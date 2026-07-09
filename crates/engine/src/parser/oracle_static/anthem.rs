@@ -212,6 +212,17 @@ pub(crate) fn parse_typed_you_control(
                             .controller(ControllerRef::You)
                             .properties(vec![FilterProp::IsCommander]),
                     )
+                // CR 111.1 + CR 111.6 + CR 109.5: "[Creature ]tokens you control" —
+                // token-ness is an object property (CR 111.1), not a subtype, and a
+                // token can be any card type (CR 111.6), so this must span
+                // Treasure/Clue/Food tokens as well as creature tokens. Precedes the
+                // capitalized-subtype fallback, which would otherwise mis-synthesize a
+                // bogus `Subtype("Token")` creature-only filter (Jaheira, Friend of the
+                // Forest).
+                } else if let Some(filter) =
+                    parse_token_you_control_descriptor(&TextPair::new(descriptor, &desc_lower))
+                {
+                    filter
                 } else if is_capitalized_words(descriptor) {
                     // CR 205.3m: Normalize plural subtypes to canonical singular form
                     let subtype_name = parse_subtype(descriptor)
@@ -726,7 +737,7 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    collapsing to `SourceIsAttacking`.
 ///
 /// Returns the condition unchanged when neither guard matches.
-fn rewrite_self_pronoun_subject(condition: &str) -> String {
+pub(crate) fn rewrite_self_pronoun_subject(condition: &str) -> String {
     let lower = condition.to_lowercase();
     if let Some(rest) =
         nom_tag_lower(&lower, &lower, "it's ").or_else(|| nom_tag_lower(&lower, &lower, "it is "))
@@ -1052,8 +1063,11 @@ pub(crate) fn parse_dynamic_pt_in_text(
     let after_verb = nom_tag_lower(after_gets, after_gets, "gets ")
         .or_else(|| nom_tag_lower(after_gets, after_gets, "get "))?;
 
-    // CR 613.4c: Parse variable P/T pattern via nom combinator
-    let (_, (p_sign, p_is_x, t_sign, t_is_x)) = parse_variable_pt_pattern(after_verb).ok()?;
+    // CR 613.4c: Parse variable P/T pattern via nom combinator. Each axis is
+    // either the variable X (`None`) or a fixed magnitude (`Some(n)`).
+    let (_, (p_sign, p_mag, t_sign, t_mag)) = parse_variable_pt_pattern(after_verb).ok()?;
+    let p_is_x = p_mag.is_none();
+    let t_is_x = t_mag.is_none();
 
     if !p_is_x && !t_is_x {
         return None; // No X variable — not a dynamic P/T pattern
@@ -1082,27 +1096,38 @@ pub(crate) fn parse_dynamic_pt_in_text(
     };
 
     let mut mods = Vec::new();
-    if p_is_x {
-        let qty = if p_sign < 0 {
-            QuantityExpr::Multiply {
-                factor: -1,
-                inner: Box::new(quantity.clone()),
-            }
-        } else {
-            quantity.clone()
-        };
-        mods.push(ContinuousModification::AddDynamicPower { value: qty });
+    // CR 613.4c layer 7c: the dynamic axis grants an X-valued modification; a
+    // fixed nonzero axis grants a constant modification alongside it (the mixed
+    // "+X/+1" case). A fixed `0` axis contributes nothing.
+    match p_mag {
+        None => {
+            let qty = if p_sign < 0 {
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(quantity.clone()),
+                }
+            } else {
+                quantity.clone()
+            };
+            mods.push(ContinuousModification::AddDynamicPower { value: qty });
+        }
+        Some(n) if n != 0 => mods.push(ContinuousModification::AddPower { value: p_sign * n }),
+        Some(_) => {}
     }
-    if t_is_x {
-        let qty = if t_sign < 0 {
-            QuantityExpr::Multiply {
-                factor: -1,
-                inner: Box::new(quantity),
-            }
-        } else {
-            quantity
-        };
-        mods.push(ContinuousModification::AddDynamicToughness { value: qty });
+    match t_mag {
+        None => {
+            let qty = if t_sign < 0 {
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(quantity),
+                }
+            } else {
+                quantity
+            };
+            mods.push(ContinuousModification::AddDynamicToughness { value: qty });
+        }
+        Some(n) if n != 0 => mods.push(ContinuousModification::AddToughness { value: t_sign * n }),
+        Some(_) => {}
     }
 
     Some(mods)

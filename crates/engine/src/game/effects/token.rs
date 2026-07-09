@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::game::game_object::{AttachTarget, BackFaceData, DisplaySource};
-use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
+use crate::game::game_object::{AttachTarget, BackFaceData, DisplaySource, GameObject};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
@@ -32,6 +32,141 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 // ── Token script parser ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenAbilitySource {
+    Predefined,
+    CatalogRulesText,
+    None,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TokenAbilityMaterialization {
+    pub source: TokenAbilitySource,
+    pub abilities: Vec<AbilityDefinition>,
+    pub trigger_definitions: Vec<TriggerDefinition>,
+    pub static_definitions: Vec<StaticDefinition>,
+    pub keywords: Vec<Keyword>,
+    pub modifications: Vec<ContinuousModification>,
+    pub back_face: Option<BackFaceData>,
+    pub rules_text: Option<String>,
+    pub unparsed_rules_text_lines: Vec<String>,
+}
+
+impl TokenAbilityMaterialization {
+    fn none() -> Self {
+        Self {
+            source: TokenAbilitySource::None,
+            abilities: Vec::new(),
+            trigger_definitions: Vec::new(),
+            static_definitions: Vec::new(),
+            keywords: Vec::new(),
+            modifications: Vec::new(),
+            back_face: None,
+            rules_text: None,
+            unparsed_rules_text_lines: Vec::new(),
+        }
+    }
+
+    pub(crate) fn has_functional_payload(&self) -> bool {
+        !self.abilities.is_empty()
+            || !self.trigger_definitions.is_empty()
+            || !self.static_definitions.is_empty()
+            || !self.keywords.is_empty()
+            || !self.modifications.is_empty()
+            || self.back_face.is_some()
+    }
+}
+
+/// CR 111.3 + CR 111.10: Materialize the intrinsic ability payload a token
+/// receives from its predefined subtype/name or, if that contributes nothing,
+/// from the linked catalog token rules text.
+pub(crate) fn materialize_token_ability_payload(
+    name: &str,
+    subtypes: &[String],
+    preset: Option<&crate::game::token_presets::TokenPreset>,
+) -> TokenAbilityMaterialization {
+    let predefined = materialize_predefined_token_payload(name, subtypes);
+    if predefined.has_functional_payload() {
+        return predefined;
+    }
+    preset.map_or_else(
+        TokenAbilityMaterialization::none,
+        materialize_catalog_token_payload,
+    )
+}
+
+fn materialize_predefined_token_payload(
+    name: &str,
+    subtypes: &[String],
+) -> TokenAbilityMaterialization {
+    let mut materialized = TokenAbilityMaterialization::none();
+    let mut abilities_to_add = Vec::new();
+    for subtype in subtypes {
+        abilities_to_add.extend(predefined_token_abilities(subtype));
+    }
+    let role_spec = if subtypes.iter().any(|s| s == "Role") {
+        predefined_role_token_spec(name)
+    } else {
+        None
+    };
+    let is_incubator = subtypes.iter().any(|s| s == "Incubator");
+
+    if abilities_to_add.is_empty() && role_spec.is_none() && !is_incubator {
+        return materialized;
+    }
+
+    materialized.source = TokenAbilitySource::Predefined;
+    materialized.abilities = abilities_to_add;
+    if is_incubator {
+        materialized.back_face = Some(incubator_phyrexian_back_face());
+    }
+    for subtype in subtypes {
+        if let Some(text) = predefined_token_rules_text(subtype) {
+            materialized.rules_text = Some(text.to_string());
+            break;
+        }
+    }
+    if let Some(spec) = role_spec {
+        materialized.static_definitions = spec.statics;
+        materialized.trigger_definitions = spec.triggers;
+    }
+
+    materialized
+}
+
+fn materialize_catalog_token_payload(
+    preset: &crate::game::token_presets::TokenPreset,
+) -> TokenAbilityMaterialization {
+    let mut materialized = TokenAbilityMaterialization::none();
+    let Some(rules_text) = preset.rules_text.as_deref().filter(|text| !text.is_empty()) else {
+        return materialized;
+    };
+
+    materialized.source = TokenAbilitySource::CatalogRulesText;
+    materialized.rules_text = Some(rules_text.to_string());
+    let (static_definitions, modifications, unparsed_lines) =
+        catalog_rules_text_abilities(rules_text);
+    materialized.static_definitions = static_definitions;
+    materialized.unparsed_rules_text_lines = unparsed_lines;
+
+    for modification in modifications {
+        match modification {
+            ContinuousModification::GrantTrigger { trigger } => {
+                let mut trigger = *trigger;
+                normalize_token_self_lki_trigger(&mut trigger);
+                materialized.trigger_definitions.push(trigger);
+            }
+            ContinuousModification::AddKeyword { keyword } => materialized.keywords.push(keyword),
+            ContinuousModification::GrantAbility { definition } => {
+                materialized.abilities.push(*definition);
+            }
+            other => materialized.modifications.push(other),
+        }
+    }
+
+    materialized
+}
 
 /// Parsed token attributes from a Forge token script name.
 struct TokenAttrs {
@@ -410,8 +545,7 @@ pub fn resolve(
             &fallback_keywords,
             &fallback_supertypes,
             state,
-            ability.controller,
-            ability.source_id,
+            ability,
         )
     });
 
@@ -447,7 +581,10 @@ pub fn resolve(
         copy: None,
         enter_tapped: crate::types::proposed_event::EtbTapState::from_seeded_tapped(tapped),
         count,
-        applied: HashSet::new(),
+        applied: state
+            .post_replacement_token_choice_applied
+            .clone()
+            .unwrap_or_default(),
     };
 
     match replacement::replace_event(state, proposed, events) {
@@ -527,13 +664,8 @@ fn build_token_spec(
         } else {
             // No parsed attrs — resolve fallback P/T, and defer type/color
             // inference to the apply path's creature-only fallback branch.
-            let rp = resolve_pt_value(fallback_power, state, ability.controller, ability.source_id);
-            let rt = resolve_pt_value(
-                fallback_toughness,
-                state,
-                ability.controller,
-                ability.source_id,
-            );
+            let rp = resolve_pt_value(fallback_power, state, ability);
+            let rt = resolve_pt_value(fallback_toughness, state, ability);
             let (p, t, core) = if rp != 0 || rt != 0 {
                 (Some(rp), Some(rt), vec![CoreType::Creature])
             } else {
@@ -826,7 +958,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
             }
         }
 
-        // CR 111.4 + CR 707.2a: Predefined abilities first; catalog rules_text
+        // CR 111.3 + CR 111.10: Predefined abilities first; catalog rules_text
         // only when the predefined path contributed nothing.
         inject_resolved_token_abilities(state, obj_id);
         // Battlefield entry: request an incremental layer re-derive for just this
@@ -1531,16 +1663,7 @@ pub(crate) fn resolve_token_spec(
 
     let parsed = parse_token_script(name).or_else(|| {
         build_token_attrs_from_effect(
-            name,
-            power,
-            toughness,
-            types,
-            colors,
-            keywords,
-            supertypes,
-            state,
-            ability.controller,
-            ability.source_id,
+            name, power, toughness, types, colors, keywords, supertypes, state, ability,
         )
     });
 
@@ -1669,8 +1792,7 @@ fn build_token_attrs_from_effect(
     keywords: &[Keyword],
     supertypes: &[Supertype],
     state: &GameState,
-    controller: crate::types::player::PlayerId,
-    source_id: crate::types::identifiers::ObjectId,
+    ability: &ResolvedAbility,
 ) -> Option<TokenAttrs> {
     if types.is_empty()
         && colors.is_empty()
@@ -1695,8 +1817,8 @@ fn build_token_attrs_from_effect(
         }
     }
 
-    let resolved_power = resolve_pt_value(power, state, controller, source_id);
-    let resolved_toughness = resolve_pt_value(toughness, state, controller, source_id);
+    let resolved_power = resolve_pt_value(power, state, ability);
+    let resolved_toughness = resolve_pt_value(toughness, state, ability);
     if core_types.is_empty() && (resolved_power != 0 || resolved_toughness != 0) {
         core_types.push(CoreType::Creature);
     }
@@ -1718,16 +1840,11 @@ fn build_token_attrs_from_effect(
     })
 }
 
-fn resolve_pt_value(
-    value: &PtValue,
-    state: &GameState,
-    controller: crate::types::player::PlayerId,
-    source_id: crate::types::identifiers::ObjectId,
-) -> i32 {
+fn resolve_pt_value(value: &PtValue, state: &GameState, ability: &ResolvedAbility) -> i32 {
     match value {
         PtValue::Fixed(n) => *n,
         PtValue::Variable(_) => 0,
-        PtValue::Quantity(expr) => resolve_quantity(state, expr, controller, source_id),
+        PtValue::Quantity(expr) => resolve_quantity_with_targets(state, expr, ability),
     }
 }
 
@@ -2047,6 +2164,7 @@ fn junk_ability() -> AbilityDefinition {
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
                 source_id: None,
+                invalidation: None,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
@@ -2450,8 +2568,14 @@ fn wicked_role_spec() -> RoleSpec {
 ///
 /// All Role tokens share the `Role` subtype, so dispatch must be by display
 /// name — subtype alone cannot distinguish the seven variants.
+///
+/// CR 111.10: a Role token's printed name is "<Role> Role" (e.g. "Monster Role"),
+/// which is exactly what the parser/token creation assigns as the display name.
+/// Strip that trailing " Role" before matching so real tokens dispatch correctly;
+/// the bare role word ("Monster") is also accepted for internal/test callers.
 fn predefined_role_token_spec(name: &str) -> Option<RoleSpec> {
-    match name {
+    let role = name.strip_suffix(" Role").unwrap_or(name);
+    match role {
         "Cursed" => Some(RoleSpec::statics_only(cursed_role_statics())),
         "Monster" => Some(RoleSpec::statics_only(monster_role_statics())),
         "Royal" => Some(RoleSpec::statics_only(royal_role_statics())),
@@ -2479,92 +2603,113 @@ fn predefined_role_token_spec(name: &str) -> Option<RoleSpec> {
 /// the layer pass rebuilds live from base on each pass, but several code
 /// paths (SBAs, action enumeration) consult the live set directly between
 /// passes so keeping them in sync here avoids a one-frame lag.
-/// CR 111.4 + CR 707.2a: Apply predefined token abilities first; fall back to
+/// CR 111.3 + CR 111.10: Apply predefined token abilities first; fall back to
 /// catalog `rules_text` only when the predefined path contributed nothing
 /// (artifacts, Roles, Incubator, …).
 pub(super) fn inject_resolved_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
-    let predefined_injected = inject_predefined_token_abilities(state, obj_id);
-    if !predefined_injected {
-        inject_catalog_token_abilities(state, obj_id);
+    let Some(materialized) = materialize_token_ability_payload_for_object(state, obj_id) else {
+        return;
+    };
+    if materialized.source == TokenAbilitySource::CatalogRulesText
+        && !materialized.has_functional_payload()
+    {
+        return;
     }
+    apply_token_ability_materialization(state, obj_id, materialized, true);
 }
 
-/// CR 111.4 + CR 707.2a: Grant catalog `rules_text` when token creation resolved
+/// CR 111.3 + CR 111.4: Grant catalog `rules_text` when token creation resolved
 /// a `token_image_ref` preset whose abilities are not already covered by the
 /// predefined path (e.g. SOS Pest attack life gain).
 pub(crate) fn inject_catalog_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
-    let Some(obj) = state.objects.get_mut(&obj_id) else {
-        return;
-    };
-    let Some(preset) = obj.token_image_ref.as_ref().and_then(|image_ref| {
-        crate::game::token_presets::known_token_preset_by_id(&image_ref.preset_id)
+    let Some(preset) = state.objects.get(&obj_id).and_then(|obj| {
+        obj.token_image_ref.as_ref().and_then(|image_ref| {
+            crate::game::token_presets::known_token_preset_by_id(&image_ref.preset_id)
+        })
     }) else {
         return;
     };
-    let Some(rules_text) = preset.rules_text.as_deref().filter(|text| !text.is_empty()) else {
-        return;
+    let materialized = materialize_catalog_token_payload(preset);
+    if materialized.source == TokenAbilitySource::CatalogRulesText
+        && materialized.has_functional_payload()
+    {
+        apply_token_ability_materialization(state, obj_id, materialized, true);
+    }
+}
+
+fn apply_token_ability_materialization(
+    state: &mut GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+    materialized: TokenAbilityMaterialization,
+    suppress_catalog_if_existing_statics: bool,
+) -> bool {
+    let Some(obj) = state.objects.get_mut(&obj_id) else {
+        return false;
     };
-    // CR 113.3 + CR 707.2a: a token's abilities are derived from its rules text, and
-    // a catalog rules_text can pack independent abilities of different categories on
-    // separate lines (an Equipment token's static buff line + its "Equip {N}" line).
-    // Classifying the whole blob lets the static splitter swallow the trailing equip
-    // line, so classify per line and aggregate. A preset with no newline yields a
-    // single segment — identical to the previous single-blob behavior (no regression).
-    let (static_definitions, modifications) = catalog_rules_text_abilities(rules_text);
-    if static_definitions.is_empty() && modifications.is_empty() {
-        return;
+    // CR 111.3: A token's abilities are defined by the effect that creates it, so
+    // when the creating effect already granted this token abilities via a
+    // `with "..."` clause (parsed into `static_definitions` at creation, before
+    // this fallback runs), those are authoritative and complete. The catalog
+    // preset's `rules_text` is then only a display/art mirror and MUST NOT inject
+    // functional abilities — critically, the matched art preset can be a
+    // different printing whose text lists extra keyword actions (a Kamigawa
+    // "crews Vehicles as though its power were 2 greater" Pilot token rendered
+    // with the Aetherdrift "saddles Mounts and crews Vehicles …" art), so
+    // injecting it grants a second crew static and doubles the contribution (a
+    // 1/1 Pilot crews for 5 instead of 3). Skip functional injection whenever the
+    // token already carries granted statics; still record the display rules text.
+    // Tokens created by name with no explicit ability clause (Treasure, Pest,
+    // Equipment presets) reach here with no prior statics and inject normally.
+    if suppress_catalog_if_existing_statics
+        && materialized.source == TokenAbilitySource::CatalogRulesText
+        && !obj.static_definitions.is_empty()
+    {
+        if obj.token_rules_text.is_none() {
+            obj.token_rules_text = materialized.rules_text;
+        }
+        return true;
     }
 
-    if !static_definitions.is_empty() {
-        Arc::make_mut(&mut obj.base_static_definitions).extend(static_definitions.iter().cloned());
-        for static_def in static_definitions {
+    apply_token_ability_payload(obj, materialized);
+    true
+}
+
+fn apply_token_ability_payload(obj: &mut GameObject, materialized: TokenAbilityMaterialization) {
+    if !materialized.static_definitions.is_empty() {
+        Arc::make_mut(&mut obj.base_static_definitions)
+            .extend(materialized.static_definitions.iter().cloned());
+        for static_def in materialized.static_definitions {
             obj.static_definitions.push(static_def);
         }
     }
-
-    let mut static_mods = Vec::new();
-    let mut triggers = Vec::new();
-    let mut abilities = Vec::new();
-    let mut keywords = Vec::new();
-    for modification in modifications {
-        match modification {
-            ContinuousModification::GrantTrigger { trigger } => {
-                let mut trigger = *trigger;
-                normalize_token_self_lki_trigger(&mut trigger);
-                triggers.push(trigger);
-            }
-            ContinuousModification::AddKeyword { keyword } => keywords.push(keyword),
-            ContinuousModification::GrantAbility { definition } => abilities.push(*definition),
-            other => static_mods.push(other),
-        }
-    }
-
-    if !static_mods.is_empty() {
+    if !materialized.modifications.is_empty() {
+        let rules_text = materialized.rules_text.clone().unwrap_or_default();
         let static_def = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
-            .modifications(static_mods)
-            .description(rules_text.to_string());
+            .modifications(materialized.modifications)
+            .description(rules_text);
         Arc::make_mut(&mut obj.base_static_definitions).push(static_def.clone());
         obj.static_definitions.push(static_def);
     }
-    if !triggers.is_empty() {
-        Arc::make_mut(&mut obj.base_trigger_definitions).extend(triggers.iter().cloned());
-        for trigger in triggers {
+    if !materialized.trigger_definitions.is_empty() {
+        Arc::make_mut(&mut obj.base_trigger_definitions)
+            .extend(materialized.trigger_definitions.iter().cloned());
+        for trigger in materialized.trigger_definitions {
             obj.trigger_definitions.push(trigger);
         }
     }
-    if !abilities.is_empty() {
-        Arc::make_mut(&mut obj.abilities).extend(abilities.iter().cloned());
-        Arc::make_mut(&mut obj.base_abilities).extend(abilities);
+    if !materialized.abilities.is_empty() {
+        Arc::make_mut(&mut obj.abilities).extend(materialized.abilities.iter().cloned());
+        Arc::make_mut(&mut obj.base_abilities).extend(materialized.abilities);
     }
-    if !keywords.is_empty() {
-        for keyword in keywords {
+    if !materialized.keywords.is_empty() {
+        for keyword in materialized.keywords {
             if !obj.base_keywords.contains(&keyword) {
                 obj.base_keywords.push(keyword.clone());
             }
@@ -2574,16 +2719,24 @@ pub(crate) fn inject_catalog_token_abilities(
             }
         }
     }
+    if obj.back_face.is_none() {
+        obj.back_face = materialized.back_face;
+    }
     if obj.token_rules_text.is_none() {
-        obj.token_rules_text = Some(rules_text.to_string());
+        obj.token_rules_text = materialized.rules_text;
     }
 }
 
 fn catalog_rules_text_abilities(
     rules_text: &str,
-) -> (Vec<StaticDefinition>, Vec<ContinuousModification>) {
+) -> (
+    Vec<StaticDefinition>,
+    Vec<ContinuousModification>,
+    Vec<String>,
+) {
     let mut static_definitions = Vec::new();
     let mut modifications = Vec::new();
+    let mut unparsed_lines = Vec::new();
     for line in rules_text
         .split('\n')
         .map(str::trim)
@@ -2591,7 +2744,12 @@ fn catalog_rules_text_abilities(
     {
         let parsed_statics = crate::parser::oracle_static::parse_static_line_multi(line);
         if parsed_statics.is_empty() {
-            modifications.extend(crate::parser::oracle_static::classify_quoted_inner(line));
+            let parsed_modifications = crate::parser::oracle_static::classify_quoted_inner(line);
+            if parsed_modifications.is_empty() {
+                unparsed_lines.push(line.to_string());
+            } else {
+                modifications.extend(parsed_modifications);
+            }
         } else {
             static_definitions.extend(
                 parsed_statics
@@ -2600,75 +2758,37 @@ fn catalog_rules_text_abilities(
             );
         }
     }
-    (static_definitions, modifications)
+    (static_definitions, modifications, unparsed_lines)
 }
 
 pub(super) fn inject_predefined_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) -> bool {
-    let (subtypes, name) = match state.objects.get(&obj_id) {
-        Some(obj) => (obj.card_types.subtypes.clone(), obj.name.clone()),
-        None => return false,
-    };
-    let mut abilities_to_add = Vec::new();
-    for subtype in &subtypes {
-        abilities_to_add.extend(predefined_token_abilities(subtype));
-    }
-    let role_spec = if subtypes.iter().any(|s| s == "Role") {
-        predefined_role_token_spec(&name)
-    } else {
-        None
-    };
-    let is_incubator = subtypes.iter().any(|s| s == "Incubator");
-
-    if abilities_to_add.is_empty() && role_spec.is_none() && !is_incubator {
-        return false;
-    }
-
-    let Some(obj) = state.objects.get_mut(&obj_id) else {
+    let Some(obj) = state.objects.get(&obj_id) else {
         return false;
     };
-
-    if !abilities_to_add.is_empty() {
-        Arc::make_mut(&mut obj.abilities).extend(abilities_to_add.clone());
-        Arc::make_mut(&mut obj.base_abilities).extend(abilities_to_add);
+    let materialized = materialize_predefined_token_payload(&obj.name, &obj.card_types.subtypes);
+    if materialized.source != TokenAbilitySource::Predefined {
+        return false;
     }
+    apply_token_ability_materialization(state, obj_id, materialized, false)
+}
 
-    // CR 111.10i: Incubator tokens are double-faced; attach the Phyrexian back face
-    // when predefined abilities are injected (incubate.rs and generic token create).
-    if subtypes.iter().any(|s| s == "Incubator") && obj.back_face.is_none() {
-        obj.back_face = Some(incubator_phyrexian_back_face());
-    }
+fn materialize_token_ability_payload_for_object(
+    state: &GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) -> Option<TokenAbilityMaterialization> {
+    let obj = state.objects.get(&obj_id)?;
+    let preset = obj.token_image_ref.as_ref().and_then(|image_ref| {
+        crate::game::token_presets::known_token_preset_by_id(&image_ref.preset_id)
+    });
 
-    // CR 111.10: expose the predefined token's printed rules text so the
-    // frontend can render alt-text when the Scryfall token image is missing.
-    if obj.token_rules_text.is_none() {
-        for subtype in &subtypes {
-            if let Some(text) = predefined_token_rules_text(subtype) {
-                obj.token_rules_text = Some(text.to_string());
-                break;
-            }
-        }
-    }
-
-    if let Some(spec) = role_spec {
-        let RoleSpec { statics, triggers } = spec;
-        if !statics.is_empty() {
-            Arc::make_mut(&mut obj.base_static_definitions).extend(statics.iter().cloned());
-            for s in statics {
-                obj.static_definitions.push(s);
-            }
-        }
-        if !triggers.is_empty() {
-            Arc::make_mut(&mut obj.base_trigger_definitions).extend(triggers.iter().cloned());
-            for t in triggers {
-                obj.trigger_definitions.push(t);
-            }
-        }
-    }
-
-    true
+    Some(materialize_token_ability_payload(
+        &obj.name,
+        &obj.card_types.subtypes,
+        preset,
+    ))
 }
 
 #[cfg(test)]
@@ -3909,6 +4029,208 @@ mod tests {
     }
 
     #[test]
+    fn catalog_pest_dies_trigger_fires_after_lethal_damage_sba() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::game::triggers::process_triggers;
+
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "14c28cbd-1740-5c17-98ea-4aea094067f1",
+        )
+        .expect("BLC Pest preset");
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Pest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+        }
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        state.objects.get_mut(&obj_id).unwrap().damage_marked = 1;
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        process_triggers(&mut state, &events);
+
+        assert!(
+            !state.objects.contains_key(&obj_id),
+            "token destroyed by lethal damage must cease to exist after moving zones"
+        );
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "the Pest's dies trigger must fire when lethal damage SBAs move it to the graveyard"
+        );
+        let lki_token_ref = state
+            .lki_cache
+            .get(&obj_id)
+            .and_then(|lki| lki.token_image_ref.as_ref())
+            .expect("LKI must preserve the token image ref for dead-token stack display");
+        assert_eq!(
+            Some(lki_token_ref.preset_id.as_str()),
+            preset
+                .token_image_ref
+                .as_ref()
+                .map(|image| image.preset_id.as_str())
+        );
+    }
+
+    #[test]
+    fn catalog_pest_dies_trigger_fires_after_tragic_slip_zero_toughness() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::events::GameEvent;
+
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "14c28cbd-1740-5c17-98ea-4aea094067f1",
+        )
+        .expect("BLC Pest preset");
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, 20);
+        let slip = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Tragic Slip",
+                true,
+                "Target creature gets -1/-1 until end of turn.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let pest = create_object(
+            runner.state_mut(),
+            CardId(0),
+            P0,
+            "Pest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = runner.state_mut().objects.get_mut(&pest).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+        }
+        inject_catalog_token_abilities(runner.state_mut(), pest);
+
+        let outcome = runner.cast(slip).target_object(pest).resolve();
+
+        assert!(
+            outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    to: Zone::Graveyard,
+                    ..
+                } if *object_id == pest
+            )),
+            "Tragic Slip's -1/-1 must create a zero-toughness battlefield-to-graveyard event"
+        );
+        assert!(
+            !outcome.state().objects.contains_key(&pest),
+            "zero-toughness Pest token must cease to exist"
+        );
+        assert!(
+            outcome.state().stack.len() == 1 || outcome.life_delta(P0) == 1,
+            "the Pest dies trigger must either remain on the stack or resolve to gain 1 life"
+        );
+    }
+
+    #[test]
+    fn pest_infestation_linked_create_token_grants_catalog_dies_trigger() {
+        use crate::types::proposed_event::TokenCharacteristics;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Pest Infestation".to_string(),
+            Zone::Battlefield,
+        );
+        let source_obj = state.objects.get_mut(&source).unwrap();
+        source_obj.printed_ref = Some(crate::types::card::PrintedCardRef {
+            oracle_id: "1b704798-0c69-4c18-ac7e-42933ce90028".to_string(),
+            face_name: "Pest Infestation".to_string(),
+        });
+        source_obj.source_related_token_ids.extend(
+            [
+                "5d96727f-b037-5af6-a854-b39b4bc4b5ea",
+                "be7c7de8-06e4-5ea4-8faf-18881dbcee45",
+                "fda6f4a3-6734-5347-8712-e449ed76e0a8",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Pest".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Pest".to_string()],
+                supertypes: vec![],
+                colors: vec![ManaColor::Black, ManaColor::Green],
+                keywords: vec![],
+            },
+            script_name: "Pest".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let event = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: std::collections::HashSet::new(),
+        };
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let pest_id = state.last_created_token_ids[0];
+        let obj = &state.objects[&pest_id];
+        assert_eq!(
+            obj.token_image_ref
+                .as_ref()
+                .map(|image| image.preset_id.as_str()),
+            Some("5d96727f-b037-5af6-a854-b39b4bc4b5ea"),
+            "Pest Infestation's multiple equivalent source-linked token ids must resolve to the first matching Pest preset, not fall back to an unrelated Pest"
+        );
+        assert_eq!(obj.trigger_definitions.len(), 1);
+        let trigger = &obj.trigger_definitions[0];
+        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        let execute = trigger.execute.as_ref().expect("Pest dies trigger effect");
+        assert!(matches!(
+            *execute.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            }
+        ));
+    }
+
+    #[test]
     fn predefined_treasure_create_token_pipeline_has_exactly_one_mana_ability() {
         use crate::types::proposed_event::TokenCharacteristics;
         use std::collections::HashSet;
@@ -4051,6 +4373,144 @@ mod tests {
         assert!(
             obj.trigger_definitions.is_empty(),
             "catalog injection must not double-grant predefined Royal Role statics"
+        );
+    }
+
+    /// CR 111.10k: A Role token created by a real card ("Create a Monster Role
+    /// token …") is named "Monster Role" — the parser's `known_role_token_identity`
+    /// produces the full "<Role> Role" name, which is the printed token name. The
+    /// predefined-ability dispatch MUST recognize that full name; matching only the
+    /// bare "Monster" left the token with no +1/+1-and-trample static. Regression
+    /// for Role tokens (Monstrous Rage, Royal Treatment, …) granting nothing.
+    #[test]
+    fn predefined_monster_role_full_name_grants_role_static() {
+        use crate::types::proposed_event::TokenCharacteristics;
+        use std::collections::HashSet;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Monstrous Rage".to_string(),
+            Zone::Battlefield,
+        );
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                // The name the parser actually produces for "a Monster Role token".
+                display_name: "Monster Role".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Aura".to_string(), "Role".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
+            script_name: "Monster Role".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let event = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let role_id = state.last_created_token_ids[0];
+        let obj = &state.objects[&role_id];
+        assert_eq!(
+            obj.static_definitions.len(),
+            1,
+            "Monster Role must carry its enchanted-creature +1/+1-and-trample static"
+        );
+    }
+
+    /// CR 111.3: A Role token is one face of a two-Role DFC ("Monster // Sorcerer"),
+    /// so its source card links to BOTH face presets — the single-preset fast path
+    /// in `find_exact_token_ref` is skipped and art resolves via body match. The
+    /// token is named "Monster Role" but the face preset is "Monster", so the name
+    /// comparison must reconcile the trailing " Role"; otherwise the token gets no
+    /// image ref and renders with no art (reported for Monstrous Rage). The match
+    /// must also select the correct face (Monster, not Sorcerer).
+    #[test]
+    fn dfc_monster_role_resolves_the_monster_face_art() {
+        use crate::types::card::PrintedCardRef;
+        use crate::types::proposed_event::TokenCharacteristics;
+        use std::collections::HashSet;
+
+        // Monster face of the "Monster // Sorcerer" DFC (WOE), and the Sorcerer face.
+        const MONSTER_PRESET: &str = "246f948c-eea9-5f6a-8d19-f8c11c51de94";
+        const SORCERER_PRESET: &str = "dd6f5274-9bb4-5acc-9855-55815f497831";
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Monstrous Rage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.printed_ref = Some(PrintedCardRef {
+                oracle_id: "646a2371-54c0-4492-ac2f-20f109d6108c".to_string(),
+                face_name: "Monstrous Rage".to_string(),
+            });
+            obj.source_related_token_ids =
+                vec![MONSTER_PRESET.to_string(), SORCERER_PRESET.to_string()];
+        }
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Monster Role".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Aura".to_string(), "Role".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
+            script_name: "Monster Role".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: source,
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+        let event = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let role_id = state.last_created_token_ids[0];
+        let image_ref = state.objects[&role_id]
+            .token_image_ref
+            .clone()
+            .expect("DFC Monster Role must resolve an image ref, not render artless");
+        assert_eq!(
+            image_ref.preset_id, MONSTER_PRESET,
+            "must resolve the Monster face preset, not the Sorcerer face"
         );
     }
 
@@ -5351,12 +5811,13 @@ mod tests {
 
     #[test]
     fn catalog_rules_text_routes_all_ability_kinds() {
-        let (statics, modifications) = catalog_rules_text_abilities(
+        let (statics, modifications, unparsed_lines) = catalog_rules_text_abilities(
             "Flying\n\
              This creature can't block.\n\
              {T}: Add {G}.\n\
              When this creature dies, you gain 1 life.",
         );
+        assert!(unparsed_lines.is_empty());
 
         assert!(
             statics
@@ -5424,6 +5885,73 @@ mod tests {
             ),
             3,
             "1/1 Shorikai Pilot must contribute 3 power toward crew"
+        );
+    }
+
+    /// CR 111.3: A Kamigawa Shorikai/Kotori Pilot token ("crews Vehicles as
+    /// though its power were 2 greater", a `[Crew]`-only contribution) whose body
+    /// matches — and is rendered with — the Aetherdrift Pilot art preset ("saddles
+    /// Mounts and crews Vehicles …", a `[Saddle, Crew]` contribution) must NOT
+    /// pick up the art preset's static on top of its own. The creating effect's
+    /// `with "..."` grant is authoritative; the catalog is display-only here.
+    /// Regression: the token was crewing for 5 (1 + 2 + 2) instead of 3 because
+    /// the two statics have different `actions` and slipped past an exact-match
+    /// de-dupe.
+    #[test]
+    fn catalog_skips_functional_injection_when_effect_already_granted_crew_static() {
+        use crate::types::statics::{CrewAction, CrewContributionKind, StaticMode};
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Pilot".to_string(),
+            Zone::Battlefield,
+        );
+        // Aetherdrift Pilot preset — a *different* printing than the creating
+        // card, carrying a `[Saddle, Crew]` contribution in its rules_text.
+        let aetherdrift_pilot = crate::game::token_presets::known_token_preset_by_id(
+            "648bee61-604f-58a2-8beb-11faa77a89af",
+        )
+        .expect("Aetherdrift Pilot preset must exist");
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.token_image_ref = aetherdrift_pilot.token_image_ref.clone();
+            // The creating effect (Shorikai/Kotori) already granted the crew-only
+            // static via its `with "..."` clause.
+            let with_clause = StaticDefinition::new(StaticMode::CrewContribution {
+                kind: CrewContributionKind::PowerDelta { delta: 2 },
+                actions: vec![CrewAction::Crew],
+            })
+            .affected(TargetFilter::SelfRef);
+            Arc::make_mut(&mut obj.base_static_definitions).push(with_clause.clone());
+            obj.static_definitions.push(with_clause);
+        }
+
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        let crew_statics = state.objects[&obj_id]
+            .static_definitions
+            .iter_all()
+            .filter(|def| matches!(def.mode, StaticMode::CrewContribution { .. }))
+            .count();
+        assert_eq!(
+            crew_statics, 1,
+            "the art preset's crew static must not stack on the effect's own grant"
+        );
+        assert_eq!(
+            crate::game::static_abilities::object_crew_power_contribution(
+                &state,
+                obj_id,
+                CrewAction::Crew,
+            ),
+            3,
+            "1/1 Pilot with a single +2 crew delta must contribute 3, not 5"
         );
     }
 

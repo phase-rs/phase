@@ -15,8 +15,9 @@ use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CastOfferKind, CastPaymentMode, ConvokeMode, CounterCostChoice, CounterMoveChoice, GameState,
-    PayCostKind, TargetSelectionSlot, WaitingFor,
+    CastOfferKind, CastPaymentMode, ConvokeMode, CounterCostChoice, CounterMoveChoice,
+    CounterRemoveChoice, GameState, MulliganDecisionPhase, PayCostKind, PendingMulliganAction,
+    TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
@@ -92,10 +93,12 @@ fn collect_evidence_candidate_combos(
         if combo.is_empty() || combos.len() >= MAX_COMBOS {
             return;
         }
+        // CR 202.3d + CR 701.59a: a split card in the graveyard is off the stack, so
+        // collect-evidence exile totals must use its combined mana value.
         let total: u32 = combo
             .iter()
             .filter_map(|id| state.objects.get(id))
-            .map(|obj| obj.mana_cost.mana_value())
+            .map(|obj| obj.effective_mana_value())
             .sum();
         if total < minimum_mana_value {
             return;
@@ -113,7 +116,7 @@ fn collect_evidence_candidate_combos(
             state
                 .objects
                 .get(&id)
-                .map(|obj| (id, obj.mana_cost.mana_value()))
+                .map(|obj| (id, obj.effective_mana_value()))
         })
         .collect();
     valued_cards.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0 .0.cmp(&a.0 .0)));
@@ -283,6 +286,43 @@ fn counter_move_distribution_candidates(
     actions
 }
 
+/// CR 107.1c: Coarse candidates for a `RemoveCountersChoice` prompt — the two
+/// extremal legal answers: "remove none" (empty selection) and "remove all"
+/// (every available counter of every type). The full legal space (any per-type
+/// subset) is combinatorial; the server bypasses its enumeration gate for human
+/// submissions (`accepts_freeform_counter_removal`), so the AI only needs enough
+/// variety to never wedge.
+// ponytail: two extremal candidates; add per-type partials if a policy ever
+// wants finer counter-shedding control.
+fn counter_removal_candidates(
+    player: PlayerId,
+    available: &[(crate::types::counter::CounterType, u32)],
+) -> Vec<CandidateAction> {
+    let mut actions = vec![candidate(
+        GameAction::ChooseCountersToRemove { selections: vec![] },
+        TacticalClass::Selection,
+        Some(player),
+    )];
+    let remove_all: Vec<CounterRemoveChoice> = available
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(counter_type, count)| CounterRemoveChoice {
+            counter_type: counter_type.clone(),
+            count: *count,
+        })
+        .collect();
+    if !remove_all.is_empty() {
+        actions.push(candidate(
+            GameAction::ChooseCountersToRemove {
+                selections: remove_all,
+            },
+            TacticalClass::Selection,
+            Some(player),
+        ));
+    }
+    actions
+}
+
 fn permute_into(
     items: &[usize],
     current: &mut Vec<usize>,
@@ -334,6 +374,9 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             destinations,
             ..
         } => counter_move_distribution_candidates(*player, available, destinations),
+        WaitingFor::RemoveCountersChoice {
+            player, available, ..
+        } => counter_removal_candidates(*player, available),
         // CR 603.3b: Trigger ordering enumeration. Full n! permutations explode
         // (8! = 40320) so cap at n <= 4 (24 perms); larger groups generate only
         // identity + reverse, which is enough variety for search lookahead to
@@ -644,44 +687,49 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
         // candidate per Powder so the policy may pick that branch.
         WaitingFor::MulliganDecision { pending, .. } => pending
             .iter()
-            .flat_map(|entry| {
-                let mut actions = vec![
-                    candidate(
-                        GameAction::MulliganDecision {
-                            choice: MulliganChoice::Keep,
-                        },
-                        TacticalClass::Selection,
-                        Some(entry.player),
-                    ),
-                    candidate(
-                        GameAction::MulliganDecision {
-                            choice: MulliganChoice::Mulligan,
-                        },
-                        TacticalClass::Selection,
-                        Some(entry.player),
-                    ),
-                ];
-                for powder_id in serum_powders_in_hand(state, entry.player) {
-                    actions.push(candidate(
-                        GameAction::MulliganDecision {
-                            choice: MulliganChoice::UseSerumPowder {
-                                object_id: powder_id,
+            .flat_map(|entry| match &entry.phase {
+                MulliganDecisionPhase::Declare => {
+                    let mut actions = vec![
+                        candidate(
+                            GameAction::MulliganDecision {
+                                choice: MulliganChoice::Keep,
                             },
-                        },
-                        TacticalClass::Selection,
-                        Some(entry.player),
-                    ));
+                            TacticalClass::Selection,
+                            Some(entry.player),
+                        ),
+                        candidate(
+                            GameAction::MulliganDecision {
+                                choice: MulliganChoice::Mulligan,
+                            },
+                            TacticalClass::Selection,
+                            Some(entry.player),
+                        ),
+                    ];
+                    for powder_id in serum_powders_in_hand(state, entry.player) {
+                        actions.push(candidate(
+                            GameAction::MulliganDecision {
+                                choice: MulliganChoice::UseSerumPowder {
+                                    object_id: powder_id,
+                                },
+                            },
+                            TacticalClass::Selection,
+                            Some(entry.player),
+                        ));
+                    }
+                    actions
                 }
-                actions
+                MulliganDecisionPhase::BottomCards { count, then } => {
+                    let exclude = match then {
+                        PendingMulliganAction::UseSerumPowder { object_id } => Some(*object_id),
+                        PendingMulliganAction::Keep => None,
+                    };
+                    bottom_card_actions(state, entry.player, *count, exclude)
+                }
             })
-            .collect(),
-        WaitingFor::MulliganBottomCards { pending } => pending
-            .iter()
-            .flat_map(|entry| bottom_card_actions(state, entry.player, entry.count))
             .collect(),
         WaitingFor::OpeningHandBottomCards { pending, .. } => pending
             .iter()
-            .flat_map(|entry| bottom_card_actions(state, entry.player, entry.count))
+            .flat_map(|entry| bottom_card_actions(state, entry.player, entry.count, None))
             .collect(),
         _ => Vec::new(),
     }
@@ -707,6 +755,9 @@ pub fn candidate_actions_broad_with_probe(
             destinations,
             ..
         } => counter_move_distribution_candidates(*player, available, destinations),
+        WaitingFor::RemoveCountersChoice {
+            player, available, ..
+        } => counter_removal_candidates(*player, available),
         WaitingFor::TargetSelection {
             player,
             target_slots,
@@ -733,6 +784,7 @@ pub fn candidate_actions_broad_with_probe(
             player,
             valid_attacker_ids,
             valid_attack_targets,
+            ..
         } => attacker_actions(state, *player, valid_attacker_ids, valid_attack_targets),
         WaitingFor::DeclareBlockers {
             player,
@@ -838,7 +890,25 @@ pub fn candidate_actions_broad_with_probe(
             vehicle_id,
             crew_power,
             eligible_creatures,
-        } => crew_vehicle_candidates(state, *player, *vehicle_id, *crew_power, eligible_creatures),
+            ..
+        } => {
+            let mut actions = crew_vehicle_candidates(
+                state,
+                *player,
+                *vehicle_id,
+                *crew_power,
+                eligible_creatures,
+            );
+            // CR 602.2b + CR 601.2h: no crew cost is paid until the selected
+            // creatures are tapped, so the pre-payment selection step can be
+            // cancelled back to priority.
+            actions.push(candidate(
+                GameAction::CancelCast,
+                TacticalClass::Pass,
+                Some(*player),
+            ));
+            actions
+        }
         // CR 702.184a: Offer each eligible creature as the station cost payer.
         WaitingFor::StationTarget {
             player,
@@ -851,6 +921,7 @@ pub fn candidate_actions_broad_with_probe(
             mount_id,
             saddle_power,
             eligible_creatures,
+            ..
         } => saddle_mount_candidates(state, *player, *mount_id, *saddle_power, eligible_creatures),
         WaitingFor::PayManaAbilityMana {
             player, options, ..
@@ -915,6 +986,18 @@ pub fn candidate_actions_broad_with_probe(
             }
         }
         WaitingFor::ScryChoice { player, cards } => select_cards_variants(*player, cards, None),
+        // CR 119.7 + CR 119.8: every enumerated redistribution option is legal by
+        // construction (the resolver filtered CR 119.7/119.8), so each is a
+        // candidate submission.
+        WaitingFor::RedistributeLifeTotals { player, options } => (0..options.len())
+            .map(|option_index| {
+                candidate(
+                    GameAction::SubmitLifeRedistribution { option_index },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::CoinFlipKeepChoice {
             player,
             results,
@@ -1132,6 +1215,22 @@ pub fn candidate_actions_broad_with_probe(
             })
             .collect()
         }
+        // CR 701.4a: behold picks exactly one beholdable object. Each candidate is
+        // a single-object `SelectCards`. The choice is rational-neutral for the
+        // corpus (the rider fires regardless of which object), but a battlefield
+        // permanent leaks nothing while a hand card is publicly revealed — so a
+        // rational agent prefers the battlefield leg. All picks are legal; policy
+        // scoring orders them.
+        WaitingFor::BeholdChoice { player, choices } => choices
+            .iter()
+            .map(|&id| {
+                candidate(
+                    GameAction::SelectCards { cards: vec![id] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ChooseOneOfBranch {
             player, branches, ..
         } => (0..branches.len())
@@ -1203,6 +1302,51 @@ pub fn candidate_actions_broad_with_probe(
                 })
                 .collect()
         }
+        // CR 101.4 + CR 707.2: EachPlayerCopyChosen selection — enumerate each
+        // single object (copy first only) plus representative first+second pairs
+        // when a second object may be chosen. Ordered: index 0 is copied, index 1
+        // scales the copy.
+        WaitingFor::EachPlayerCopyChosenSelection {
+            player,
+            eligible,
+            min,
+            max,
+            ..
+        } => {
+            let mut actions: Vec<CandidateAction> = Vec::new();
+            if *min <= 1 {
+                for e in eligible {
+                    actions.push(candidate(
+                        GameAction::SelectTargets {
+                            targets: vec![e.clone()],
+                        },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    ));
+                }
+            }
+            if *max >= 2 {
+                'outer: for first in eligible {
+                    for second in eligible {
+                        if first == second {
+                            continue;
+                        }
+                        actions.push(candidate(
+                            GameAction::SelectTargets {
+                                targets: vec![first.clone(), second.clone()],
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        ));
+                        // Cap to avoid combinatorial explosion on wide boards.
+                        if actions.len() >= 64 {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            actions
+        }
         WaitingFor::KeepWithinTotalPowerChoice {
             player,
             eligible,
@@ -1245,7 +1389,26 @@ pub fn candidate_actions_broad_with_probe(
             options,
             choice_type,
             source_id,
+            ..
         } => named_choice_actions(state, *player, options, choice_type, *source_id),
+        // CR 608.2d: every printed guess is a legal candidate. Enumerated
+        // uniformly here for legality + server validation; the AI's actual pick
+        // is made by a hidden-info determinization pre-emption in
+        // `phase-ai::search::choose_action` so it cannot read the committed value.
+        WaitingFor::OpponentGuess {
+            player, options, ..
+        } => options
+            .iter()
+            .map(|choice| {
+                candidate(
+                    GameAction::ChooseOption {
+                        choice: choice.clone(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 601.2b + CR 701.4a: pre-choice behold type prompt — one ChooseOption
         // per FEASIBLE creature type (options already exclude unpayable types).
         WaitingFor::CostTypeChoice {
@@ -1297,6 +1460,20 @@ pub fn candidate_actions_broad_with_probe(
         // with the player who is authorized to submit it; otherwise the
         // action gets routed to the wrong AI seat in multiplayer. The
         // `actor` field is always set to the authorized submitter.
+        // CR 608.2d + CR 700.3: AI opponent choice for pile separation — offer each
+        // candidate opponent as a legal action.
+        WaitingFor::SeparatePilesChooseOpponent {
+            player, candidates, ..
+        } => candidates
+            .iter()
+            .map(|&opp| {
+                candidate(
+                    GameAction::ChoosePileOpponent { opponent: opp },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 700.3 + CR 700.3a: AI partition candidates. Full powerset is
         // exponential, so we cap at three heuristics: all-in-A (chooser
         // sees an empty pile B), all-in-B (chooser sees a full pile A),
@@ -2702,7 +2879,6 @@ pub fn candidate_actions_broad_with_probe(
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::MulliganDecision { .. }
-        | WaitingFor::MulliganBottomCards { .. }
         | WaitingFor::OpeningHandBottomCards { .. } => Vec::new(),
         // CR 702.xxx: Paradigm (Strixhaven) — enumerate each exiled paradigm
         // source as a cast candidate plus a pass option. Assign when WotC
@@ -2843,7 +3019,10 @@ pub fn candidate_actions_with_probe(
     let mut actions = candidate_actions_exact(state);
     actions.extend(candidate_actions_broad_with_probe(state, probe));
 
-    if state.waiting_for.has_pending_cast() {
+    let has_pending_cast = state.waiting_for.has_pending_cast()
+        || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
+            && state.pending_cast.is_some());
+    if has_pending_cast {
         if let Some(player) = state.waiting_for.acting_player() {
             actions.push(candidate(
                 GameAction::CancelCast,
@@ -3359,6 +3538,10 @@ pub(crate) fn priority_actions_with_probe(
                         && !c.tapped
                         && c.card_types.core_types.contains(&CoreType::Creature)
                 })
+                // CR 701.26a + CR 508.1f: crew/saddle/station all tap the chosen
+                // creature, so a "can't become tapped" creature is never eligible
+                // (attacking, CR 508.1f, is the only exemption and is not a cost).
+                && !crate::game::restrictions::object_cant_tap(state, cid)
             })
             .collect();
         // CR 702.122a: Crew additionally excludes creatures with a "can't crew"
@@ -4160,9 +4343,19 @@ fn serum_powders_in_hand(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
         .collect()
 }
 
-fn bottom_card_actions(state: &GameState, player: PlayerId, count: u8) -> Vec<CandidateAction> {
+fn bottom_card_actions(
+    state: &GameState,
+    player: PlayerId,
+    count: u8,
+    exclude: Option<ObjectId>,
+) -> Vec<CandidateAction> {
     let p = &state.players[player.0 as usize];
-    let hand: Vec<_> = p.hand.iter().copied().collect();
+    let hand: Vec<_> = p
+        .hand
+        .iter()
+        .copied()
+        .filter(|id| Some(*id) != exclude)
+        .collect();
 
     if count == 0 || hand.is_empty() {
         return vec![candidate(
@@ -4244,6 +4437,12 @@ fn mana_payment_actions(
                 let Some(obj) = state.objects.get(&obj_id) else {
                     continue;
                 };
+                // CR 701.26a + CR 508.1f: a "can't become tapped" creature can't be
+                // tapped for convoke/improvise/waterbend (all tap the creature to
+                // pay). Delve (graveyard exile above) never taps, so it's exempt.
+                if crate::game::restrictions::object_cant_tap(state, obj_id) {
+                    continue;
+                }
                 match mode {
                     ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
                         // Waterbend: always colorless
@@ -4724,6 +4923,44 @@ mod tests {
         }
     }
 
+    /// CR 202.3d + CR 701.59a: collect-evidence candidate generation values a
+    /// graveyard split card by its COMBINED mana value. Assault // Battery is
+    /// {R} (front, MV 1) + {3}{G} (MV 4) → combined MV 5. An evidence threshold
+    /// of 5 must be satisfiable by this single card; a threshold of 6 must not.
+    ///
+    /// Revert-failing discriminator: reading the front-only MV (1) omits the card
+    /// at threshold 5, so the `contains(&assault)` assertion fails on revert.
+    #[test]
+    fn collect_evidence_candidates_use_combined_split_mana_value() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        let assault = sc.add_real_card(P0, "Assault", Zone::Graveyard, db);
+        let state = sc.state;
+
+        // Sanity: combined MV off the stack is 5 (front-only would be 1).
+        assert_eq!(
+            state.objects.get(&assault).unwrap().effective_mana_value(),
+            5,
+            "Assault // Battery in the graveyard reports combined MV 5"
+        );
+
+        let at_five = collect_evidence_candidate_combos(&state, &[assault], 5);
+        assert!(
+            at_five.iter().any(|combo| combo.contains(&assault)),
+            "combined MV 5 must satisfy collect-evidence threshold 5; the front-only \
+             MV (1) would wrongly omit Assault // Battery"
+        );
+
+        let at_six = collect_evidence_candidate_combos(&state, &[assault], 6);
+        assert!(
+            at_six.is_empty(),
+            "combined MV 5 cannot satisfy a collect-evidence threshold of 6"
+        );
+    }
+
     #[test]
     fn two_hg_priority_actions_offer_single_pass_for_team_representative() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
@@ -4923,6 +5160,33 @@ mod tests {
         assert!(
             !has_crew(&priority_actions(&state, PlayerId(0))),
             "a tapped-only board offers no Crew"
+        );
+    }
+
+    /// CR 701.26a + CR 508.1f (Ood Sphere): a creature that "can't become tapped"
+    /// is excluded from the crew/saddle/station eligibility hoist, so the AI/MP
+    /// legal-action set never offers a Crew that would tap it.
+    #[test]
+    fn cant_become_tapped_creature_is_not_crew_eligible() {
+        let mut state = crew_priority_state();
+        add_crew_vehicle(&mut state, 100, PlayerId(0));
+        let creature = add_untapped_creature(&mut state, 200, PlayerId(0));
+        assert!(
+            has_crew(&priority_actions(&state, PlayerId(0))),
+            "baseline: an untapped creature enables the Crew offer"
+        );
+
+        // Grant CantTap (printed onto the creature's own static definitions).
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            let def = StaticDefinition::new(crate::types::statics::StaticMode::CantTap)
+                .affected(TargetFilter::SelfRef);
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+        assert!(
+            !has_crew(&priority_actions(&state, PlayerId(0))),
+            "a can't-become-tapped creature must not be offered to crew"
         );
     }
 
@@ -5289,6 +5553,7 @@ mod tests {
                     crate::types::identifiers::ObjectId(2),
                 ],
                 valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+                attacker_constraints: Default::default(),
             },
             ..GameState::new_two_player(42)
         };
@@ -5321,6 +5586,7 @@ mod tests {
                 // The goading player is deliberately first: the pre-fix generator
                 // would only ever offer this single (illegal-under-goad) pairing.
                 valid_attack_targets: vec![goader, other_a, other_b],
+                attacker_constraints: Default::default(),
             },
             ..GameState::new_two_player(42)
         };
@@ -5389,6 +5655,7 @@ mod tests {
                 AttackTarget::Player(PlayerId(1)),
                 AttackTarget::Player(PlayerId(2)),
             ],
+            attacker_constraints: Default::default(),
         };
 
         let actions = candidate_actions(&state);
@@ -5464,6 +5731,7 @@ mod tests {
                 AttackTarget::Player(PlayerId(2)),
                 AttackTarget::Player(PlayerId(1)),
             ],
+            attacker_constraints: Default::default(),
         };
 
         let actions = candidate_actions(&state);
@@ -5505,6 +5773,7 @@ mod tests {
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
             source_id: Some(source),
+            persist_player: None,
         };
 
         let actions = candidate_actions(&state);

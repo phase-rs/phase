@@ -156,9 +156,10 @@ TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-da
 TOOL_BIN="target/tool"
 cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
 
-# The token catalog is baked into the engine lib at compile time via
-# `include_str!("../../data/known-tokens.toml")` (token_presets.rs). Regenerate
-# it, then re-embed it only if it actually changed.
+# The token catalog is baked into the engine lib at compile time (build.rs
+# converts data/known-tokens.toml to JSON in OUT_DIR; token_presets.rs embeds
+# it via include_bytes!). Regenerate it, then re-embed it only if it actually
+# changed.
 echo "Generating token preset catalog from MTGJSON set files..."
 TOKENS_FILE="crates/engine/data/known-tokens.toml"
 # Temp beside the target so the replace below is an atomic same-filesystem
@@ -167,7 +168,7 @@ TOKENS_TMP="$(mktemp "${TOKENS_FILE}.XXXXXX")"
 "$TOOL_BIN/tokens-gen" --input "$DATA_DIR/mtgjson/sets" --output "$TOKENS_TMP"
 # tokens-gen output is deterministic, so only overwrite when content actually
 # changed — an unconditional copy bumps the file's mtime and forces a full
-# (40-65s) engine recompile via the include_str! dependency for nothing.
+# (40-65s) engine recompile via build.rs's rerun-if-changed for nothing.
 if cmp -s "$TOKENS_TMP" "$TOKENS_FILE"; then
   rm -f "$TOKENS_TMP"
 else
@@ -264,7 +265,7 @@ elif [ ! -s "$WARNING_PATTERNS_OUTPUT_TMP" ] || ! jq -e '.' "$WARNING_PATTERNS_O
   coverage_ok=0
 fi
 if [ "$coverage_ok" = 1 ]; then
-  if ! jq '{total_cards, supported_cards, coverage_pct, coverage_by_format, coverage_by_set}' \
+  if ! jq '{total_cards, supported_cards, coverage_pct, coverage_by_format, coverage_by_set, token_coverage}' \
         "$COVERAGE_OUTPUT_TMP" > "$COVERAGE_SUMMARY_TMP"; then
     echo "WARNING: coverage-summary derivation failed; leaving existing $COVERAGE_SUMMARY in place." >&2
   else

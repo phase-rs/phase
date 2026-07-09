@@ -128,6 +128,13 @@ interface GameStoreState {
    * calls the UI store, keeping the layer boundary clean.
    */
   startingContest: { events: GameEvent[]; startingPlayer: PlayerId } | null;
+  /**
+   * PlayerIds bound to AI controllers this game. Client-owned lobby/session
+   * config (NOT game-state derivation): set at game init from the resolved AI
+   * seat bindings and cleared on `reset`. Empty for human-only games (online /
+   * p2p). Consumed by telemetry `game_end` to classify `winner_kind`.
+   */
+  aiSeatIds: PlayerId[];
 }
 
 interface GameStoreActions {
@@ -187,6 +194,7 @@ const initialState: GameStoreState = {
   resolutionProgress: null,
   isResolvingAll: false,
   startingContest: null,
+  aiSeatIds: [],
 };
 
 export const useGameStore = create<GameStore>()(

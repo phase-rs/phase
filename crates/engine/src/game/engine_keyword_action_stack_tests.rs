@@ -127,6 +127,16 @@ fn make_creature(state: &mut GameState, name: &str, power: i32) -> ObjectId {
     id
 }
 
+fn grant_cant_tap(state: &mut GameState, id: ObjectId) {
+    let def =
+        crate::types::ability::StaticDefinition::new(crate::types::statics::StaticMode::CantTap)
+            .affected(crate::types::ability::TargetFilter::SelfRef);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.static_definitions.push(def.clone());
+    std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    crate::game::layers::evaluate_layers(state);
+}
+
 /// Simulates a Counterspell-analog effect resolving during the priority
 /// window that opens after a keyword-action announcement. The top stack
 /// entry is moved to the graveyard (per CR 701.5a — counter means "move
@@ -332,6 +342,28 @@ fn crew_opens_priority_window_between_announcement_and_resolution() {
 }
 
 // --- Saddle -------------------------------------------------------------
+
+#[test]
+fn saddle_activation_excludes_cant_tap_creatures_from_threshold() {
+    let mut state = setup_main_phase();
+    let mount_id = make_mount(&mut state, 3);
+    let restricted = make_creature(&mut state, "Restricted Rider", 2);
+    let rider = make_creature(&mut state, "Rider", 1);
+    grant_cant_tap(&mut state, restricted);
+
+    let err = apply_as_current(
+        &mut state,
+        GameAction::SaddleMount {
+            mount_id,
+            creature_ids: vec![],
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, EngineError::ActionNotAllowed(_)),
+        "Saddle 3 must not count restricted 2-power creature plus unrestricted 1-power {rider:?}"
+    );
+}
 
 #[test]
 fn saddle_can_be_countered_by_stack_targeting_effect() {
@@ -894,5 +926,373 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
             .as_ref()
             .map(|pending| pending.offers.as_slice()),
         Some(remaining.as_slice()),
+    );
+}
+
+/// CR 702.6: An Equip keyword granted at runtime by a static ability (Bram,
+/// Bludgeon Brawl: "… is an Equipment with equip {N} …") must produce a real,
+/// cost-bearing equip activated ability — offered and charged through the normal
+/// `ActivateAbility` path, exactly like a printed Equipment — rather than a
+/// keyword the runtime ignores.
+#[test]
+fn granted_equip_keyword_offers_functional_equip_ability() {
+    use crate::types::ability::{
+        AbilityCost, AbilityTag, ContinuousModification, Effect, StaticDefinition, TargetFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
+
+    let mut state = setup_main_phase();
+    // A Food artifact with NO printed equip keyword or ability.
+    let food = create_object(
+        &mut state,
+        CardId(1500),
+        PlayerId(0),
+        "Test Food".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&food).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Food".to_string());
+    }
+
+    // The Bram / Bludgeon Brawl grant on the object itself: become an Equipment
+    // and gain equip {1}.
+    let equip_cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 1,
+    };
+    let def = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Equipment".to_string(),
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Equip(equip_cost),
+            },
+        ]);
+    {
+        let obj = state.objects.get_mut(&food).unwrap();
+        obj.static_definitions.push(def.clone());
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    }
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // Layer result: the object is now an Equipment carrying the Equip keyword.
+    let obj = state.objects.get(&food).unwrap();
+    assert!(
+        obj.card_types.subtypes.iter().any(|s| s == "Equipment"),
+        "granted Equipment subtype missing"
+    );
+    assert!(
+        crate::game::keywords::has_keyword_kind(obj, crate::types::keywords::KeywordKind::Equip),
+        "granted Equip keyword missing"
+    );
+
+    // The runtime now offers a synthesized, sorcery-speed, cost-bearing equip
+    // activated ability tagged `AbilityTag::Equip` — the SAME shape a printed
+    // Equipment gets, so it is offered + charged through the normal
+    // `ActivateAbility` path (not the cost-free `KeywordAction::Equip` path).
+    let abilities = crate::game::casting::activated_ability_definitions(&state, food);
+    let equip = abilities
+        .iter()
+        .find(|(_, ability)| ability.ability_tag == Some(AbilityTag::Equip))
+        .expect("granted equip must be offered as an activated ability");
+    assert!(
+        matches!(equip.1.effect.as_ref(), Effect::Attach { .. }),
+        "granted equip ability must attach: {:?}",
+        equip.1.effect
+    );
+    assert!(
+        matches!(equip.1.cost, Some(AbilityCost::Mana { .. })),
+        "granted equip ability must carry its mana cost: {:?}",
+        equip.1.cost
+    );
+}
+
+/// CR 202.3: Bludgeon Brawl's granted anthem "Equipped creature gets +X/+0, where
+/// X is that artifact's mana value" binds X to the *Equipment's* mana value, not
+/// the equipped creature's. The parser lowers this to `AddDynamicPower {
+/// SelfManaValue }`; this test proves the layer system resolves `SelfManaValue`
+/// against the granting Equipment (the static's source), so a mana-value-3
+/// Equipment boosts a 2/2 to 5/2.
+#[test]
+fn granted_equip_anthem_self_mana_value_reads_equipment_mana_value() {
+    use crate::types::ability::{
+        ContinuousModification, FilterProp, QuantityExpr, QuantityRef, StaticDefinition,
+        TargetFilter, TypedFilter,
+    };
+    use crate::types::mana::ManaCost;
+
+    let mut state = setup_main_phase();
+    // An Equipment with mana value 3.
+    let gear = create_object(
+        &mut state,
+        CardId(1600),
+        PlayerId(0),
+        "Test Gear".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&gear).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 3,
+        };
+    }
+    // A 2/2 creature, with the Equipment attached to it.
+    let bear = make_creature(&mut state, "Bear", 2);
+    state.objects.get_mut(&gear).unwrap().attached_to = Some(bear.into());
+
+    // Granted anthem on the Equipment: "Equipped creature gets +X/+0" where X is
+    // the Equipment's own mana value.
+    let anthem = StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+        ))
+        .modifications(vec![ContinuousModification::AddDynamicPower {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::SelfManaValue,
+            },
+        }]);
+    {
+        let obj = state.objects.get_mut(&gear).unwrap();
+        obj.static_definitions.push(anthem.clone());
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(anthem);
+    }
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // Power boosted by the EQUIPMENT's mana value (3): 2 + 3 = 5; +X/+0 leaves T.
+    let creature = state.objects.get(&bear).unwrap();
+    assert_eq!(
+        creature.power,
+        Some(5),
+        "granted anthem X must read the Equipment's mana value (2 + 3)"
+    );
+    assert_eq!(
+        creature.toughness,
+        Some(2),
+        "+X/+0 must leave toughness unchanged"
+    );
+}
+
+/// CR 702.6a: A permanent may have more than one equip ability, each independently
+/// activatable. An object that PRINTS `Equip {1}` (already synthesized into
+/// `obj.abilities` at card load) and is ALSO granted an identical `Equip {1}` at
+/// runtime must expose BOTH — the granted instance is subtracted by occurrence,
+/// not by value-wide membership.
+#[test]
+fn identical_printed_and_granted_equip_both_offered() {
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
+
+    let equip_one = Keyword::Equip(ManaCost::Cost {
+        shards: vec![],
+        generic: 1,
+    });
+    let mut state = setup_main_phase();
+    let gear = create_object(
+        &mut state,
+        CardId(1700),
+        PlayerId(0),
+        "Twin Equip".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&gear).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        // Printed Equip {1}: lives in base_keywords AND (via card-load synthesis)
+        // as an activated ability.
+        obj.base_keywords.push(equip_one.clone());
+        std::sync::Arc::make_mut(&mut obj.abilities)
+            .push(crate::database::synthesis::equip_ability_for_keyword(&equip_one).unwrap());
+        // Post-layer keyword set carries BOTH the printed and a granted copy.
+        obj.keywords.push(equip_one.clone());
+        obj.keywords.push(equip_one.clone());
+    }
+
+    // Both equip abilities are offered: the printed one from obj.abilities and the
+    // granted one from the runtime appender.
+    let equip_count = crate::game::casting::activated_ability_definitions(&state, gear)
+        .iter()
+        .filter(|(_, ability)| {
+            ability.ability_tag == Some(crate::types::ability::AbilityTag::Equip)
+        })
+        .count();
+    assert_eq!(
+        equip_count, 2,
+        "printed + identical granted Equip must both be offered"
+    );
+}
+
+/// CR 202.3 + CR 118.9: Bludgeon Brawl grants `equip {X}` where X is the
+/// artifact's mana value, carried as the `ManaCost::SelfManaValue` placeholder.
+/// The offered equip ability must present the CONCRETE mana value as its cost —
+/// otherwise the payment path treats `SelfManaValue` as `{0}` and equip is free.
+#[test]
+fn granted_equip_self_mana_value_cost_is_concretized_to_mana_value() {
+    use crate::types::ability::{
+        AbilityCost, AbilityTag, ContinuousModification, StaticDefinition, TargetFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
+
+    let mut state = setup_main_phase();
+    // An Equipment with mana value 4, granted equip {X}=its mana value.
+    let gear = create_object(
+        &mut state,
+        CardId(1800),
+        PlayerId(0),
+        "MV Gear".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&gear).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Equipment".to_string());
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 4,
+        };
+    }
+    let def = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Equip(ManaCost::SelfManaValue),
+        }]);
+    {
+        let obj = state.objects.get_mut(&gear).unwrap();
+        obj.static_definitions.push(def.clone());
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    }
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // The offered equip cost is the concrete mana value (4), not the placeholder.
+    let abilities = crate::game::casting::activated_ability_definitions(&state, gear);
+    let equip = abilities
+        .iter()
+        .find(|(_, ability)| ability.ability_tag == Some(AbilityTag::Equip))
+        .expect("granted equip must be offered");
+    match &equip.1.cost {
+        Some(AbilityCost::Mana {
+            cost: ManaCost::Cost { generic, shards },
+        }) => {
+            assert_eq!(*generic, 4, "equip {{X}} must concretize to mana value 4");
+            assert!(shards.is_empty(), "no colored pips expected");
+        }
+        other => panic!("equip cost must be concrete Mana {{4}}, not a placeholder: {other:?}"),
+    }
+}
+
+/// CR 702.6 + CR 702.6a: end-to-end proof that a runtime-granted Equip keyword
+/// (Bram, Bludgeon Brawl) is not merely *offered* but fully *functional* through
+/// the normal `ActivateAbility` path — announced, its mana cost paid from the
+/// pool, a legal "creature you control" targeted, and resolved so the Equipment
+/// becomes attached. The shape-only tests above assert the offered ability's AST
+/// (cost + `Effect::Attach`); this drives the whole pipeline, so a regression in
+/// runtime-index selection, payment, targeting, or Attach resolution fails HERE
+/// even though those still pass.
+#[test]
+fn granted_equip_attaches_through_full_activation_pipeline() {
+    use crate::game::scenario::GameScenario;
+    use crate::types::ability::{
+        AbilityTag, ContinuousModification, StaticDefinition, TargetFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::{ManaCost, ManaPipId, ManaType, ManaUnit};
+
+    let p0 = PlayerId(0);
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    // CR 702.6a: equip is a sorcery-speed activated ability — main phase, own
+    // turn, empty stack, priority to P0.
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // A creature P0 controls — the legal equip target.
+    let bear = scenario.add_creature(p0, "Bear", 2, 2).id();
+
+    // A noncreature Food artifact granted "Equipment with equip {1}" by a static
+    // on itself (Bram-shaped), mirroring the parser's `AddSubtype` + `AddKeyword`
+    // output.
+    let food = create_object(
+        &mut scenario.state,
+        CardId(1900),
+        p0,
+        "Test Food".to_string(),
+        Zone::Battlefield,
+    );
+    let equip_cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 1,
+    };
+    let def = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Equipment".to_string(),
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Equip(equip_cost),
+            },
+        ]);
+    {
+        let obj = scenario.state.objects.get_mut(&food).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.subtypes.push("Food".to_string());
+        obj.static_definitions.push(def.clone());
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    }
+    crate::game::layers::evaluate_layers(&mut scenario.state);
+
+    // Fund the {1} equip cost — the driver does not model source auto-tap, so the
+    // pool must cover the cost or `PassPriority` (finalize payment) errors.
+    scenario.with_mana_pool(
+        p0,
+        vec![ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(9998),
+            pip_id: ManaPipId(0),
+            supertype: None,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+        }],
+    );
+
+    // The granted equip is appended LAST in `activated_ability_definitions`;
+    // resolve its runtime index the same way the engine does.
+    let equip_index = crate::game::casting::activated_ability_definitions(&scenario.state, food)
+        .iter()
+        .position(|(_, ability)| ability.ability_tag == Some(AbilityTag::Equip))
+        .expect("granted equip must be offered as an activated ability");
+
+    let mut runner = scenario.build();
+    // Announce → pay {1} from the pool → target the creature → resolve.
+    let outcome = runner
+        .activate(food, equip_index)
+        .target_object(bear)
+        .resolve();
+
+    // CR 702.6a: equip attaches the Equipment to the chosen creature.
+    assert_eq!(
+        outcome.state().objects.get(&food).unwrap().attached_to,
+        Some(bear.into()),
+        "granted equip must attach the Equipment to the targeted creature through the \
+         normal ActivateAbility path"
+    );
+    assert!(
+        outcome
+            .state()
+            .objects
+            .get(&bear)
+            .unwrap()
+            .attachments
+            .contains(&food),
+        "the equipped creature must carry the Equipment"
     );
 }

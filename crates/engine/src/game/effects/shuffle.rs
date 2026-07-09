@@ -19,6 +19,35 @@ pub fn resolve(
         Effect::Shuffle { target } => target.clone(),
         _ => TargetFilter::Controller,
     };
+
+    // CR 701.24a: "Shuffle a library OR a face-down pile of cards." A pile is a
+    // first-class shuffle target modeled as the chain's tracked object set
+    // (Expose the Culprit's "shuffle that pile"). Randomize the set's order via
+    // the game RNG and return WITHOUT emitting `PlayerPerformedAction::
+    // ShuffledLibrary` — a pile shuffle is categorically not a library shuffle,
+    // so "whenever you shuffle your library" triggers (Cosi's Trickster, Psychic
+    // Spiral) must not fire. The `TrackedSetId(0)` sentinel is bound to the
+    // active chain set through the single-authority `resolve_tracked_set_sentinel`
+    // so Shuffle and the downstream Cloak read the same set.
+    let resolved_target =
+        crate::game::targeting::resolve_tracked_set_sentinel(state, shuffle_target.clone());
+    if let TargetFilter::TrackedSet { id } = resolved_target {
+        use rand::seq::SliceRandom;
+        let GameState {
+            tracked_object_sets,
+            rng,
+            ..
+        } = state;
+        if let Some(set) = tracked_object_sets.get_mut(&id) {
+            set.shuffle(rng);
+        }
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::Shuffle,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     let target_player = if matches!(shuffle_target, TargetFilter::Owner) {
         // CR 400.3: "its owner's library" resolves to the owner of source_id.
         state

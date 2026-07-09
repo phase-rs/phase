@@ -23,7 +23,9 @@
 //! Parameterizing on the counter type and its live count covers any spell mana
 //! value and any current/future card with this structure — not a single card.
 
-use engine::game::functioning_abilities::active_static_definitions;
+use engine::game::functioning_abilities::{
+    active_static_definitions, is_self_referential_prohibition,
+};
 use engine::game::static_abilities::{check_static_ability, StaticCheckContext};
 use engine::types::ability::{
     AbilityDefinition, Comparator, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
@@ -35,6 +37,7 @@ use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
+use engine::types::zones::Zone;
 
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
@@ -133,6 +136,14 @@ fn spell_can_be_countered(
     }
     state.objects.get(&spell_id).is_none_or(|obj| {
         !active_static_definitions(state, obj).any(|sd| sd.mode == StaticMode::CantBeCountered)
+            // CR 113.6g: this policy scores the cast before the card moves to
+            // the stack, so predict the spell's own future stack-functioning
+            // self-prohibition instead of asking whether it functions in hand.
+            && !obj.static_definitions.iter_unchecked().any(|sd| {
+                sd.mode == StaticMode::CantBeCountered
+                    && is_self_referential_prohibition(sd)
+                    && (sd.active_zones.is_empty() || sd.active_zones.contains(&Zone::Stack))
+            })
     })
 }
 

@@ -37,7 +37,8 @@ use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
     parse_cant_be_activated_exemption_in_text, parse_chosen_qualifier_subject,
-    parse_continuous_modifications, parse_static_line, parse_static_line_multi,
+    parse_continuous_modifications, parse_continuous_subject_filter, parse_static_line,
+    parse_static_line_multi, peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{
@@ -49,6 +50,22 @@ pub(super) fn try_parse_subject_predicate_ast(
     ctx: &mut ParseContext,
 ) -> Option<ClauseAst> {
     if try_parse_targeted_controller_gain_life(text).is_some() {
+        return None;
+    }
+
+    // CR 723.1 / CR 723.2: "you control [target] during [possessive] next turn /
+    // next combat phase" (Mindslaver / Secret of Bloodbending) is a
+    // `ControlNextTurn` imperative, not a subject-predicate grant. The imperative
+    // path owns the window axis; without this deferral the subject grammar
+    // mis-parses the trailing "combat phase" into an `Unimplemented` remnant.
+    if matches!(
+        imperative::parse_targeted_action_ast(
+            text,
+            &text.to_lowercase(),
+            &mut ParseContext::default()
+        ),
+        Some(crate::parser::oracle_ir::ast::TargetedImperativeAst::ControlNextTurn { .. })
+    ) {
         return None;
     }
 
@@ -138,6 +155,26 @@ pub(super) fn try_parse_subject_predicate_ast(
     // power and toughness") cannot be re-derived by `find_predicate_start`.
     if let Some(clause) = try_parse_subject_base_pt_set_clause_ast(text, ctx) {
         return Some(clause);
+    }
+
+    // CR 611.3 + CR 105.2 + CR 305.7: "all <X> become <P> and all <Y> become <Q>"
+    // — a compound-quantified dual-subject become effect (Nightcreep: "all
+    // creatures become black and all lands become Swamps"). Each conjunct carries
+    // its own subject and predicate; must run before `try_parse_subject_become_clause`,
+    // which would claim only the first conjunct and drop the second into the
+    // static description. Sibling of the compound-subject static handlers in
+    // `oracle_static/type_change.rs` (#5219 class).
+    if let Some(clause) = try_parse_compound_all_subjects_become_clause(text, ctx) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, sub_ability| PredicateAst::Become {
+                effect,
+                duration,
+                sub_ability,
+            },
+            ctx,
+        ));
     }
 
     if let Some(clause) = try_parse_subject_become_clause(text, ctx) {
@@ -301,6 +338,54 @@ fn try_parse_contracted_subject_additive_type_clause(
     let rest_original = &text[prefix_len..];
     let predicate = format!("is {rest_original}");
     let application = additive_type_subject_application(subject_text, ctx)?;
+
+    // CR 205.1a + CR 205.1b + CR 613.1d + CR 611.2a + CR 400.7 + CR 603.6:
+    // type-REPLACEMENT copula — "It's a Treasure artifact with '<ability>', and it
+    // loses all other card types" (Vraska, the Silencer). The "loses all other card
+    // types" tail (kept attached to the copula by the sequence splitter) routes this
+    // to the shared `SetCardTypes` + subtype + granted-ability builder — the same
+    // modifications the copy path already emits (Shelob) — reused here on the
+    // subject-copula path. Tried BEFORE the additive form because the replacement
+    // tail must win over the type-addition reading (mirrors the copy-path ordering
+    // in `parse_except_body`). Like the animation arm below, this anaphor names the
+    // object the PRECEDING clause returned (a reanimated card), never the source
+    // permanent, so gate on a real prior referent (`ParentTarget`, or the
+    // `TriggeringSource` that was returned by a dies-trigger reanimate) and decline
+    // `SelfRef` so a source-permanent misbind honest-defers instead. Installed as an
+    // indefinite continuous effect that ends when the returned object leaves play
+    // (CR 611.2a: no stated duration; CR 400.7: a new object on re-entry is not the
+    // same object — mirrors `install_aura_continuous_effect`).
+    if let Some((_, modifications)) =
+        super::become_copy_except::parse_its_a_type_loses_others(&lower)
+    {
+        let affected = static_affected_for_application(&application);
+        if matches!(
+            affected,
+            TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+        ) {
+            return Some(ClauseAst::SubjectPredicate {
+                subject: Box::new(SubjectPhraseAst {
+                    affected: application.affected.clone(),
+                    target: application.target.clone(),
+                    multi_target: application.multi_target.clone(),
+                    inherits_parent: application.inherits_parent,
+                    is_optional: application.is_optional,
+                }),
+                predicate: Box::new(PredicateAst::Become {
+                    effect: Effect::GenericEffect {
+                        static_abilities: vec![StaticDefinition::continuous()
+                            .affected(affected)
+                            .modifications(modifications)
+                            .description(predicate.clone())],
+                        duration: Some(Duration::UntilHostLeavesPlay),
+                        target: application.target.clone(),
+                    },
+                    duration: Some(Duration::UntilHostLeavesPlay),
+                    sub_ability: None,
+                }),
+            });
+        }
+    }
 
     // CR 205.1b: additive form first — "it's a [type] in addition to its other
     // types" retains prior types (AddType/AddSubtype only).
@@ -510,6 +595,83 @@ fn build_additive_type_continuous_clause(
             target: application.target.clone(),
         },
         duration: Some(Duration::Permanent),
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// CR 611.3 + CR 105.2 + CR 305.7: "all `<X>` become `<P>` and all `<Y>` become
+/// `<Q>`" — compound-quantified dual-subject become. Nightcreep is the exemplar:
+/// each conjunct applies its own subject-specific transformation (creatures →
+/// black, lands → Swamp). Declines when fewer than two conjuncts resolve, when
+/// any conjunct lacks a become verb, or when subjects share one predicate
+/// ("all creatures and all lands become Swamps").
+fn try_parse_compound_all_subjects_become_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let conjuncts = peel_compound_all_quantified_conjuncts(text)?;
+    let mut static_abilities = Vec::new();
+    let mut merged_duration = None;
+    let mut merged_target = None;
+
+    for conjunct in conjuncts {
+        let conjunct_lower = conjunct.to_lowercase();
+        let tp = TextPair::new(&conjunct, &conjunct_lower);
+        let (subject_tp, predicate_tp) = tp
+            .split_around(" becomes ")
+            .or_else(|| tp.split_around(" become "))?;
+        let predicate_with_verb = if nom_primitives::scan_contains(&conjunct_lower, " becomes ") {
+            format!("becomes {}", predicate_tp.original.trim())
+        } else {
+            format!("become {}", predicate_tp.original.trim())
+        };
+        let predicate_lower = predicate_with_verb.to_lowercase();
+        alt((tag::<_, _, OracleError<'_>>("become "), tag("becomes ")))
+            .parse(predicate_lower.as_str())
+            .ok()?;
+        let affected = parse_continuous_subject_filter(subject_tp.original.trim())?;
+        let application = SubjectApplication {
+            affected,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+        };
+        let clause = build_become_clause(application, &predicate_with_verb, ctx)?;
+        let Effect::GenericEffect {
+            static_abilities: mut defs,
+            duration,
+            target,
+            ..
+        } = clause.effect
+        else {
+            return None;
+        };
+        if merged_duration.is_none() {
+            merged_duration = duration.or(clause.duration);
+        }
+        if merged_target.is_none() {
+            merged_target = target;
+        }
+        static_abilities.append(&mut defs);
+    }
+
+    if static_abilities.len() < 2 {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities,
+            duration: merged_duration.clone(),
+            target: merged_target,
+        },
+        duration: merged_duration,
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -1306,7 +1468,13 @@ fn try_parse_subject_restriction_clause(
     // creature gets -3/-0 and its activated abilities can't be activated"), so they
     // bind to `ParentTarget`; `parse_subject_application` resolves the typed-subject
     // forms ("target creature's", "each creature you control").
-    if let Some((before, _)) = tp.split_around(" activated abilities can't be activated") {
+    // CR 605.1a: split on the predicate with either apostrophe glyph so a U+2019
+    // effect clause ("target creature's activated abilities can't be activated
+    // unless they're mana abilities") still reaches the shared exemption scan.
+    if let Some((before, _)) = tp
+        .split_around(" activated abilities can't be activated")
+        .or_else(|| tp.split_around(" activated abilities can\u{2019}t be activated"))
+    {
         let subject = before.original.trim();
         let application = subject_application_for_cant_be_activated(subject, ctx)?;
         let affected = static_affected_for_application(&application);
@@ -2369,6 +2537,28 @@ pub(super) fn parse_subject_application(
         });
     }
 
+    // CR 608.2k + CR 509.1/509.3d: "the other creature" — the creature on the
+    // opposite side of a compound blocks-or-becomes-blocked pairing (Mammoth
+    // Harness, Venom). Unconditionally ParentTarget (unlike "that creature"):
+    // the antecedent flips per-firing-orientation, which
+    // `blocked_attacker_from_event` already disambiguates from the resolved
+    // event shape, regardless of ctx.subject.
+    if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("the other ").parse(lower.as_str())
+    {
+        let consumed = lower.len() - rest_subject.len();
+        let original_rest = &subject[consumed..];
+        let (filter, rem) = parse_type_phrase(original_rest);
+        if rem.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTarget,
+                target: Some(TargetFilter::ParentTarget),
+                multi_target: None,
+                inherits_parent: true,
+                is_optional: false,
+            });
+        }
+    }
+
     // CR 608.2c: "that creature/permanent/land" — anaphoric back-reference to a
     // previously mentioned object in the same effect sequence. Strip "that " and parse
     // the remainder as a type phrase. Covers all "that [type]" patterns generically.
@@ -2857,13 +3047,47 @@ fn try_split_pump_compound(
 
 fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Option<Duration>)> {
     let lower = predicate.to_lowercase();
-    let (choice_text, _) = tag::<_, _, OracleError<'_>>("gain your choice of ")
-        .parse(lower.as_str())
-        .ok()?;
-    let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
-    let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
-    let first = parse_keyword_from_oracle(left.trim())?;
-    let second = parse_keyword_from_oracle(right.trim())?;
+
+    // Shape 1: "gain your choice of X or Y" — an explicit keyword-grant menu.
+    if let Ok((choice_text, _)) =
+        tag::<_, _, OracleError<'_>>("gain your choice of ").parse(lower.as_str())
+    {
+        let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
+        let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
+        let first = parse_keyword_from_oracle(left.trim())?;
+        let second = parse_keyword_from_oracle(right.trim())?;
+        return Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))));
+    }
+
+    // Shape 2: "gain/have protection from X or from the color of your choice"
+    // (Angelic Intervention, Apostle's Blessing, Giver of Runes, Jeweled Spirit,
+    // Razor Barrier). The predicate arrives DECONJUGATED (gains→gain, has→have),
+    // so anchor on the bare forms — never "gains"/"has".
+    // CR 608.2d: a choice offered by a resolving ability is announced as the
+    // effect is applied (choose one protection).
+    // CR 702.16a: protection from [quality] (color, colorless, or card type).
+    let (remainder, _) = alt((
+        tag::<_, _, OracleError<'_>>("gain protection from "),
+        tag("have protection from "),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let (quality_text, duration) = super::strip_trailing_duration(remainder);
+    // GUARDRAIL: split on the literal " or from " (NOT " or "). Splitting on
+    // " or " would leave the right half as "from the color of your choice",
+    // which parse_protection_target's `from `-prefix arm routes to Quality —
+    // silently killing the color choice. When there is no " or from " this is a
+    // single protection grant, so return None and fall through to the existing
+    // continuous-clause behavior.
+    let (_, (left, right)) =
+        nom_primitives::split_once_on(quality_text.trim(), " or from ").ok()?;
+    // The halves are bare qualities (the "protection from " prefix is already
+    // stripped), so map each with parse_protection_target — NOT
+    // parse_keyword_from_oracle, which expects the full "protection from …" form.
+    let first = Keyword::Protection(crate::types::keywords::parse_protection_target(left.trim()));
+    let second = Keyword::Protection(crate::types::keywords::parse_protection_target(
+        right.trim(),
+    ));
     Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))))
 }
 
@@ -3255,6 +3479,52 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
     (text.to_string(), None)
 }
 
+/// CR 305.7 + CR 305.6 + CR 205.1b (Layer 4): Lower a "become[s] [a[n]] `<basic
+/// land type>`" predicate to its land-subtype modification(s). Non-additive
+/// replaces the object's land subtypes (`SetBasicLandType`, CR 305.7 — the land
+/// gains only the named type's intrinsic mana ability); the "in addition to
+/// {their|its} other types" form retains existing land types and adds the subtype
+/// (`AddSubtype`, CR 205.1b). Composed along its axes — optional article, the
+/// basic-land-type word (singular or plural via `parse_basic_land_type_plural`),
+/// and the optional additive marker. Declines any predicate that does not name
+/// exactly a basic land type (optionally with the additive marker), so non-land
+/// becomes fall through to `parse_animation_spec`.
+fn try_parse_become_basic_land_type_modifications(
+    become_text: &str,
+) -> Option<Vec<ContinuousModification>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = become_text
+        .trim()
+        .trim_end_matches('.')
+        .trim()
+        .to_lowercase();
+    let (rest, _) = opt(alt((tag::<_, _, VE>("a "), tag::<_, _, VE>("an "))))
+        .parse(lower.as_str())
+        .ok()?;
+    // Extract the candidate basic-land word with a nom combinator (not manual
+    // scanning), then classify it via the shared `parse_basic_land_type_plural`.
+    let (after, word) = nom::character::complete::alpha1::<_, VE>(rest).ok()?;
+    let land_type = crate::parser::oracle_static::parse_basic_land_type_plural(word)?;
+    let after = after.trim();
+    // CR 205.1b: only a bare type word (replacement) or the "in addition to their/
+    // its other types" additive marker may follow; anything else is a mixed
+    // predicate that must fall through to the animation parser.
+    let additive = if after.is_empty() {
+        false
+    } else if nom_primitives::scan_contains(after, "in addition to") {
+        true
+    } else {
+        return None;
+    };
+    Some(if additive {
+        vec![ContinuousModification::AddSubtype {
+            subtype: land_type.as_subtype_str().to_string(),
+        }]
+    } else {
+        vec![ContinuousModification::SetBasicLandType { land_type }]
+    })
+}
+
 fn build_become_clause(
     application: SubjectApplication,
     predicate: &str,
@@ -3310,6 +3580,34 @@ fn build_become_clause(
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
                 .modifications(vec![modification])
+                .description(become_text.to_string())],
+            duration: duration.clone(),
+            target: application.target.clone(),
+        };
+        return Some(ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
+
+    // CR 305.7 + CR 305.6 + CR 205.1b (Layer 4): "become[s] [a] <basic land type>"
+    // (Nightcreep's "all lands become Swamps") is a LAND-subtype change, not a
+    // creature subtype. `parse_animation_spec` below mis-tokenizes the basic-land
+    // word — notably the plural "Swamps" — as a creature subtype (`AddSubtype` +
+    // `RemoveAllSubtypes{Creature}`), so the land never gains the type's intrinsic
+    // mana ability. Intercept it here and emit the correct land-type modification.
+    if let Some(modifications) = try_parse_become_basic_land_type_modifications(become_text) {
+        let affected = static_affected_for_application(&application);
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
                 .description(become_text.to_string())],
             duration: duration.clone(),
             target: application.target.clone(),
@@ -3425,6 +3723,22 @@ fn build_become_clause(
         return Some(super::parsed_clause(Effect::BecomeSaddled { target }));
     }
 
+    // CR 509.1h: "becomes blocked" makes the target attacking creature a blocked
+    // creature with no blockers assigned (Dazzling Beauty: "Target unblocked
+    // attacking creature becomes blocked."). Mirrors the saddled idiom: a real
+    // "Target ... creature" subject carries its `Typed` filter as the target slot;
+    // an anaphoric subject falls back to `affected`.
+    if all_consuming(tag::<_, _, OracleError<'_>>("blocked"))
+        .parse(become_lower.as_str())
+        .is_ok()
+    {
+        let target = application
+            .target
+            .clone()
+            .unwrap_or_else(|| application.affected.clone());
+        return Some(super::parsed_clause(Effect::BecomeBlocked { target }));
+    }
+
     // CR 707.2 / CR 613.1a: "become a copy of [target]" — copy copiable characteristics.
     // Must intercept before parse_animation_spec which rejects "copy of" patterns.
     //
@@ -3486,6 +3800,36 @@ fn build_become_clause(
 
     if let Some(clause) = try_parse_become_and_attack_if_able(&application, become_text, ctx) {
         return Some(clause);
+    }
+
+    // CR 205.1a + CR 613.1d + CR 613.1f + CR 613.8a: "becomes a <type> [with
+    // \"<ability>\"] and loses all other card types and abilities" — full
+    // card-type replacement plus ability wipe plus optional ability grant
+    // (Vraska, Betrayal's Sting [-2]). Must intercept before parse_animation_spec,
+    // which bails on the " loses all other card types " tail and would drop both
+    // the type replacement and the granted ability.
+    if let Some(modifications) =
+        super::become_copy_except::parse_becomes_type_loses_all(become_text)
+    {
+        let affected = static_affected_for_application(&application);
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .description(become_text.to_string())],
+            duration: duration.clone(),
+            target: application.target.clone(),
+        };
+        return Some(ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
     }
 
     let (become_text, name_override) = strip_become_name_override(become_text);
@@ -3797,11 +4141,17 @@ fn try_parse_set_day_night(become_text: &str) -> Option<ParsedEffectClause> {
 /// - "all colors" / "every color" → `SetColor(WUBRG)` (CR 105.2: a multicolored
 ///   object can be each of the five colors). The new color set replaces all
 ///   previous colors (CR 105.3).
-/// - "the chosen color" → `AddChosenColor`, reading the source's
-///   `ChosenAttribute::Color` bound by a preceding `Effect::Choose` in the same
-///   ability (Puca's Eye: "draw a card, then choose a color. This artifact
-///   becomes the chosen color"). Despite the additive-sounding `Add` prefix,
-///   `AddChosenColor` SETS the color at Layer 5 (CR 105.3) — see its definition.
+/// - "the chosen color" / "that color" → `AddChosenColor`, reading the source's
+///   `ChosenAttribute::Color`. For "the chosen color" the color is bound by a
+///   preceding `Effect::Choose` in the same ability (Puca's Eye: "draw a card,
+///   then choose a color. This artifact becomes the chosen color"). For "that
+///   color" (CR 106.1a + CR 202.2) the color is bound by the mana produced
+///   earlier in the SAME activated mana ability ("Add one mana of any color.
+///   This creature becomes that color", Foraging Wickermaw) — the mana producer
+///   records it as `ChosenAttribute::Color` on the source
+///   (`produce_mana_from_ability`), and this `AddChosenColor` reads it live at
+///   Layer 5. Despite the additive-sounding `Add` prefix, `AddChosenColor` SETS
+///   the color at Layer 5 (CR 105.3 / CR 613.1e) — see its definition.
 ///
 /// Returns `None` for any other predicate so the caller falls through to the
 /// fixed-color animation path (which already handles single named colors) and to
@@ -3822,6 +4172,7 @@ fn try_parse_become_color_modification(become_text: &str) -> Option<ContinuousMo
     if all_consuming(alt((
         tag::<_, _, OracleError<'_>>("the chosen color"),
         tag("the color chosen this way"),
+        tag("that color"),
     )))
     .parse(lower.as_str())
     .is_ok()
@@ -5070,6 +5421,44 @@ pub(super) fn strip_subject_clause(text: &str) -> Option<String> {
     Some(deconjugate_verb(predicate))
 }
 
+/// Strip a leading *controller* subject ("you may " / "you ") from `text`,
+/// returning the imperative remainder in original case; `None` for every other
+/// leading subject.
+///
+/// This is the controller-only counterpart to [`strip_subject_clause`]. It
+/// exists for the token "create … for each X" fallback in
+/// `oracle_effect/mod.rs`, which delegates to `token::try_parse_token`. That
+/// path defaults `Effect::Token.owner` to `TargetFilter::Controller`
+/// (CR 109.5: an unqualified "you" is the controller of the source) and — via
+/// the early return in `try_parse_for_each_effect` — does NOT run the
+/// subject→owner rebinding that the numeric/targeted for-each arms use. So
+/// stripping a *non-controller* subject there ("each player", "each opponent",
+/// "target player/opponent", "its controller", "that player", …) would
+/// silently mis-own the created token to the source controller
+/// (CR 111.11: a token is created under a specific player's control). Only the
+/// controller subject may be stripped in that fallback; any other leading
+/// subject returns `None` so the clause honestly falls through to unsupported.
+pub(super) fn strip_controller_subject_clause(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    // Longest-match first: "you may " before the bare "you " so the optional
+    // permission word is consumed rather than stranded on the remainder.
+    let ((), remainder) = nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("you may "),
+                tag::<_, _, OracleError<'_>>("you "),
+            )),
+        )
+        .parse(i)
+    })?;
+    let remainder = remainder.trim();
+    if remainder.is_empty() {
+        return None;
+    }
+    Some(remainder.to_string())
+}
+
 /// Strip third-person 's' from the first word: "discards a card" → "discard a card".
 pub(super) fn deconjugate_verb(text: &str) -> String {
     let text = text.trim();
@@ -5325,10 +5714,39 @@ fn add_another_property(filter: TargetFilter) -> TargetFilter {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityKind, ContinuousModification, ControllerRef, Effect, TypeFilter,
+        AbilityKind, BasicLandType, ContinuousModification, ControllerRef, Effect, TypeFilter,
     };
     use crate::types::card_type::Supertype;
     use crate::types::statics::BlockExceptionKind;
+
+    /// CR 105.3 + CR 106.1a: "becomes that color" (Foraging Wickermaw) maps to the
+    /// same `AddChosenColor` reader as "the chosen color" (Puca's Eye) — only the
+    /// upstream writer differs (mana production vs `Effect::Choose`). Regression-
+    /// guards the sibling arms so a future edit can't drop them.
+    #[test]
+    fn become_that_color_maps_to_add_chosen_color() {
+        assert!(matches!(
+            try_parse_become_color_modification("that color"),
+            Some(ContinuousModification::AddChosenColor)
+        ));
+        assert!(matches!(
+            try_parse_become_color_modification("the chosen color"),
+            Some(ContinuousModification::AddChosenColor)
+        ));
+        assert!(matches!(
+            try_parse_become_color_modification("all colors"),
+            Some(ContinuousModification::SetColor { .. })
+        ));
+        // Unrelated predicates still fall through (the animation path handles them).
+        assert!(try_parse_become_color_modification("a giant lizard").is_none());
+        assert_eq!(
+            try_parse_become_basic_land_type_modifications("Swamps"),
+            Some(vec![ContinuousModification::SetBasicLandType {
+                land_type: BasicLandType::Swamp,
+            }])
+        );
+        assert!(try_parse_become_basic_land_type_modifications("black").is_none());
+    }
 
     // CR 702.62a + CR 702.62b + CR 611.2a: "Cards exiled this way gain suspend"
     // (unconditional form — no "that don't have" clause) must produce the
@@ -7950,5 +8368,53 @@ mod tests {
         // remainder is not discarded.
         let mut ctx = ParseContext::default();
         assert!(try_parse_copula_goaded_clause("it's goaded and draws a card", &mut ctx).is_none());
+    }
+
+    // CR 509.1h: "Target unblocked attacking creature becomes blocked." parses to
+    // `Effect::BecomeBlocked` whose target is a Typed(creature) filter carrying
+    // both FilterProp::Unblocked and FilterProp::Attacking. SHAPE test — runtime
+    // semantics are covered by the cast-pipeline tests in
+    // tests/dazzling_beauty_become_blocked.rs.
+    #[test]
+    fn become_blocked_parses_with_unblocked_attacking_target() {
+        use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
+
+        let effect =
+            super::super::parse_effect("Target unblocked attacking creature becomes blocked.");
+        let Effect::BecomeBlocked { target } = &effect else {
+            panic!("expected Effect::BecomeBlocked, got {effect:?}");
+        };
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            properties,
+            ..
+        }) = target
+        else {
+            panic!("expected a Typed creature target, got {target:?}");
+        };
+        assert!(
+            type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Creature)),
+            "target must be a creature filter, got {type_filters:?}"
+        );
+        assert!(
+            properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Unblocked)),
+            "target must carry FilterProp::Unblocked (CR 509.1h), got {properties:?}"
+        );
+        assert!(
+            properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Attacking { .. })),
+            "target must carry FilterProp::Attacking, got {properties:?}"
+        );
+        // Reach-guard against a vacuous parse: the effect is the concrete
+        // BecomeBlocked variant, not Unimplemented.
+        assert!(
+            !matches!(effect, Effect::Unimplemented { .. }),
+            "must not fall through to Unimplemented"
+        );
     }
 }

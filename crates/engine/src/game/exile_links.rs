@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::types::ability::ResolvedAbility;
+use crate::types::ability::{CastingPermission, Duration, ResolvedAbility};
 use crate::types::game_state::{ExileLink, ExileLinkKind, GameState};
 use crate::types::identifiers::ObjectId;
 
@@ -99,12 +99,46 @@ pub(crate) fn push_exiled_with_source_this_turn(
     exiled_id: ObjectId,
     source_id: ObjectId,
 ) {
+    let already_recorded = state
+        .cards_exiled_with_source_this_turn
+        .get(&source_id)
+        .is_some_and(|entry| entry.contains(&exiled_id));
+    if already_recorded {
+        return;
+    }
+
+    expire_until_source_exiles_another_card_durations(state, source_id);
+
     let entry = state
         .cards_exiled_with_source_this_turn
         .entry(source_id)
         .or_default();
-    if !entry.contains(&exiled_id) {
-        entry.push(exiled_id);
+    entry.push(exiled_id);
+}
+
+// CR 611.2a + CR 607.2a: Source-linked durations expire when that same source
+// exiles another card, whether stored as a play permission or a transient effect.
+fn expire_until_source_exiles_another_card_durations(state: &mut GameState, source_id: ObjectId) {
+    for (_, object) in state.objects.iter_mut() {
+        object.casting_permissions.retain(|permission| {
+            !matches!(
+                permission,
+                CastingPermission::PlayFromExile {
+                    duration: Duration::UntilSourceExilesAnotherCard,
+                    source_id: Some(permission_source),
+                    ..
+                } if *permission_source == source_id
+            )
+        });
+    }
+
+    let before = state.transient_continuous_effects.len();
+    state.transient_continuous_effects.retain(|effect| {
+        !(effect.duration == Duration::UntilSourceExilesAnotherCard
+            && effect.source_id == source_id)
+    });
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -210,7 +244,8 @@ mod tests {
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
-    use crate::types::zones::Zone;
+    use crate::types::statics::CastFrequency;
+    use crate::types::zones::{EtbTapState, Zone};
 
     /// CR 702.167a/c: a `CraftMaterial` link must survive the craft source's
     /// battlefield exit (it self-exiles mid-activation and returns with the same
@@ -264,6 +299,144 @@ mod tests {
                 .iter()
                 .any(|l| l.exiled_id == tracked && l.source_id == source),
             "TrackedBySource link must be pruned on the source's battlefield exit"
+        );
+    }
+
+    fn play_from_exile_permission(duration: Duration, source_id: ObjectId) -> CastingPermission {
+        CastingPermission::PlayFromExile {
+            duration,
+            granted_to: PlayerId(0),
+            frequency: CastFrequency::Unlimited,
+            source_id: Some(source_id),
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: EtbTapState::Unspecified,
+            invalidation: None,
+        }
+    }
+
+    #[test]
+    fn source_exile_duration_expires_previous_permission_on_next_source_exile() {
+        use crate::game::zones::create_object;
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(1);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let other_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Source".to_string(),
+            Zone::Battlefield,
+        );
+        let first = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "First Exiled Card".to_string(),
+            Zone::Exile,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Second Exiled Card".to_string(),
+            Zone::Exile,
+        );
+        let other_card = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Other Exiled Card".to_string(),
+            Zone::Exile,
+        );
+
+        push_exiled_with_source_this_turn(&mut state, first, source);
+        state
+            .objects
+            .get_mut(&first)
+            .unwrap()
+            .casting_permissions
+            .extend([
+                play_from_exile_permission(Duration::UntilSourceExilesAnotherCard, source),
+                play_from_exile_permission(Duration::Permanent, source),
+            ]);
+        state
+            .objects
+            .get_mut(&other_card)
+            .unwrap()
+            .casting_permissions
+            .push(play_from_exile_permission(
+                Duration::UntilSourceExilesAnotherCard,
+                other_source,
+            ));
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilSourceExilesAnotherCard,
+            TargetFilter::SelfRef,
+            vec![],
+            None,
+        );
+        state.add_transient_continuous_effect(
+            other_source,
+            PlayerId(0),
+            Duration::UntilSourceExilesAnotherCard,
+            TargetFilter::SelfRef,
+            vec![],
+            None,
+        );
+
+        push_exiled_with_source_this_turn(&mut state, first, source);
+        assert_eq!(
+            state.objects[&first].casting_permissions.len(),
+            2,
+            "duplicate source/exiled pair must not expire its own freshly granted permission"
+        );
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            2,
+            "duplicate source/exiled pair must not expire source-event durations"
+        );
+
+        push_exiled_with_source_this_turn(&mut state, second, source);
+
+        let first_permissions = &state.objects[&first].casting_permissions;
+        assert_eq!(first_permissions.len(), 1);
+        assert!(
+            matches!(
+                first_permissions.as_slice(),
+                [CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    ..
+                }]
+            ),
+            "second source exile should prune only the source-exile duration grant, got {first_permissions:?}"
+        );
+        assert_eq!(
+            state.objects[&other_card].casting_permissions.len(),
+            1,
+            "same duration from a different source must survive"
+        );
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "source-event transient duration from a different source must survive"
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0].source_id,
+            other_source
         );
     }
 

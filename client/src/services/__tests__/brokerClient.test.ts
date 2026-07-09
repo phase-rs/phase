@@ -187,6 +187,38 @@ describe("lookupJoinTargetOver", () => {
     );
     await promise;
   });
+
+  it("defaults deck-selection lookups to non-reserving metadata reads", async () => {
+    const ws = new MockWebSocket();
+    const promise = lookupJoinTargetOver(makePhaseSocket(ws), "ABC123");
+
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({
+        type: "LookupJoinTarget",
+        data: {
+          game_code: "ABC123",
+          password: null,
+          reserve: false,
+          display_name: null,
+          release_reservation_token: null,
+        },
+      }),
+    );
+
+    ws.deliver(
+      JSON.stringify({
+        type: "JoinTargetInfo",
+        data: {
+          game_code: "ABC123",
+          is_p2p: false,
+          player_count: 2,
+          filled_seats: 1,
+          match_config: { match_type: "Bo1" },
+        },
+      }),
+    );
+    await promise;
+  });
 });
 
 describe("subscribeLobbyOver", () => {

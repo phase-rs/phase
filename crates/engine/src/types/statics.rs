@@ -590,6 +590,17 @@ pub enum TriggerCause {
     /// `GameEvent::DamageDealt` whose target is a creature controlled by the
     /// doubler's controller.
     ControlledCreatureDealtDamage,
+    /// CR 601.2 + CR 707.10: Trigger was caused by the doubler's controller
+    /// casting or copying a spell (Veyran, Voice of Duality-class: "If you
+    /// casting or copying an instant or sorcery spell causes ..."). Matches
+    /// `GameEvent::SpellCast` and `GameEvent::SpellCopied` events whose
+    /// controller is the doubler's controller. The `core_types` list narrows
+    /// the spell's type — for Veyran this is `[Instant, Sorcery]`; an empty
+    /// list means any spell.
+    ControllerCastOrCopiedSpell {
+        #[serde(default)]
+        core_types: Vec<super::card_type::CoreType>,
+    },
     /// CR 309.4c: Trigger was caused by entering a dungeon room
     /// (Hama Pashar-class). Matches `GameEvent::RoomEntered` events.
     RoomEntered,
@@ -607,6 +618,10 @@ impl fmt::Display for TriggerCause {
             TriggerCause::CreatureDying => write!(f, "CreatureDying"),
             TriggerCause::ControlledCreatureDealtDamage => {
                 write!(f, "ControlledCreatureDealtDamage")
+            }
+            TriggerCause::ControllerCastOrCopiedSpell { core_types } => {
+                let names: Vec<String> = core_types.iter().map(|ct| format!("{ct:?}")).collect();
+                write!(f, "ControllerCastOrCopiedSpell([{}])", names.join(","))
             }
             TriggerCause::RoomEntered => write!(f, "RoomEntered"),
         }
@@ -1541,6 +1556,15 @@ pub enum StaticMode {
     Lifelink,
 
     // -- Tier 2: Rule-modification statics --
+    /// CR 701.26a: "This permanent can't become tapped." Enforced at every place a
+    /// permanent would become tapped — both effect-driven taps
+    /// (`effects::tap_untap::process_one_tap`) and every cost-driven tap, which all
+    /// route through the single authority `restrictions::tap_permanent_for_cost`
+    /// ({T} activation costs, convoke, crew, station, saddle, harmonize, tap-N
+    /// additional costs, and {T} mana abilities). CR 508.1f is the one exemption:
+    /// tapping a creature as it's declared an attacker isn't a cost, so a
+    /// can't-become-tapped creature still taps by attacking. Queried via
+    /// `restrictions::object_cant_tap`.
     CantTap,
     CantUntap,
     /// CR 509.1c: This creature must be blocked if able. `by == None` ⇒ any
@@ -1561,7 +1585,11 @@ pub enum StaticMode {
     /// places a block requirement on *every* creature able to block it: each
     /// such untapped defender must be declared as a blocker of this attacker,
     /// not merely one.
-    MustBeBlockedByAll,
+    // CR 509.1c: like MustBeBlocked but forces *every* matching idle able creature to block; blockers None = all creatures (Lure), Some = only matching creatures (Talruum Piper flying, Marble Priest Walls).
+    MustBeBlockedByAll {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blockers: Option<TargetFilter>,
+    },
     /// CR 701.15b: This creature is goaded for as long as the static applies.
     /// The source controller is the goading player for the "attack another
     /// player if able" requirement.
@@ -1730,10 +1758,9 @@ pub enum StaticMode {
     /// Yawgmoth (color = Black). `ManaColor` parameterization admits future
     /// printings for any other single color without enum proliferation.
     ///
-    /// **Scope note**: this static currently affects spell-cast mana costs only.
-    /// Activated-ability mana costs are covered by the same 2024-06-07 K'rrik
-    /// ruling but require a `pending_activation` pause/resume primitive not yet
-    /// built. Deferred to GH issue #600.
+    /// **Scope note**: wired through spell-cast and activated-ability mana payment
+    /// via `effective_shard_requirement` promotion and the shared Phyrexian pause
+    /// infrastructure (`maybe_pause_for_phyrexian_choice`).
     PayLifeAsColoredMana {
         color: ManaColor,
     },
@@ -2091,7 +2118,7 @@ impl StaticMode {
             StaticMode::CantTap => StaticModeKind::CantTap,
             StaticMode::CantUntap => StaticModeKind::CantUntap,
             StaticMode::MustBeBlocked { .. } => StaticModeKind::MustBeBlocked,
-            StaticMode::MustBeBlockedByAll => StaticModeKind::MustBeBlockedByAll,
+            StaticMode::MustBeBlockedByAll { .. } => StaticModeKind::MustBeBlockedByAll,
             StaticMode::Goaded => StaticModeKind::Goaded,
             StaticMode::CombatAlone { .. } => StaticModeKind::CombatAlone,
             StaticMode::CantCrew => StaticModeKind::CantCrew,
@@ -2234,6 +2261,7 @@ impl Hash for StaticMode {
             },
             StaticMode::CantBeBlockedBy { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::MustBeBlocked { .. } => {} // optional TargetFilter does not implement Hash; discriminant only
+            StaticMode::MustBeBlockedByAll { .. } => {} // optional TargetFilter does not implement Hash; discriminant only
             StaticMode::BlockRestriction { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::AttachmentRestriction { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::CantBeBlockedByMoreThan { max } => max.hash(state),
@@ -2433,7 +2461,7 @@ impl StaticMode {
             | StaticMode::CantTap
             | StaticMode::CantUntap
             | StaticMode::MustBeBlocked { .. }
-            | StaticMode::MustBeBlockedByAll
+            | StaticMode::MustBeBlockedByAll { .. }
             | StaticMode::Goaded
             | StaticMode::CombatAlone { .. }
             | StaticMode::CantCrew
@@ -2775,7 +2803,15 @@ impl fmt::Display for StaticMode {
                 write!(f, "MustBeBlocked:By({filter:?})")
             }
             StaticMode::CantPhaseIn => write!(f, "CantPhaseIn"),
-            StaticMode::MustBeBlockedByAll => write!(f, "MustBeBlockedByAll"),
+            StaticMode::MustBeBlockedByAll { blockers: None } => write!(f, "MustBeBlockedByAll"),
+            // CR 509.1c: TargetFilter has no parseable string form — Debug
+            // format, one-way (mirrors MustBeBlocked). No from_str
+            // reconstruction; the Some form is parse-time only.
+            StaticMode::MustBeBlockedByAll {
+                blockers: Some(filter),
+            } => {
+                write!(f, "MustBeBlockedByAll:By({filter:?})")
+            }
             StaticMode::Goaded => write!(f, "Goaded"),
             StaticMode::CombatAlone {
                 action,
@@ -3244,7 +3280,7 @@ impl FromStr for StaticMode {
             "CantUntap" => StaticMode::CantUntap,
             "MustBeBlocked" => StaticMode::MustBeBlocked { by: None },
             "CantPhaseIn" => StaticMode::CantPhaseIn,
-            "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll,
+            "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll { blockers: None },
             "Goaded" => StaticMode::Goaded,
             "CombatAlone(Attack,NeedsCompanion)" => StaticMode::CombatAlone {
                 action: CombatAloneAction::Attack,

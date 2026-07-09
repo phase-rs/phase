@@ -566,3 +566,122 @@ fn random_modal_trigger_resolves_without_prompting() {
         "random modal trigger entry must be resolver-eligible (cursor cleared)",
     );
 }
+
+/// SHAPE-level regression (manual surgery): drives the real dispatch pipeline to
+/// a genuine mid-construction pause, then manually removes the in-construction
+/// entry to model an unexpected dangling `pending_trigger_entry`. The real
+/// upstream producer of that dangling cursor is UNIDENTIFIED — the two known
+/// rules-legal causes were both proven unreachable (a controller leaving is
+/// handled upstream by `elimination::do_eliminate`; countering/removal
+/// mid-construction is impossible because modes/targets are chosen before anyone
+/// has priority, CR 603.3d) — so this test surgically injects the corrupt state
+/// rather than reproducing the producer. See the follow-up issue for the hunt.
+///
+/// The recovery (`triggers::abandon_ceased_pending_trigger`, CR 608.2b / CR
+/// 800.4a recovery semantics) must NOT panic in
+/// `assign_pending_trigger_entry_ability`; it must record a distinguishable
+/// diagnostic, clean the vanished entry's side tables, clear all pending-trigger
+/// state, and hand control back to the game via `Priority`.
+///
+/// Reverting the recovery path makes this test panic with
+/// `pending_trigger_entry must reference a stack entry` — the exact live
+/// production crash (`submitAction-panic`, WASM-poisoning).
+#[test]
+fn ceased_in_construction_trigger_recovers_without_panic_on_completion() {
+    let mut state = setup();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+
+    // Two legal opponent creatures so target choice cannot auto-resolve — the
+    // trigger genuinely pauses mid-construction via the real dispatch pipeline.
+    let target1 = make_creature(&mut state, PlayerId(1), "Opp 1");
+    let _target2 = make_creature(&mut state, PlayerId(1), "Opp 2");
+    let source = make_source_with_trigger(&mut state);
+
+    process_triggers(
+        &mut state,
+        &[zone_changed_event(source, Zone::Hand, Zone::Battlefield)],
+    );
+
+    let entry_id = state
+        .pending_trigger_entry
+        .expect("push-first: trigger entry is in construction on the stack");
+    let wf = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
+        .expect("begin target selection")
+        .expect("target prompt required (two legal targets)");
+    state.waiting_for = wf;
+
+    // Manual surgery: drop ONLY the entry from the stack, modelling an unexpected
+    // dangling cursor. Seed BOTH per-entry side tables so the assertions that the
+    // recovery owns their cleanup (not the test) are non-vacuous — the recovery,
+    // not this test, must prune them.
+    state.stack.retain(|e| e.id != entry_id);
+    state
+        .stack_trigger_event_batches
+        .insert(entry_id, Vec::new());
+    state.stack_paid_facts.insert(
+        entry_id,
+        crate::types::game_state::StackPaidSnapshot::default(),
+    );
+    assert!(
+        state.stack_trigger_event_batches.contains_key(&entry_id)
+            && state.stack_paid_facts.contains_key(&entry_id),
+        "reach-guard: both side-table rows seeded before recovery runs",
+    );
+
+    // Submitting the choice for the now-dead trigger must recover, not panic.
+    let result = crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target1)),
+        },
+    )
+    .expect("completion of a ceased trigger recovers");
+
+    assert!(
+        state.pending_trigger_entry.is_none(),
+        "ceased trigger must clear the construction cursor",
+    );
+    assert!(
+        state.pending_trigger.is_none(),
+        "ceased trigger must clear the stashed pending_trigger",
+    );
+    // (c) the trigger event batch is cleared as part of the coherent cleanup.
+    assert!(
+        state.pending_trigger_event_batch.is_empty(),
+        "ceased trigger must clear pending_trigger_event_batch",
+    );
+    // (b) the completion hands control back to the game via Priority.
+    assert!(
+        matches!(result.waiting_for, WaitingFor::Priority { .. }),
+        "ceased trigger recovery must return Priority, got {:?}",
+        result.waiting_for,
+    );
+    // (a) the abandon is recorded distinguishably for telemetry (count matters).
+    assert_eq!(
+        state.pending_trigger_abandons.len(),
+        1,
+        "the abandon must be recorded exactly once for telemetry",
+    );
+    // Descriptor must carry BOTH the source name and the dead stack-entry id.
+    assert!(
+        state.pending_trigger_abandons[0].contains("Test Source"),
+        "diagnostic must name the source, got {:?}",
+        state.pending_trigger_abandons,
+    );
+    assert!(
+        state.pending_trigger_abandons[0].contains(&format!("(stack entry {})", entry_id.0)),
+        "diagnostic must carry the dead stack-entry id, got {:?}",
+        state.pending_trigger_abandons,
+    );
+    // Item 5 hygiene: the recovery — not the test — owns per-entry side-table
+    // cleanup for the vanished entry.
+    assert!(
+        !state.stack_trigger_event_batches.contains_key(&entry_id),
+        "recovery must prune the dead entry's stack_trigger_event_batches row",
+    );
+    assert!(
+        !state.stack_paid_facts.contains_key(&entry_id),
+        "recovery must prune the dead entry's stack_paid_facts row",
+    );
+}

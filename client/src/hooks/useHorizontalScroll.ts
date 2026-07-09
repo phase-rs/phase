@@ -10,8 +10,14 @@ import { useEffect, useRef } from "react";
  * anchor, input) so we don't fight existing handlers. A click that follows a
  * drag is blocked in the capture phase so cards aren't accidentally selected
  * while panning.
+ *
+ * Pass `{ drag: false }` to keep only the wheel behavior — useful when the
+ * children own their own pointer-drag gesture (e.g. framer-motion Reorder) and
+ * a scroll-pan drag would conflict with it.
  */
-export function useHorizontalScroll<T extends HTMLElement>() {
+export function useHorizontalScroll<T extends HTMLElement>({
+  drag = true,
+}: { drag?: boolean } = {}) {
   const ref = useRef<T | null>(null);
 
   useEffect(() => {
@@ -91,23 +97,27 @@ export function useHorizontalScroll<T extends HTMLElement>() {
     };
 
     el.addEventListener("wheel", onWheel, { passive: false });
-    el.addEventListener("pointerdown", onPointerDown);
-    el.addEventListener("pointermove", onPointerMove);
-    el.addEventListener("pointerup", endDrag);
-    el.addEventListener("pointercancel", endDrag);
-    el.addEventListener("click", onClickCapture, { capture: true });
+    if (drag) {
+      el.addEventListener("pointerdown", onPointerDown);
+      el.addEventListener("pointermove", onPointerMove);
+      el.addEventListener("pointerup", endDrag);
+      el.addEventListener("pointercancel", endDrag);
+      el.addEventListener("click", onClickCapture, { capture: true });
+    }
 
     return () => {
       el.removeEventListener("wheel", onWheel);
-      el.removeEventListener("pointerdown", onPointerDown);
-      el.removeEventListener("pointermove", onPointerMove);
-      el.removeEventListener("pointerup", endDrag);
-      el.removeEventListener("pointercancel", endDrag);
-      el.removeEventListener("click", onClickCapture, { capture: true });
+      if (drag) {
+        el.removeEventListener("pointerdown", onPointerDown);
+        el.removeEventListener("pointermove", onPointerMove);
+        el.removeEventListener("pointerup", endDrag);
+        el.removeEventListener("pointercancel", endDrag);
+        el.removeEventListener("click", onClickCapture, { capture: true });
+      }
       el.style.cursor = "";
       el.style.userSelect = "";
     };
-  }, []);
+  }, [drag]);
 
   return ref;
 }

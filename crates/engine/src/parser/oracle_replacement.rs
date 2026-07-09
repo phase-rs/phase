@@ -11,7 +11,8 @@ use nom::Parser;
 
 use super::oracle_effect::become_copy_except::parse_except_clause;
 use super::oracle_effect::{
-    parse_effect_chain, parse_effect_chain_with_context, try_parse_named_choice,
+    parse_effect_chain, parse_effect_chain_with_context, parse_effect_clause,
+    try_parse_named_choice,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::replacement::ReplacementIr;
@@ -297,6 +298,19 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     //       "If a nontoken creature an opponent controls would die, exile it instead." (Valentin)
     //       "If a creature an opponent controls would die, exile it instead." (Vren)
     if let Some(def) = parse_creature_die_exile_replacement(&norm_lower, &normalized) {
+        return Some(def);
+    }
+
+    // --- "If a [filter] would enter and it wasn't cast, exile it instead" ---
+    // CR 614.1a + CR 614.1d + CR 614.12: A permanent-static ETB replacement
+    // that exiles creatures which enter without having been cast. E.g.
+    // Containment Priest:
+    //   "If a nontoken creature would enter and it wasn't cast, exile it instead."
+    // Only the clean, always-on static form is handled here; the duration-scoped
+    // variants ("Until end of turn, ...": Hallowed Moonlight, Mistcaller) and the
+    // self-referential form ("if this creature would enter ...": Primeval Spawn)
+    // are deliberately excluded (see the guards inside).
+    if let Some(def) = parse_creature_enter_wasnt_cast_exile_replacement(&norm_lower, &normalized) {
         return Some(def);
     }
 
@@ -1652,6 +1666,89 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
     )
 }
 
+/// CR 608.2d + CR 608.2c + CR 701.20e: For a leading "look at an opponent's hand"
+/// inside an as-enters replacement, front an explicit `Choose(Opponent)` step and
+/// rebind the look to the chosen opponent. Returns
+/// `Some((choose_opponent_effect, rewritten_reveal_effect))` IFF `reveal` is a
+/// `RevealHand` whose look-target is a NON-targeted "an opponent" player filter —
+/// `TargetFilter::Typed(tf)` with `tf.controller == Some(ControllerRef::Opponent)`.
+/// `controller` is the sole player-authority axis on `TypedFilter`, so matching it
+/// exactly is the full "no other player authority" check.
+///
+/// CORRECTION 1 — why the shared `Typed(Opponent)` shape is safe to rewrite here:
+/// this helper runs ONLY inside `parse_as_enters_choose`. An as-enters *replacement*
+/// applies as the permanent enters the battlefield with NOTHING on the stack
+/// (CR 614.1c) and announces its choices at that moment (CR 608.2d). "Look at
+/// **target** opponent's hand" is a targeted effect that requires a spell/ability on
+/// the stack to declare a target (CR 601.2c) — it is UNREACHABLE in this as-enters
+/// composition. The predicate deliberately matches the `Typed(Opponent)` shape
+/// regardless of whether the Oracle article was "an" or "target" (both `an opponent's
+/// hand` and `target opponent's hand` lower to the identical `Typed(Opponent)` via
+/// `parse_hand_possessive_target`); it is NOT claiming that a targeted variant is
+/// handled by targeting — the "target" variant simply never reaches this seam.
+///
+/// The rewrite yields `ControllerRef::ChosenPlayer { index: 0 }` (NOT
+/// `SourceChosenPlayer`, which `collect_player_targets` fails-closed on →
+/// `MissingParam`). Index 0 because the fronted `Choose(Opponent)` is the only
+/// player-choice in this chain; `set_chosen_players_recursive` copies the resolved
+/// `[opponent]` down the sub-abilities, so the rebound `RevealHand` reads
+/// `chosen_players[0]` at resolution.
+fn front_opponent_choice_for_nontargeted_look(reveal: &Effect) -> Option<(Effect, Effect)> {
+    // Only a non-targeted opponent-hand look qualifies: `Typed` filter controlled
+    // by `Opponent`. A real targeted `RevealHand` (Thoughtseize) carries a
+    // `TargetRef::Player` slot and a non-`Typed` target, so it is not matched here.
+    match reveal {
+        Effect::RevealHand {
+            target: TargetFilter::Typed(tf),
+            ..
+        } if tf.controller == Some(ControllerRef::Opponent) => {}
+        _ => return None,
+    }
+
+    // Rebind the look to the opponent the fronted choice selects.
+    let mut rewritten_reveal = reveal.clone();
+    if let Effect::RevealHand {
+        target: TargetFilter::Typed(tf),
+        ..
+    } = &mut rewritten_reveal
+    {
+        // CR 608.2c: "that player" — the dependent look and its card-name choice
+        // bind to the single opponent chosen by the fronted `Choose(Opponent)`.
+        tf.controller = Some(ControllerRef::ChosenPlayer { index: 0 });
+    }
+
+    // CORRECTION 2 — `persist: true` is REQUIRED (not cosmetic): it makes
+    // `bind_named_choice` receive `source_id = Some`, which is the precondition for
+    // `capture_deferred_entry_events_if_mid_entry_choice` (engine_replacement.rs)
+    // to defer this permanent's entry event across the choice so ETB observers are
+    // not dropped (issue #830). KNOWN BENIGN SIDE EFFECT: with `source_id = Some`,
+    // `bind_named_choice` also pushes a `ChosenAttribute::Player(chosen_opponent)`
+    // onto the source (via `ChosenAttribute::from_choice`) that is NOT cleared
+    // afterward — only `Keyword`/`Counter`/`Direction` kinds are retain-filtered
+    // (choose.rs). This is harmless here: Anointed Peacekeeper's / Sorcerous
+    // Spyglass's two cost-tax statics read `ChosenAttribute::CardName` BY KIND, not
+    // `Player`, so the stray `Player` attribute co-exists without affecting them.
+    // The 3-player integration test asserts this co-existence explicitly.
+    //
+    // CORRECTION 3 — deferred-entry replay ordering (honest imperfection): the
+    // fronted `Choose(Opponent)` is where the entry is deferred, so ETB observers
+    // are replayed at `engine_resolution_choices.rs` (the
+    // `replay_deferred_entry_events` arm, currently ~lines 3690-3722) AFTER the
+    // opponent is chosen but BEFORE the card name is named. This is benign for the
+    // covered class: neither Anointed Peacekeeper nor Sorcerous Spyglass has its own
+    // ETB trigger, and no battlefield observer reads the chosen card name of the
+    // entering permanent, so replaying observers before the name is bound changes no
+    // observable outcome.
+    let choose_opponent = Effect::Choose {
+        // CR 608.2d + CR 102.3: the controller chooses one opponent.
+        choice_type: ChoiceType::Opponent { restriction: None },
+        persist: true,
+        // Same controller-choice selection mode as the fronted card-name choice.
+        selection: crate::types::ability::TargetSelectionMode::Chosen,
+    };
+    Some((choose_opponent, rewritten_reveal))
+}
+
 /// Parse "As ~ enters, choose a [type]" into a Moved replacement with persisted Choose.
 /// Skips lines that also contain shock land markers (handled by parse_shock_land).
 fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
@@ -1673,7 +1770,7 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     }
 
     // Extract the "choose a ..." clause — scan_split_at_phrase returns (prefix, rest_starting_at_match)
-    let (_, choose_text) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
+    let (prefix_lower, choose_text) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
         tag::<_, _, OracleError<'_>>("choose ").parse(i)
     })?;
     let choice_type = try_parse_named_choice(choose_text)?;
@@ -1686,6 +1783,51 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
             selection: crate::types::ability::TargetSelectionMode::Chosen,
         },
     );
+
+    // CR 614.1c + CR 614.1d: Some "as ~ enters" replacements carry a leading
+    // imperative before the choice (Anointed Peacekeeper: "As ~ enters the
+    // battlefield, look at an opponent's hand, then choose any card name."). We
+    // extract that middle clause by anchoring on the LAST enters-frame in the
+    // pre-"choose" prefix: this drops the whole "as <subject> enters[ the
+    // battlefield], " head AND any earlier enters-tapped sentence (Thriving
+    // Grove's first "enters"), leaving only the interposed instruction.
+    // Iterating `scan_preceded` retains the final frame match rather than
+    // `str::rfind` on raw text. All work is on `norm_lower` (lowercased) — its
+    // byte offsets do NOT map to `original_text` because `~` substitution
+    // changed the length, so the extracted slice is fed to `parse_effect_clause`
+    // (which accepts lowercased text) rather than recovered from the original.
+    // Include the enters-tapped frames so a leading imperative that follows an
+    // "enters tapped," head is still captured and threaded through `core` below
+    // (the enters_tapped branch composes `SetTapState.sub_ability(core)`).
+    // Without these alts, an "enters tapped, <imperative>, then choose" line
+    // would leave `middle_lower` empty and silently drop the imperative while
+    // still parsing "supported" — a coverage-honesty violation. Longer frames
+    // first so the "... tapped, " variants win over their comma-less bases.
+    fn frame(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        alt((
+            tag::<_, _, OracleError<'_>>("enters the battlefield tapped, "),
+            tag("enters the battlefield, "),
+            tag("enters tapped, "),
+            tag("enters, "),
+        ))
+        .parse(i)
+    }
+    let mut middle_lower = "";
+    let mut cursor = prefix_lower;
+    while let Some((_, _, rest)) = nom_primitives::scan_preceded(cursor, frame) {
+        middle_lower = rest;
+        cursor = rest;
+    }
+    let middle_lower = middle_lower.trim();
+    // Structural trailing-connector cleanup (not parsing dispatch): "..., then" /
+    // "... then" / "...," → bare instruction. `strip_suffix` is sanctioned for
+    // structural, non-dispatch string normalization.
+    let middle_lower = middle_lower
+        .strip_suffix(", then") // allow-noncombinator: structural trailing-connector cleanup on the pre-extracted clause, not parsing dispatch
+        .or_else(|| middle_lower.strip_suffix(" then")) // allow-noncombinator: structural trailing-connector cleanup, not parsing dispatch
+        .or_else(|| middle_lower.strip_suffix(',')) // allow-noncombinator: structural trailing-connector cleanup, not parsing dispatch
+        .unwrap_or(middle_lower)
+        .trim();
 
     // CR 614.1c + CR 614.1d: The Thriving land cycle ("This land enters tapped.
     // As it enters, choose a color other than <C>.") layers TWO replacement
@@ -1703,6 +1845,59 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
         && !has_phrase("unless")
         && !has_phrase("if you control");
 
+    // Compose the leading imperative (if any) ahead of the persisted choice.
+    // With no middle clause this is `choose` unchanged (every existing plain
+    // `Choose` / `SetTapState.sub_ability(Choose)` anchor still parses identically).
+    let core = if middle_lower.is_empty() {
+        choose
+    } else {
+        let leading = parse_effect_clause(middle_lower, &mut ParseContext::default());
+        // Compose the middle ahead of the choice ONLY when it is a genuine,
+        // cleanly-parsed leading ACTION. A middle that doesn't parse
+        // (Unimplemented) or carries peeled structural slots we don't thread
+        // here (duration / sub_ability / distribute / multi_target / condition /
+        // optional / unless_pay) is almost always a subject/quantifier phrase —
+        // e.g. "you and an opponent each" (Null Chamber), "you and target
+        // opponent each secretly" (Power Level Analyzer) — NOT an action.
+        // In that case fall back to the bare choice: the pre-existing parse,
+        // which already ignored the prefix. This never drops a previously
+        // supported `Moved` replacement (zero regression), while still composing
+        // real leading actions (Anointed Peacekeeper / Sorcerous Spyglass:
+        // "look at an opponent's hand, then choose any card name").
+        let composable = !matches!(leading.effect, Effect::Unimplemented { .. })
+            && leading.duration.is_none()
+            && leading.sub_ability.is_none()
+            && leading.distribute.is_none()
+            && leading.multi_target.is_none()
+            && leading.condition.is_none()
+            && !leading.optional
+            && leading.unless_pay.is_none();
+        if composable {
+            // CR 608.2d + CR 608.2c + CR 701.20e: A non-targeted "look at an
+            // opponent's hand" (Anointed Peacekeeper / Sorcerous Spyglass) lowers
+            // to `RevealHand { target: Typed(controller=Opponent), reveal:false }`,
+            // which fans out across every opponent — `reveal_hand::resolve` then
+            // takes `.first()`. That is a multiplayer bug: in a 3+ player game the
+            // controller MUST choose which opponent to look at (CR 608.2d), and the
+            // subsequent card-name choice binds to *that* opponent's hand
+            // (CR 608.2c "that player"). Front an explicit `Choose(Opponent)` and
+            // rebind the look to the chosen opponent so the fan-out collapses to a
+            // single, controller-selected opponent.
+            if let Some((choose_opponent, rewritten_reveal)) =
+                front_opponent_choice_for_nontargeted_look(&leading.effect)
+            {
+                AbilityDefinition::new(AbilityKind::Spell, choose_opponent).sub_ability(
+                    AbilityDefinition::new(AbilityKind::Spell, rewritten_reveal)
+                        .sub_ability(choose),
+                )
+            } else {
+                AbilityDefinition::new(AbilityKind::Spell, leading.effect).sub_ability(choose)
+            }
+        } else {
+            choose
+        }
+    };
+
     let execute = if enters_tapped {
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -1712,9 +1907,9 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
                 state: TapStateChange::Tap,
             },
         )
-        .sub_ability(choose)
+        .sub_ability(core)
     } else {
-        choose
+        core
     };
 
     Some(
@@ -2177,6 +2372,131 @@ fn subject_lower_has_face_up(after_subject: &str) -> bool {
     tag::<_, _, OracleError<'_>>(" enters or is turned face up")
         .parse(after_subject)
         .is_ok()
+}
+
+/// A dual-condition "As [this permanent] enters [or is turned face up], put …
+/// counters on it" ability. The engine has no single enters-or-turned-face-up
+/// event, so this recognizer emits ONE replacement per event
+/// (`Moved`/Battlefield and `TurnFaceUp`), both carrying the same `execute`,
+/// mirroring the multi-emit shape of `lower_as_enters_becomes_choice_modal`.
+/// Because `parse_replacement_line` returns a single `Option`, the two
+/// definitions are pushed directly into `result`.
+///
+/// Handles the counter class:
+///   "As ~ enters[ the battlefield][ or is turned face up], put X +1/+1 counters
+///    on it, where X is the number of other creatures you control."
+/// (Crowd-Control Warden — dual arm) and the single-condition template family
+/// (any counter type, fixed or dynamic count). The effect is parsed through the
+/// shared `parse_effect_chain` stack, so the where-X quantity + ObjectCount /
+/// `FilterProp::Another` lowering are all reused.
+///
+/// A tight self-`PutCounter` guard (`normalize_self_put_counter_chain`) keeps
+/// this from claiming sibling "As ~ enters, choose…/becomes…" lines: those lower
+/// to `Effect::Choose` (not `PutCounter`) and fall through here.
+///
+/// CR 614.1c: "As [this permanent] enters …" is a replacement effect (the ETB arm).
+/// CR 708.11: an "As … is turned face up" ability applies while the permanent is
+/// being turned face up (the face-up arm).
+/// CR 122.1a: the placed +1/+1 counters add to the creature's power and toughness.
+pub(crate) fn lower_as_enters_or_face_up_counters(
+    text: &str,
+    result: &mut super::oracle::ParsedAbilities,
+) -> bool {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    // nom-frame: "as ~ enters[ the battlefield][ or is turned face up], ".
+    let Ok((rest, _)) = tag::<_, _, VE>("as ~ enters").parse(lower.as_str()) else {
+        return false;
+    };
+    let (rest, _the_battlefield) = opt(tag::<_, _, VE>(" the battlefield"))
+        .parse(rest)
+        .unwrap_or((rest, None));
+    let (rest, face_up) = opt(tag::<_, _, VE>(" or is turned face up"))
+        .parse(rest)
+        .unwrap_or((rest, None));
+    let has_face_up = face_up.is_some();
+    let Ok((tail_lower, _)) = tag::<_, _, VE>(", ").parse(rest) else {
+        return false;
+    };
+
+    // Recover the ORIGINAL-case effect slice via byte offset (mirrors
+    // `split_once_on_lower`) so `parse_effect_chain` sees the printed casing.
+    let Some(effect_start) = text.len().checked_sub(tail_lower.len()) else {
+        return false;
+    };
+    let effect_text = text[effect_start..].trim().trim_end_matches('.').trim();
+    if effect_text.is_empty() {
+        return false;
+    }
+
+    // Reuse the counter + quantity effect stack (where-X → ObjectCount / Another).
+    let mut execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+
+    // Scoping guard + self-anaphor normalization: every effect in the chain must
+    // place counters on the entering/turned-up permanent itself (none may be
+    // Unimplemented or externally targeted). Rewrites the "it" placeholder to
+    // `SelfRef` so the runtime event-modifier fold recognizes it.
+    if !normalize_self_put_counter_chain(&mut execute) {
+        return false;
+    }
+
+    // CR 614.1c: ETB arm — a battlefield-entry-scoped `Moved` replacement whose
+    // `PutCounter { SelfRef }` execute is folded into the entering object's
+    // enter-with-counters by the runtime event-modifier path.
+    result.replacements.push(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(execute.clone())
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .description(text.to_string()),
+    );
+
+    // CR 708.11: face-up arm — the same effect applies as the permanent is turned
+    // face up (Disguise/megamorph turn-up), bound to that permanent via SelfRef.
+    if has_face_up {
+        result.replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+                .valid_card(TargetFilter::SelfRef)
+                .execute(execute)
+                .description(text.to_string()),
+        );
+    }
+
+    true
+}
+
+/// Validate + normalize the execute chain of an as-enters / turned-face-up
+/// counter replacement. Requires every effect reachable through the
+/// `sub_ability` chain to place counters on the permanent itself, rejecting
+/// `Effect::Unimplemented` and any externally-targeted effect — this scopes
+/// `lower_as_enters_or_face_up_counters` to the CR 614.1c / CR 708.11
+/// event-modifier class (do NOT reuse the looser
+/// `turn_face_up_effect_is_self_resolving`, which also passes `Effect::Choose`).
+///
+/// `parse_effect_chain` represents "put … counters on it" as `SelfRef` for a
+/// fixed count but as `ParentTarget` for the dynamic "…, where X is …" form (the
+/// "it" anaphor has no parent target to bind, so `parse_target` leaves the
+/// `ParentTarget` placeholder). In an as-enters / turned-face-up replacement "it"
+/// is definitionally the entering/turned-up permanent, so this rewrites
+/// `ParentTarget` → `SelfRef` in place. The rewrite is required for correctness:
+/// the runtime folds an ETB counter modifier only when the `PutCounter` target
+/// is `SelfRef` (`EventModifiers::is_event_modifier_effect`), and the
+/// turned-face-up applier binds `SelfRef` to the permanent.
+fn normalize_self_put_counter_chain(ability: &mut AbilityDefinition) -> bool {
+    let mut current = Some(ability);
+    while let Some(def) = current {
+        match def.effect.as_mut() {
+            Effect::PutCounter { target, .. }
+                if matches!(target, TargetFilter::SelfRef | TargetFilter::ParentTarget) =>
+            {
+                *target = TargetFilter::SelfRef;
+            }
+            _ => return false,
+        }
+        current = def.sub_ability.as_deref_mut();
+    }
+    true
 }
 
 /// CR 110.2a + CR 614.1d: "`<this permanent>` enters under the control of an
@@ -3153,6 +3473,12 @@ fn parse_enters_with_counters(
     let (mut count_expr, rest) =
         parse_count_expr(after_prefix).unwrap_or((QuantityExpr::Fixed { value: 1 }, after_prefix));
     rewrite_variable_x_to_cost_x_paid(&mut count_expr);
+    // CR 122.1: "N additional <type> counters" — the count word precedes
+    // "additional", so the leading-`additional` strip above (which only fires
+    // when no count word is present, e.g. "an additional +1/+1 counter") misses
+    // it. Strip it here so "additional" doesn't leak into the counter-type slice
+    // (`Generic("additional +1/+1")` instead of the canonical `Plus1Plus1`).
+    let rest = strip_additional_counter_qualifier(rest);
     // Next word(s) before "counter" are the counter type
     let (_, (counter_type_raw, after_counter)) =
         nom_primitives::split_once_on(rest, "counter").ok()?;
@@ -3431,6 +3757,22 @@ fn parse_for_each_convoked_creature_clause(
     ))
 }
 
+/// CR 122.1 + CR 614.1c: Strip an optional "additional " qualifier that follows
+/// the count word in "N additional <type> counter(s)". The word "additional" is
+/// not part of the counter TYPE — it only signals that the counters stack on top
+/// of any the object already enters with, which the engine models by this being a
+/// distinct `PutCounter` replacement. Callers slice the counter type out of the
+/// text after `parse_count_expr` consumes the count, so the leading-`additional`
+/// strip in `parse_enters_with_counters` (which only fires on the count-less
+/// "an additional +1/+1 counter" form) never reaches this position; without this
+/// strip, "additional" leaks into the type (a bogus `Generic("additional +1/+1")`
+/// instead of the canonical `Plus1Plus1`).
+fn strip_additional_counter_qualifier(input: &str) -> &str {
+    tag::<_, _, OracleError<'_>>("additional ")
+        .parse(input)
+        .map_or(input, |(rest, _)| rest)
+}
+
 fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(CounterType, QuantityExpr)>> {
     let mut remaining = after_with;
     let mut entries = Vec::new();
@@ -3438,6 +3780,9 @@ fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(CounterType, Qu
     loop {
         let (mut count_expr, rest) = parse_count_expr(remaining)?;
         rewrite_variable_x_to_cost_x_paid(&mut count_expr);
+        // CR 122.1: strip the "additional" qualifier that follows the count word
+        // ("two additional +1/+1 counters") so it doesn't leak into the type.
+        let rest = strip_additional_counter_qualifier(rest);
 
         let (at_counter, counter_type_raw) = take_until::<_, _, OracleError<'_>>(" counter")
             .parse(rest)
@@ -4197,6 +4542,121 @@ fn parse_creature_die_exile_replacement(
     Some(def)
 }
 
+/// CR 614.1a + CR 614.1d + CR 614.12: "If a [filter] would enter and it wasn't
+/// cast, exile it instead." (Containment Priest). A static ETB replacement
+/// gated on the entering object not having been cast. Only the always-on,
+/// non-self form is recognized here — duration-scoped ("Until end of turn, ...")
+/// and self-referential ("if this creature would enter ...") variants return
+/// `None`.
+///
+/// The "wasn't cast" gate is expressed as `Not(WasPlayed)` on the valid-card
+/// filter: `WasPlayed` is `played_from_zone.is_some() || cast_from_zone.is_some()`
+/// (see `game/filter.rs`), and a nontoken creature only ever enters via casting
+/// or via an effect that puts it onto the battlefield, so `Not(WasPlayed)` is
+/// exactly "entered without being cast." Because a cast Containment Priest sets
+/// `cast_from_zone`, this gate also stops the replacement from exiling the
+/// permanent's own casting — the reported bug in issue #4761.
+fn parse_creature_enter_wasnt_cast_exile_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Grammar: "if" <subject> "would enter" ["the battlefield"] "and it wasn't
+    // cast," "exile it instead". Composed from nom combinators (parser seam
+    // rule R1) rather than string scanning. `norm_lower` is lower-cased but not
+    // apostrophe-normalized, so the gate accepts both the ASCII and typographic
+    // apostrophe.
+    let (after_subject, subject) = preceded(
+        tag::<_, _, OracleError<'_>>("if "),
+        terminated(
+            take_until::<_, _, OracleError<'_>>(" would enter"),
+            tag(" would enter"),
+        ),
+    )
+    .parse(norm_lower)
+    .ok()?;
+
+    // Require the "wasn't cast" gate and the exile-instead outcome, tolerating an
+    // optional "the battlefield" between "would enter" and the gate.
+    all_consuming((
+        preceded(
+            opt(tag::<_, _, OracleError<'_>>(" the battlefield")),
+            preceded(
+                alt((
+                    tag(" and it wasn't cast"),
+                    tag(" and it wasn\u{2019}t cast"),
+                )),
+                preceded(tag(", "), tag("exile it instead")),
+            ),
+        ),
+        opt(tag(".")),
+        multispace0,
+    ))
+    .parse(after_subject)
+    .ok()?;
+
+    let subject = subject.trim();
+
+    // Exclude the self-referential form ("if this creature would enter ...",
+    // Primeval Spawn) and any `~` self-reference — those are handled elsewhere.
+    if tag::<_, _, OracleError<'_>>("this ").parse(subject).is_ok()
+        || take_until::<_, _, OracleError<'_>>("~")
+            .parse(subject)
+            .is_ok()
+    {
+        return None;
+    }
+
+    // Strip the leading article ("a"/"an"/"the") and parse the creature filter.
+    let subject = nom_primitives::parse_article
+        .parse(subject)
+        .map_or(subject, |(rest, _)| rest)
+        .trim();
+    let (filter, subject_rest) = parse_type_phrase(subject);
+    if matches!(&filter, TargetFilter::Any) || !subject_rest.trim().is_empty() {
+        return None;
+    }
+
+    // Attach the "wasn't cast" gate as `Not(WasPlayed)` on the entering object.
+    let filter = match filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.properties.push(FilterProp::Not {
+                prop: Box::new(FilterProp::WasPlayed),
+            });
+            TargetFilter::Typed(tf)
+        }
+        _ => return None,
+    };
+
+    // Exile the entering object. SelfRef refers to the object whose ETB event is
+    // being replaced (same convention as the die-exile / ETB-tapped replacements).
+    let exile_self = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            origin: None,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    );
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .execute(exile_self)
+            .valid_card(filter)
+            .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string()),
+    )
+}
+
 fn split_dealt_damage_subject_condition(
     input: &str,
 ) -> Option<(&str, Option<ReplacementCondition>)> {
@@ -4480,18 +4940,32 @@ fn parse_graveyard_exile_replacement(
 
     // Scope of the subject's destination graveyard. Valid-card filter is keyed
     // off this: "opponent's graveyard" ⇒ `Owned { controller: Opponent }`.
+    // Scope of the subject's destination graveyard, keying the valid-card owner
+    // filter. "your graveyard" ⇒ `Owned { You }` (Forbidden Crypt — the redirect
+    // must NOT exile opponents' cards); "opponent's graveyard" ⇒ `Owned { Opponent }`
+    // (Leyline of the Void); any other graveyard phrase ⇒ no owner constraint.
+    // CR 400.3 + CR 108.3: cards go to their owner's graveyard, so ownership is
+    // the stable discriminant for whose-graveyard scoping.
     #[derive(Clone)]
     enum Scope {
         Any,
+        You,
         Opponent,
     }
 
     // The outcome clause ("exile it instead" or the shuffle-back phrasing)
-    // determines what ChangeZone + sub_ability chain we emit.
+    // determines what ChangeZone + sub_ability chain we emit. The exile variant
+    // carries any `with N <type> counter(s) on it` rider (CR 122.1) lifted by the
+    // shared anaphor recognizer — Dauthi Voidwalker's "instead exile it with a
+    // void counter on it" is the exemplar.
     #[derive(Clone)]
     enum Outcome {
-        Exile,
-        ShuffleBack { reveal: bool },
+        Exile {
+            enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        },
+        ShuffleBack {
+            reveal: bool,
+        },
     }
 
     // CR 730.3e + CR 111.1: the subject's token axis. "a card or token" is
@@ -4551,6 +5025,11 @@ fn parse_graveyard_exile_replacement(
                 value(Scope::Opponent, tag("an opponent's graveyard")),
                 value(Scope::Opponent, tag("an opponents graveyard")),
                 value(Scope::Opponent, tag("opponent's graveyard")),
+                // CR 400.3: "your graveyard" (Forbidden Crypt) scopes to You-owned
+                // cards — the redirect must not exile opponents' cards. Tried
+                // before the generic ` graveyard` fallthrough so the possessive
+                // owner is captured rather than swallowed as unscoped.
+                value(Scope::You, tag("your graveyard")),
                 value(
                     Scope::Any,
                     preceded(take_until(" graveyard"), tag(" graveyard")),
@@ -4560,20 +5039,33 @@ fn parse_graveyard_exile_replacement(
             let (i, _) = opt(tag(" from anywhere")).parse(i)?;
             let (i, _) = tag(", ").parse(i)?;
 
-            // Outcome dispatch. The shuffle-back variant optionally prefixes
-            // "reveal ~ and " (CR 701.20); the exile variant has no such prefix.
-            let (i, outcome) = alt((
-                value(Outcome::Exile, tag("exile it instead")),
-                value(
-                    Outcome::ShuffleBack { reveal: true },
-                    tag("reveal ~ and shuffle it into its owner's library instead"),
-                ),
-                value(
-                    Outcome::ShuffleBack { reveal: false },
-                    tag("shuffle it into its owner's library instead"),
-                ),
-            ))
-            .parse(i)?;
+            // Outcome dispatch. The exile variant delegates to the shared
+            // `parse_exile_anaphor_clause` so it accepts both word orders
+            // ("exile it instead" / "instead exile it") AND lifts an inline
+            // `with N <type> counter(s) on it` rider (CR 122.1) — Dauthi
+            // Voidwalker's "instead exile it with a void counter on it". The
+            // shuffle-back variant optionally prefixes "reveal ~ and " (CR 701.20).
+            let exile_anaphor = parse_exile_anaphor_clause(TextPair::new(i, i));
+            let (i, outcome) = if exile_anaphor.matched {
+                (
+                    exile_anaphor.continuation.lower,
+                    Outcome::Exile {
+                        enter_with_counters: exile_anaphor.enter_with_counters,
+                    },
+                )
+            } else {
+                alt((
+                    value(
+                        Outcome::ShuffleBack { reveal: true },
+                        tag("reveal ~ and shuffle it into its owner's library instead"),
+                    ),
+                    value(
+                        Outcome::ShuffleBack { reveal: false },
+                        tag("shuffle it into its owner's library instead"),
+                    ),
+                ))
+                .parse(i)?
+            };
 
             Ok((i, (scope, token_scope, outcome, subject.to_string())))
         })?;
@@ -4582,7 +5074,7 @@ fn parse_graveyard_exile_replacement(
 
     // Destination routing is determined by the outcome branch.
     let destination = match &outcome {
-        Outcome::Exile => Zone::Exile,
+        Outcome::Exile { .. } => Zone::Exile,
         Outcome::ShuffleBack { .. } => Zone::Library,
     };
 
@@ -4593,10 +5085,15 @@ fn parse_graveyard_exile_replacement(
     // opponent's token reach the graveyard so dies-triggers fire — Blood Artist
     // class). Both axes are leaf `FilterProp`s on one `TypedFilter`.
     let mut props = Vec::new();
-    if let Scope::Opponent = scope {
-        props.push(FilterProp::Owned {
+    match scope {
+        // CR 400.3: "your graveyard" ⇒ You-owned cards only (Forbidden Crypt).
+        Scope::You => props.push(FilterProp::Owned {
+            controller: ControllerRef::You,
+        }),
+        Scope::Opponent => props.push(FilterProp::Owned {
             controller: ControllerRef::Opponent,
-        });
+        }),
+        Scope::Any => {}
     }
     if let TokenScope::NonToken = token_scope {
         props.push(FilterProp::NonToken);
@@ -4611,9 +5108,21 @@ fn parse_graveyard_exile_replacement(
         None
     };
 
-    // Build the ChangeZone redirect. `event_modifiers_for_ability` extracts only
-    // the `destination` field from this top-level ChangeZone — other fields here
-    // (owner_library, etc.) are inert metadata along the redirect path.
+    // CR 122.1: A `with N <type> counter(s) on it` rider on the exile outcome
+    // (Dauthi Voidwalker's void counter) is lifted onto the redirect's
+    // `enter_with_counters`, which `event_modifiers_for_ability` →
+    // `extract_etb_counters` reads and applies as the object enters exile.
+    let redirect_counters = match &outcome {
+        Outcome::Exile {
+            enter_with_counters,
+        } => enter_with_counters.clone(),
+        Outcome::ShuffleBack { .. } => vec![],
+    };
+
+    // Build the ChangeZone redirect. `event_modifiers_for_ability` extracts the
+    // `destination` field (and `enter_with_counters`, when present) from this
+    // top-level ChangeZone — other fields here (owner_library, etc.) are inert
+    // metadata along the redirect path.
     let redirect = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
@@ -4626,7 +5135,7 @@ fn parse_graveyard_exile_replacement(
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
-            enter_with_counters: vec![],
+            enter_with_counters: redirect_counters,
             conditional_enter_with_counters: vec![],
             face_down_profile: None,
             enters_modified_if: None,
@@ -4637,7 +5146,7 @@ fn parse_graveyard_exile_replacement(
     // The mandatory post-effect extractor at `replacement.rs` sees a top-level
     // ChangeZone and stashes `sub_ability` to run after the redirected move lands.
     let execute = match outcome {
-        Outcome::Exile => redirect,
+        Outcome::Exile { .. } => redirect,
         Outcome::ShuffleBack { reveal } => {
             // CR 701.24: shuffle into owner's library. CR 400.3 is the owner-routing
             // authority — TargetFilter::Owner resolves to state.objects[source_id].owner,
@@ -6565,7 +7074,10 @@ fn parse_optional_token_substitution_choice(
 /// Deepest Foundation's "three times that many"), plus "those tokens plus [spec]"
 /// (Chatterfang — "that many 1/1 green Squirrel creature tokens"; Donatello —
 /// "a Mutagen token").
-fn parse_token_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+pub(crate) fn parse_token_replacement(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
     let modification_mode = parse_token_replacement_shape(lower)?;
@@ -7727,6 +8239,19 @@ fn strip_as_long_as_prefix_for_prevention(
     }
 }
 
+/// CR 615.1a: subject-first prevention recipient "<subject> would be dealt …".
+/// The attached creature (CR 301.5f "equipped creature" / CR 303.4b "enchanted
+/// creature") is the shield's recipient for the Panther-Habit class ("If
+/// equipped creature would be dealt damage, prevent that damage …"). Composes
+/// `parse_attached_subject_target_filter` (whose core does not consume trailing
+/// whitespace) with the leading-space `tag(" would be dealt")`, so it matches
+/// both "would be dealt damage" and "…would be dealt combat damage". The
+/// self-subject forms ("~" / "this creature") are handled by the earlier
+/// if-branch (they map to `SelfRef`), so no self arm belongs here.
+fn parse_subject_first_prevention_recipient(input: &str) -> OracleResult<'_, TargetFilter> {
+    terminated(parse_attached_subject_target_filter, tag(" would be dealt")).parse(input)
+}
+
 /// CR 615: Parse damage prevention replacement effects.
 /// Handles:
 /// - "prevent all combat damage that would be dealt [this turn]" (Fog, Moments Peace)
@@ -7896,6 +8421,17 @@ fn parse_damage_prevention_replacement(
             )
             .parse(input)
         })
+        // CR 615.1a + CR 301.5f/303.4b: subject-first form "If equipped/enchanted
+        // creature would be dealt damage, …" (Panther Habit). Disjoint from the
+        // "dealt to <attached>" recipient scan above (passive subject-first vs.
+        // recipient clause) and from `parse_damage_recipient_valid_card_filter`
+        // below, so chaining it here as an additional fallback cannot shadow them.
+        .or_else(|| {
+            nom_primitives::scan_at_word_boundaries(
+                working_lower,
+                parse_subject_first_prevention_recipient,
+            )
+        })
         .or_else(|| parse_damage_recipient_valid_card_filter(working_lower))
     };
 
@@ -7926,6 +8462,19 @@ fn parse_damage_prevention_replacement(
     // the prevented event's damage recipient, exactly like a typed `valid_card`
     // does — so the cohort-2 anaphor rewrite must fire for it too.
     let recipient_is_event_filter = valid_card_filter.is_some() || recipient_from_event;
+    // CR 301.5f/303.4b: an OBJECT-recipient shield (typed `valid_card`, e.g.
+    // Panther Habit's equipped creature) rebinds a bare "it" rider to the damage
+    // recipient. Compute by borrow BEFORE the move below; the self-scoped cohort
+    // (`valid_card == SelfRef` — Anti-Venom, Unbreathing Horde) is excluded so it
+    // keeps its source-referring rider.
+    let recipient_is_object =
+        matches!(&valid_card_filter, Some(f) if !matches!(f, TargetFilter::SelfRef));
+    // CR 608.2k: A self-scoped shield ("dealt to ~") rebinds the rider's dangling
+    // anaphor to the SOURCE, not the event recipient — see the follow-up rewrite
+    // branch below. Kept as its own predicate (rather than `!recipient_is_object`)
+    // because a `valid_card`-less pure-event shield is neither self- nor object-
+    // scoped and must not take the self-scoped branch.
+    let recipient_is_self_scoped = matches!(&valid_card_filter, Some(TargetFilter::SelfRef));
     if let Some(vc) = valid_card_filter {
         def = def.valid_card(vc);
     }
@@ -7993,8 +8542,30 @@ fn parse_damage_prevention_replacement(
         // its all-consuming recipient terminator fails, so this rewrite
         // does not fire and `ParentTarget` correctly inherits the spell's
         // chosen target.
-        if recipient_is_event_filter {
-            rewrite_parent_target_to_post_replacement_damage_target(&mut followup_def);
+        //
+        // CR 608.2k: The two recipient cohorts are mutually exclusive and demand
+        // opposite anaphor bindings, so branch on them rather than layering
+        // rewrites. A SELF-scoped shield (`valid_card == SelfRef` — Anti-Venom,
+        // Unbreathing Horde) refers back to the SOURCE: any dangling `ParentTarget`
+        // in the rider (e.g. "him"/"her", which lower to the generic CR 608.2c
+        // anaphor rather than binding to the `subject: SelfRef` thread) must
+        // resolve to `SelfRef`, and a `SelfRef` rider stays put. An OBJECT- or
+        // event-recipient shield refers to the PREVENTED EVENT'S recipient: both a
+        // dangling `ParentTarget` and a `subject`-bound `SelfRef` in the rider must
+        // resolve to `PostReplacementDamageTarget`.
+        if recipient_is_self_scoped {
+            rewrite_parent_target_to_self_ref(&mut followup_def);
+        } else {
+            if recipient_is_event_filter {
+                rewrite_parent_target_to_post_replacement_damage_target(&mut followup_def);
+            }
+            // CR 615.5 + CR 301.5f/303.4b: in an object-recipient shield a bare
+            // "it" in the prevented-amount rider (Panther Habit "put that many
+            // +1/+1 counters on it") lowers to SelfRef but means the damage
+            // recipient.
+            if recipient_is_object {
+                rewrite_self_ref_to_post_replacement_damage_target(&mut followup_def);
+            }
         }
         def = def.execute(followup_def);
     }
@@ -8173,6 +8744,58 @@ fn rewrite_parent_target_to_post_replacement_damage_target(def: &mut AbilityDefi
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewrite_parent_target_to_post_replacement_damage_target(else_branch);
+    }
+}
+
+/// CR 615.5 + CR 301.5f/303.4b: In an OBJECT-recipient prevention shield (typed
+/// `valid_card`, e.g. Panther Habit's "equipped creature"), a bare "it" in the
+/// prevented-amount rider lowers to `SelfRef` (via the `subject: SelfRef` thread
+/// on the follow-up parse) but semantically refers to the prevented event's
+/// damage recipient — the attached creature, not the source permanent. Rewrite
+/// `SelfRef` → `PostReplacementDamageTarget` across the follow-up tree so the
+/// counter lands on the recipient. Only invoked for the object-recipient cohort;
+/// the self-scoped cohort (Anti-Venom, Unbreathing Horde — `valid_card` SelfRef)
+/// deliberately keeps its source-referring rider and never calls this. Mirrors
+/// `rewrite_parent_target_to_post_replacement_damage_target`'s recursion into
+/// `sub_ability` and `else_ability`; uses the shared `each_target_filter_mut`
+/// walker (which visits `PutCounter`/`RemoveCounter` targets).
+fn rewrite_self_ref_to_post_replacement_damage_target(def: &mut AbilityDefinition) {
+    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
+        if matches!(f, TargetFilter::SelfRef) {
+            *f = TargetFilter::PostReplacementDamageTarget;
+        }
+    });
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_self_ref_to_post_replacement_damage_target(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_self_ref_to_post_replacement_damage_target(else_branch);
+    }
+}
+
+/// CR 608.2k + CR 615.5: In a SELF-scoped prevention shield ("If damage would be
+/// dealt to ~, … put that many +1/+1 counters on him." — Anti-Venom class), the
+/// rider's anaphor refers back to the shield's source. A gendered/singular
+/// pronoun ("him"/"her") does not bind to the follow-up's `subject: SelfRef`
+/// thread the way bare "it" does — it lowers to the generic CR 608.2c parent
+/// anaphor (`ParentTarget`). There is no parent target slot in a passive
+/// replacement, so remap the dangling `ParentTarget` to `SelfRef` so the counter
+/// lands on the source. The counterpart object-recipient cohort routes the same
+/// dangling anaphor to `PostReplacementDamageTarget` instead
+/// (`rewrite_parent_target_to_post_replacement_damage_target`); the two are
+/// mutually exclusive at the call site. Recurses into `sub_ability`/`else_ability`
+/// and uses the shared `each_target_filter_mut` walker, mirroring its siblings.
+fn rewrite_parent_target_to_self_ref(def: &mut AbilityDefinition) {
+    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
+        if matches!(f, TargetFilter::ParentTarget) {
+            *f = TargetFilter::SelfRef;
+        }
+    });
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_parent_target_to_self_ref(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_parent_target_to_self_ref(else_branch);
     }
 }
 
@@ -10019,6 +10642,124 @@ mod tests {
         }
     }
 
+    /// CR 615.1a + CR 301.5f + CR 615.5 + issue #5246: Panther Habit — "If
+    /// equipped creature would be dealt damage, prevent that damage and put that
+    /// many +1/+1 counters on it."
+    ///
+    /// Two coupled bugs are fixed here:
+    /// - BUG 1: the shield must scope to the equipped creature (`valid_card`
+    ///   Typed(Creature, EquippedBy)), not fire on every DamageDone event.
+    /// - BUG 2: the rider "put that many +1/+1 counters on it" — the bare "it"
+    ///   lowers to SelfRef but means the equipped creature (the damage
+    ///   recipient), so it must be rewritten to `PostReplacementDamageTarget`.
+    #[test]
+    fn panther_habit_equipped_recipient_scope_and_counter_target_rewrite() {
+        let def = parse_replacement_line(
+            "If equipped creature would be dealt damage, prevent that damage and put that many +1/+1 counters on it.",
+            "Panther Habit",
+        )
+        .expect("Panther Habit should parse as a damage prevention replacement");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        // (BUG 1) valid_card scopes the shield to the equipped creature.
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EquippedBy])
+            )),
+            "shield must scope to equipped creature, got {:?}",
+            def.valid_card
+        );
+        assert!(
+            def.damage_target_filter.is_none(),
+            "scoping comes from valid_card alone, got {:?}",
+            def.damage_target_filter
+        );
+
+        // (BUG 2) rider PutCounter targets the damage recipient (not SelfRef).
+        let execute = def.execute.as_ref().expect("execute rider present");
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(
+                    *target,
+                    TargetFilter::PostReplacementDamageTarget,
+                    "rider 'it' must rebind to the damage recipient, not the Equipment"
+                );
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        }
+                    ),
+                    "counter count must be the prevented amount; got {count:?}"
+                );
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+    }
+
+    /// CR 615.1a + CR 303.4b + CR 615.5: Enchanted-creature synthetic member of
+    /// the Panther Habit class — the subject-first recipient + "it"-rider rewrite
+    /// must work for the Aura attachment axis too (EnchantedBy).
+    #[test]
+    fn enchanted_creature_subject_first_prevention_counter_target_rewrite() {
+        let def = parse_replacement_line(
+            "If enchanted creature would be dealt damage, prevent that damage and put that many +1/+1 counters on it.",
+            "Synthetic Habit Aura",
+        )
+        .expect("enchanted-creature prevention should parse");
+
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+            )),
+            "shield must scope to enchanted creature, got {:?}",
+            def.valid_card
+        );
+        let execute = def.execute.as_ref().expect("execute rider present");
+        match &*execute.effect {
+            Effect::PutCounter { target, .. } => {
+                assert_eq!(*target, TargetFilter::PostReplacementDamageTarget);
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+    }
+
+    /// CR 615.1a + CR 615.5 regression: a SELF-scoped shield (Anti-Venom —
+    /// "If damage would be dealt to ~, … put that many +1/+1 counters on him.")
+    /// keeps its source-referring rider. `valid_card` is `SelfRef` (not an object
+    /// filter), so the object-recipient rewrite must NOT fire and the counter
+    /// must stay on `SelfRef`. Guards against the BUG-2 fix over-reaching into the
+    /// self-scoped cohort.
+    #[test]
+    fn anti_venom_self_scoped_rider_stays_self_ref() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to ~, prevent that damage and put that many +1/+1 counters on him.",
+            "Anti-Venom, Horrifying Healer",
+        )
+        .expect("Anti-Venom prevention should parse");
+
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.as_ref().expect("execute rider present");
+        match &*execute.effect {
+            Effect::PutCounter { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::SelfRef,
+                    "self-scoped rider must keep SelfRef, not be rewritten to the recipient"
+                );
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+    }
+
     #[test]
     fn prevention_life_followup_uses_prevented_amount() {
         let def = parse_replacement_line(
@@ -10948,13 +11689,195 @@ mod tests {
             matches!(
                 *execute.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::NumberRange { min: 0, max: 20 },
+                    choice_type: ChoiceType::NumberRange {
+                        min: 0,
+                        max: 20,
+                        ..
+                    },
                     persist: true,
                     ..
                 }
             ),
             "expected a persisted NumberRange(0,20) choice, got {:?}",
             execute.effect
+        );
+    }
+
+    // CR 608.2d + CR 608.2c + CR 701.20e: Anointed Peacekeeper's ETB carries a
+    // leading "look at an opponent's hand" before the persisted card-name choice.
+    // Because "an opponent" is a CR 608.2d choice the controller announces while
+    // the permanent enters (fatal in 3+ player games if the look fans across every
+    // opponent), the composed Moved replacement must FRONT an explicit
+    // `Choose(Opponent)`, rebind the look to that chosen opponent
+    // (`ChosenPlayer { index: 0 }`), and ride the persisted `Choose(CardName)`
+    // beneath the look. Nesting: Choose(Opponent) -> RevealHand(chosen) ->
+    // Choose(CardName). Reverting the fronting collapses the outer effect back to a
+    // bare `RevealHand { Typed(Opponent) }`, flipping every assertion below.
+    #[test]
+    fn as_enters_look_at_hand_then_choose_composes_reveal_and_choice() {
+        let def = parse_replacement_line(
+            "As Anointed Peacekeeper enters the battlefield, look at an opponent's hand, then choose any card name.",
+            "Anointed Peacekeeper",
+        )
+        .expect("look-at-hand + choose ETB must produce a replacement");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(def.mode, ReplacementMode::Mandatory));
+        let execute = def.execute.as_ref().unwrap();
+        // Outer: the fronted opponent choice (CR 608.2d).
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent { restriction: None },
+                    persist: true,
+                    ..
+                }
+            ),
+            "outer effect must be the fronted Choose(Opponent), got {:?}",
+            execute.effect
+        );
+        // Middle: the private hand look, rebound to the chosen opponent (CR 608.2c).
+        let look = execute
+            .sub_ability
+            .as_ref()
+            .expect("the opponent-hand look must ride beneath the opponent choice");
+        assert!(
+            matches!(
+                &*look.effect,
+                Effect::RevealHand { reveal: false, target: TargetFilter::Typed(tf), .. }
+                    if tf.controller == Some(ControllerRef::ChosenPlayer { index: 0 })
+            ),
+            "the look must be a private hand look bound to the chosen opponent, got {:?}",
+            look.effect
+        );
+        // Inner: the persisted card-name choice (CR 201.4).
+        let sub = look
+            .sub_ability
+            .as_ref()
+            .expect("the persisted card-name choice must ride beneath the look");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::CardName,
+                    persist: true,
+                    ..
+                }
+            ),
+            "innermost must be a persisted CardName choice, got {:?}",
+            sub.effect
+        );
+    }
+
+    // A non-action middle — a subject/quantifier phrase like "you and an
+    // opponent each" (Null Chamber) or "you and target opponent each secretly"
+    // (Power Level Analyzer) — is NOT composed. parse_as_enters_choose falls back
+    // to the bare choice (the pre-existing parse that ignored the prefix), rather
+    // than bailing (which would drop a previously-supported `Moved` replacement)
+    // or wrapping the subject as a leading action. Regression guard for Null
+    // Chamber / Power Level Analyzer, surfaced by the coverage parse-diff.
+    #[test]
+    fn as_enters_non_action_middle_falls_back_to_bare_choice() {
+        let def = parse_as_enters_choose(
+            "as ~ enters, you and an opponent each choose a card name.",
+            "As ~ enters, you and an opponent each choose a card name.",
+        )
+        .expect("a supported as-enters choice must still produce a Moved replacement");
+        let execute = def.execute.as_ref().unwrap();
+        // The bare persisted choice is the primary effect — the subject phrase is
+        // neither wrapped as a leading action nor allowed to drop the Moved node.
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::CardName,
+                    persist: true,
+                    ..
+                }
+            ),
+            "non-action middle must fall back to the bare persisted choice, got {:?}",
+            execute.effect
+        );
+        assert!(
+            execute.sub_ability.is_none(),
+            "no leading action should be composed for a subject-phrase middle, got {:?}",
+            execute.sub_ability
+        );
+    }
+
+    // CR 614.1c + CR 614.1d: the enters-tapped frame must also capture a leading
+    // imperative, so an "enters tapped, <action>, then choose" line composes
+    // tap + action + choice rather than silently dropping the action. No printed
+    // card carries this shape yet; this guards the building block's coverage
+    // honesty (the frame `alt` must not leave the imperative unthreaded).
+    #[test]
+    fn as_enters_tapped_with_leading_imperative_composes_tap_action_and_choice() {
+        let def = parse_as_enters_choose(
+            "as ~ enters the battlefield tapped, look at an opponent's hand, then choose any card name.",
+            "As ~ enters the battlefield tapped, look at an opponent's hand, then choose any card name.",
+        )
+        .expect("tapped + leading imperative + choose must compose, not drop the imperative");
+        let execute = def.execute.as_ref().unwrap();
+        // Outer: the enter-tapped event modifier.
+        assert!(
+            matches!(&*execute.effect, Effect::SetTapState { .. }),
+            "outer effect must be the enter-tapped modifier, got {:?}",
+            execute.effect
+        );
+        // Middle: the leading imperative (private opponent-hand look) — NOT dropped.
+        // Middle: the fronted opponent choice (CR 608.2d) — the leading hand-look
+        // is a non-targeted "an opponent's hand" look, so it is fronted with an
+        // explicit `Choose(Opponent)` before the look itself, exactly as the
+        // non-tapped Anointed Peacekeeper composition. The point of THIS test is
+        // that the leading imperative is threaded (not dropped) through the
+        // enters-tapped frame; it is still threaded, now beneath the choice.
+        let mid = execute
+            .sub_ability
+            .as_ref()
+            .expect("tap must carry the composed core");
+        assert!(
+            matches!(
+                &*mid.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent { restriction: None },
+                    persist: true,
+                    ..
+                }
+            ),
+            "the fronted opponent choice must ride beneath the tap, got {:?}",
+            mid.effect
+        );
+        // The private hand look, rebound to the chosen opponent (CR 608.2c).
+        let look = mid
+            .sub_ability
+            .as_ref()
+            .expect("the opponent-hand look must ride beneath the opponent choice");
+        assert!(
+            matches!(
+                &*look.effect,
+                Effect::RevealHand { reveal: false, target: TargetFilter::Typed(tf), .. }
+                    if tf.controller == Some(ControllerRef::ChosenPlayer { index: 0 })
+            ),
+            "the leading hand-look must be threaded and bound to the chosen opponent, got {:?}",
+            look.effect
+        );
+        // Inner: the persisted card-name choice.
+        let choose = look
+            .sub_ability
+            .as_ref()
+            .expect("the persisted choice must ride the look");
+        assert!(
+            matches!(
+                *choose.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::CardName,
+                    persist: true,
+                    ..
+                }
+            ),
+            "innermost must be the persisted CardName choice, got {:?}",
+            choose.effect
         );
     }
 
@@ -12272,6 +13195,107 @@ mod tests {
         ));
     }
 
+    /// CR 614.1a + CR 122.1: Dauthi Voidwalker (#5245) — "If a card would be put
+    /// into an opponent's graveyard from anywhere, instead exile it with a void
+    /// counter on it." The graveyard-exile replacement must accept BOTH the
+    /// "instead exile it" prefix word order AND the "with a void counter on it"
+    /// rider, lifting the counter onto the exile redirect's `enter_with_counters`
+    /// (which `extract_etb_counters` applies as the card enters exile).
+    #[test]
+    fn dauthi_voidwalker_exile_with_void_counter() {
+        let def = parse_replacement_line(
+            "If a card would be put into an opponent's graveyard from anywhere, instead exile it with a void counter on it.",
+            "Dauthi Voidwalker",
+        )
+        .expect("Dauthi's graveyard-exile-with-counter replacement must parse");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        // Opponent-owned, token-excluding (CR 730.3e) — same subject scope as Leyline.
+        match &def.valid_card {
+            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
+                assert!(properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                }));
+                assert!(properties.contains(&FilterProp::NonToken));
+            }
+            other => panic!("Expected Typed(Owned Opponent + NonToken), got {other:?}"),
+        }
+        // Exile redirect carries the void counter.
+        match def.execute.as_deref().map(|a| &*a.effect) {
+            Some(Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                enter_with_counters,
+                ..
+            }) => {
+                assert_eq!(
+                    enter_with_counters.len(),
+                    1,
+                    "expected one counter rider, got {enter_with_counters:?}"
+                );
+                let (ct, qty) = &enter_with_counters[0];
+                assert_eq!(&*ct.as_str(), "void", "expected a void counter, got {ct:?}");
+                assert_eq!(qty, &QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("Expected ChangeZone→Exile with counters, got {other:?}"),
+        }
+    }
+
+    /// CR 400.3: Forbidden Crypt — "If a card would be put into your graveyard
+    /// from anywhere, exile that card instead." The "your graveyard" scope must
+    /// bind the redirect to YOU-owned cards; without it the anaphor recognizer
+    /// (which now makes this card parse) would exile opponents' cards too. Review
+    /// finding on #5443 (matthewevans).
+    #[test]
+    fn forbidden_crypt_your_graveyard_scopes_to_you() {
+        let def = parse_replacement_line(
+            "If a card would be put into your graveyard from anywhere, exile that card instead.",
+            "Forbidden Crypt",
+        )
+        .expect("Forbidden Crypt graveyard-exile replacement must parse");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
+                assert!(
+                    properties.contains(&FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    }),
+                    "'your graveyard' must scope to You-owned cards, got {properties:?}"
+                );
+                // Must NOT be scoped to an opponent.
+                assert!(!properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                }));
+                // "a card" is still token-excluding (CR 730.3e).
+                assert!(properties.contains(&FilterProp::NonToken));
+            }
+            other => panic!("Expected Typed(Owned You + NonToken), got {other:?}"),
+        }
+    }
+
+    /// Regression guard: the plain "exile it instead" suffix word order (Leyline /
+    /// Rest in Peace) must stay counter-free after the anaphor-recognizer refactor.
+    #[test]
+    fn graveyard_exile_no_counter_suffix_word_order_unchanged() {
+        let def = parse_replacement_line(
+            "If a card would be put into an opponent's graveyard from anywhere, exile it instead.",
+            "Leyline of the Void",
+        )
+        .unwrap();
+        match def.execute.as_deref().map(|a| &*a.effect) {
+            Some(Effect::ChangeZone {
+                destination: Zone::Exile,
+                enter_with_counters,
+                ..
+            }) => assert!(
+                enter_with_counters.is_empty(),
+                "plain exile must carry no counters, got {enter_with_counters:?}"
+            ),
+            other => panic!("Expected ChangeZone→Exile, got {other:?}"),
+        }
+    }
+
     /// CR 730.3e + CR 111.1: a card-only subject targeting ANY graveyard ("a
     /// card would be put into a graveyard") is token-EXCLUDING with no
     /// controller scope — `valid_card` is `NonToken` alone. This is the live
@@ -12327,6 +13351,98 @@ mod tests {
             }
             other => panic!("Expected Typed filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn containment_priest_enter_wasnt_cast_exile_replacement() {
+        // Issue #4761: "If a nontoken creature would enter and it wasn't cast,
+        // exile it instead." must parse as a ChangeZone→Battlefield replacement
+        // that exiles the entering object — NOT as a Spell effect exiling the
+        // card itself (the regression that made casting Containment Priest exile
+        // itself).
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Flash\nIf a nontoken creature would enter and it wasn't cast, exile it instead.",
+            "Containment Priest",
+            &["Flash".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Cleric".to_string()],
+        );
+        // The bogus self-exile Spell ability must be gone.
+        assert!(
+            parsed.abilities.is_empty(),
+            "no spell ability should be produced, got {:?}",
+            parsed.abilities
+        );
+        assert_eq!(
+            parsed.replacements.len(),
+            1,
+            "expected one ETB replacement, got {:?}",
+            parsed.replacements
+        );
+        let def = &parsed.replacements[0];
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        // valid_card = nontoken creature gated on "wasn't cast" (Not(WasPlayed)).
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.properties.contains(&FilterProp::NonToken));
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Not { prop } if matches!(**prop, FilterProp::WasPlayed)
+                    )),
+                    "expected Not(WasPlayed) gate, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_wasnt_cast_exile_excludes_duration_and_self_variants() {
+        // Duration-scoped ("Until end of turn, ...") and self-referential
+        // ("if this creature would enter ...") variants must NOT be captured by
+        // the Containment Priest static arm — they need separate handling.
+        assert!(
+            parse_replacement_line(
+                "Until end of turn, if a creature would enter and it wasn't cast, exile it instead.",
+                "Hallowed Moonlight",
+            )
+            .filter(|d| d.event == ReplacementEvent::ChangeZone
+                && d.destination_zone == Some(Zone::Battlefield))
+            .is_none(),
+            "duration-scoped variant must not match the static enter-exile arm"
+        );
+        assert!(
+            parse_replacement_line(
+                "If this creature would enter and it wasn't cast or no mana was spent to cast it, exile it instead.",
+                "Primeval Spawn",
+            )
+            .filter(|d| matches!(&d.valid_card, Some(TargetFilter::Typed(tf))
+                if tf.properties.iter().any(|p| matches!(p, FilterProp::Not { prop } if matches!(**prop, FilterProp::WasPlayed)))))
+            .is_none(),
+            "self-referential variant must not match the static enter-exile arm"
+        );
+        assert!(
+            parse_replacement_line(
+                "If a nontoken creature would enter and it wasn't cast, exile it instead, draw a card.",
+                "Trailing Rider Guard",
+            )
+            .filter(|d| d.event == ReplacementEvent::ChangeZone
+                && d.destination_zone == Some(Zone::Battlefield))
+            .is_none(),
+            "static enter-exile arm must not swallow trailing riders after instead"
+        );
     }
 
     #[test]
@@ -16095,6 +17211,164 @@ mod tests {
         );
     }
 
+    // --- lower_as_enters_or_face_up_counters (Crowd-Control Warden) ---
+
+    /// Assert a replacement's execute is exactly
+    /// `PutCounter { Plus1Plus1, Ref{ObjectCount{Creature, You, ⊇[Another]}}, SelfRef }`.
+    fn assert_self_other_creatures_counter(rep: &ReplacementDefinition) {
+        let execute = rep.execute.as_deref().expect("replacement has execute");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = execute.effect.as_ref()
+        else {
+            panic!("execute must be PutCounter, got {:?}", execute.effect);
+        };
+        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+        assert_eq!(
+            *target,
+            TargetFilter::SelfRef,
+            "counters land on the permanent itself"
+        );
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = count
+        else {
+            panic!("count must be a dynamic ObjectCount ref, got {count:?}");
+        };
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+        }) = filter
+        else {
+            panic!("ObjectCount filter must be Typed, got {filter:?}");
+        };
+        assert!(
+            type_filters.contains(&TypeFilter::Creature),
+            "counts creatures"
+        );
+        assert_eq!(*controller, Some(ControllerRef::You), "you control");
+        assert!(
+            properties.contains(&FilterProp::Another),
+            "'other creatures' must carry FilterProp::Another so the source excludes itself, got {properties:?}"
+        );
+    }
+
+    /// P1: the full dual-condition line lowers to exactly TWO replacements — a
+    /// `Moved`/Battlefield ETB arm and a `TurnFaceUp` arm — both carrying the same
+    /// dynamic `PutCounter { SelfRef }`. Zero `Unimplemented`. Reverting the
+    /// recognizer regresses the line to `Unimplemented("replacement_structure")`.
+    #[test]
+    fn crowd_control_warden_lowers_to_dual_counter_replacements() {
+        let parsed = parse_oracle_text(
+            "As this creature enters or is turned face up, put X +1/+1 counters on it, \
+             where X is the number of other creatures you control.\nDisguise {3}{G/W}{G/W}",
+            "Crowd-Control Warden",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+
+        assert_eq!(
+            parsed.replacements.len(),
+            2,
+            "dual line emits one Moved + one TurnFaceUp replacement, got {}",
+            parsed.replacements.len()
+        );
+
+        let moved = parsed
+            .replacements
+            .iter()
+            .find(|r| r.event == ReplacementEvent::Moved)
+            .expect("ETB Moved arm present");
+        assert_eq!(moved.destination_zone, Some(Zone::Battlefield));
+        assert_eq!(moved.valid_card, Some(TargetFilter::SelfRef));
+        assert_self_other_creatures_counter(moved);
+
+        let face_up = parsed
+            .replacements
+            .iter()
+            .find(|r| r.event == ReplacementEvent::TurnFaceUp)
+            .expect("TurnFaceUp arm present");
+        assert_eq!(face_up.valid_card, Some(TargetFilter::SelfRef));
+        assert_self_other_creatures_counter(face_up);
+
+        // No honest gap anywhere (the whole replacement line is supported; the
+        // Disguise line is an extracted keyword, not an Unimplemented ability).
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(|a| a.effect.unimplemented_description().is_some()),
+            "no Unimplemented ability — the replacement_structure gap is closed"
+        );
+    }
+
+    /// P1 revert tripwire: WITHOUT the recognizer the line falls through to the
+    /// Priority-14a fallback and stamps `Unimplemented("replacement_structure")`.
+    /// This asserts the exact pre-fix behaviour by parsing the line through the
+    /// non-multi-emit path (`parse_replacement_line`, which cannot handle the dual
+    /// condition), proving the recognizer is what closes the gap.
+    #[test]
+    fn crowd_control_warden_dual_line_unhandled_by_single_option_path() {
+        // The single-`Option` replacement path (used before the multi-emit
+        // recognizer) returns None for the dual condition — this is the gap the
+        // recognizer fills. If a future single-Option parser learns this line,
+        // this test flips and the recognizer wiring should be reconsidered.
+        let single = parse_replacement_line(
+            "As ~ enters or is turned face up, put X +1/+1 counters on it, \
+             where X is the number of other creatures you control.",
+            "Crowd-Control Warden",
+        );
+        assert!(
+            single.is_none(),
+            "the dual line is not parseable as a single replacement definition — \
+             it requires the multi-emit recognizer"
+        );
+    }
+
+    /// P2 (guard reach-guard): "As ~ enters, choose a basic land type." must NOT be
+    /// claimed by the counter recognizer (its execute is `Effect::Choose`, not
+    /// `PutCounter`), so it falls through to `parse_as_enters_choose`. Non-vacuous:
+    /// the line still produces a Choose replacement through the full pipeline, and
+    /// NO counter replacement is emitted. Removing the PutCounter-SelfRef guard
+    /// would let the recognizer stamp a bare `Moved`/Choose replacement first,
+    /// pre-empting `parse_as_enters_choose`'s land-type wiring.
+    #[test]
+    fn as_enters_choose_line_not_stolen_by_counter_recognizer() {
+        let parsed = parse_oracle_text(
+            "As ~ enters, choose a basic land type.",
+            "~",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert_eq!(
+            parsed.replacements.len(),
+            1,
+            "exactly one replacement (the choose), got {}",
+            parsed.replacements.len()
+        );
+        let rep = &parsed.replacements[0];
+        assert!(
+            rep.execute
+                .as_deref()
+                .is_some_and(|e| matches!(e.effect.as_ref(), Effect::Choose { .. })),
+            "as-enters-choose line must still lower to a Choose replacement, not a PutCounter"
+        );
+        // Reach-guard positive: the recognizer would have emitted PutCounter — prove
+        // it did not steal the line.
+        assert!(
+            !parsed.replacements.iter().any(|r| r
+                .execute
+                .as_deref()
+                .is_some_and(|e| matches!(e.effect.as_ref(), Effect::PutCounter { .. }))),
+            "the counter recognizer must not claim a choose line"
+        );
+    }
+
     #[test]
     fn differing_type_axis_yields_distinct_labels_and_emits_modal() {
         // FIX 2 proof: two modes that share P/T AND keywords but differ on the
@@ -16698,8 +17972,8 @@ mod snapshot_tests {
     /// `ReplacementMode::Optional { decline: None }` (so the player is
     /// prompted to accept/decline and the original draw resolves on decline),
     /// and the effect chain must compose the existing `Effect::Choose`
-    /// (`ChoiceType::Labeled["Land","Nonland"]`) and `Effect::RevealUntil`
-    /// (filter: `FilterProp::IsChosenLandOrNonlandKind`, kept→Hand, rest→
+    /// (`ChoiceType::CardPredicate`) and `Effect::RevealUntil`
+    /// (filter: `FilterProp::MatchesLastChosenCardPredicate`, kept→Hand, rest→
     /// Library) building blocks with no `Unimplemented` node anywhere.
     #[test]
     fn abundance_parses_as_optional_choose_then_reveal_until_chosen_kind() {
@@ -16722,24 +17996,23 @@ mod snapshot_tests {
         );
 
         let execute = def.execute.as_ref().expect("execute chain must be present");
-        // Head clause: Choose(Labeled["Land","Nonland"]).
+        // Head clause: Choose(CardPredicate).
         let Effect::Choose {
-            choice_type: ChoiceType::Labeled { options },
+            choice_type: ChoiceType::CardPredicate { options },
             ..
         } = &*execute.effect
         else {
             panic!(
-                "expected head Effect::Choose(Labeled), got {:?}",
+                "expected head Effect::Choose(CardPredicate), got {:?}",
                 execute.effect
             );
         };
         assert_eq!(
             options,
-            &vec!["Land".to_string(), "Nonland".to_string()],
-            "labeled choice options must be exactly [\"Land\",\"Nonland\"]"
+            &ChoiceType::land_or_nonland_card_predicate_options()
         );
 
-        // RevealUntil { filter: IsChosenLandOrNonlandKind, kept=Hand, rest=Library }
+        // RevealUntil { filter: MatchesLastChosenCardPredicate, kept=Hand, rest=Library }
         // chained via the bare-and split (either as ContinuationStep or
         // SequentialSibling — both run sequentially under the chain resolver).
         let reveal = execute
@@ -16761,8 +18034,8 @@ mod snapshot_tests {
         assert!(
             tf.properties
                 .iter()
-                .any(|p| matches!(p, FilterProp::IsChosenLandOrNonlandKind)),
-            "RevealUntil filter must carry FilterProp::IsChosenLandOrNonlandKind so the \
+                .any(|p| matches!(p, FilterProp::MatchesLastChosenCardPredicate)),
+            "RevealUntil filter must carry FilterProp::MatchesLastChosenCardPredicate so the \
              runtime resolves the kept card against the controller's earlier labeled choice"
         );
         assert_eq!(*kept_destination, Zone::Hand);

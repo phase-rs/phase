@@ -101,6 +101,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "SearchPartitionChoice",
     "OutsideGameChoice",
     "ChooseFromZoneChoice",
+    // CR 701.4a: behold a [quality] — single-pick from a mixed-zone candidate
+    // list (BeholdChoiceModal, rendered via CardChoiceModal).
+    "BeholdChoice",
     "ChooseOneOfBranch",
     "ConniveDiscard",
     "DiscardChoice",
@@ -120,9 +123,16 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "TimeTravelChoice",
     "ChooseObjectsSelection",
     "CategoryChoice",
+    "EachPlayerCopyChosenSelection",
     "KeepWithinTotalPowerChoice",
     "DistributeAmong",
+    // CR 119.7 + CR 119.8: controller-chosen life-total redistribution permutation
+    // (Reverse the Sands, The Doctor's Tomb) — rendered by LifeRedistributionModal.
+    "RedistributeLifeTotals",
     "MoveCountersDistribution",
+    // CR 107.1c: "remove any number of counters" (Rhys, Tetravus) — rendered by
+    // MoveCountersDistributionModal in no-destination removal mode.
+    "RemoveCountersChoice",
     "RetargetChoice",
     "CopyRetarget",
     "DamageSourceChoice",
@@ -140,6 +150,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "RevealUntilKeptChoice",
     "RepeatDecision",
     "VoteChoice",
+    "SeparatePilesChooseOpponent",
     "SeparatePilesPartition",
     "SeparatePilesChoice",
     "ChooseRingBearer",
@@ -152,6 +163,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "CommanderZoneChoice",
     "BattleProtectorChoice",
     "NamedChoice",
+    "OpponentGuess",
     "CostTypeChoice",
     "UntapChoice",
     "ChooseUntapSubset",
@@ -161,7 +173,6 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // Game lifecycle
     "GameOver",
     "MulliganDecision",
-    "MulliganBottomCards",
     "OpeningHandBottomCards",
     "BetweenGamesSideboard",
     "BetweenGamesChoosePlayDraw",
@@ -226,7 +237,6 @@ export function waitingForReason(
     case "UnlessPayment":
       return { key: "status.reason.payingCost" };
     case "MulliganDecision":
-    case "MulliganBottomCards":
     case "OpeningHandBottomCards":
       return { key: "status.reason.mulligan" };
     case "DiscardToHandSize":
@@ -257,4 +267,17 @@ export function waitingForReason(
     default:
       return { key: "status.reason.thinking" };
   }
+}
+
+/**
+ * Map a reason to its standalone seat-badge key. `status.seat.*` mirrors
+ * `status.reason.*` key-for-key but holds self-contained chip labels
+ * ("Responding") instead of sentence fragments meant for composition
+ * ("Your priority — responding to the stack").
+ */
+export function seatStatusKey(reason: WaitingReason | null): string {
+  return (reason?.key ?? "status.reason.thinking").replace(
+    "status.reason.",
+    "status.seat.",
+  );
 }

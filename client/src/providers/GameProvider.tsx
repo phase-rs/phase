@@ -10,11 +10,17 @@ import { WasmAdapter, getSharedAdapter } from "../adapter/wasm-adapter";
 import { WebSocketAdapter } from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
 import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter";
-import { ACTIVE_DECK_KEY, loadActiveDeck, loadSavedDeckBracket } from "../constants/storage";
+import {
+  ACTIVE_DECK_KEY,
+  isRandomDeckSelection,
+  loadActiveDeck,
+  loadSavedDeckBracket,
+} from "../constants/storage";
 import type { CommanderBracket } from "../types/bracket";
 import type { CommanderBracketTier } from "../types/bracketEstimate";
 import type { AiDeckCandidate } from "../services/aiDeckCatalog";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
+import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
 import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
@@ -185,7 +191,7 @@ function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
  */
 function loadActiveDeckBracket(): CommanderBracket | null {
   const name = localStorage.getItem(ACTIVE_DECK_KEY);
-  if (!name) return null;
+  if (!name || isRandomDeckSelection(name)) return null;
   return loadSavedDeckBracket(name);
 }
 
@@ -238,18 +244,13 @@ function candidatePassesFilters(
   return archetypeFilter === "Any" || !candidate.archetype || candidate.archetype === archetypeFilter;
 }
 
-function randomPickDistinct(pool: AiDeckCandidate[], excludeIds: Set<string>): AiDeckCandidate {
-  const fresh = pool.filter((d) => !excludeIds.has(d.id));
-  const source = fresh.length > 0 ? fresh : pool;
-  return source[Math.floor(Math.random() * source.length)];
-}
-
 function pickOpponentDeck(
   catalog: AiDeckCandidate[],
   requestedDeckId: string,
   excludeIds: Set<string>,
   archetypeFilter: ReturnType<typeof usePreferencesStore.getState>["aiArchetypeFilter"],
   coverageFloor: number,
+  selectedFormat?: FormatConfig["format"] | null,
 ): AiDeckCandidate {
   if (requestedDeckId !== AI_DECK_RANDOM) {
     const pinned = catalog.find((candidate) => candidate.id === requestedDeckId);
@@ -259,7 +260,10 @@ function pickOpponentDeck(
   const filtered = catalog.filter((candidate) =>
     candidatePassesFilters(candidate, archetypeFilter, coverageFloor)
   );
-  return randomPickDistinct(filtered.length > 0 ? filtered : catalog, excludeIds);
+  return pickRandomDeckCandidate(filtered.length > 0 ? filtered : catalog, {
+    selectedFormat,
+    excludeIds,
+  }) ?? catalog[0];
 }
 
 // Placeholder decklist for fixed-deck formats (Momir's Madness): the player
@@ -289,7 +293,7 @@ function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBrac
 
 async function buildLocalAiDeckList(
   t: TFunction,
-  deck: ParsedDeck,
+  deck: ParsedDeck | null,
   playerCount: number,
   formatConfig?: FormatConfig,
   selectedMatchType?: MatchType,
@@ -335,8 +339,26 @@ async function buildLocalAiDeckList(
     );
   }
 
-  const opponentCount = Math.max(1, playerCount - 1);
   const excludeIds = new Set<string>();
+  let playerDeck = deck;
+  let resolvedPlayerBracket = playerBracket;
+  if (!playerDeck) {
+    const playerPick = pickRandomDeckCandidate(catalog.candidates, {
+      selectedFormat: formatConfig?.format,
+    });
+    if (!playerPick) {
+      throw new Error(
+        formatConfig?.format
+          ? t("gameProvider.noLegalAiDecks.withFormat", { format: formatConfig.format })
+          : t("gameProvider.noLegalAiDecks.generic"),
+      );
+    }
+    playerDeck = playerPick.deck;
+    resolvedPlayerBracket = playerPick.bracket;
+    excludeIds.add(playerPick.id);
+  }
+
+  const opponentCount = Math.max(1, playerCount - 1);
   const picks: AiDeckCandidate[] = [];
   for (let i = 0; i < opponentCount; i++) {
     // Unconfigured seats default to Random — NOT to `aiSeats[0]`. Falling
@@ -350,13 +372,14 @@ async function buildLocalAiDeckList(
       excludeIds,
       aiArchetypeFilter,
       aiCoverageFloor,
+      formatConfig?.format,
     );
     picks.push(result);
     excludeIds.add(result.id);
   }
 
-  const playerExpanded = expandParsedDeck(deck);
-  const playerTier = bracketToEngineTier(playerBracket);
+  const playerExpanded = expandParsedDeck(playerDeck);
+  const playerTier = bracketToEngineTier(resolvedPlayerBracket);
   // Build ai_difficulties in the same order as the AI seats: opponent first,
   // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
   // to ai_decks. Missing seat prefs default to "Medium".
@@ -646,7 +669,7 @@ export function GameProvider({
             }
           }
           if (event.type === "stateChanged") {
-            processRemoteUpdate(event.state, event.events, event.legalResult);
+            processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
           }
           if (event.type === "guestConnected") {
             notifyOpponentJoined(tRef.current);
@@ -824,8 +847,6 @@ export function GameProvider({
             //    their original seat.
             const sessionKey = `phase-${code}`;
             const existing = await loadP2PSession(sessionKey);
-            const reservationToken =
-              window.sessionStorage.getItem(`phase-p2p-reservation:${code}`) ?? undefined;
             signal.throwIfAborted();
             const adapter = new P2PGuestAdapter(
               deckList,
@@ -834,7 +855,7 @@ export function GameProvider({
               conn,
               existing?.playerToken,
               useMultiplayerStore.getState().displayName || undefined,
-              reservationToken,
+              undefined,
               sessionKey,
             );
             p2pAdapter = adapter;
@@ -931,9 +952,9 @@ export function GameProvider({
       const sessionKey = `phase-join-password:${joinCode ?? ""}`;
       let password: string | undefined =
         (joinCode && window.sessionStorage.getItem(sessionKey)) || undefined;
-      const reservationSessionKey = `phase-join-reservation:${joinCode ?? ""}`;
-      const reservationToken: string | undefined =
-        (joinCode && window.sessionStorage.getItem(reservationSessionKey)) || undefined;
+      if (joinCode) {
+        window.sessionStorage.removeItem(`phase-join-reservation:${joinCode}`);
+      }
       if (!password && urlParams.has("password")) {
         password = urlParams.get("password") ?? undefined;
         if (password && joinCode) {
@@ -960,7 +981,7 @@ export function GameProvider({
           deck,
           wsMode === "join" ? joinCode : undefined,
           wsMode === "join" ? password : undefined,
-          wsMode === "join" ? reservationToken : undefined,
+          undefined,
           useMultiplayerStore.getState().displayName || "Player",
         );
 
@@ -996,7 +1017,7 @@ export function GameProvider({
             if (needAdapter) {
               useGameStore.setState({ adapter: wsAdapter });
             }
-            processRemoteUpdate(event.state, event.events, event.legalResult);
+            processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
             useMultiplayerStore.getState().setConnectionStatus("connected");
             if (
               event.state.match_phase === "Completed"
@@ -1154,9 +1175,11 @@ export function GameProvider({
               });
           onResumeResetRef.current?.(reason);
           clearGame(gameId);
-          const parsedDeck = loadActiveDeck();
+          const activeDeckName = localStorage.getItem(ACTIVE_DECK_KEY);
+          const randomPlayerDeck = isRandomDeckSelection(activeDeckName);
+          const parsedDeck = randomPlayerDeck ? null : loadActiveDeck();
           const suppliesDeck = formatConfig ? formatSuppliesDeck(formatConfig.format) : false;
-          if (!parsedDeck && !suppliesDeck) {
+          if (!parsedDeck && !suppliesDeck && !randomPlayerDeck) {
             onNoDeckRef.current?.();
             return;
           }
@@ -1164,7 +1187,7 @@ export function GameProvider({
           try {
             deckList = await buildLocalAiDeckList(
               tRef.current,
-              parsedDeck ?? EMPTY_PARSED_DECK,
+              randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
               playerCount ?? 2,
               formatConfig,
               matchConfig?.match_type,
@@ -1277,9 +1300,11 @@ export function GameProvider({
         }
       }
 
-      const parsedDeck = loadActiveDeck();
+      const activeDeckName = localStorage.getItem(ACTIVE_DECK_KEY);
+      const randomPlayerDeck = isRandomDeckSelection(activeDeckName);
+      const parsedDeck = randomPlayerDeck ? null : loadActiveDeck();
       const suppliesDeck = formatConfig ? formatSuppliesDeck(formatConfig.format) : false;
-      if (!parsedDeck && !suppliesDeck) {
+      if (!parsedDeck && !suppliesDeck && !randomPlayerDeck) {
         onNoDeckRef.current?.();
         return;
       }
@@ -1288,7 +1313,7 @@ export function GameProvider({
       try {
         deckList = await buildLocalAiDeckList(
           tRef.current,
-          parsedDeck ?? EMPTY_PARSED_DECK,
+          randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
           playerCount ?? 2,
           formatConfig,
           matchConfig?.match_type,

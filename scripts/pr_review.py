@@ -80,10 +80,12 @@ PR_ATTRIBUTED_EVENTS = {
     "pruned_merged",
     "prune_merged",
     "request_changes",
+    "requested_changes_warning",
     "review",
     "review_blocked",
     "review_correction",
     "review_reopened",
+    "stale_changes_closed",
     "tracker_row",
     "update_branch",
 }
@@ -113,6 +115,8 @@ ALLOWED_OUTCOMES = {
     "accepted",
     "queued",
     "pruned",
+    "requested_changes_warning",
+    "stale_changes_closed",
 }
 # Defect signals subtract from the contributor score and are the ONLY signals
 # that feed windowed recurrence / scrutiny elevation.
@@ -131,6 +135,8 @@ DEFECT_SIGNAL_WEIGHTS = {
     "no-repro": 6,
     "value-bar": 6,
     "careful-watch": 4,
+    "ai-template-gap": 4,
+    "unchecked-engine-implementer": 4,
 }
 # Praise signals add to the contributor score (credit, capped below). They never
 # affect recurrence, scrutiny, or the derived-trusted gate — praise softens the
@@ -206,11 +212,16 @@ PROOF_SKIP_PHRASES = (
     "see ci status checks",
 )
 AI_AGENT_COAUTHOR_LOGINS = {"cursoragent"}
+REQUESTED_CHANGES_EXPIRY_MARKER = "<!-- pr-review-requested-changes-expiry -->"
+DEFAULT_REQUESTED_CHANGES_WARNING_AFTER_DAYS = 7
+DEFAULT_REQUESTED_CHANGES_CLOSE_AFTER_WARNING_DAYS = 7
 # Sweep-priority order for scan output buckets (lower sorts first).
 CANDIDATE_ACTION_ORDER = {
+    "close_stale_changes_for_handler": 0,
     "dequeue_stale_for_handler": 0,
     "update_branch_for_handler": 1,
     "approve_ready_for_handler": 2,
+    "warn_stale_changes_for_handler": 3,
     "review": 3,
     "hold_ci": 4,
     "request_changes": 5,
@@ -271,6 +282,33 @@ class Policy:
     def frontend_deferred_label(self) -> str | None:
         value = self.raw.get("labels", {}).get("frontend_deferred")
         return str(value) if value else None
+
+    @property
+    def quality_label(self) -> str | None:
+        value = self.raw.get("labels", {}).get("quality")
+        return str(value) if value else None
+
+    @property
+    def requested_changes_warning_after_days(self) -> int:
+        return self._positive_int(
+            self.raw.get("requested_changes", {}).get("warning_after_days"),
+            DEFAULT_REQUESTED_CHANGES_WARNING_AFTER_DAYS,
+        )
+
+    @property
+    def requested_changes_close_after_warning_days(self) -> int:
+        return self._positive_int(
+            self.raw.get("requested_changes", {}).get("close_after_warning_days"),
+            DEFAULT_REQUESTED_CHANGES_CLOSE_AFTER_WARNING_DAYS,
+        )
+
+    @staticmethod
+    def _positive_int(value: Any, default: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if parsed > 0 else default
 
 
 def now_iso() -> str:
@@ -515,6 +553,13 @@ def timestamp_after(candidate: str | None, baseline: str | None) -> bool:
     return candidate_dt is not None and baseline_dt is not None and candidate_dt > baseline_dt
 
 
+def age_in_days(value: str | None) -> float | None:
+    timestamp = parse_event_datetime(value)
+    if timestamp is None:
+        return None
+    return (datetime.now(UTC) - timestamp).total_seconds() / (24 * 60 * 60)
+
+
 def filtered_events_by_days(events: list[dict[str, Any]], days: int | None) -> list[dict[str, Any]]:
     if days is None:
         return events
@@ -548,6 +593,8 @@ def canonical_from_text(value: str | None) -> tuple[str, str] | None:
         return ("merged", "merged")
     if "defer-fe" in text or text == "defer" or text == "deferred":
         return ("deferred", "deferred")
+    if text == "requested-changes-warning":
+        return ("held", "requested_changes_warning")
     if "ci-failed" in text:
         return ("changes_requested", "ci_failed")
     if "pending-ci" in text or "hold-ci" in text or text == "hold-ci":
@@ -566,7 +613,12 @@ def canonical_from_text(value: str | None) -> tuple[str, str] | None:
         return ("review", "review")
     if text == "pending" or text.startswith("pending-"):
         return ("pending", "pending")
-    if text == "closed" or text.startswith("supersede") or text.startswith("superseded"):
+    if (
+        text == "closed"
+        or text == "stale-changes-closed"
+        or text.startswith("supersede")
+        or text.startswith("superseded")
+    ):
         return ("closed", "closed")
     if text in {"queued", "pruned"}:
         return ("accepted", text)
@@ -1502,12 +1554,17 @@ def compact_pr_view(pr: dict[str, Any], acting_login: str) -> dict[str, Any]:
         "body_hash": text_hash(pr.get("body")),
         "body_excerpt": excerpt(pr.get("body"), 800),
         "commit_author_logins": commit_author_logins(pr.get("commits") or []),
+        "maintainer_merge_commit_count": maintainer_merge_commit_count(
+            pr.get("commits") or [], acting_login
+        ),
         "comments": [
             {
                 "author": comment.get("author", {}).get("login"),
                 "createdAt": comment.get("createdAt"),
                 "body_hash": text_hash(comment.get("body")),
                 "body_excerpt": excerpt(comment.get("body"), 300),
+                "requested_changes_expiry_marker": REQUESTED_CHANGES_EXPIRY_MARKER
+                in (comment.get("body") or ""),
             }
             for comment in pr.get("comments", [])
         ],
@@ -1572,6 +1629,23 @@ def commit_author_logins(commits: list[dict[str, Any]]) -> list[str]:
     return sorted(logins, key=str.casefold)
 
 
+def maintainer_merge_commit_count(commits: list[dict[str, Any]], acting_login: str) -> int:
+    acting = fold_login(acting_login)
+    count = 0
+    for commit in commits:
+        headline = str(commit.get("messageHeadline") or "")
+        if not headline.startswith("Merge "):
+            continue
+        author_logins = {
+            fold_login(str(author.get("login")))
+            for author in commit.get("authors", [])
+            if author.get("login")
+        }
+        if acting in author_logins:
+            count += 1
+    return count
+
+
 def every_commit_has_agent_coauthor(commits: list[dict[str, Any]]) -> bool:
     if not commits:
         return False
@@ -1604,10 +1678,14 @@ def proof_profile(
     scrutiny = (contributor or {}).get("scrutiny")
 
     risk_flags = []
+    tracking_signals = []
     if missing_template_sections:
         risk_flags.append("missing-ai-contributor-template")
+        tracking_signals.append("ai-template-gap")
     if unchecked_items:
         risk_flags.append("unchecked-verification-items")
+        if any("engine-implementer" in item for item in unchecked_items):
+            tracking_signals.append("unchecked-engine-implementer")
     if skipped_phrases:
         risk_flags.append("verification-skipped-or-delegated")
     if agent_coauthored:
@@ -1617,10 +1695,11 @@ def proof_profile(
     if (gittensor or {}).get("risk_flag"):
         risk_flags.append(str((gittensor or {})["risk_flag"]))
 
-    proof_required = any(
-        flag in PROOF_REQUIRED_RISK_FLAGS or flag.startswith("contributor-scrutiny-")
-        for flag in risk_flags
-    )
+    # Missing template sections, unchecked checklist items, and elevated
+    # contributor scrutiny are tracking signals for repeat patterns. They should
+    # not by themselves block an otherwise passing review; only hard proof risks
+    # require concrete verification before queue handoff.
+    proof_required = any(flag in PROOF_REQUIRED_RISK_FLAGS for flag in risk_flags)
     template_verification_complete = bool(body.strip()) and not (
         missing_template_sections or skipped_phrases
     )
@@ -1635,7 +1714,54 @@ def proof_profile(
         "checked_test_evidence": checked_evidence[:5],
         "skipped_phrases": skipped_phrases,
         "agent_coauthored_all_commits": agent_coauthored,
+        "tracking_signals": tracking_signals,
     }
+
+
+def proof_tracking_signals(packet: dict[str, Any]) -> list[str]:
+    proof = packet.get("proof") or {}
+    return list(proof.get("tracking_signals") or [])
+
+
+def is_parser_refactor_file(path: str) -> bool:
+    return path.startswith("crates/engine/src/parser/")
+
+
+def is_declared_refactor(pr: dict[str, Any]) -> bool:
+    labels = {str(label).casefold() for label in pr.get("labels", []) if label}
+    title = str(pr.get("title") or "").casefold()
+    return "refactor" in labels or title.startswith("refactor")
+
+
+def low_risk_refactor_proof_override(
+    *,
+    pr: dict[str, Any],
+    files: list[str],
+    classification: dict[str, Any],
+    checks: dict[str, Any],
+    parse_diff: dict[str, Any],
+    proof: dict[str, Any],
+) -> bool:
+    """Allow green parser-only refactors to clear body-proof-only gaps.
+
+    Agent coauthorship still raises scrutiny, but for a refactor with no card parse
+    changes the concrete evidence is the diff shape, parse-diff, and green checks.
+    Hard proof risks like skipped verification or Gittensor closed-heavy still block.
+    """
+    if not proof.get("proof_gap"):
+        return False
+    risk_flags = set(proof.get("risk_flags") or [])
+    if risk_flags & {"verification-skipped-or-delegated", "gittensor-closed-heavy"}:
+        return False
+    return (
+        bool(files)
+        and classification.get("surface") == "backend"
+        and is_declared_refactor(pr)
+        and all(is_parser_refactor_file(path) for path in files)
+        and checks.get("state") == "green"
+        and parse_diff.get("present")
+        and parse_diff.get("state") == "no_changes"
+    )
 
 
 def fetch_gittensor_records(api_url: str | None) -> tuple[list[dict[str, Any]], str | None]:
@@ -1726,6 +1852,145 @@ def gittensor_summary(
 # ─── Advisory recommendation (ordered precedence ladder) ─────────────────────
 
 
+def requested_changes_policy(packet: dict[str, Any]) -> dict[str, Any]:
+    configured = (packet.get("policy") or {}).get("requested_changes") or {}
+    return {
+        "warning_after_days": configured.get(
+            "warning_after_days", DEFAULT_REQUESTED_CHANGES_WARNING_AFTER_DAYS
+        ),
+        "close_after_warning_days": configured.get(
+            "close_after_warning_days", DEFAULT_REQUESTED_CHANGES_CLOSE_AFTER_WARNING_DAYS
+        ),
+        "warning_marker": configured.get(
+            "warning_marker", REQUESTED_CHANGES_EXPIRY_MARKER
+        ),
+    }
+
+
+def comment_login(comment: dict[str, Any]) -> str | None:
+    author = comment.get("author")
+    if isinstance(author, dict):
+        return author.get("login")
+    return author
+
+
+def comment_text(comment: dict[str, Any]) -> str:
+    return str(comment.get("body") or comment.get("body_excerpt") or "")
+
+
+def author_activity_after(pr: dict[str, Any], timestamp: str | None) -> bool:
+    author_login = pr.get("author_login")
+    return any(
+        comment_login(comment) == author_login
+        and timestamp_after(comment.get("createdAt"), timestamp)
+        for comment in pr.get("comments", [])
+    ) or any(
+        comment_login(review) == author_login
+        and timestamp_after(review.get("submittedAt"), timestamp)
+        for review in pr.get("reviews", [])
+    )
+
+
+def latest_requested_changes_review_timestamp(packet: dict[str, Any]) -> str | None:
+    head = (packet.get("pr") or {}).get("headRefOid")
+    reviews = [
+        review
+        for review in (packet.get("pr") or {}).get("reviews", [])
+        if review.get("state") == "CHANGES_REQUESTED"
+        and (not review.get("commit") or not head or review.get("commit") == head)
+        and review.get("submittedAt")
+    ]
+    if not reviews:
+        return None
+    reviews.sort(key=lambda review: review.get("submittedAt") or "")
+    return reviews[-1].get("submittedAt")
+
+
+def latest_requested_changes_warning(packet: dict[str, Any]) -> dict[str, Any] | None:
+    local_event = packet.get("local_current_event") or {}
+    candidates = []
+    if local_event.get("event_type") == "requested_changes_warning" or local_event.get(
+        "outcome"
+    ) == "requested_changes_warning":
+        candidates.append(
+            {
+                "source": "event_log",
+                "timestamp": local_event.get("timestamp"),
+            }
+        )
+    marker = requested_changes_policy(packet)["warning_marker"]
+    acting_login = packet.get("acting_login")
+    for comment in (packet.get("pr") or {}).get("comments", []):
+        marker_present = comment.get("requested_changes_expiry_marker") or (
+            marker in comment_text(comment)
+        )
+        if not marker_present:
+            continue
+        author_login = comment_login(comment)
+        if acting_login and author_login and author_login != acting_login:
+            continue
+        candidates.append(
+            {
+                "source": "github_comment",
+                "timestamp": comment.get("createdAt"),
+            }
+        )
+    candidates = [candidate for candidate in candidates if candidate.get("timestamp")]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda candidate: candidate["timestamp"])
+    return candidates[-1]
+
+
+def requested_changes_expiry_state(
+    packet: dict[str, Any], local_block: bool, author_followup_after_local_event: bool
+) -> dict[str, Any]:
+    pr = packet.get("pr") or {}
+    policy = requested_changes_policy(packet)
+    head = pr.get("headRefOid")
+    review_decision = pr.get("reviewDecision")
+    latest_commit = packet.get("latest_maintainer_review_commit")
+    current_head_changes_requested = review_decision == "CHANGES_REQUESTED" and (
+        latest_commit is None or latest_commit == head
+    )
+    active = local_block or current_head_changes_requested
+    warning = latest_requested_changes_warning(packet)
+    warning_timestamp = (warning or {}).get("timestamp")
+    author_followup_after_warning = author_activity_after(pr, warning_timestamp)
+    blocker_timestamp = None
+    if local_block:
+        blocker_timestamp = (packet.get("local_current_event") or {}).get("timestamp")
+    if blocker_timestamp is None and current_head_changes_requested:
+        blocker_timestamp = latest_requested_changes_review_timestamp(packet)
+    blocker_age = age_in_days(blocker_timestamp)
+    warning_age = age_in_days(warning_timestamp)
+    warning_due = (
+        active
+        and warning is None
+        and blocker_age is not None
+        and blocker_age >= policy["warning_after_days"]
+    )
+    close_due = (
+        active
+        and warning is not None
+        and not author_followup_after_warning
+        and not author_followup_after_local_event
+        and warning_age is not None
+        and warning_age >= policy["close_after_warning_days"]
+    )
+    return {
+        "active": active,
+        "blocker_timestamp": blocker_timestamp,
+        "warning": warning,
+        "warning_due": warning_due,
+        "close_due": close_due,
+        "author_followup_after_warning": author_followup_after_warning,
+        "warning_after_days": policy["warning_after_days"],
+        "close_after_warning_days": policy["close_after_warning_days"],
+        "warning_marker": policy["warning_marker"],
+    }
+
+
 def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     pr = packet["pr"]
     head = pr.get("headRefOid")
@@ -1739,11 +2004,10 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     local_event_type = local_event.get("event_type")
     local_outcome = local_event.get("outcome")
     local_event_timestamp = local_event.get("timestamp")
-    author_login = pr.get("author_login")
-    author_followup_after_local_event = any(
-        comment.get("author") == author_login
-        and timestamp_after(comment.get("createdAt"), local_event_timestamp)
-        for comment in pr.get("comments", [])
+    author_followup_after_local_event = author_activity_after(pr, local_event_timestamp)
+    parse_diff = packet.get("parse_diff") or {}
+    parse_diff_after_local_event = timestamp_after(
+        parse_diff.get("updated_at"), local_event_timestamp
     )
     author_policy = packet.get("author_policy", {})
     local_block_event = local_outcome != "ci_failed" and local_event_type in {
@@ -1756,6 +2020,14 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         "reviewed_request_changes",
         "blocked",
     }
+    local_hold = local_event_type == "held" or local_outcome in HOLD_STATES
+    local_block = local_block_event or local_block_outcome
+    conflicts_with_base = (
+        pr.get("mergeStateStatus") == "DIRTY" or pr.get("mergeable") == "CONFLICTING"
+    )
+    requested_changes_expiry = requested_changes_expiry_state(
+        packet, local_block, author_followup_after_local_event
+    )
 
     if pr.get("state") == "MERGED":
         action = "merged_prune"
@@ -1775,26 +2047,61 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         # paths still surfaces as request_changes — safety wins over the skip.
         action = "skip"
         reason = "contributor_standing_skip"
-    elif classification.get("files_truncated"):
-        # A truncated file list may hide a hard-stop path, so it must never silently
-        # defer or pass to a handler — force a manual review before any softer branch.
-        action = "review"
-        reason = "files_truncated_needs_manual_classification"
     elif (local_outcome or "").lower() == "defer-fe":
         action = "defer"
         reason = "local_defer_fe_current_head"
-    elif (local_event_type == "held" or local_outcome in HOLD_STATES) and author_followup_after_local_event:
+    elif local_hold and author_followup_after_local_event:
         action = "review"
         reason = "author_followup_after_local_hold"
-    elif local_event_type == "held" or local_outcome in HOLD_STATES:
+    elif local_hold and (packet.get("ci") or {}).get("state") != "green":
         action = "hold_ci"
         reason = "local_hold_current_head"
-    elif local_block_event or local_block_outcome:
+    elif local_hold and conflicts_with_base:
+        action = "blocked"
+        reason = "local_hold_current_head"
+    elif local_block and author_followup_after_local_event and conflicts_with_base:
+        action = "update_branch_for_handler"
+        reason = "conflicting_after_author_followup"
+    elif local_block and author_followup_after_local_event:
+        action = "review"
+        reason = "author_followup_after_local_block"
+    elif requested_changes_expiry["author_followup_after_warning"] and conflicts_with_base:
+        action = "update_branch_for_handler"
+        reason = "conflicting_after_author_followup"
+    elif requested_changes_expiry["author_followup_after_warning"]:
+        action = "review"
+        reason = "author_followup_after_requested_changes_warning"
+    elif requested_changes_expiry["close_due"]:
+        action = "close_stale_changes_for_handler"
+        reason = "requested_changes_expired"
+    elif requested_changes_expiry["warning_due"]:
+        action = "warn_stale_changes_for_handler"
+        reason = "requested_changes_warning_due"
+    elif local_block and parse_diff_after_local_event:
+        if conflicts_with_base:
+            action = "update_branch_for_handler"
+            reason = "conflicting_after_parse_diff_followup"
+        else:
+            action = "review"
+            reason = "parse_diff_after_local_block"
+    elif local_block:
         action = "blocked"
         reason = "local_block_current_head"
-    elif (packet.get("proof") or {}).get("proof_gap"):
-        action = "request_changes" if review_decision == "APPROVED" or queue else "review"
-        reason = "proof_required_missing"
+    elif classification.get("files_truncated"):
+        # A truncated file list may hide a hard-stop path, so it must never silently
+        # defer or pass to a handler. Current-head local terminal events are honored
+        # above; otherwise force a manual review before any softer branch.
+        action = "review"
+        reason = "files_truncated_needs_manual_classification"
+    elif review_decision == "APPROVED" and conflicts_with_base:
+        action = "update_branch_for_handler"
+        reason = "approved_conflicting"
+    elif requested_changes_expiry["active"]:
+        action = "blocked"
+        reason = "changes_requested_current_head"
+    elif conflicts_with_base:
+        action = "update_branch_for_handler"
+        reason = "conflicting"
     elif latest_commit and latest_commit != head and review_decision == "APPROVED":
         action = "dequeue_stale_for_handler" if queue else "review"
         reason = "stale_approval"
@@ -1805,6 +2112,9 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
             if (pr.get("isInMergeQueue") or pr.get("mergeQueueEntry"))
             else "auto_merge_enabled"
         )
+    elif (packet.get("proof") or {}).get("proof_gap"):
+        action = "request_changes" if review_decision == "APPROVED" or queue else "review"
+        reason = "proof_required_missing"
     elif classification.get("surface") == "frontend" and not author_policy.get(
         "frontend_review_allowed"
     ):
@@ -1813,9 +2123,6 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif local_event_type == "approved_enqueued":
         action = "approve_ready_for_handler"
         reason = "local_approved_enqueued_live_check"
-    elif review_decision == "CHANGES_REQUESTED" and latest_commit == head:
-        action = "blocked"
-        reason = "changes_requested_current_head"
     elif review_decision == "CHANGES_REQUESTED":
         action = "review"
         reason = "stale_changes_requested"
@@ -1833,14 +2140,32 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     # a stale merge-base whose R2 baseline aged out shows "Baseline pending" forever, so
     # flag engine-surface review candidates to consider update-branch first. The
     # files_truncated safety reason from make_packet is preserved — it must not be masked.
-    parse_diff = packet.get("parse_diff") or {}
-    if (
+    baseline_pending_after_maintainer_merge = (
+        "engine" in (classification.get("path_classes") or {})
+        and parse_diff.get("state") == "baseline_pending"
+        and int(pr.get("maintainer_merge_commit_count") or 0) > 0
+    )
+    stale_changes_requested = (
+        review_decision == "CHANGES_REQUESTED"
+        and latest_commit is not None
+        and latest_commit != head
+    )
+    if baseline_pending_after_maintainer_merge and (
+        review_decision == "APPROVED" or stale_changes_requested
+    ) and not (packet.get("proof") or {}).get("proof_gap"):
+        action = "approve_ready_for_handler"
+        reason = "baseline_pending_after_maintainer_merge_ready"
+    elif (
         action == "review"
         and reason != "files_truncated_needs_manual_classification"
         and "engine" in (classification.get("path_classes") or {})
         and parse_diff.get("state") == "baseline_pending"
     ):
-        reason = "review_parse_baseline_pending"
+        reason = (
+            "review_parse_baseline_pending_after_maintainer_merge"
+            if baseline_pending_after_maintainer_merge
+            else "review_parse_baseline_pending"
+        )
 
     recommendation = {
         "pr": pr.get("number"),
@@ -1855,6 +2180,8 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         "gittensor": packet.get("gittensor"),
         "proof": packet.get("proof"),
     }
+    if action in {"warn_stale_changes_for_handler", "close_stale_changes_for_handler"}:
+        recommendation["requested_changes_expiry"] = requested_changes_expiry
     if action == "defer" and reason == "frontend_policy":
         label = packet.get("policy", {}).get("labels", {}).get("frontend_deferred")
         if label:
@@ -1921,6 +2248,27 @@ def make_packet(
         )
     }
     proof = proof_profile(pr, contributor_summary, gittensor)
+    if (
+        files
+        and classification.get("surface") == "unknown"
+        and all(path.startswith("docs/") for path in files)
+    ):
+        # Docs-only maintenance has no runtime or parser boundary to prove. Keep
+        # the risk flags visible for reviewer context, but do not turn contributor
+        # scrutiny into a queue-safety proof blocker.
+        proof["proof_required"] = False
+        proof["proof_gap"] = False
+    elif low_risk_refactor_proof_override(
+        pr=compact_pr,
+        files=files,
+        classification=classification,
+        checks=checks,
+        parse_diff=parse_diff,
+        proof=proof,
+    ):
+        proof["proof_satisfied"] = True
+        proof["proof_gap"] = False
+        proof["proof_override"] = "low_risk_parser_refactor_green_no_parse_changes"
     packet = {
         "schema_version": 1,
         "completeness": "complete" if mode == "full" else "triage",
@@ -1935,7 +2283,13 @@ def make_packet(
         "policy": {
             "labels": {
                 "frontend_deferred": policy.frontend_deferred_label,
-            }
+                "quality": policy.quality_label,
+            },
+            "requested_changes": {
+                "warning_after_days": policy.requested_changes_warning_after_days,
+                "close_after_warning_days": policy.requested_changes_close_after_warning_days,
+                "warning_marker": REQUESTED_CHANGES_EXPIRY_MARKER,
+            },
         },
         "author_policy": author_policy,
         "contributor": contributor_summary,
@@ -1992,7 +2346,7 @@ def pr_node_fields(
         else ""
     )
     status_rollup = (
-        "commits(last:20){nodes{commit{oid authors(first:10){nodes{name email user{login}}} "
+        "commits(last:20){nodes{commit{oid messageHeadline authors(first:10){nodes{name email user{login}}} "
         "statusCheckRollup{state contexts(first:"
         f"{status_contexts_first}"
         "){nodes{__typename "
@@ -2000,7 +2354,7 @@ def pr_node_fields(
         "... on StatusContext{context state}}}}}}}"
         if status_contexts_first is not None
         else (
-            "commits(last:20){nodes{commit{oid authors(first:10){nodes{name email user{login}}} "
+            "commits(last:20){nodes{commit{oid messageHeadline authors(first:10){nodes{name email user{login}}} "
             "statusCheckRollup{state}}}}"
         )
     )
@@ -2031,28 +2385,32 @@ SCAN_PR_QUERY = (
     "pullRequests(states:[OPEN], first:$first, after:$after,"
     " orderBy:{field:CREATED_AT, direction:DESC}){"
     "pageInfo{hasNextPage endCursor}"
-    f"nodes{{{pr_node_fields(
+    "nodes{"
+    + pr_node_fields(
         comments_last=15,
-        include_full_reviews=False,
+        include_full_reviews=True,
         include_pr_body=True,
         include_review_body=False,
         include_comment_body=True,
         status_contexts_first=None,
-    )}}}"
+    )
+    + "}"
     "}}}"
 )
 
 SINGLE_PR_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){"
     "repository(owner:$owner,name:$name){"
-    f"pullRequest(number:$number){{{pr_node_fields(
+    "pullRequest(number:$number){"
+    + pr_node_fields(
         comments_last=30,
         include_full_reviews=True,
         include_pr_body=True,
         include_review_body=True,
         include_comment_body=True,
         status_contexts_first=80,
-    )}}}"
+    )
+    + "}"
     "}}"
 )
 
@@ -2122,6 +2480,7 @@ def graphql_commit_authors(node: dict[str, Any]) -> list[dict[str, Any]]:
         commits.append(
             {
                 "oid": commit.get("oid"),
+                "messageHeadline": commit.get("messageHeadline"),
                 "authors": [
                     {
                         "login": ((author.get("user") or {}).get("login")),
@@ -2318,7 +2677,13 @@ def candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
     order = CANDIDATE_ACTION_ORDER.get(action, 99)
     if action == "review":
         return (order, created, pr_number)
-    if action in {"dequeue_stale_for_handler", "update_branch_for_handler", "approve_ready_for_handler"}:
+    if action in {
+        "close_stale_changes_for_handler",
+        "dequeue_stale_for_handler",
+        "update_branch_for_handler",
+        "approve_ready_for_handler",
+        "warn_stale_changes_for_handler",
+    }:
         return (order, updated, created, pr_number)
     return (order, pr_number)
 
@@ -2389,7 +2754,7 @@ def event_skeleton(pr_number: int, compact_pr: dict[str, Any]) -> dict[str, Any]
     # Timestamp is prefilled because event_id hashes it: an agent that fills the
     # skeleton and pipes it to `record --event-json -` gets idempotent retries.
     return {
-        "event_type": "<FILL: review|changes_requested|blocked|approved_enqueued|deferred|held>",
+        "event_type": "<FILL: review|changes_requested|blocked|approved_enqueued|deferred|held|requested_changes_warning|stale_changes_closed>",
         "pr": pr_number,
         "head_sha": compact_pr.get("headRefOid"),
         "author": compact_pr.get("author_login"),
@@ -2406,6 +2771,9 @@ def command_inspect(args: argparse.Namespace) -> int:
     packet = packet_for_pr(context, pr, args.mode)
     if args.emit_event:
         packet["event_skeleton"] = event_skeleton(args.pr, packet["pr"])
+        signals = proof_tracking_signals(packet)
+        if signals:
+            packet["event_skeleton"]["signals"] = signals
     print(json_dumps(packet))
     return 0
 
@@ -2428,6 +2796,9 @@ def command_recommend(args: argparse.Namespace) -> int:
     if args.emit_event:
         recommendation = dict(recommendation)
         recommendation["event_skeleton"] = event_skeleton(args.pr, packet["pr"])
+        signals = proof_tracking_signals(packet)
+        if signals:
+            recommendation["event_skeleton"]["signals"] = signals
     print(json_dumps(recommendation))
     return 0
 

@@ -1,9 +1,9 @@
-use crate::game::effects::life::{apply_damage_life_loss, apply_life_gain};
+use crate::game::effects::life::{apply_life_totals_assignment, LifeAssignmentOutcome};
 use crate::game::static_abilities::{player_has_cant_gain_life, player_has_cant_lose_life};
 use crate::game::targeting::resolve_effect_player_ref;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingEffectResolved};
 use crate::types::player::PlayerId;
 
 /// CR 701.12a: Two players exchange life totals (Soul Conduit, Axis of
@@ -102,30 +102,28 @@ pub fn resolve(
         return Ok(());
     }
 
-    // CR 701.12c: each player gains or loses the difference to equal the other's
-    // previous total (a gain/loss, not a set). Both diffs are computed from the
-    // pre-swap snapshot so the swap is simultaneous.
-    let diff_a = life_b - life_a;
-    let diff_b = life_a - life_b;
-    for (pid, diff) in [(pid_a, diff_a), (pid_b, diff_b)] {
-        let deferred = match diff.signum() {
-            1 => apply_life_gain(state, pid, diff as u32, events).err(),
-            -1 => apply_damage_life_loss(state, pid, (-diff) as u32, events).err(),
-            _ => None,
-        };
-        if deferred.is_some() {
-            // CR 614.7: a competing replacement required a player choice; the
-            // helper installed the WaitingFor and the resume path completes
-            // resolution.
-            return Ok(());
+    // CR 701.12c: each player's life total becomes the other's previous total (a
+    // gain/loss, not a set), applied simultaneously from the pre-swap snapshot.
+    // Delegated to the shared N-slot permutation helper — the 2-player exchange is
+    // its special case.
+    match apply_life_totals_assignment(
+        state,
+        &[(pid_a, life_b), (pid_b, life_a)],
+        ability.controller,
+        Some(PendingEffectResolved::new(resolved_kind, ability.source_id)),
+        events,
+    )? {
+        // CR 616.1: a competing replacement required a player choice; the helper
+        // installed the WaitingFor and the resume path completes resolution.
+        LifeAssignmentOutcome::Deferred => Ok(()),
+        LifeAssignmentOutcome::Applied => {
+            events.push(GameEvent::EffectResolved {
+                kind: resolved_kind,
+                source_id: ability.source_id,
+            });
+            Ok(())
         }
     }
-
-    events.push(GameEvent::EffectResolved {
-        kind: resolved_kind,
-        source_id: ability.source_id,
-    });
-    Ok(())
 }
 
 #[cfg(test)]

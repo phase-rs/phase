@@ -758,6 +758,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::SetPower { .. }
         | ContinuousModification::SetToughness { .. }
         | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::RemoveKeyword { .. }
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::AddType { .. }
@@ -929,8 +930,15 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
             }
         }
         Effect::SeparateIntoPiles {
-            chosen_pile_effect, ..
-        } => walk_ability_def(chosen_pile_effect, out),
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => {
+            walk_ability_def(chosen_pile_effect, out);
+            if let Some(unchosen) = unchosen_pile_effect {
+                walk_ability_def(unchosen, out);
+            }
+        }
         Effect::RevealFromHand { on_decline, .. } => {
             if let Some(sub) = on_decline {
                 walk_ability_def(sub, out);
@@ -1060,6 +1068,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
+        | Effect::Behold { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
@@ -1080,6 +1089,9 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
+        // Builds its PutCounter/RemoveCounter branches at resolution — carries no
+        // static conjure name to preload.
+        | Effect::ChooseCounterAdjustment { .. }
         | Effect::DoublePT { .. }
         | Effect::DoublePTAll { .. }
         | Effect::MoveCounters { .. }
@@ -1098,6 +1110,8 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::ExileTop { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -1110,11 +1124,13 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }
         | Effect::BecomeSaddled { .. }
+        | Effect::BecomeBlocked { .. }
         | Effect::SetClassLevel { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::FreeCastFromZones { .. }
@@ -1128,6 +1144,8 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
         | Effect::ChaosEnsues
+        | Effect::RedistributeLifeTotals
+        | Effect::ReverseTurnOrder
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -1145,6 +1163,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::ForEachCategoryExile { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
         | Effect::Exploit { .. }
         | Effect::GainEnergy { .. }
         | Effect::GivePlayerCounter { .. }
@@ -2866,6 +2885,8 @@ mod tests {
             object_filter: TargetFilter::Any,
             chooser: PlayerScope::Controller,
             chosen_pile_effect: Box::new(conjure_ability("piles", Zone::Hand)),
+            pile_source: crate::types::ability::PileSource::Battlefield,
+            unchosen_pile_effect: None,
         };
         walk_effect(&piles, &mut names);
 

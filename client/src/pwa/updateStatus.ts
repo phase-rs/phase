@@ -106,6 +106,12 @@ let downloadProgress = 0;
 const progressListeners = new Set<() => void>();
 
 export function setDownloadProgress(value: number) {
+  // NaN escapes the 0–100 clamp below (Math.max/min propagate NaN, and
+  // `downloadProgress === NaN` is always false so the change guard doesn't stop
+  // it), poisoning the store and the progress UI. NaN is the `received / total`
+  // result when a download reports no content-length, so ignore it and keep the
+  // last valid value. (±Infinity still clamp correctly to 100 / 0.)
+  if (Number.isNaN(value)) return;
   const clamped = Math.max(0, Math.min(100, Math.round(value)));
   if (downloadProgress === clamped) return;
   downloadProgress = clamped;

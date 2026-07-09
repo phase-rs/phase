@@ -12,19 +12,28 @@ pub(super) fn run_post_action_pipeline(
     events: &mut Vec<GameEvent>,
     default_wf: &WaitingFor,
     skip_trigger_scan: bool,
+    skip_deferred_trigger_drain: bool,
 ) -> Result<WaitingFor, EngineError> {
-    run_post_action_pipeline_from(state, events, 0, default_wf, skip_trigger_scan)
+    run_post_action_pipeline_from(
+        state,
+        events,
+        0,
+        default_wf,
+        skip_trigger_scan,
+        skip_deferred_trigger_drain,
+    )
 }
 
 /// Run the normal post-action settlement while scanning only events produced at
 /// or after `event_start`. Use for nested resume paths that carry earlier
 /// payment/choice events in the same output buffer.
-pub(super) fn run_post_action_pipeline_from(
+pub(crate) fn run_post_action_pipeline_from(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     event_start: usize,
     default_wf: &WaitingFor,
     skip_trigger_scan: bool,
+    skip_deferred_trigger_drain: bool,
 ) -> Result<WaitingFor, EngineError> {
     // Capture stack depth before any trigger/SBA processing so we can detect
     // whether new triggered abilities were added during this pipeline pass.
@@ -141,6 +150,7 @@ pub(super) fn run_post_action_pipeline_from(
     // handled by the check below.
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && !state.deferred_triggers.is_empty()
+        && !skip_deferred_trigger_drain
     {
         if let Some(wf) = triggers::drain_deferred_trigger_queue(state, events) {
             state.waiting_for = wf;
@@ -173,6 +183,15 @@ pub(super) fn run_post_action_pipeline_from(
     let delayed_events = triggers::check_delayed_triggers(state, &delayed_input);
     events.extend(delayed_events);
     state.consumed_before_priority_trigger_events.clear();
+
+    // CR 603.3b: check_delayed_triggers may have paused the batch on a same-controller
+    // ordering choice; surface it before check_state_triggers / the priority fallthrough
+    // clobber it. Scoped to OrderTriggers so the Breeches target-selection pause (which
+    // sets pending_trigger and is re-derived at begin_pending_trigger_target_selection)
+    // is untouched.
+    if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+        return Ok(state.waiting_for.clone());
+    }
 
     // CR 603.8: Check state triggers after event-based triggers.
     // State triggers fire when a condition is true, checked whenever a player

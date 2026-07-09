@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { GameObject } from "../../adapter/types";
-import { toCardProps } from "../cardProps";
+import { toCardProps, toRoman } from "../cardProps";
 
 function makeGameObject(overrides: Partial<GameObject> = {}): GameObject {
   return {
@@ -165,5 +165,24 @@ describe("toCardProps", () => {
     expect(props.attachmentIds).toEqual([10, 11]);
     expect(props.keywords).toEqual(["Flying", "Trample"]);
     expect(props.colorIdentity).toEqual(["White", "Blue"]);
+  });
+});
+
+describe("toRoman", () => {
+  it("converts 1-5 to Roman numerals", () => {
+    expect(["", "I", "II", "III", "IV", "V"].map((_, i) => toRoman(i))).toEqual([
+      "", "I", "II", "III", "IV", "V",
+    ]);
+  });
+
+  it("renders blank (never the literal 'undefined'/'NaN') for a missing/invalid level", () => {
+    expect(toRoman(undefined as unknown as number)).toBe("");
+    expect(toRoman(NaN)).toBe("");
+    expect(toRoman(0)).toBe("");
+    expect(toRoman(-1)).toBe("");
+  });
+
+  it("falls back to the arabic numeral for a Class level beyond V", () => {
+    expect(toRoman(6)).toBe("6");
   });
 });

@@ -8,7 +8,7 @@
 
 use engine::types::ability::{CounterTriggerFilter, DamageKindFilter, TriggerConstraint};
 use engine::types::triggers::{AttackTargetFilter, TriggerMode};
-use engine::types::{Phase, TargetFilter, TriggerDefinition, TypedFilter, Zone};
+use engine::types::{Phase, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter, Zone};
 
 use crate::convert::filter::{
     cards_in_graveyard_to_filter, cards_to_filter, convert as convert_permanents,
@@ -362,16 +362,11 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
             });
         }
 
-        // CR 701.9: Discard triggers — "when [players] discards [cards]". Engine
-        // TriggerDefinition::Discarded has no valid_player or discarded-card
-        // filter axis today, so dropping the player/card constraints fires the
-        // trigger on every discard regardless of who/what. Strict-fail until
-        // engine extends.
-        Trigger::WhenAPlayerDiscardsACard(_players, _cards) => {
-            return Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "TriggerDefinition",
-                needed_variant: "Discarded with valid_player + discarded-card filter".into(),
-            });
+        // CR 701.9: Discard triggers — "when [players] discards [cards]".
+        // `valid_target` carries the player axis; `valid_card` optionally
+        // constrains the discarded card (type/keyword predicates).
+        Trigger::WhenAPlayerDiscardsACard(players, cards) => {
+            discard_trigger(players, cards, "Trigger::WhenAPlayerDiscardsACard")?
         }
         // CR 702.29 + CR 603: Cycling triggers — "whenever [a player] cycles a
         // card". Engine `TriggerMode::Cycled` fires per cycle event; the
@@ -572,12 +567,18 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
             TriggerDefinition::new(TriggerMode::YouAttack)
         }
 
-        // CR 508.3a: "Whenever [a creature] attacks alone" — same firing axis
-        // as a regular attack trigger; the "alone" qualifier (single-attacker
-        // batch) has no engine field today. Mirrors native parser at
-        // oracle_trigger.rs:8273 (collapses to `TriggerMode::Attacks`).
+        // CR 506.5: "Whenever [a creature] attacks alone" — same firing axis
+        // as a regular attack trigger; zero same-controller co-attackers via
+        // `Not(MinCoAttackers { minimum: 1 })`.
         Trigger::WhenACreatureAttacksAlone(filter) => {
-            TriggerDefinition::new(TriggerMode::Attacks).valid_card(convert_permanents(filter)?)
+            TriggerDefinition::new(TriggerMode::Attacks)
+                .valid_card(convert_permanents(filter)?)
+                .condition(TriggerCondition::Not {
+                    condition: Box::new(TriggerCondition::MinCoAttackers {
+                        minimum: 1,
+                        filter: None,
+                    }),
+                })
         }
 
         // CR 509.1h: "Whenever [a creature] blocks [a creature]" — fires for
@@ -845,6 +846,37 @@ fn cycled_trigger(
             return Err(ConversionGap::EnginePrerequisiteMissing {
                 engine_type: "TriggerDefinition",
                 needed_variant: format!("{idiom} with cycled-card filter: CardsInHand::{other:?}"),
+            });
+        }
+    }
+    Ok(def)
+}
+
+/// CR 701.9 + CR 603: Build a `Discarded` trigger with the player axis on
+/// `valid_target` and optional discarded-card predicates on `valid_card`.
+fn discard_trigger(
+    players: &Players,
+    cards: &CardsInHand,
+    idiom: &'static str,
+) -> ConvResult<TriggerDefinition> {
+    let mut def = TriggerDefinition::new(TriggerMode::Discarded);
+    if !matches!(players, Players::AnyPlayer) {
+        let controller = players_to_controller(players)?;
+        def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(controller),
+        ));
+    }
+    match cards {
+        CardsInHand::AnyCard => {}
+        CardsInHand::SingleCardInHand(crate::schema::types::CardInHand::ThisCardInHand) => {
+            def.valid_card = Some(TargetFilter::SelfRef);
+        }
+        other => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "TriggerDefinition",
+                needed_variant: format!(
+                    "{idiom} with discarded-card filter: CardsInHand::{other:?}"
+                ),
             });
         }
     }

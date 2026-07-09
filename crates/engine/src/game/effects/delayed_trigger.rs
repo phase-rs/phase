@@ -60,8 +60,14 @@ pub fn resolve(
     // `AtNextPhaseForPlayer.player` because compile-time AST has no access to
     // runtime player ids; rewrite here to the actual controller at resolve
     // time. Mirrors the `bind_contextual_filter_to_condition` pattern above.
-    if let DelayedTriggerCondition::AtNextPhaseForPlayer { player, .. } = &mut condition {
+    if let DelayedTriggerCondition::AtNextPhaseForPlayer { player, gate, .. } = &mut condition {
         *player = ability.controller;
+        // CR 513.2 + CR 603.7a: the "on your next turn" floor only becomes
+        // concrete at creation. Stamp the symbolic parse-time gate to the actual
+        // creation turn so the matcher skips the current turn's matching phase.
+        if matches!(gate, crate::types::ability::TurnGate::AfterCreationTurn) {
+            *gate = crate::types::ability::TurnGate::After(state.turn_number);
+        }
     }
 
     // CR 603.7c: Build the delayed trigger's resolved ability from the full
@@ -180,12 +186,26 @@ pub fn resolve(
 /// tail clause carries only its own local slot, so an inner delayed
 /// `ParentTargetSlot { index }` anaphor pointing at an earlier slot would index
 /// out of range and degrade to `Any`. Flattening the root chain exposes every
-/// declared slot in order so the indexed anaphor resolves. Only when the root
-/// chain is empty do we fall back to the triggering source (unchanged).
+/// declared slot in order so the indexed anaphor resolves.
+///
+/// CR 608.2c (phase#4767): When the root chain exposes NO concrete slot — because
+/// the parent target was injected at runtime by a `forward_result` zone-change
+/// rather than declared as an explicit chain slot (Animate Dead / Dance of the
+/// Dead: the reanimated creature is the moved object, bound into the sub-chain's
+/// `targets` by `effects/mod.rs`'s forward_result block, never a declared slot) —
+/// the node's OWN propagated `targets` are the resolved parent target. Prefer them
+/// over the triggering-source fallback, which would otherwise snapshot the
+/// triggering object (the Aura) instead of "that creature". Only when BOTH the
+/// root chain and the node's own targets are empty do we fall back to the
+/// triggering source (unchanged).
 fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
     let root_chain = crate::game::targeting::parent_chain_targets_from_root(state, ability);
     if !root_chain.is_empty() {
         return root_chain;
+    }
+
+    if !ability.targets.is_empty() {
+        return ability.targets.clone();
     }
 
     crate::game::targeting::resolve_event_context_target(
@@ -576,11 +596,15 @@ fn snapshot_quantity_ref(
             .as_ref()
             .and_then(crate::game::targeting::extract_source_from_event)
         {
-            // CR 202.3e: include cost_x_paid for the on-stack spell.
+            // CR 202.3d + CR 202.3e + CR 702.102b: snapshot "that spell's mana value"
+            // through the split-aware authority — a FUSED split spell freezes its
+            // COMBINED mana value (both halves), and every other spell freezes its own
+            // cost with the chosen X (`spell_mana_value`'s non-fused arm is the same
+            // `mana_value_with_x(zone, cost_x_paid)` read).
             return state
                 .objects
                 .get(&spell_id)
-                .map(|obj| obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid) as i32);
+                .map(|obj| obj.spell_mana_value() as i32);
         }
     }
     let target_object_id = ability.targets.iter().find_map(|t| match t {
@@ -615,7 +639,10 @@ fn snapshot_quantity_ref(
             let value = state
                 .objects
                 .get(&target_object_id)
-                .map(|obj| obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid) as i32)
+                // CR 202.3d + CR 709.4b: the target object may be in a non-stack
+                // zone (a targeted card in a graveyard), where a split card's mana
+                // value is its combined halves; CR 202.3e: chosen X on the stack.
+                .map(|obj| obj.effective_mana_value() as i32)
                 .or_else(|| {
                     state
                         .lki_cache
@@ -668,6 +695,17 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                 *origin = Some(Zone::Exile);
             }
         }
+        // CR 603.7c + CR 608.2c: Pin the tracked-set sentinel `TrackedSetId(0)` to
+        // the concrete `real_id` inside the mass-destroy target filter at
+        // delayed-trigger CREATION, so end-step resolution reads THIS ability's
+        // frozen population and never falls back to `matches_target_filter`'s live
+        // `max_by_key` scan (which would pick a later, unrelated tracked set — the
+        // Maddening Imp cross-resolution collision). Reuses the existing
+        // `TargetFilter::rebind_tracked_set_sentinel` (types/ability.rs) — the
+        // single authority for rewriting `TrackedSet{0}`/`TrackedSetFiltered{0}` →
+        // concrete inside a filter (recursing And/Or/Not) — rather than open-coding
+        // the two-variant rewrite the `ChangeZoneAll` arm above does inline.
+        Effect::DestroyAll { target, .. } => target.rebind_tracked_set_sentinel(real_id),
         // Upgrade ChangeZone → ChangeZoneAll: ChangeZone uses ability.targets (empty for
         // delayed triggers), so it would move nothing. ChangeZoneAll scans by filter.
         Effect::ChangeZone { destination, .. } => {
@@ -1548,6 +1586,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(effect_def),
                 uses_tracked_set: false,
@@ -1565,8 +1604,56 @@ mod tests {
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::PreCombatMain,
                 player: PlayerId(1),
+                gate: crate::types::ability::TurnGate::None,
             },
             "placeholder player must be rewritten to ability.controller"
+        );
+    }
+
+    /// CR 513.2 + CR 603.7a: the parser's symbolic `TurnGate::AfterCreationTurn`
+    /// (Kav Landseeker "the end step on your next turn") must be stamped to
+    /// `TurnGate::After(creation_turn)` at resolve time, so the runtime matcher
+    /// skips the current turn's end step. Revert-to-red: drop the stamp in
+    /// `resolve()` and the stored gate stays `AfterCreationTurn` (which the
+    /// matcher `debug_assert!`s against — a wrong-timing bug).
+    #[test]
+    fn after_creation_turn_gate_stamped_to_concrete_floor() {
+        use crate::types::ability::TurnGate;
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 5;
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    player: PlayerId(0),
+                    gate: TurnGate::AfterCreationTurn,
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert_eq!(
+            state.delayed_triggers[0].condition,
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
+                player: PlayerId(0),
+                gate: TurnGate::After(5),
+            },
+            "AfterCreationTurn must be stamped to After(state.turn_number)"
         );
     }
 
@@ -1587,6 +1674,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::End,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(effect_def),
                 uses_tracked_set: false,
@@ -1641,6 +1729,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::End,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(inner_def),
                 uses_tracked_set: false,
@@ -1713,6 +1802,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -1741,6 +1831,55 @@ mod tests {
         }
     }
 
+    /// CR 202.3d + CR 702.102b: a delayed/reflexive "that spell's mana value"
+    /// (`ObjectManaValue { Demonstrative }`, no parent target) snapshots from the
+    /// `SpellCast` trigger-event context. For a FUSED split spell the frozen value
+    /// must be the COMBINED mana value of both halves (Breaking // Entering: front
+    /// {U}{B} = 2, back {4}{B}{R} = 6 → 8), not the front half. Reverting the
+    /// snapshot to `mana_cost.mana_value_with_x(...)` freezes 2 and this flips.
+    #[test]
+    fn snapshot_that_spells_mana_value_uses_combined_for_fused_split_spell() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+
+        let db = crate::test_support::shared_card_db();
+        let mut sc = GameScenario::new();
+        let spell = sc.add_real_card(P0, "Breaking", Zone::Stack, db);
+        sc.state.objects.get_mut(&spell).unwrap().fused_split_spell = true;
+        let card_id = sc.state.objects[&spell].card_id;
+        let mut state = sc.state;
+        // "that spell's mana value" resolves from the SpellCast event context.
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id,
+            controller: PlayerId(0),
+            object_id: spell,
+        });
+
+        // Demonstrative "that spell" ref with NO parent target -> event-context path.
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let value = snapshot_quantity_ref(
+            &QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Demonstrative,
+            },
+            &state,
+            &ability,
+        );
+        assert_eq!(
+            value,
+            Some(8),
+            "'that spell's mana value' for a fused Breaking // Entering freezes the \
+             COMBINED MV 8, not the front half (2)"
+        );
+    }
+
     #[test]
     fn sub_ability_parent_dependent_quantity_baked_to_fixed() {
         let mut state = GameState::new_two_player(42);
@@ -1767,6 +1906,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -1824,6 +1964,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -1875,6 +2016,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -1933,6 +2075,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -1980,6 +2123,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -2035,6 +2179,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -2085,6 +2230,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -2145,6 +2291,7 @@ mod tests {
                 condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::PreCombatMain,
                     player: PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -2195,6 +2342,7 @@ mod tests {
             source_id,
             LKISnapshot {
                 name: "Nine-Lives Familiar".to_string(),
+                token_image_ref: None,
                 power: Some(3),
                 toughness: Some(3),
                 base_power: Some(3),

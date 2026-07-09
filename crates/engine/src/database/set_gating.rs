@@ -79,9 +79,17 @@ fn set_still_gated(code: &str, catalog: &SetCatalog, as_of: ReleaseDate) -> bool
 /// Resolve the gated-set list for the current generation run: `GATED_SETS` from
 /// the environment, minus any sets whose MTGJSON release date has passed.
 pub fn resolve_gated_sets(catalog: &SetCatalog) -> HashSet<String> {
-    let configured = gated_sets_from_env();
-    let as_of = gated_sets_as_of();
-    let effective = effective_gated_sets(&configured, catalog, as_of);
+    resolve_gated_sets_from(&gated_sets_from_env(), catalog, gated_sets_as_of())
+}
+
+/// Env-independent core of [`resolve_gated_sets`]: filter `configured` down to
+/// sets still unreleased as of `as_of`, logging any auto-unlocked codes.
+pub fn resolve_gated_sets_from(
+    configured: &HashSet<String>,
+    catalog: &SetCatalog,
+    as_of: ReleaseDate,
+) -> HashSet<String> {
+    let effective = effective_gated_sets(configured, catalog, as_of);
     if !configured.is_empty() {
         let unlocked: Vec<&str> = configured
             .iter()

@@ -5,6 +5,7 @@ import {
   openPhaseSocket,
   withReconnect,
 } from "../openPhaseSocket";
+import { PROTOCOL_VERSION } from "../../adapter/ws-adapter";
 
 class MockWebSocket extends EventTarget {
   static OPEN = 1;
@@ -44,7 +45,7 @@ function helloFrame(
     data: {
       server_version: "0.0.0-test",
       build_commit: "testhash",
-      protocol_version: 11,
+      protocol_version: PROTOCOL_VERSION,
       mode: "Full",
       ...overrides,
     },
@@ -64,7 +65,7 @@ describe("openPhaseSocket", () => {
 
     const socket = await promise;
     expect(socket.serverInfo.mode).toBe("Full");
-    expect(socket.serverInfo.protocolVersion).toBe(11);
+    expect(socket.serverInfo.protocolVersion).toBe(PROTOCOL_VERSION);
     expect(ws.send).toHaveBeenCalledWith(
       expect.stringContaining('"type":"ClientHello"'),
     );
@@ -82,7 +83,7 @@ describe("openPhaseSocket", () => {
   it("rejects the previous protocol version for Full servers", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 10 }));
+    ws.deliverMessage(helloFrame({ protocol_version: PROTOCOL_VERSION - 1 }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
@@ -94,14 +95,14 @@ describe("openPhaseSocket", () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
     ws.deliverMessage(
-      helloFrame({ protocol_version: 10, mode: "LobbyOnly" }),
+      helloFrame({ protocol_version: PROTOCOL_VERSION - 1, mode: "LobbyOnly" }),
     );
 
     const socket = await promise;
     expect(socket.serverInfo.mode).toBe("LobbyOnly");
-    expect(socket.serverInfo.protocolVersion).toBe(10);
+    expect(socket.serverInfo.protocolVersion).toBe(PROTOCOL_VERSION - 1);
     expect(ws.send).toHaveBeenCalledWith(
-      expect.stringContaining('"protocol_version":10'),
+      expect.stringContaining(`"protocol_version":${PROTOCOL_VERSION - 1}`),
     );
   });
 
