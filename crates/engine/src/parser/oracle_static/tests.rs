@@ -4056,6 +4056,135 @@ fn peel_compound_all_quantified_conjuncts_single_quantifier_declines() {
     assert!(peel_compound_all_quantified_conjuncts("All Mountains are Plains").is_none());
 }
 
+// CR 611.3 + CR 613.4b + CR 205.1b: compound-subject animation whose subject is
+// a heterogeneous union of NEGATED-type legs — Bello, Bard of the Brambles.
+// Distinct from the "all X and all Y" family above (`parse_compound_all_subjects_type_change`
+// / `..._type_replacement`): Bello's subject has a SINGLE leading "each"
+// quantifier and per-conjunct negations ("non-Equipment", "non-Aura"), so it
+// is dispatched through `parse_each_compound_subject_type_change`, which
+// delegates the subject wholesale to the general target-phrase grammar. The
+// predicate also grants a MIXED bare-keyword + quoted-trigger list, which the
+// shared additive-type-clause helper alone would have silently reduced to
+// just the quoted trigger.
+#[test]
+fn bello_compound_negated_type_subject_animation_with_granted_abilities() {
+    use crate::types::card_type::CoreType;
+
+    let line = "During your turn, each non-Equipment artifact and non-Aura enchantment you \
+                control with mana value 4 or greater is a 4/4 Elemental creature in addition \
+                to its other types and has indestructible, haste, and \"Whenever this creature \
+                deals combat damage to a player, draw a card.\"";
+    let defs = parse_static_line_multi(line);
+    assert_eq!(defs.len(), 1, "Bello is one compound static: {defs:?}");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::DuringYourTurn),
+        "the leading During-your-turn scope must be preserved: {:?}",
+        def.condition
+    );
+
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!(
+            "affected must be an Or of the two subjects: {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filters.len(), 2, "one disjunct per subject: {filters:?}");
+
+    let cmc_ge_4 = FilterProp::Cmc {
+        comparator: Comparator::GE,
+        value: QuantityExpr::Fixed(4),
+    };
+    // Artifact conjunct: a non-Equipment artifact you control, mana value >= 4.
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Artifact)
+                && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype("Equipment".to_string()))))
+                && tf.controller == Some(ControllerRef::You)
+                && tf.properties.contains(&cmc_ge_4))),
+        "artifact conjunct must be non-Equipment artifact you control, MV>=4: {:?}",
+        def.affected
+    );
+    // Enchantment conjunct: a non-Aura enchantment you control, mana value >= 4.
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Enchantment)
+                && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype("Aura".to_string()))))
+                && tf.controller == Some(ControllerRef::You)
+                && tf.properties.contains(&cmc_ge_4))),
+        "enchantment conjunct must be non-Aura enchantment you control, MV>=4: {:?}",
+        def.affected
+    );
+
+    use ContinuousModification as CM;
+    for expected in [
+        CM::SetPower { value: 4 },
+        CM::SetToughness { value: 4 },
+        CM::AddType {
+            core_type: CoreType::Creature,
+        },
+        CM::AddSubtype {
+            subtype: "Elemental".to_string(),
+        },
+        CM::AddKeyword {
+            keyword: Keyword::Indestructible,
+        },
+        CM::AddKeyword {
+            keyword: Keyword::Haste,
+        },
+    ] {
+        assert!(
+            def.modifications.contains(&expected),
+            "missing {expected:?} in {:?}",
+            def.modifications
+        );
+    }
+    assert!(
+        def.modifications
+            .iter()
+            .any(|m| matches!(m, CM::GrantTrigger { .. })),
+        "the quoted combat-damage trigger must be granted, not silently dropped: {:?}",
+        def.modifications
+    );
+}
+
+// CR 205.1a vs CR 205.1b: `parse_each_compound_subject_type_change` applies
+// strictly ADDITIVE semantics, so it must decline a compound predicate lacking
+// the "in addition to its/their other types" marker — a bare replacement
+// compound is a different (unhandled here) semantics, not a gap in this
+// handler. Mirrors the same additive-marker gate the "all X and all Y" family
+// uses (`compound_subject_animation_replacement_predicate`).
+#[test]
+fn compound_negated_type_subject_animation_declines_non_additive_predicate() {
+    assert!(
+        parse_static_line_multi(
+            "each non-Equipment artifact and non-Aura enchantment you control with mana value \
+             4 or greater is a 4/4 Elemental creature."
+        )
+        .is_empty(),
+        "non-additive compound must not be additive-claimed"
+    );
+}
+
+// Single-subject lines (no "and" conjunction) must not be claimed by the
+// compound handler — they fall through unchanged (no other handler owns this
+// specific "each non-<Subtype> <Type> ... is ..." single-subject shape either,
+// so the expectation is the same unclaimed/Unimplemented status as today, not
+// a regression introduced by adding the compound handler).
+#[test]
+fn compound_negated_type_subject_animation_single_subject_falls_through() {
+    assert!(
+        parse_static_line_multi(
+            "each non-Equipment artifact you control with mana value 4 or greater is a 4/4 \
+             Elemental creature in addition to its other types."
+        )
+        .is_empty(),
+        "single-subject line must not be claimed by the compound-subject handler"
+    );
+}
+
 #[test]
 fn static_opponent_controlled_compound_subject_shares_continuous_predicate() {
     let def = parse_static_line(
