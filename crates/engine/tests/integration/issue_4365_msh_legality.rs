@@ -4,7 +4,7 @@
 use engine::database::legality::LegalityStatus;
 use engine::database::set_catalog::{ReleaseDate, SetCatalog, SetMeta};
 use engine::database::set_gating::{
-    all_formats_banned, effective_gated_sets, is_card_gated, resolve_gated_sets,
+    all_formats_banned, effective_gated_sets, is_card_gated, resolve_gated_sets_from,
 };
 use std::collections::HashSet;
 
@@ -68,18 +68,20 @@ fn msh_cards_are_marked_banned_only_while_gate_is_active() {
 }
 
 #[test]
-fn resolve_gated_sets_unlocks_msh_when_env_still_lists_it() {
-    std::env::set_var("GATED_SETS", "MSH,MSC,TMSH");
-    std::env::set_var("GATED_SETS_AS_OF", "2026-06-30");
+fn resolve_gated_sets_unlocks_msh_when_config_still_lists_it() {
+    // Explicit inputs via the env-independent seam — mutating GATED_SETS with
+    // `std::env::set_var` is unsound in the shared-process harness.
+    let configured: HashSet<String> = ["MSH", "MSC", "TMSH"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let as_of = ReleaseDate::parse("2026-06-30").unwrap();
 
-    let effective = resolve_gated_sets(&msh_catalog());
+    let effective = resolve_gated_sets_from(&configured, &msh_catalog(), as_of);
     assert!(
         effective.is_empty(),
         "resolve_gated_sets must drop released sets even when GATED_SETS is stale"
     );
-
-    std::env::remove_var("GATED_SETS");
-    std::env::remove_var("GATED_SETS_AS_OF");
 }
 
 #[test]

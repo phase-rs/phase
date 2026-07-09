@@ -2320,6 +2320,19 @@ pub enum RestrictionPlayerScope {
     /// Resolved to `SpecificPlayer` by `add_restriction` after parent target
     /// propagation, without declaring a second target slot.
     ParentTargetedPlayer,
+    /// CR 109.4 + CR 608.2c + CR 608.2h: The controller of the parent effect's
+    /// object target — "its controller" where "it" is the object countered/
+    /// destroyed/tapped by the parent instruction (Render Silent: "Counter target
+    /// spell. Its controller can't cast spells this turn."). Resolved to
+    /// `SpecificPlayer` by `add_restriction::fill_runtime_fields` at restriction-
+    /// creation time via `ability_utils::parent_target_controller`, capturing the
+    /// referent's controller from last-known information (the object has left the
+    /// stack by the time the chained restriction resolves). Distinct from
+    /// `ParentTargetedPlayer` ("that player", CR 608.2c — a reused *player* target):
+    /// this derives a player from an *object* target's controller (CR 109.4).
+    /// Mirrors `PlayerFilter::ParentObjectTargetController` /
+    /// `PlayerScope::ParentObjectTargetController` on the sibling enums.
+    ParentObjectTargetController,
     OpponentsOfSourceController,
     /// CR 508.5 / CR 508.5a: The defending player for the source's attack
     /// ("Whenever ~ attacks, defending player can't cast spells this turn." —

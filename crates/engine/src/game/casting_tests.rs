@@ -33862,6 +33862,7 @@ mod loyalty_gate {
 /// until `finalize_cast` performs the standard library → stack move.
 mod top_of_library_cast_permission_runtime {
     use super::*;
+    use crate::game::scenario::{GameScenario, P0};
     use crate::types::ability::{
         CardPlayMode, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
@@ -33886,6 +33887,24 @@ mod top_of_library_cast_permission_runtime {
             obj.card_types.subtypes = vec!["Elf".to_string()];
         }
         // Move it to the front of the library.
+        let player = state.players.iter_mut().find(|p| p.id == owner).unwrap();
+        player.library.retain(|id| *id != obj_id);
+        player.library.push_front(obj_id);
+        obj_id
+    }
+
+    fn put_card_on_top_of_library(
+        state: &mut GameState,
+        owner: PlayerId,
+        card_id: CardId,
+        name: &str,
+        core_types: Vec<CoreType>,
+    ) -> ObjectId {
+        let obj_id = create_object(state, card_id, owner, name.to_string(), Zone::Library);
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types = core_types;
+        }
         let player = state.players.iter_mut().find(|p| p.id == owner).unwrap();
         player.library.retain(|id| *id != obj_id);
         player.library.push_front(obj_id);
@@ -33992,6 +34011,74 @@ mod top_of_library_cast_permission_runtime {
         let top = put_creature_on_top_of_library(&mut state, PlayerId(0), CardId(903));
         let available = spell_objects_available_to_cast(&state, PlayerId(0));
         assert!(!available.contains(&top));
+    }
+
+    /// CR 305.1 + CR 401.5: Case of the Locked Hothouse's solved reward
+    /// ("You may play lands and cast creature and enchantment spells from the
+    /// top of your library.") must authorize the land on the play-land path
+    /// and the typed spells on the cast path.
+    #[test]
+    fn mixed_disjunctive_play_permission_surfaces_land_creature_and_enchantment() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source_id = {
+            let mut source = scenario.add_creature(P0, "Locked Hothouse Reward", 0, 4);
+            let source_id = source.id();
+            source.as_enchantment().with_subtypes(vec!["Case"]).from_oracle_text(
+                "You may play lands and cast creature and enchantment spells from the top of your library.",
+            );
+            source_id
+        };
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+
+        let land =
+            put_card_on_top_of_library(state, P0, CardId(907), "Top Land", vec![CoreType::Land]);
+        assert_eq!(
+            top_of_library_land_playable_by_permission(state, P0),
+            Some((land, source_id)),
+            "the land branch must authorize the top land on the play-land path"
+        );
+        assert!(
+            !spell_objects_available_to_cast(state, P0).contains(&land),
+            "lands must not leak onto the cast path"
+        );
+
+        let creature = put_card_on_top_of_library(
+            state,
+            P0,
+            CardId(908),
+            "Top Creature",
+            vec![CoreType::Creature],
+        );
+        assert!(
+            spell_objects_available_to_cast(state, P0).contains(&creature),
+            "the creature branch must authorize the top creature"
+        );
+
+        let enchantment = put_card_on_top_of_library(
+            state,
+            P0,
+            CardId(909),
+            "Top Enchantment",
+            vec![CoreType::Enchantment],
+        );
+        assert!(
+            spell_objects_available_to_cast(state, P0).contains(&enchantment),
+            "the enchantment branch must authorize the top enchantment spell"
+        );
+
+        let artifact = put_card_on_top_of_library(
+            state,
+            P0,
+            CardId(910),
+            "Top Artifact",
+            vec![CoreType::Artifact],
+        );
+        assert!(
+            !spell_objects_available_to_cast(state, P0).contains(&artifact),
+            "cards outside the mixed branch filter must stay unavailable"
+        );
     }
 
     /// Install a `OncePerTurn` top-of-library permission (Assemble the

@@ -4,12 +4,13 @@ import { useTranslation } from "react-i18next";
 import type { ObjectId } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { usePlayerId, waitingPlayer } from "../../hooks/usePlayerId.ts";
 import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import { COUNTER_COLORS, formatCounterType } from "../../viewmodel/cardProps.ts";
+import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 
@@ -59,19 +60,19 @@ export function DialogAttachmentCard({ objectId, widthPx, onDismiss }: Props) {
   const playerId = usePlayerId();
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
 
-  // Target eligibility: pulled directly from the engine's WaitingFor state.
-  // Mirrors the same predicate `PlayerHud` uses for the player-as-target
-  // case (PlayerHud.tsx isValidTarget calc), specialized to Object targets.
+  // Target eligibility: pulled directly from the engine's WaitingFor state via
+  // the same authority the battlefield uses (`GameBoard` seeds
+  // `validTargetObjectIds` from `getWaitingForObjectChoiceIds`, and
+  // `PermanentCard` dispatches `ChooseTarget` on a click). A player-attached
+  // Aura (Curse cycle) has no host permanent, so it renders only here — reading
+  // a narrower prompt set than the board made it unreachable for every
+  // object-choice prompt other than plain targeting. CR 707.9: Copy Enchantment
+  // asks for an enchantment to copy via `CopyTargetChoice`, and an attached
+  // Curse is an enchantment permanent (CR 303.4a), so it must be clickable.
   const isValidTarget = useGameStore((s) => {
     const wf = s.waitingFor;
-    if (
-      wf?.type !== "TargetSelection"
-      && wf?.type !== "TriggerTargetSelection"
-    ) return false;
-    if (wf.data.player !== playerId) return false;
-    return (wf.data.selection?.current_legal_targets ?? []).some(
-      (t) => "Object" in t && t.Object === objectId,
-    );
+    if (waitingPlayer(wf) !== playerId) return false;
+    return getWaitingForObjectChoiceIds(wf).includes(objectId);
   });
 
   // Activation: collect every legal action the engine has registered against

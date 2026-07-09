@@ -544,36 +544,9 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
                 return Err(format!("{:?} has Defender", id));
             }
         }
-        // CR 508.1 + CR 101.2 + CR 109.5: Intrinsic CantAttack statics live ON the
-        // attacker; remote CantAttack statics (e.g. Angelic Arbiter restricting
-        // opponents' creatures via an `affected` filter) live elsewhere and are
-        // resolved through the shared `check_static_ability` building block, which
-        // matches `def.affected` against this attacker and applies any
-        // per-affected-player gate.
-        if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
-            matches!(
-                sd.mode,
-                StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-            ) && sd.attack_defended.is_none()
-        }) || (gates.has_cant_attack
-            && crate::game::static_abilities::check_static_ability(
-                state,
-                StaticMode::CantAttack,
-                &crate::game::static_abilities::StaticCheckContext {
-                    target_id: Some(id),
-                    ..Default::default()
-                },
-            ))
-            || (gates.has_cant_attack_or_block
-                && crate::game::static_abilities::check_static_ability(
-                    state,
-                    StaticMode::CantAttackOrBlock,
-                    &crate::game::static_abilities::StaticCheckContext {
-                        target_id: Some(id),
-                        ..Default::default()
-                    },
-                ))
-        {
+        // CR 508.1c: local + remote "can't attack" restrictions, via the
+        // single authority shared with display and eligibility.
+        if creature_cant_attack_gated(state, id, &gates) {
             return Err(format!("{:?} can't attack", id));
         }
 
@@ -2289,6 +2262,19 @@ fn creature_cant_attack_gated(
             sd.mode,
             StaticMode::CantAttack | StaticMode::CantAttackOrBlock
         ) && sd.attack_defended.is_none()
+            && match sd.affected.as_ref() {
+                // CR 604.1 + CR 109.5: an unscoped source-local attack
+                // restriction is intrinsic to its own source.
+                None => true,
+                // CR 508.1c: scoped attack restrictions affect this source only
+                // when their affected filter actually matches it.
+                Some(filter) => matches_target_filter(
+                    state,
+                    obj_id,
+                    filter,
+                    &FilterContext::from_source(state, obj_id),
+                ),
+            }
     })
     // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics (Angelic
     // Arbiter restricting opponents' creatures) resolved via the shared
@@ -2943,8 +2929,10 @@ pub fn declare_attackers_with_bands(
                 crate::types::ability::RestrictionPlayerScope::TargetedPlayer
                 | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
                 | crate::types::ability::RestrictionPlayerScope::DefendingPlayer
-                // CR 109.5: resolved to `SpecificPlayer` by `add_restriction` at
-                // creation time, so an unresolved scope here restricts no one.
+                // CR 109.4 + CR 109.5: resolved to `SpecificPlayer` by
+                // `add_restriction` at creation time, so an unresolved scope here
+                // restricts no one.
+                | crate::types::ability::RestrictionPlayerScope::ParentObjectTargetController
                 | crate::types::ability::RestrictionPlayerScope::ScopedPlayer => false,
             };
             if !attacker_is_affected {
@@ -4272,34 +4260,10 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
                                     ..Default::default()
                                 },
                             )))
-                    && !super::functioning_abilities::active_static_definitions(state, obj).any(
-                        |sd| {
-                            matches!(
-                                sd.mode,
-                                StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-                            ) && sd.attack_defended.is_none()
-                        },
-                    )
-                    // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics
-                    // (Angelic Arbiter) resolved via `check_static_ability`.
-                    && !(gates.has_cant_attack
-                        && crate::game::static_abilities::check_static_ability(
-                            state,
-                            StaticMode::CantAttack,
-                            &crate::game::static_abilities::StaticCheckContext {
-                                target_id: Some(*id),
-                                ..Default::default()
-                            },
-                        ))
-                    && !(gates.has_cant_attack_or_block
-                        && crate::game::static_abilities::check_static_ability(
-                            state,
-                            StaticMode::CantAttackOrBlock,
-                            &crate::game::static_abilities::StaticCheckContext {
-                                target_id: Some(*id),
-                                ..Default::default()
-                            },
-                        ))
+                    // CR 508.1c: local + remote "can't attack" restrictions,
+                    // via the single authority shared with display and
+                    // enforcement.
+                    && !creature_cant_attack_gated(state, *id, &gates)
                     && (obj.has_keyword(&Keyword::Haste)
                         || obj.entered_battlefield_turn.is_some_and(|etb| etb < turn))
             })
@@ -4311,7 +4275,7 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::parser::oracle_static::parse_static_line;
+    use crate::parser::oracle_static::{parse_static_line, parse_static_line_multi};
     use crate::types::ability::{
         ChosenAttribute, Comparator, ControllerRef, FilterProp, ObjectScope, PtStat, PtValueScope,
         QuantityExpr, QuantityRef, SeatDirection, StaticCondition, StaticDefinition, TargetFilter,
@@ -4766,6 +4730,69 @@ mod tests {
             "after its controller casts a spell, the creature can't attack"
         );
         assert!(validate_attackers(&state, &[attacker]).is_err());
+    }
+
+    /// CR 508.1c + CR 201.2a: Akron Legionnaire's exempt-list restriction
+    /// end-to-end through actual attacker declaration — not just the parsed
+    /// AST shape (see `oracle_static::tests::
+    /// akron_legionnaire_leading_except_for_exempts_named_and_artifact_creatures`
+    /// for that unit-level check). Attaches the REAL parsed static via
+    /// `parse_static_line_multi` — the only entry point that reaches
+    /// `parse_leading_except_for_rule_static`, since the scoped (non-self)
+    /// subject defers the single-return `parse_static_line` path — to Akron
+    /// Legionnaire itself, then proves the restriction actually gates
+    /// `validate_attackers`/`get_valid_attacker_ids`: a plain nonartifact
+    /// creature you control is excluded, while Akron Legionnaire (exempted by
+    /// name) and an artifact creature you control (exempted by type) remain
+    /// legal attackers.
+    #[test]
+    fn akron_legionnaire_exempts_named_and_artifact_creatures_from_attacking() {
+        let mut state = setup();
+
+        let akron = create_creature(&mut state, PlayerId(0), "Akron Legionnaire", 8, 4);
+        let defs = parse_static_line_multi(
+            "Except for creatures named Akron Legionnaire and artifact creatures, \
+             creatures you control can't attack.",
+        );
+        assert_eq!(defs.len(), 1, "{defs:?}");
+        assert_eq!(defs[0].mode, StaticMode::CantAttack);
+        state
+            .objects
+            .get_mut(&akron)
+            .unwrap()
+            .static_definitions
+            .push(defs.into_iter().next().unwrap());
+
+        let artifact_creature = create_creature(&mut state, PlayerId(0), "Ornithopter", 0, 2);
+        state
+            .objects
+            .get_mut(&artifact_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let plain_creature = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        let valid = get_valid_attacker_ids(&state);
+        assert!(
+            valid.contains(&akron),
+            "Akron Legionnaire exempts itself by name"
+        );
+        assert!(
+            valid.contains(&artifact_creature),
+            "artifact creatures are exempt"
+        );
+        assert!(
+            !valid.contains(&plain_creature),
+            "a plain nonartifact creature you control can't attack"
+        );
+
+        assert!(validate_attackers(&state, &[akron]).is_ok());
+        assert!(validate_attackers(&state, &[artifact_creature]).is_ok());
+        assert!(validate_attackers(&state, &[plain_creature]).is_err());
+        assert!(validate_attackers(&state, &[akron, artifact_creature]).is_ok());
+        assert!(validate_attackers(&state, &[akron, plain_creature]).is_err());
     }
 
     #[test]

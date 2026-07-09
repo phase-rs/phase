@@ -8371,6 +8371,47 @@ pub(super) fn apply_where_x_effect_expression(
 /// explicit no-ops below). `apply_where_x_quantity_expression` only rewrites a
 /// `CostXPaid` / bare `Variable("X")` value, so a modification whose quantity is
 /// already a concrete reference is left unchanged.
+/// CR 613.4c + CR 702: a granted keyword's "where X is its `<P/T/mana value>`"
+/// refers to the keyword's RECIPIENT (the creature that has the keyword), not the
+/// grant's source object. The bare object-quantity parser defaults "its power" /
+/// "its toughness" / "its mana value" to `Source` scope (the correct default in a
+/// self-referential context); rebind those to `Recipient` for a granted dynamic
+/// keyword so the continuous layer resolves the value against each affected
+/// creature. Self-grants (subject `~`) are unaffected — recipient == source.
+fn rebind_dynamic_keyword_value_to_recipient(
+    value: crate::types::ability::QuantityExpr,
+) -> crate::types::ability::QuantityExpr {
+    use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef};
+    let rebound = |scope: ObjectScope| match scope {
+        ObjectScope::Source => ObjectScope::Recipient,
+        other => other,
+    };
+    match value {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power { scope },
+        } => QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: rebound(scope),
+            },
+        },
+        QuantityExpr::Ref {
+            qty: QuantityRef::Toughness { scope },
+        } => QuantityExpr::Ref {
+            qty: QuantityRef::Toughness {
+                scope: rebound(scope),
+            },
+        },
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue { scope },
+        } => QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: rebound(scope),
+            },
+        },
+        other => other,
+    }
+}
+
 fn apply_where_x_continuous_modification(
     modification: &mut ContinuousModification,
     where_x_expression: Option<&str>,
@@ -8381,9 +8422,21 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::SetPowerDynamic { value, .. }
         | ContinuousModification::SetToughnessDynamic { value, .. }
         | ContinuousModification::AddDynamicPower { value, .. }
-        | ContinuousModification::AddDynamicToughness { value, .. }
-        | ContinuousModification::AddDynamicKeyword { value, .. } => {
+        | ContinuousModification::AddDynamicToughness { value, .. } => {
             *value = apply_where_x_quantity_expression(value.clone(), where_x_expression);
+        }
+        ContinuousModification::AddDynamicKeyword { value, .. } => {
+            *value = apply_where_x_quantity_expression(value.clone(), where_x_expression);
+            // CR 613.4c + CR 702: a GRANTED keyword's "where X is its
+            // power/toughness/mana value" refers to the keyword's RECIPIENT (the
+            // creature that has the keyword), not the grant's source object. The
+            // bare object-quantity parser defaults "its power" to `Source` scope;
+            // rebind it to `Recipient` so the continuous layer resolves the count
+            // against each affected creature (Infantry Shield: "Equipped creature
+            // has … mobilize X, where X is its power"). Self-grants are unaffected
+            // (recipient == source). This is the IR-lowering counterpart of the
+            // same rebind on the direct grant path in `oracle_static/keyword_grant.rs`.
+            *value = rebind_dynamic_keyword_value_to_recipient(value.clone());
         }
         // Resolution-time-consumed; where-X counter quantities are applied by
         // the counter/enter-with parser paths before this continuous grant pass.

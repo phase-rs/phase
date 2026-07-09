@@ -4233,6 +4233,120 @@ fn static_cant_attack_if_defending_player_controls() {
     );
 }
 
+// Akron Legionnaire — a leading "Except for <A> and <B>, " exempt-list clause
+// scoping an otherwise-blanket CantAttack restriction (CR 508.1c + CR 201.2a).
+// `parse_leading_except_for_rule_static` must peel the exempt clause, resolve
+// each conjunct independently (a named exemption within a type class, and a
+// bare type-phrase exemption), Or-combine them, and AND `Not{Or{..}}` onto the
+// `affected` filter the existing single-subject dispatcher
+// (`parse_compound_subject_rule_static`) produces for the remainder.
+#[test]
+fn akron_legionnaire_leading_except_for_exempts_named_and_artifact_creatures() {
+    let line = "Except for creatures named Akron Legionnaire and artifact creatures, \
+                creatures you control can't attack.";
+    let defs = parse_static_line_multi(line);
+    assert_eq!(
+        defs.len(),
+        1,
+        "Akron Legionnaire is one restriction static: {defs:?}"
+    );
+    let def = &defs[0];
+    assert_eq!(def.mode, StaticMode::CantAttack);
+
+    let Some(TargetFilter::And { filters }) = def.affected.as_ref() else {
+        panic!(
+            "affected must be And{{subject, Not{{exempt}}}}: {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "subject conjunct + negated exempt conjunct: {filters:?}"
+    );
+
+    // Subject conjunct: creatures you control (the sibling dispatcher's own
+    // resolution of the remainder, untouched).
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters == vec![TypeFilter::Creature]
+                && tf.controller == Some(ControllerRef::You))),
+        "expected a creatures-you-control subject conjunct: {filters:?}"
+    );
+
+    // Negated exempt conjunct: Not{Or{named Akron Legionnaire, artifact creatures}}.
+    let not_exempt = filters
+        .iter()
+        .find_map(|f| match f {
+            TargetFilter::Not { filter } => Some(filter.as_ref()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a Not{{..}} exempt conjunct: {filters:?}"));
+    let TargetFilter::Or {
+        filters: exempt_filters,
+    } = not_exempt
+    else {
+        panic!("expected Not{{Or{{..}}}}, got Not{{{not_exempt:?}}}");
+    };
+    assert_eq!(
+        exempt_filters.len(),
+        2,
+        "one disjunct per exempt conjunct: {exempt_filters:?}"
+    );
+    assert!(
+        exempt_filters
+            .iter()
+            .any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters == vec![TypeFilter::Creature]
+                && tf.properties.contains(&FilterProp::Named {
+                    name: "akron legionnaire".to_string()
+                }))),
+        "expected a creatures-named-Akron-Legionnaire exempt conjunct: {exempt_filters:?}"
+    );
+    assert!(
+        exempt_filters
+            .iter()
+            .any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Artifact)
+                && tf.type_filters.contains(&TypeFilter::Creature))),
+        "expected an artifact-creatures exempt conjunct: {exempt_filters:?}"
+    );
+}
+
+// Guard: dispatch order must not disturb the untouched sibling. A plain
+// "creatures you control can't attack." (no leading "except for" clause) must
+// still resolve through `parse_compound_subject_rule_static` unwrapped — no
+// spurious And/Not wrapper from the new dispatcher declining and falling
+// through. Scoped (non-self) "can't attack" subjects are deferred by the
+// single-return `parse_static_line_inner` dispatcher (dispatch.rs) to the
+// multi path, so this must go through `parse_static_line_multi`.
+#[test]
+fn plain_cant_attack_unaffected_by_leading_except_for_dispatcher() {
+    let defs = parse_static_line_multi("Creatures you control can't attack.");
+    assert_eq!(defs.len(), 1, "{defs:?}");
+    let def = &defs[0];
+    assert_eq!(def.mode, StaticMode::CantAttack);
+    assert!(
+        matches!(&def.affected, Some(TargetFilter::Typed(tf))
+            if tf.type_filters == vec![TypeFilter::Creature]
+                && tf.controller == Some(ControllerRef::You)),
+        "expected an unwrapped creatures-you-control subject: {:?}",
+        def.affected
+    );
+}
+
+// Guard: an exempt clause that isn't the printed 2-conjunct "<A> and <B>"
+// shape (only one conjunct, no "and") must strict-fail rather than mis-parse
+// — this dispatcher is scoped to the evidence-backed 2-conjunct form (see
+// `parse_leading_except_for_rule_static`'s doc comment).
+#[test]
+fn leading_except_for_declines_single_conjunct_exempt_clause() {
+    assert!(
+        parse_static_line_multi("Except for Elves, creatures you control can't attack.").is_empty(),
+        "single-conjunct exempt clause must not be claimed by the 2-conjunct dispatcher"
+    );
+}
+
 /// CR 509.1c: "~ can't block if you control [filter]" attaches the "if"
 /// clause as a controller-scoped board-presence condition (Branded Brawlers).
 #[test]
@@ -16645,6 +16759,59 @@ fn dynamic_keyword_annihilator_x() {
 }
 
 #[test]
+fn dynamic_keyword_mobilize_x_infantry_shield() {
+    // Issue #5266 + CR 702.181a: Infantry Shield — "Equipped creature has menace
+    // and mobilize X, where X is its power." The mobilize count must be the
+    // dynamic equipped-creature power (AddDynamicKeyword), NOT a Fixed-1 grant.
+    let def =
+        parse_static_line("Equipped creature has menace and mobilize X, where X is its power.")
+            .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    // Menace is still granted as a plain keyword.
+    assert!(
+        def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Menace
+            }
+        )),
+        "menace must still be granted: {:?}",
+        def.modifications
+    );
+    // Mobilize is granted as a DYNAMIC keyword whose count is the equipped
+    // creature's power — a RECIPIENT-scoped Power reference (CR 613.4c), not a
+    // Fixed-1 grant nor the Source-scoped (equipment) value that resolves to 0.
+    let mobilize_value = def.modifications.iter().find_map(|m| match m {
+        ContinuousModification::AddDynamicKeyword {
+            kind: crate::types::keywords::DynamicKeywordKind::Mobilize,
+            value,
+        } => Some(value.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        mobilize_value,
+        Some(crate::types::ability::QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Recipient,
+            },
+        }),
+        "mobilize must be a Recipient-scoped dynamic power grant; got {:?}",
+        def.modifications
+    );
+    // Regression guard: the buggy Fixed-count mobilize must NOT be emitted.
+    assert!(
+        !def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Mobilize(_)
+            }
+        )),
+        "mobilize must be dynamic, not a Fixed AddKeyword: {:?}",
+        def.modifications
+    );
+}
+
+#[test]
 fn cant_be_blocked_unconditional() {
     let def = parse_static_line("This creature can't be blocked.").unwrap();
     assert_eq!(def.mode, StaticMode::CantBeBlocked);
@@ -23059,6 +23226,62 @@ fn top_of_library_cast_permission_crystal_skull_historic_disjunctive() {
                     && tf.properties.contains(&FilterProp::Historic)
         ),
         "expected historic Card branch, got {:?}",
+        filters[1]
+    );
+}
+
+/// CR 305.1 + CR 401.5 + CR 601.2a: Case of the Locked Hothouse — the solved reward uses a
+/// simple land branch plus a compound spell branch ("creature and enchantment
+/// spells"). The mixed disjunction must still lower to one `Play` permission.
+#[test]
+fn top_of_library_cast_permission_locked_hothouse_mixed_disjunctive() {
+    let text =
+        "You may play lands and cast creature and enchantment spells from the top of your library.";
+    let lower = text.to_lowercase();
+    let def = try_parse_top_of_library_cast_permission(text, &lower)
+        .expect("Case of the Locked Hothouse reward must parse");
+    match def.mode {
+        StaticMode::TopOfLibraryCastPermission {
+            play_mode,
+            frequency,
+            ref alt_cost,
+        } => {
+            assert_eq!(play_mode, CardPlayMode::Play);
+            assert_eq!(frequency, CastFrequency::Unlimited);
+            assert!(alt_cost.is_none());
+        }
+        other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+    }
+    let filter = def.affected.expect("affected filter set");
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or over land / creature-or-enchantment branches, got {filter:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    assert!(
+        matches!(
+            &filters[0],
+            TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Land)
+        ),
+        "expected land branch, got {:?}",
+        filters[0]
+    );
+    assert!(
+        matches!(
+            &filters[1],
+            TargetFilter::Or { filters: spell_filters }
+                if spell_filters.len() == 2
+                    && spell_filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.contains(&TypeFilter::Creature)
+                    ))
+                    && spell_filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.contains(&TypeFilter::Enchantment)
+                    ))
+        ),
+        "expected creature-or-enchantment spell branch, got {:?}",
         filters[1]
     );
 }

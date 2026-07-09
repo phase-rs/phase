@@ -1,12 +1,15 @@
 //! CR 111.1 + CR 111.10 + CR 111.4: Debug-only catalog of pre-defined token
-//! presets. Loaded from `crates/engine/data/known-tokens.toml` (committed
+//! presets. Sourced from `crates/engine/data/known-tokens.toml` (committed
 //! phase-native source generated from MTGJSON set token data by the
-//! `tokens-gen` bin).
+//! `tokens-gen` bin), converted to JSON at build time by `build.rs`, and
+//! embedded via `include_bytes!` — the debug-mode toml_edit parse of the
+//! ~5.9MB catalog cost ~1s per test process under nextest's
+//! process-per-test model.
 //!
-//! The catalog is a fixed engine resource — versioned with code, embedded via
-//! `include_str!`. Runtime token-art resolution, named-token parsing, token
-//! ability materialization, and the debug-create UI all consume this single
-//! engine-typed list of bodies.
+//! The catalog is a fixed engine resource — versioned with code. Runtime
+//! token-art resolution, named-token parsing, token ability materialization,
+//! and the debug-create UI all consume this single engine-typed list of
+//! bodies.
 
 use std::sync::LazyLock;
 
@@ -165,11 +168,12 @@ struct CatalogFile {
     token: Vec<TokenPreset>,
 }
 
-/// Embedded catalog data. Path is relative to this source file:
-/// `crates/engine/src/game/token_presets.rs` → `crates/engine/data/known-tokens.toml`.
+/// Embedded catalog data: `data/known-tokens.toml` converted to JSON in
+/// `OUT_DIR` by `build.rs` (structural conversion — same serde shape).
 static PRESETS: LazyLock<Vec<TokenPreset>> = LazyLock::new(|| {
-    let raw = include_str!("../../data/known-tokens.toml");
-    let parsed: CatalogFile = toml::from_str(raw).expect("known-tokens.toml well-formed");
+    let raw = include_bytes!(concat!(env!("OUT_DIR"), "/known-tokens.json"));
+    let parsed: CatalogFile =
+        serde_json::from_slice(raw).expect("build.rs-converted known-tokens.json well-formed");
     // Duplicate-id assertion: every preset must be addressable by a unique
     // stable id (used by the FE for selection state and React keys).
     let mut seen = std::collections::HashSet::new();
@@ -551,10 +555,11 @@ mod tests {
         (state, source)
     }
 
-    /// Forces `LazyLock` evaluation in `cargo test -p engine` so a malformed
-    /// `known-tokens.toml`, an unknown `Keyword`/`CoreType`/`ManaColor`
-    /// variant, or a duplicate id panics in CI rather than at first
-    /// production access.
+    /// Forces `LazyLock` evaluation in `cargo test -p engine` so an unknown
+    /// `Keyword`/`CoreType`/`ManaColor` variant or a duplicate id panics in
+    /// CI rather than at first production access. (Malformed TOML fails
+    /// earlier, in `build.rs`; the structural conversion there cannot catch
+    /// these typed-schema violations.)
     #[test]
     fn catalog_loads_and_validates() {
         let presets = known_token_presets();
