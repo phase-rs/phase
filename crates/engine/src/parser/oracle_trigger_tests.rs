@@ -9446,11 +9446,12 @@ fn extract_if_condition_first_time_tapped_pattern() {
     assert_eq!("untap it", cleaned);
 }
 
-/// CR 603.4 + CR 701.26 + issue #5325: Captain America, Living Legend — the
-/// "during your turn" restriction embedded between the tapped-event clause and
-/// the first-time intervening-if must lower to the `OnlyDuringYourTurn` trigger
-/// constraint. It was previously dropped (left on the event tail after the
-/// intervening-if was peeled), so the ability fired on any turn.
+/// CR 603.2e + CR 701.26 + issue #5325: Captain America, Living Legend — the
+/// "during your turn" restriction on the "becomes tapped" trigger event (CR
+/// 603.2e), embedded ahead of the first-time intervening-if (CR 603.4), must
+/// lower to the `OnlyDuringYourTurn` trigger constraint. It was previously
+/// dropped (left on the event tail after the intervening-if was peeled), so the
+/// ability fired on any turn.
 #[test]
 fn captain_america_becomes_tapped_during_your_turn_constraint() {
     let def = parse_trigger_line(

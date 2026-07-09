@@ -9322,11 +9322,12 @@ fn try_parse_event(
             SimpleEvent::BecomesTapped => {
                 def.mode = TriggerMode::Taps;
                 def.valid_card = Some(subject.clone());
-                // CR 603.4: "becomes tapped during your turn" carries a turn
-                // restriction (Captain America, Living Legend — "Whenever a
-                // creature you control becomes tapped during your turn, if it's
-                // the first time …"). The intervening-if extractor strips the
-                // trailing "if …" clause but leaves the "during your turn" phrase
+                // CR 603.2e: a "becomes tapped" trigger event may carry a "during
+                // your turn" turn restriction (Captain America, Living Legend —
+                // "Whenever a creature you control becomes tapped during your turn,
+                // if it's the first time …"). The intervening-if extractor (CR
+                // 603.4) strips the trailing "if …" clause but leaves the "during
+                // your turn" phrase
                 // on the event tail (`remaining`); peel it into the trigger's turn
                 // constraint so the ability only fires on the controller's turn,
                 // instead of being silently dropped. `remaining` still carries the
@@ -14873,10 +14874,10 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     None
 }
 
-/// CR 603.4: match the turn specifier that follows "during " in a turn-restriction
-/// clause → the corresponding trigger constraint. Single authority shared by the
-/// trailing peel ([`peel_trailing_turn_constraint`]) and the leading matcher
-/// ([`parse_leading_turn_constraint`]).
+/// CR 603.1: match the turn specifier that follows "during " in a trigger's
+/// turn-restriction clause → the corresponding trigger constraint. Single
+/// authority shared by the trailing peel ([`peel_trailing_turn_constraint`]) and
+/// the leading matcher ([`parse_leading_turn_constraint`]).
 fn parse_during_turn_spec(input: &str) -> OracleResult<'_, TriggerConstraint> {
     alt((
         value(
@@ -14901,21 +14902,29 @@ fn parse_during_turn_spec(input: &str) -> OracleResult<'_, TriggerConstraint> {
     .parse(input)
 }
 
-/// CR 603.4: match a "during `<your/opponent's>` turn" restriction at the START of
+/// CR 603.1: match a "during `<your/opponent's>` turn" restriction at the START of
 /// a post-event tail (Captain America, Living Legend: "becomes tapped during your
 /// turn, if it's the first time …"). Unlike [`peel_trailing_turn_constraint`] the
 /// phrase need not consume the whole tail — the intervening-if / effect clause
-/// follows it — so require a clause boundary (comma or end) after the turn spec so
-/// it doesn't misfire on a longer phrase that merely starts with "during your …".
+/// follows it. The trailing `terminated(..)` boundary combinator requires the turn
+/// spec to be followed by end-of-input or a `,` (the start of the ", if …/effect"
+/// clause), so it doesn't misfire on a longer phrase that merely starts with
+/// "during your …". Boundary acceptance stays inside the nom combinator (no
+/// string dispatch).
 fn parse_leading_turn_constraint(input: &str) -> Option<TriggerConstraint> {
-    let (rest, constraint) = preceded(
-        tag::<_, _, OracleError<'_>>("during "),
-        parse_during_turn_spec,
+    terminated(
+        preceded(
+            tag::<_, _, OracleError<'_>>("during "),
+            parse_during_turn_spec,
+        ),
+        alt((
+            value((), eof),
+            value((), peek(tag::<_, _, OracleError<'_>>(","))),
+        )),
     )
     .parse(input.trim_start())
-    .ok()?;
-    let rest = rest.trim_start();
-    (rest.is_empty() || rest.starts_with(',')).then_some(constraint)
+    .map(|(_, constraint)| constraint)
+    .ok()
 }
 
 fn peel_trailing_turn_constraint(input: &str) -> (&str, Option<TriggerConstraint>) {
