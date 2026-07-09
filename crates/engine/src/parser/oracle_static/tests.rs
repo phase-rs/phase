@@ -14180,6 +14180,72 @@ fn lignify_subtype_only_with_base_pt_type_change() {
     );
 }
 
+/// CR 205.1a + CR 613.1d: subtype-only creature type-change WITHOUT a base P/T —
+/// "Enchanted creature is a Flagbearer." (Coalition Flag). The copula names a
+/// bare creature subtype and there is no base P/T (unlike Lignify), so the
+/// enchanted permanent BEING a creature is the disambiguator from the basic-land
+/// change ("Enchanted land is a Mountain"). Emits the subtype replacement
+/// (RemoveAllSubtypes{Creature} → AddSubtype) with NO SetCardTypes (card types
+/// preserved) and NO P/T change. Before the fix this dropped the whole static.
+#[test]
+fn coalition_flag_subtype_only_no_base_pt_type_change() {
+    use crate::types::card_type::SubtypeSet;
+    let def = parse_static_line("Enchanted creature is a Flagbearer.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+        "subtype change must not emit SetCardTypes: {mods:?}"
+    );
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetPower { .. } | ContinuousModification::SetToughness { .. }
+        )),
+        "'is a Flagbearer' does not change P/T: {mods:?}"
+    );
+    assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+        set: SubtypeSet::Creature,
+    }));
+    assert!(mods.contains(&ContinuousModification::AddSubtype {
+        subtype: "Flagbearer".to_string(),
+    }));
+    let pos = |m: &ContinuousModification| mods.iter().position(|x| x == m).unwrap();
+    assert!(
+        pos(&ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        }) < pos(&ContinuousModification::AddSubtype {
+            subtype: "Flagbearer".to_string(),
+        }),
+        "RemoveAllSubtypes must precede AddSubtype(Flagbearer): {mods:?}"
+    );
+}
+
+/// Regression guard for the fix above: a bare land subtype change with NO base
+/// P/T ("Enchanted land is a Mountain") enchants a LAND, not a creature, so it
+/// must NOT be caught by the creature-subtype branch — it stays a basic-land
+/// type change (`SetBasicLandType`), never `AddSubtype(Mountain)`.
+#[test]
+fn enchanted_land_is_mountain_stays_basic_land_change() {
+    let def = parse_static_line("Enchanted land is a Mountain.").unwrap();
+    let mods = &def.modifications;
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::SetBasicLandType { .. })),
+        "basic-land change must route to SetBasicLandType: {mods:?}"
+    );
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddSubtype { .. }
+                | ContinuousModification::RemoveAllSubtypes { .. }
+        )),
+        "must not be caught by the creature-subtype branch: {mods:?}"
+    );
+}
+
 #[test]
 fn enchanted_is_type_with_base_pt_preserves_trailing_keyword_clause() {
     // Building-block check: the trailing "and has <kw> ... loses all
