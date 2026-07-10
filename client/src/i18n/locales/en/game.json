@@ -495,6 +495,7 @@
     "commanderTitleTax": "Commander: {{name}} (Tax: +{{tax}})",
     "castCommander": "Cast {{name}} — double-click or drag to play",
     "castCommanderTax": "Cast {{name}} (Tax: +{{tax}}) — double-click or drag to play",
+    "ninjutsuCommander": "Commander ninjutsu: {{name}} — click to return an unblocked attacker to hand and put this commander onto the battlefield tapped and attacking",
     "tax": "Tax: +{{tax}}",
     "companion": "Companion",
     "companionTitle": "Companion: {{name}}",

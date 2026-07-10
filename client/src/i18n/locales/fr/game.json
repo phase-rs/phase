@@ -463,6 +463,7 @@
     "commanderTitleTax": "Commandant : {{name}} (Taxe : +{{tax}})",
     "castCommander": "Lancer {{name}} — double-cliquez ou glissez pour jouer",
     "castCommanderTax": "Lancer {{name}} (Taxe : +{{tax}}) — double-cliquez ou glissez pour jouer",
+    "ninjutsuCommander": "Ninjutsu de commandant : {{name}} — cliquez pour renvoyer un attaquant non bloqué en main et mettre ce commandant sur le champ de bataille engagé et attaquant",
     "tax": "Taxe : +{{tax}}",
     "companion": "Compagnon",
     "companionTitle": "Compagnon : {{name}}",

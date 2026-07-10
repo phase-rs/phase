@@ -463,6 +463,7 @@
     "commanderTitleTax": "Comandante: {{name}} (Tassa: +{{tax}})",
     "castCommander": "Lancia {{name}} — doppio clic o trascina per giocare",
     "castCommanderTax": "Lancia {{name}} (Tassa: +{{tax}}) — doppio clic o trascina per giocare",
+    "ninjutsuCommander": "Ninjutsu del comandante: {{name}} — clicca per far tornare in mano un attaccante non bloccato e mettere questo comandante sul campo di battaglia TAPpato e attaccante",
     "tax": "Tassa: +{{tax}}",
     "companion": "Compagno",
     "companionTitle": "Compagno: {{name}}",

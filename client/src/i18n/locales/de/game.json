@@ -463,6 +463,7 @@
     "commanderTitleTax": "Kommandeur: {{name}} (Steuer: +{{tax}})",
     "castCommander": "{{name}} wirken — Doppelklick oder ziehen zum Spielen",
     "castCommanderTax": "{{name}} wirken (Steuer: +{{tax}}) — Doppelklick oder ziehen zum Spielen",
+    "ninjutsuCommander": "Kommandeur-Ninjutsu: {{name}} — klicken, um einen ungeblockten Angreifer auf die Hand zurückzunehmen und diesen Kommandeur getappt und angreifend ins Spiel zu bringen",
     "tax": "Steuer: +{{tax}}",
     "companion": "Gefährte",
     "companionTitle": "Gefährte: {{name}}",

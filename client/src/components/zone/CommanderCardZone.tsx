@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import type { PanInfo } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import type { GameAction, GameObject, PlayerId } from "../../adapter/types.ts";
+import type { GameObject, PlayerId } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
@@ -11,6 +11,10 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useDragToCast } from "../../hooks/useDragToCast.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import {
+  collectObjectActions,
+  resolveSingleActionDispatch,
+} from "../../viewmodel/cardActionChoice.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
 import { commandersInZone } from "../../viewmodel/commanderColumn.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
@@ -57,28 +61,49 @@ function CommanderCard({
 }) {
   const { t } = useTranslation("game");
   const isCompactHeight = useIsCompactHeight();
-  const legalActions = useGameStore((s) => s.legalActions);
+  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const effectiveCost = useGameStore(
     (s) => s.spellCosts[String(commander.id)],
   );
   const inspectObject = useUiStore((s) => s.inspectObject);
+  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
   const { src } = useCardImage(commander.name, { size: "normal" });
   const { handlers: hoverHandlers, firedRef } = useCardHover(commander.id);
   const tax = commander.commander_tax ?? 0;
 
-  const castAction = useMemo(() => {
-    for (const action of legalActions) {
-      if (action.type === "CastSpell") {
-        const data = (
-          action as Extract<GameAction, { type: "CastSpell" }>
-        ).data;
-        if (Number(data.object_id) === commander.id) return action;
-      }
-    }
-    return null;
-  }, [legalActions, commander.id]);
+  // Engine authority (GameAction::source_object): both CastSpell (cast from the
+  // command zone) and ActivateNinjutsu (commander ninjutsu, CR 702.49d) anchor
+  // to this commander's id, so the map lookup surfaces every action the engine
+  // legally offers for it — no client-side legality inference.
+  const commanderActions = useMemo(
+    () => collectObjectActions(legalActionsByObject, commander.id),
+    [legalActionsByObject, commander.id],
+  );
+  const castAction = useMemo(
+    () => commanderActions.find((a) => a.type === "CastSpell") ?? null,
+    [commanderActions],
+  );
+  const ninjutsuActions = useMemo(
+    () => commanderActions.filter((a) => a.type === "ActivateNinjutsu"),
+    [commanderActions],
+  );
 
   const canCast = castAction !== null;
+  const canNinjutsu = ninjutsuActions.length > 0;
+
+  // CR 702.49d: commander ninjutsu returns an unblocked attacker and puts this
+  // commander onto the battlefield tapped and attacking. The engine emits one
+  // ActivateNinjutsu per returnable attacker; route through the shared dispatch
+  // authority so a lone option fires immediately and multiple options surface
+  // the choice modal — mirroring hand-zone ninjutsu (PlayerHand.playCard).
+  const activateNinjutsu = () => {
+    const auto = resolveSingleActionDispatch(ninjutsuActions, commander);
+    if (auto) {
+      dispatchAction(auto);
+    } else {
+      setPendingAbilityChoice({ objectId: commander.id, actions: ninjutsuActions });
+    }
+  };
   const displayCost = effectiveCost ?? commander.mana_cost;
   // canCast is engine-authoritative: the action is in legalActions only when
   // priority + mana + timing all permit the cast. Reuse it as the drag gate
@@ -109,6 +134,12 @@ function CommanderCard({
           useUiStore.getState().openDebugContextMenu({ objectId: commander.id, x: e.clientX, y: e.clientY });
           return;
         }
+        // Commander ninjutsu is a click affordance (unlike drag-to-cast): a
+        // legal ActivateNinjutsu takes precedence over inspecting the card.
+        if (canNinjutsu) {
+          activateNinjutsu();
+          return;
+        }
         inspectObject(commander.id);
       }}
       onDoubleClick={canCast ? () => dispatchAction(castAction) : undefined}
@@ -116,15 +147,19 @@ function CommanderCard({
       dragSnapToOrigin
       onDragEnd={onDragEnd}
       whileDrag={{ cursor: "grabbing", scale: 1.04 }}
-      className={`group relative ${canCast ? "cursor-grab" : "cursor-default"}`}
+      className={`group relative ${
+        canCast ? "cursor-grab" : canNinjutsu ? "cursor-pointer" : "cursor-default"
+      }`}
       title={
         canCast
           ? tax > 0
             ? t("zone.castCommanderTax", { name: commander.name, tax })
             : t("zone.castCommander", { name: commander.name })
-          : tax > 0
-            ? t("zone.commanderTitleTax", { name: commander.name, tax })
-            : t("zone.commanderTitle", { name: commander.name })
+          : canNinjutsu
+            ? t("zone.ninjutsuCommander", { name: commander.name })
+            : tax > 0
+              ? t("zone.commanderTitleTax", { name: commander.name, tax })
+              : t("zone.commanderTitle", { name: commander.name })
       }
       style={{ width: "var(--card-w)", height: "var(--card-h)" }}
     >
@@ -143,10 +178,11 @@ function CommanderCard({
           </div>
         )}
 
-        {/* Translucent overlay — amber tint, lighter when castable */}
+        {/* Translucent overlay — amber tint, lighter when actionable (castable
+            or commander-ninjutsu available) */}
         <div
           className={`absolute inset-0 transition-colors ${
-            canCast
+            canCast || canNinjutsu
               ? "bg-amber-600/20 group-hover:bg-amber-600/5"
               : "bg-gray-900/50"
           }`}
@@ -161,8 +197,8 @@ function CommanderCard({
         </div>
       )}
 
-      {/* Castable glow ring */}
-      {canCast && (
+      {/* Actionable glow ring — castable or commander-ninjutsu available */}
+      {(canCast || canNinjutsu) && (
         <div className={`absolute inset-0 rounded-lg ${CASTABLE_AFFORDANCE_ACTIVE}`} />
       )}
 

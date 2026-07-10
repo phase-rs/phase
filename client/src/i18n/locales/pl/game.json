@@ -463,6 +463,7 @@
     "commanderTitleTax": "Dowódca: {{name}} (Podatek: +{{tax}})",
     "castCommander": "Rzuć {{name}} — kliknij dwukrotnie lub przeciągnij, aby zagrać",
     "castCommanderTax": "Rzuć {{name}} (Podatek: +{{tax}}) — kliknij dwukrotnie lub przeciągnij, aby zagrać",
+    "ninjutsuCommander": "Ninjutsu dowódcy: {{name}} — kliknij, aby zwrócić niezablokowanego atakującego do ręki i umieścić tego dowódcę na polu bitwy przekręconego i atakującego",
     "tax": "Podatek: +{{tax}}",
     "companion": "Towarzysz",
     "companionTitle": "Towarzysz: {{name}}",

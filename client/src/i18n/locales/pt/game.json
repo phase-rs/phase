@@ -463,6 +463,7 @@
     "commanderTitleTax": "Comandante: {{name}} (Taxa: +{{tax}})",
     "castCommander": "Conjure {{name}} — clique duas vezes ou arraste para jogar",
     "castCommanderTax": "Conjure {{name}} (Taxa: +{{tax}}) — clique duas vezes ou arraste para jogar",
+    "ninjutsuCommander": "Ninjutsu de comandante: {{name}} — clique para devolver um atacante não bloqueado à mão e colocar este comandante no campo de batalha virado e atacando",
     "tax": "Taxa: +{{tax}}",
     "companion": "Companheiro",
     "companionTitle": "Companheiro: {{name}}",
