@@ -9,7 +9,9 @@ use crate::types::ability::{
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
-use crate::types::game_state::{GameState, PendingCounterPostAction, WaitingFor};
+use crate::types::game_state::{
+    GameState, PendingCounterPostAction, TokenEntryEventEmission, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
@@ -1159,7 +1161,7 @@ pub(super) fn handle_copy_target_choice(
             state,
             resume.event,
             events,
-            false,
+            TokenEntryEventEmission::Suppress,
         ) {
             return Ok(state.waiting_for.clone());
         }

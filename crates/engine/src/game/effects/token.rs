@@ -1109,7 +1109,13 @@ pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
         .map(liminal_copy_token_continuation_post_action)
         .into_iter()
         .collect();
-    if !commit_liminal_token_entry_with_post_actions(state, event, events, true, post_actions) {
+    if !commit_liminal_token_entry_with_post_actions(
+        state,
+        event,
+        events,
+        TokenEntryEventEmission::Emit,
+        post_actions,
+    ) {
         return false;
     }
     continue_liminal_copy_token_batch(state, continuation, events)
@@ -1228,22 +1234,16 @@ pub(crate) fn commit_liminal_token_entry_with_event_emission(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
-    emit_entry_events: bool,
+    entry_events: TokenEntryEventEmission,
 ) -> bool {
-    commit_liminal_token_entry_with_post_actions(
-        state,
-        event,
-        events,
-        emit_entry_events,
-        Vec::new(),
-    )
+    commit_liminal_token_entry_with_post_actions(state, event, events, entry_events, Vec::new())
 }
 
 pub(crate) fn commit_liminal_token_entry_with_post_actions(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
-    emit_entry_events: bool,
+    entry_events: TokenEntryEventEmission,
     post_actions_after_finalize: Vec<PendingCounterPostAction>,
 ) -> bool {
     let ProposedEvent::TokenEntry {
@@ -1258,15 +1258,7 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     let Some(mut entry) = state.liminal_entries.remove(&entry_ref) else {
         return true;
     };
-    let finalization = liminal_token_entry_finalization_action(
-        entry_ref,
-        &entry,
-        if emit_entry_events {
-            TokenEntryEventEmission::Emit
-        } else {
-            TokenEntryEventEmission::Suppress
-        },
-    );
+    let finalization = liminal_token_entry_finalization_action(entry_ref, &entry, entry_events);
     let counters_to_apply: Vec<_> = enter_with_counters
         .iter()
         .chain(entry.enter_with_counters.iter())

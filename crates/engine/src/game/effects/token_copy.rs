@@ -1309,6 +1309,8 @@ fn apply_token_modifications(
     true
 }
 
+/// CR 707.2 + CR 707.9: classify copy exceptions that can be stamped into a
+/// liminal token's copiable values before replacement consultation.
 pub(crate) fn copy_token_modifications_are_liminal_immediate(
     modifications: &[ContinuousModification],
 ) -> bool {
@@ -1326,6 +1328,8 @@ pub(crate) fn copy_token_modifications_are_liminal_immediate(
     })
 }
 
+/// CR 707.2 + CR 707.9: apply immediate copy exceptions to a liminal token's
+/// copiable values so self as-enters replacements consult the final shape.
 pub(crate) fn apply_immediate_copy_token_modifications_to_object(
     token: &mut GameObject,
     modifications: &[ContinuousModification],
