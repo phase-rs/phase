@@ -3163,7 +3163,17 @@ fn pending_trigger_has_no_legal_resolution_targets(
     );
     let empty = match super::ability_utils::build_target_slots(state, &pending.ability) {
         Ok(slots) => {
-            (pending.ability.effect.target_filter().is_some() && slots.is_empty())
+            // CR 115.1: only effects that DECLARE a target surface a chooseable
+            // slot. `extract_target_filter_from_effect` is the single authority
+            // the slot builder itself uses — it returns `None` not only for
+            // context-refs ("you may draw a card") but for every resolution-time
+            // selection (Sacrifice, at-resolution Bounce, put-from-hand
+            // ChangeZone/CastFromZone, etc.), all of which are ALWAYS resolvable.
+            // Testing raw `target_filter()` here would fork from that authority
+            // and silently drop an auto-accepted "you may put a creature from
+            // your hand …" trigger (Kaalia et al.).
+            (extract_target_filter_from_effect(&pending.ability.effect).is_some()
+                && slots.is_empty())
                 || (!slots.is_empty() && slots.iter().all(|slot| slot.legal_targets.is_empty()))
         }
         Err(_) => true,

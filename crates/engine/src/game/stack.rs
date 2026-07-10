@@ -2325,7 +2325,16 @@ fn ability_has_no_legal_resolution_targets(
     let context_snapshot =
         super::triggers::push_trigger_event_context(state, trigger_event, &trigger_events, None);
     let empty = build_target_slots(state, ability).is_ok_and(|slots| {
-        (ability.effect.target_filter().is_some() && slots.is_empty())
+        // CR 115.1: only effects that DECLARE a target surface a chooseable slot.
+        // `extract_target_filter_from_effect` is the single authority the slot
+        // builder itself uses — it returns `None` not only for context-refs
+        // ("you may draw a card") but for every resolution-time selection
+        // (Sacrifice, at-resolution Bounce, put-from-hand ChangeZone/CastFromZone,
+        // etc.), all of which are ALWAYS resolvable. Testing raw `target_filter()`
+        // here would fork from that authority and silently drop an auto-accepted
+        // "you may put a creature from your hand …" trigger (Kaalia et al.).
+        (super::triggers::extract_target_filter_from_effect(&ability.effect).is_some()
+            && slots.is_empty())
             || (!slots.is_empty() && slots.iter().all(|slot| slot.legal_targets.is_empty()))
     });
     super::triggers::restore_trigger_event_context(state, context_snapshot);
@@ -2955,7 +2964,9 @@ mod tests {
         ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::{MayTriggerOrigin, WaitingFor};
+    use crate::types::game_state::{
+        AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, WaitingFor,
+    };
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
@@ -2964,6 +2975,50 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// CR 115.1 + CR 603.3d — regression twin for the "don't ask again → Yes
+    /// silently answers No" bug, covering the stack.rs consumer
+    /// (`optional_ability_is_inert_under_auto_choice` →
+    /// `ability_has_no_legal_resolution_targets`, reached by the on-stack
+    /// inert-noop fast-forward). An auto-ACCEPTED optional ability that surfaces
+    /// no stack-time target slot must NOT be classified inert. The `Sacrifice`
+    /// arm (a non-context-ref filter that `extract_target_filter_from_effect`
+    /// still declines) is the discriminator a context-ref-only guard would drop.
+    #[test]
+    fn auto_accepted_no_target_slot_ability_is_not_inert() {
+        let source_id = ObjectId(100);
+        let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+        for effect in [
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        ] {
+            let mut state = setup();
+            let mut ability = ResolvedAbility::new(effect, vec![], source_id, PlayerId(0));
+            ability.optional = true;
+            ability.may_trigger_origin = Some(origin);
+            state.set_may_trigger_auto_choice(
+                MayTriggerAutoChoiceKey {
+                    player: PlayerId(0),
+                    source_id,
+                    origin,
+                },
+                AutoMayChoice::Accept,
+            );
+
+            assert!(
+                !optional_ability_is_inert_under_auto_choice(&mut state, &ability, None),
+                "an auto-accepted ability with no stack-time target slot is always \
+                 resolvable and must not be suppressed as an inert no-op"
+            );
+        }
     }
 
     fn back_face_data(

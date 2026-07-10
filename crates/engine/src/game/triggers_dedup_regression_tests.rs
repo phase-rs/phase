@@ -2756,6 +2756,75 @@ fn make_optional_phase_trigger_with_no_legal_target(
     id
 }
 
+/// Helper: install an optional upkeep trigger whose accepted resolution runs
+/// `effect`. Used with effects that surface no stack-time target slot (CR 115.1):
+/// context-refs whose "target" is the controller / "you" (`Effect::Draw`,
+/// `Effect::Token`), and resolution-time selections (`Effect::Sacrifice`). All
+/// are ALWAYS resolvable, so an auto-accepted instance must NOT be suppressed as
+/// inert.
+fn make_optional_phase_trigger_effect(
+    state: &mut GameState,
+    owner: PlayerId,
+    name: &str,
+    effect: Effect,
+) -> ObjectId {
+    let id = make_creature(state, owner, name, 1, 1);
+    let trig_def = TriggerDefinition::new(TriggerMode::Phase)
+        .phase(Phase::Upkeep)
+        .optional()
+        .execute(AbilityDefinition::new(AbilityKind::Database, effect).optional())
+        .description(format!("{name}: at the beginning of upkeep, you may."));
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.trigger_definitions.push(trig_def.clone());
+    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+    id
+}
+
+/// A context-ref "you may draw a card" effect (target is the controller).
+fn optional_draw_effect() -> Effect {
+    Effect::Draw {
+        count: QuantityExpr::Fixed { value: 1 },
+        target: TargetFilter::Controller,
+    }
+}
+
+/// A context-ref "you may create a 1/1 token" effect (owner is the controller) —
+/// the Brood Sliver class. Goes through a DIFFERENT `target_filter()` match arm
+/// than `Effect::Draw`, so it independently exercises the context-ref guard.
+fn optional_create_token_effect() -> Effect {
+    Effect::Token {
+        name: "Sliver".into(),
+        power: crate::types::ability::PtValue::Fixed(1),
+        toughness: crate::types::ability::PtValue::Fixed(1),
+        types: vec!["Creature".into()],
+        colors: vec![],
+        keywords: vec![],
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        owner: TargetFilter::Controller,
+        attach_to: None,
+        enters_attacking: false,
+        supertypes: vec![],
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+    }
+}
+
+/// A "you may sacrifice a creature" effect. CR 701.21a: Sacrifice chooses its
+/// permanents at RESOLUTION (via `EffectZoneChoice`), so
+/// `extract_target_filter_from_effect` returns `None` (no stack-time slot) even
+/// though raw `target_filter()` yields a NON-context-ref filter. This is the
+/// discriminator between the single-authority fix and a narrow context-ref-only
+/// guard: only delegating to the slot builder keeps this trigger off the inert
+/// list.
+fn optional_sacrifice_effect() -> Effect {
+    Effect::Sacrifice {
+        target: TargetFilter::Typed(TypedFilter::creature()),
+        count: QuantityExpr::Fixed { value: 1 },
+        min_count: 0,
+    }
+}
+
 /// Read the source IDs of the current stack entries in stack-bottom-to-top
 /// order. Each `StackEntry::source_id` lets the test discriminate which
 /// trigger ended up where.
@@ -2910,6 +2979,76 @@ fn auto_accepted_optional_triggers_without_legal_targets_are_suppressed() {
         state.stack.is_empty(),
         "suppressed inert triggers must not reach the stack"
     );
+}
+
+/// CR 603.3d + CR 115.1 — regression for the "don't ask again → Yes silently
+/// answers No" report. An auto-ACCEPTED optional trigger that surfaces no
+/// stack-time target slot is ALWAYS resolvable, so it MUST reach the stack — it
+/// is not an inert no-op.
+///
+/// The perf refactor (#3917) gated inert-suppression on raw
+/// `target_filter().is_some() && slots.is_empty()`. But `target_filter()` is not
+/// the authority for "surfaces a chooseable slot": `extract_target_filter_from_effect`
+/// is, and it returns `None` for both context-refs (CR 121.1 "you may draw a
+/// card", the controller is never a declared target) AND resolution-time
+/// selections (CR 701.21a "you may sacrifice a creature", chosen during
+/// resolution). All report a `Some(non-context-ref)` from raw `target_filter()`
+/// yet build zero slots, so the gate mistook a remembered Accept for "no legal
+/// targets" and dropped the trigger — indistinguishable from a decline.
+///
+/// Three arms cover the class through THREE distinct `target_filter()`/authority
+/// paths: "you may draw a card" (`Effect::Draw`), Brood Sliver's "you may create
+/// a Sliver token" (`Effect::Token`), and "you may sacrifice a creature"
+/// (`Effect::Sacrifice`). The Sacrifice arm is the discriminator that a
+/// context-ref-only guard would still drop — it forces the fix to delegate to
+/// the slot-builder authority rather than re-derive a subset.
+///
+/// This drives `process_triggers` — the trigger-collection/stack path where the
+/// drop happens — so it cannot be satisfied by the resolution-path coverage in
+/// `effects/mod.rs` (`saved_accept_for_may_trigger_resolves_without_prompt`).
+#[test]
+fn auto_accepted_optional_context_ref_effect_reaches_stack() {
+    for (label, effect) in [
+        ("you may draw a card", optional_draw_effect()),
+        ("you may create a token", optional_create_token_effect()),
+        ("you may sacrifice a creature", optional_sacrifice_effect()),
+    ] {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::Upkeep;
+        let src = make_optional_phase_trigger_effect(&mut state, PlayerId(0), "Remembered", effect);
+
+        // Player remembered "yes, do it every time" for this trigger.
+        state.set_may_trigger_auto_choice(
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(0),
+                source_id: src,
+                origin: MayTriggerOrigin::Printed { trigger_index: 0 },
+            },
+            AutoMayChoice::Accept,
+        );
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            }],
+        );
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }),
+            "[{label}] a single auto-accepted trigger needs no ordering prompt; got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "[{label}] an auto-accepted context-ref trigger is always resolvable \
+             (its controller target is never chosen) and must reach the stack — \
+             not be dropped as an inert no-op"
+        );
+    }
 }
 
 /// CR 603.3b: Two genuinely INDISTINGUISHABLE no-input triggers (same
