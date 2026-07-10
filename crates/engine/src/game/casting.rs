@@ -14808,6 +14808,23 @@ pub fn handle_activate_ability(
                 &mut unavailable_modes,
             );
         }
+        let modal = if x_dependent_modal_targets {
+            modal
+        } else {
+            let Some(modal) = super::ability_utils::modal_choice_with_target_assignment_limit(
+                state,
+                source_id,
+                player,
+                &modal,
+                &ability_def.mode_abilities,
+                &unavailable_modes,
+            ) else {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal modes available for activated ability".to_string(),
+                ));
+            };
+            modal
+        };
         // CR 700.2a: The controller chooses modes while activating a modal
         // ability. If every mode is illegal due to unavailable selections or
         // unsatisfied targeting requirements, the ability cannot be activated.

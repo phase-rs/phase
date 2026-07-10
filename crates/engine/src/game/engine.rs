@@ -5195,6 +5195,24 @@ pub(super) fn begin_pending_trigger_target_selection(
                 &mut unavailable_modes,
             );
             super::triggers::restore_trigger_event_context(state, context_snapshot);
+            let Some(modal) = super::ability_utils::modal_choice_with_target_assignment_limit(
+                state,
+                source_id,
+                player,
+                &modal,
+                &mode_abilities,
+                &unavailable_modes,
+            ) else {
+                if let Some(entry_id) = state.pending_trigger_entry.take() {
+                    if state.stack.back().map(|e| e.id) == Some(entry_id) {
+                        state.stack.pop_back();
+                        state.stack_paid_facts.remove(&entry_id);
+                        state.stack_trigger_event_batches.remove(&entry_id);
+                    }
+                }
+                state.pending_trigger = None;
+                return Ok(None);
+            };
 
             // CR 700.2b (override) + CR 701.9b (analogous): "choose ... at
             // random" modal triggers (Cult of Skaro) are resolved inline by
