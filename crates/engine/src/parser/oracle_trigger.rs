@@ -1186,12 +1186,15 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             })
             .or_else(|| {
                 // CR 700.2 + CR 608.2d: Inline modal trigger body — "choose one —
-                // mode1; or mode2" on a single line (no bullet-line modes). Grenzo,
-                // Havoc Raiser is the canonical case. Route through the modal parser
-                // so each mode body is independently parsed with the trigger's
-                // established relative_player_scope (e.g. TriggeringPlayer for
-                // DamageDone triggers) so "that player" in mode bodies resolves to
-                // the damaged player (CR 603.7c).
+                // mode1; or mode2" on a single line (no bullet-line modes). No
+                // printed card currently reaches this branch: it needs an em-dash
+                // *and* "; or " inside one trigger effect body. (Grenzo, Havoc
+                // Raiser — long named here as the canonical case — uses bullet-line
+                // modes, so `raw_modes.len() == 1` and it never arrives.) Route
+                // through the modal parser so each mode body is independently
+                // parsed with the trigger's established relative_player_scope (e.g.
+                // TriggeringPlayer for DamageDone triggers) so "that player" in mode
+                // bodies resolves to the damaged player (CR 603.7c).
                 if let Some(modal_ability) = try_parse_inline_modal(
                     &effect_for_parse,
                     effect_ctx.relative_player_scope.clone(),
@@ -1286,7 +1289,9 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             {
                 ability.optional_targeting = true;
             }
-            // CR 609.3: Propagate optional to execute ability.
+            // CR 603.5: A triggered ability whose effect is optional ("may") goes
+            // on the stack regardless; the choice is made when it resolves. Carry
+            // that optionality onto the execute ability, which is what resolves.
             if modifiers.optional {
                 ability.optional = true;
             }
