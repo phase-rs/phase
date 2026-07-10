@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4776
-- **Total card appearances across root causes:** 4810 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4763
+- **Total card appearances across root causes:** 4797 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -22,7 +22,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 8 | Additional / alternative casting cost dropped | 210 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 168 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
-| 11 | Replacement / prevention / 'instead' effect mis-modeled | 170 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
+| 11 | Replacement / prevention / 'instead' effect mis-modeled | 157 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 138 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
 | 13 | State/game-state condition → StaticCondition::Unrecognized | 134 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 95 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
@@ -3654,7 +3654,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 11. Replacement / prevention / 'instead' effect mis-modeled  (170 cards)
+### 11. Replacement / prevention / 'instead' effect mis-modeled  (157 cards)
 
 **Signature.** A continuous replacement / damage-prevention / redirection clause (CR 614/615) is emitted as a one-shot Spell or unconditional sequential sibling, dropping the 'instead'/replacement semantics or the source/recipient filter.
 
@@ -3689,13 +3689,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Channel Harm
 - Charm Peddler
 - Circle of Protection: Art
-- Circle of Protection: Artifacts
-- Circle of Protection: Black
-- Circle of Protection: Blue
-- Circle of Protection: Green
-- Circle of Protection: Red
 - Circle of Protection: Shadow
-- Circle of Protection: White
 - Coalition Victory
 - Consign to Dream
 - Containment Priest
@@ -3793,13 +3787,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Reed Richards, Smartest Man
 - Reflect Damage
 - Reflective Gate
-- Rune of Protection: Artifacts
-- Rune of Protection: Black
-- Rune of Protection: Blue
-- Rune of Protection: Green
-- Rune of Protection: Lands
-- Rune of Protection: Red
-- Rune of Protection: White
 - Samite Blessing
 - Sanctum Guardian
 - Sandman's Quicksand
