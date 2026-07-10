@@ -1531,10 +1531,7 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_quantity_expr(amount));
             acc
         }
-        Effect::DraftFromSpellbook {
-            destination: _,
-            tapped: _,
-        } => Axes::NONE,
+        Effect::DraftFromSpellbook { .. } => Axes::NONE,
         Effect::ChooseCounterAdjustment {
             adjustment: _,
             count,

@@ -4094,10 +4094,7 @@ fn rw_effect(
             (p, None)
         }
         Effect::Learn => (ext_write(StateKind::HandLibrary), None),
-        Effect::DraftFromSpellbook {
-            destination: _,
-            tapped: _,
-        } => (ext_write(StateKind::HandLibrary), None),
+        Effect::DraftFromSpellbook { .. } => (ext_write(StateKind::HandLibrary), None),
         Effect::Clash => (ext_write(StateKind::HandLibrary), None),
         Effect::ChooseDrawnThisTurnPayOrTopdeck {
             count,

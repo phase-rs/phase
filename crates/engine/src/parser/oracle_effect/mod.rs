@@ -8736,6 +8736,7 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
         return Some(Effect::DraftFromSpellbook {
             destination: Zone::Hand,
             tapped: false,
+            random: false,
         });
     }
 
@@ -8750,6 +8751,7 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
         return tail_done(tail).then_some(Effect::DraftFromSpellbook {
             destination: Zone::Battlefield,
             tapped,
+            random: false,
         });
     }
 
@@ -8759,6 +8761,7 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
         return tail_done(tail).then_some(Effect::DraftFromSpellbook {
             destination: Zone::Exile,
             tapped: false,
+            random: false,
         });
     }
 
@@ -8783,9 +8786,19 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
 /// is ever narrowed to model the real three-card draft, these conjure-of-your-choice cards
 /// must retain the whole-book choice rather than following it.
 fn try_parse_conjure_from_spellbook(tp: TextPair) -> Option<Effect> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("conjure a card of your choice from ")
-        .parse(tp.lower)
-        .ok()?;
+    // Two wordings of the same draft-from-spellbook operation: "of your choice" lets the
+    // controller choose (random = false); "a random card" has the engine pick (random = true).
+    let (rest, random) = if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("conjure a card of your choice from ").parse(tp.lower)
+    {
+        (rest, false)
+    } else if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("conjure a random card from ").parse(tp.lower)
+    {
+        (rest, true)
+    } else {
+        return None;
+    };
     // Consume the (irrelevant) source-card name up to "spellbook".
     let (after_book, _src) = take_until::<_, _, OracleError<'_>>("spellbook")
         .parse(rest)
@@ -8809,6 +8822,7 @@ fn try_parse_conjure_from_spellbook(tp: TextPair) -> Option<Effect> {
     (tail.is_empty() || tail == ".").then_some(Effect::DraftFromSpellbook {
         destination,
         tapped,
+        random,
     })
 }
 
