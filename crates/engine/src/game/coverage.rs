@@ -21,11 +21,12 @@ use crate::types::ability::{
     Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
     DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect,
     EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction, LibraryPosition, ManaProduction,
-    ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
-    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    ObjectProperty, ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition,
+    StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -7542,6 +7543,23 @@ fn pump_matches_oracle(
         } if static_has_pump_modification(static_abilities, expected_power, expected_toughness) => {
             return true;
         }
+        // Digital-only Alchemy "[object] perpetually gets +N/+M" (no CR entry for
+        // "perpetually"; the delta applies as a CR 613.4c layer-7c power/toughness
+        // modification) lowers to `Effect::ApplyPerpetual` carrying a
+        // `ModifyPowerToughness` delta rather
+        // than a top-level `Effect::Pump`. Without this arm every perpetual-pump card
+        // (Heir to Dragonfire, Perennial Gravewarden, Tomakul Phoenix, …) is a spurious
+        // `WrongParameter: no matching pump effect` finding.
+        Effect::ApplyPerpetual {
+            modification:
+                PerpetualModification::ModifyPowerToughness {
+                    power_delta,
+                    toughness_delta,
+                },
+            ..
+        } if *power_delta == expected_power && *toughness_delta == expected_toughness => {
+            return true;
+        }
         _ => {}
     }
     false
@@ -11688,6 +11706,41 @@ mod tests {
                 |f| matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "counter")
             ),
             "ChooseOneOf counter branches should satisfy counter parameter audit: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_pump_parameter_accepts_perpetual_modify_power_toughness() {
+        use crate::types::ability::PerpetualModification;
+
+        // Digital-only Alchemy "[object] perpetually gets +N/+M" lowers to
+        // `Effect::ApplyPerpetual{ModifyPowerToughness}`, not a top-level
+        // `Effect::Pump`. The pump-parameter audit must treat that delta as
+        // satisfying the "+N/+M" oracle text, else every perpetual-pump card
+        // (Heir to Dragonfire, Perennial Gravewarden, Tomakul Phoenix, …) is a
+        // spurious `WrongParameter: no matching pump effect` finding.
+        let mut face = make_face();
+        let oracle = "This creature perpetually gets +1/+1.";
+        face.oracle_text = Some(oracle.to_string());
+
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::Any,
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power_delta: 1,
+                    toughness_delta: 1,
+                },
+            },
+        ));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings.iter().any(
+                |f| matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "pump")
+            ),
+            "ApplyPerpetual ModifyPowerToughness should satisfy the pump parameter audit: {findings:?}"
         );
     }
 
