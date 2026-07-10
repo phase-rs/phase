@@ -549,7 +549,7 @@ function MobilePreviewOverlay({
             </button>
           )}
           {report && (
-            <div className="absolute right-3 top-3 rounded-full border border-white/20 bg-black/70 px-3 py-1.5 shadow-lg backdrop-blur">
+            <div className="absolute bottom-3 left-3 rounded-full border border-white/20 bg-black/70 px-3 py-1.5 shadow-lg backdrop-blur">
               <ReportCardButton key={report.oracleId || report.name} {...report} />
             </div>
           )}

@@ -562,6 +562,16 @@ pub struct CastExtraCost {
 /// This is a typed enum rather than a boolean because the design space is
 /// open-ended: new cards routinely introduce novel cause predicates, and
 /// `bool` fields cannot grow to accommodate them.
+///
+/// CR 603.6a + CR 603.6c: Disjunctive qualifier on the permanent whose
+/// battlefield transition caused a trigger (Gandalf the White-class). The
+/// causing object matches if it satisfies ANY listed qualifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ZoneChangeQualifier {
+    CoreType(super::card_type::CoreType),
+    Supertype(super::card_type::Supertype),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TriggerCause {
     /// Unrestricted doubler — matches any trigger cause.
@@ -604,6 +614,24 @@ pub enum TriggerCause {
     /// CR 309.4c: Trigger was caused by entering a dungeon room
     /// (Hama Pashar-class). Matches `GameEvent::RoomEntered` events.
     RoomEntered,
+    /// CR 603.6a + CR 603.6c: Trigger was caused by a permanent entering
+    /// and/or leaving the battlefield (Gandalf the White-class). `enter` /
+    /// `leave` select which directions qualify; when both are true, either
+    /// direction matches. `qualifiers` narrows the causing permanent against
+    /// its zone-change snapshot (CR 603.10a LKI) — empty means any permanent;
+    /// Gandalf uses `[Supertype(Legendary), CoreType(Artifact)]` (disjunctive).
+    BattlefieldTransition {
+        #[serde(default = "default_true")]
+        enter: bool,
+        #[serde(default)]
+        leave: bool,
+        #[serde(default)]
+        qualifiers: Vec<ZoneChangeQualifier>,
+    },
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl fmt::Display for TriggerCause {
@@ -624,6 +652,24 @@ impl fmt::Display for TriggerCause {
                 write!(f, "ControllerCastOrCopiedSpell([{}])", names.join(","))
             }
             TriggerCause::RoomEntered => write!(f, "RoomEntered"),
+            TriggerCause::BattlefieldTransition {
+                enter,
+                leave,
+                qualifiers,
+            } => {
+                let qual_names: Vec<String> = qualifiers
+                    .iter()
+                    .map(|q| match q {
+                        ZoneChangeQualifier::CoreType(ct) => format!("{ct:?}"),
+                        ZoneChangeQualifier::Supertype(st) => format!("{st:?}"),
+                    })
+                    .collect();
+                write!(
+                    f,
+                    "BattlefieldTransition(enter={enter},leave={leave},[{}])",
+                    qual_names.join(",")
+                )
+            }
         }
     }
 }

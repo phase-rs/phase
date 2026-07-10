@@ -3300,6 +3300,8 @@ pub(crate) fn parse_static_line_inner(
             TriggerCause::CreatureAttacking
         } else if nom_primitives::scan_contains(tp.lower, "dying causes") {
             TriggerCause::CreatureDying
+        } else if let Some(cause) = parse_battlefield_transition_cause(tp.lower) {
+            cause
         } else if nom_primitives::scan_contains(tp.lower, "entering")
             || nom_primitives::scan_contains(tp.lower, "enters the battlefield")
         {
@@ -3342,6 +3344,55 @@ pub(crate) fn parse_static_line_inner(
     }
 
     None
+}
+
+/// CR 603.6a + CR 603.6c: Extract disjunctive qualifiers on the permanent whose
+/// zone change caused a trigger doubler (Gandalf the White-class).
+fn parse_zone_change_qualifiers(lower: &str) -> Vec<ZoneChangeQualifier> {
+    let mut qualifiers = Vec::new();
+    if nom_primitives::scan_contains(lower, "legendary") {
+        qualifiers.push(ZoneChangeQualifier::Supertype(Supertype::Legendary));
+    }
+    if nom_primitives::scan_contains(lower, "artifact") {
+        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Artifact));
+    }
+    if nom_primitives::scan_contains(lower, "creature") {
+        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Creature));
+    }
+    if nom_primitives::scan_contains(lower, "enchantment") {
+        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Enchantment));
+    }
+    if nom_primitives::scan_contains(lower, "land") {
+        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Land));
+    }
+    if nom_primitives::scan_contains(lower, "planeswalker") {
+        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Planeswalker));
+    }
+    qualifiers
+}
+
+/// CR 603.6a + CR 603.6c: Parse Gandalf-class battlefield transition causes.
+/// Returns `None` for Panharmonicon-style enter-only lines without a legendary
+/// supertype so the legacy `EntersBattlefield` path stays stable.
+fn parse_battlefield_transition_cause(lower: &str) -> Option<TriggerCause> {
+    let enter = nom_primitives::scan_contains(lower, "entering")
+        || nom_primitives::scan_contains(lower, "enters the battlefield");
+    let leave = nom_primitives::scan_contains(lower, "leaving")
+        || nom_primitives::scan_contains(lower, "leaves the battlefield");
+    if !enter && !leave {
+        return None;
+    }
+
+    let has_legendary = nom_primitives::scan_contains(lower, "legendary");
+    if enter && !leave && !has_legendary {
+        return None;
+    }
+
+    Some(TriggerCause::BattlefieldTransition {
+        enter,
+        leave,
+        qualifiers: parse_zone_change_qualifiers(lower),
+    })
 }
 
 /// CR 309.4c: "Room abilities of dungeons you own trigger(s) an additional time."

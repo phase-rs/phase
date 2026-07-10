@@ -1370,6 +1370,24 @@ pub struct PendingPerPlayerZoneChoice {
     pub accumulated: bool,
 }
 
+/// CR 101.4: If players make choices for one instruction, they choose in
+/// APNAP order before the simultaneous action happens.
+/// CR 701.21a: To sacrifice a permanent, its controller moves it from the
+/// battlefield to its owner's graveyard.
+/// Per-player sacrifice choices for one simultaneous instruction such as
+/// "each player sacrifices a creature."
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingPlayerScopeSacrificeChoice {
+    /// The scoped sacrifice ability template. The current chooser is rebound
+    /// onto a clone before each prompt is built.
+    pub ability: Box<ResolvedAbility>,
+    /// Players not yet prompted, in APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// Already collected choices, paired with the player who will sacrifice
+    /// those permanents once all choices are known.
+    pub selections: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
 /// CR 608.2c + CR 105.1 / CR 205.2a: Per-category-member
 /// `Effect::ForEachCategoryExile` iteration paused by the current member's
 /// interactive choice. Mirrors [`PendingPerPlayerZoneChoice`], but the
@@ -7668,6 +7686,14 @@ pub struct GameState {
     /// tracked set before "put those cards onto the battlefield" resolves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_per_player_zone_choice: Option<PendingPerPlayerZoneChoice>,
+    /// CR 101.4: If players make choices for one instruction, they choose in
+    /// APNAP order before the simultaneous action happens.
+    /// CR 701.21a: To sacrifice a permanent, its controller moves it from the
+    /// battlefield to its owner's graveyard.
+    /// Per-player sacrifice choices paused by the current player's
+    /// `EffectZoneChoice`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_player_scope_sacrifice_choice: Option<PendingPlayerScopeSacrificeChoice>,
     /// CR 608.2c + CR 105.1 / CR 205.2a: Per-category-member
     /// `Effect::ForEachCategoryExile` iteration paused by the current member's
     /// interactive choice ("for each color/card type, you may exile a card of
@@ -8934,6 +8960,7 @@ impl GameState {
             pending_choose_one_of: None,
             pending_vote_ballot_iteration: None,
             pending_per_player_zone_choice: None,
+            pending_player_scope_sacrifice_choice: None,
             pending_per_category_zone_choice: None,
             pending_counter_moves: None,
             pending_counter_removals: None,
@@ -9632,6 +9659,8 @@ impl PartialEq for GameState {
             && self.pending_choose_one_of == other.pending_choose_one_of
             && self.pending_vote_ballot_iteration == other.pending_vote_ballot_iteration
             && self.pending_per_player_zone_choice == other.pending_per_player_zone_choice
+            && self.pending_player_scope_sacrifice_choice
+                == other.pending_player_scope_sacrifice_choice
             && self.pending_counter_moves == other.pending_counter_moves
             && self.pending_counter_removals == other.pending_counter_removals
             && self.pending_batch_deliveries == other.pending_batch_deliveries

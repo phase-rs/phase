@@ -3190,6 +3190,48 @@ pub(super) fn handle_resolution_choice(
                 let _ = state.devour_eligible_snapshot.take();
             }
 
+            if matches!(effect_kind, EffectKind::Sacrifice)
+                && state.pending_player_scope_sacrifice_choice.is_some()
+            {
+                // CR 101.4: If multiple players make choices for one
+                // instruction, collect those choices before the simultaneous
+                // sacrifice action happens.
+                let outcome = effects::advance_pending_player_scope_sacrifice_choice(
+                    state, player, &chosen, events,
+                )
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                match outcome {
+                    effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                    effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                    effects::PendingPlayerScopeSacrificeOutcome::Completed {
+                        events_before_sacrifice,
+                        events_after_sacrifice,
+                    } => {
+                        set_priority(state, player);
+                        resume_with_error_propagation(state, events)?;
+                        if let Some(outcome) = batch_or_drain_observer_triggers(
+                            state,
+                            events,
+                            events_before_sacrifice,
+                            events_after_sacrifice,
+                        ) {
+                            return Ok(outcome);
+                        }
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                }
+            }
+
             if chosen.is_empty() && matches!(effect_kind, EffectKind::CastFromZone) {
                 // CR 609.1 / CR 601.2a: Declining an optional
                 // Electrodominance-style hand cast consumes the stashed

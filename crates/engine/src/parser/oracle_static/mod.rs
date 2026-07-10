@@ -44,11 +44,11 @@ mod prelude {
     };
     pub(super) use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction,
-        AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator,
-        ContinuousModification, ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope,
-        ParsedCondition, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
-        TypeFilter, TypedFilter,
+        AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, CombatRelation,
+        CombatRelationSubject, Comparator, ContinuousModification, ControllerRef, CostCategory,
+        CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PtStat, PtValueScope,
+        QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, StaticCondition,
+        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     pub(super) use crate::types::card_type::{
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
@@ -63,6 +63,7 @@ mod prelude {
         CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
         CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost, ExileCastTiming,
         HandSizeModification, ProhibitionScope, StaticMode, SuppressedTriggerEvent, TriggerCause,
+        ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;
 }

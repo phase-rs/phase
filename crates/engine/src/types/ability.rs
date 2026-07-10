@@ -12160,6 +12160,8 @@ pub enum Effect {
         destination: Zone,
         #[serde(default)]
         tapped: bool,
+        #[serde(default)]
+        random: bool,
     },
     /// CR 701.55 + CR 608.2d: Inline "[player] chooses/faces [effect A] or
     /// [effect B]" — the configured chooser scope chooses at resolution which

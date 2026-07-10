@@ -686,7 +686,12 @@ jobs:
     name: Build Server (${{ matrix.os }})
     needs: [resolve-release-ref, tauri-preflight, build-wasm, build-server-binary]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 35
+    # The Windows leg ran ~33-34 min warm against a 35-min ceiling, so any cache
+    # miss tripped the timeout and cancelled the release (a timed-out job reports
+    # as `cancelled`, which fails the publish job's `build-server == success`
+    # gate). The server-release profile change cuts this well below 35; the
+    # headroom here guards against a cold cache or a slow runner.
+    timeout-minutes: 55
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
@@ -811,40 +816,12 @@ jobs:
         with:
           ref: ${{ env.RELEASE_SHA }}
 
-      - name: Check macOS signing secrets
-        id: macos-signing
-        if: matrix.os == 'macos'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          missing=0
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            if [ -z "${!name:-}" ]; then
-              echo "::warning::Missing macOS signing secret: ${name}"
-              missing=1
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then
-            echo "::warning::Skipping macOS Tauri build — Apple signing secrets not configured. The .dmg requires notarization to avoid Gatekeeper errors."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-        shell: bash
-
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-        if: steps.macos-signing.outputs.skip != 'true'
         with:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-tauri-${{ matrix.os }}
 
       - uses: taiki-e/install-action@v2
-        if: steps.macos-signing.outputs.skip != 'true'
         with:
           tool: wasm-bindgen-cli@0.2.121
 
@@ -855,7 +832,7 @@ jobs:
           echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
 
       - name: Install binaryen (macOS)
-        if: matrix.os == 'macos' && steps.macos-signing.outputs.skip != 'true'
+        if: matrix.os == 'macos'
         run: brew install binaryen
 
       - name: Install binaryen (Windows)
@@ -867,12 +844,10 @@ jobs:
         shell: pwsh
 
       - uses: pnpm/action-setup@v4
-        if: steps.macos-signing.outputs.skip != 'true'
         with:
           version: 9
 
       - uses: actions/setup-node@v4
-        if: steps.macos-signing.outputs.skip != 'true'
         with:
           node-version: 22
           cache: pnpm
@@ -886,21 +861,18 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
 
       - name: Download card data
-        if: steps.macos-signing.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
           name: card-data
           path: client/public
 
       - name: Download frontend data files
-        if: steps.macos-signing.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
           name: frontend-data-files
           path: client/public
 
       - name: Verify Tauri bundled data files
-        if: steps.macos-signing.outputs.skip != 'true'
         run: |
           test -s client/public/card-data.json
           node - <<'NODE'
@@ -915,7 +887,6 @@ jobs:
         shell: bash
 
       - name: Build phase-server sidecar
-        if: steps.macos-signing.outputs.skip != 'true'
         run: |
           if [ "${{ matrix.os }}" = "linux" ]; then
             cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
@@ -926,7 +897,7 @@ jobs:
         shell: bash
 
       - name: Place sidecar binary (Unix)
-        if: matrix.os != 'windows' && steps.macos-signing.outputs.skip != 'true'
+        if: matrix.os != 'windows'
         run: |
           if [ "${{ matrix.os }}" = "linux" ]; then
             cp target/x86_64-unknown-linux-musl/server-release/phase-server client/src-tauri/binaries/phase-server-${{ matrix.sidecar_triple }}
@@ -940,16 +911,13 @@ jobs:
         shell: pwsh
 
       - name: Build WASM for Tauri
-        if: steps.macos-signing.outputs.skip != 'true'
         run: ./scripts/build-wasm.sh release
         shell: bash
 
       - name: Install frontend dependencies
-        if: steps.macos-signing.outputs.skip != 'true'
         run: cd client && pnpm install --frozen-lockfile
 
       - name: Build Tauri
-        if: steps.macos-signing.outputs.skip != 'true'
         uses: tauri-apps/tauri-action@v0
         env:
           # tauri-action runs beforeBuildCommand (pnpm build) as a child process,
@@ -977,7 +945,6 @@ jobs:
           projectPath: client
 
       - name: Stage Tauri artifacts
-        if: steps.macos-signing.outputs.skip != 'true'
         run: |
           mkdir -p staging
           find client/src-tauri/target/release/bundle \
@@ -990,7 +957,6 @@ jobs:
         shell: bash
 
       - name: Upload Tauri artifact
-        if: steps.macos-signing.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}

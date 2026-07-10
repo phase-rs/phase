@@ -27435,3 +27435,46 @@ fn an_additional_pt_grant_bare_parses() {
         statics[0].condition
     );
 }
+
+/// CR 509.1g / CR 509.1h: Alms Beast — "Creatures blocking or blocked by ~ have
+/// lifelink." The self-relative combat-relationship subject lowers to a
+/// source-anchored `FilterProp::CombatRelation`, and the keyword grant rides on
+/// that filter. Both the normalized self-reference ("~") and the literal "this
+/// creature" phrasing resolve identically.
+#[test]
+fn combat_relation_subject_static_binds_source_anchored_filter() {
+    for line in [
+        "Creatures blocking or blocked by this creature have lifelink.",
+        "Creatures blocking or blocked by ~ have lifelink.",
+    ] {
+        let s = super::shared::parse_static_line_multi(line);
+        assert_eq!(s.len(), 1, "{line:?}: expected one static, got {s:?}");
+        assert!(
+            s[0].modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Lifelink
+                }),
+            "{line:?}: expected a lifelink grant, got {:?}",
+            s[0].modifications
+        );
+        let props = match &s[0].affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(
+                    tf.type_filters,
+                    vec![TypeFilter::Creature],
+                    "{line:?}: expected a creature subject, got {:?}",
+                    tf.type_filters
+                );
+                &tf.properties
+            }
+            other => panic!("{line:?}: expected a Typed affected filter, got {other:?}"),
+        };
+        assert!(
+            props.contains(&FilterProp::CombatRelation {
+                relation: CombatRelation::BlockingOrBlockedBy,
+                subject: CombatRelationSubject::Source,
+            }),
+            "{line:?}: expected a source-anchored BlockingOrBlockedBy prop, got {props:?}"
+        );
+    }
+}

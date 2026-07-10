@@ -49,10 +49,17 @@ codegen-units = 1
 strip = true
 panic = 'abort'
 
-# Native server: speed over size, unwind so tokio catches per-task panics
+# Native server: speed over size, unwind so tokio catches per-task panics.
+# Overrides release's fat LTO + single codegen unit (those exist for WASM
+# binary size, not native servers): they pushed the Windows release build to
+# ~34 min against the 35-min CI timeout, cancelling the daily release. Thin LTO
+# keeps cross-crate inlining at a fraction of the compile cost, and 16 codegen
+# units parallelize the build.
 [profile.server-release]
 inherits = "release"
 opt-level = 2
+lto = "thin"
+codegen-units = 16
 panic = 'unwind'
 
 # CLI tools (oracle-gen, coverage-report): fast compile, decent runtime

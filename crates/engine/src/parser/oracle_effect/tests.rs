@@ -32467,9 +32467,11 @@ fn conjure_of_your_choice_from_spellbook_onto_battlefield() {
         Effect::DraftFromSpellbook {
             destination,
             tapped,
+            random,
         } => {
             assert_eq!(destination, Zone::Battlefield);
             assert!(!tapped);
+            assert!(!random);
         }
         other => panic!("expected DraftFromSpellbook, got: {other:?}"),
     }
@@ -32486,7 +32488,8 @@ fn conjure_of_your_choice_from_spellbook_apostrophe_source() {
         e,
         Effect::DraftFromSpellbook {
             destination: Zone::Battlefield,
-            tapped: false
+            tapped: false,
+            random: false
         }
     ));
 }
@@ -32499,7 +32502,36 @@ fn conjure_of_your_choice_from_spellbook_into_library() {
         e,
         Effect::DraftFromSpellbook {
             destination: Zone::Library,
-            tapped: false
+            tapped: false,
+            random: false
+        }
+    ));
+}
+
+#[test]
+fn conjure_a_random_card_from_spellbook_onto_battlefield() {
+    // "conjure a random card from [X] spellbook" is the engine-picks wording of
+    // draft-from-spellbook: same Effect::DraftFromSpellbook, with random = true.
+    let e = parse_effect("conjure a random card from the Slivers Spellbook onto the battlefield");
+    assert!(matches!(
+        e,
+        Effect::DraftFromSpellbook {
+            destination: Zone::Battlefield,
+            tapped: false,
+            random: true
+        }
+    ));
+}
+
+#[test]
+fn conjure_a_random_card_from_spellbook_into_hand() {
+    let e = parse_effect("conjure a random card from ~'s spellbook into your hand");
+    assert!(matches!(
+        e,
+        Effect::DraftFromSpellbook {
+            destination: Zone::Hand,
+            tapped: false,
+            random: true
         }
     ));
 }

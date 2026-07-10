@@ -22,7 +22,9 @@ use crate::types::keywords::WardCost;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
-use crate::types::statics::{StaticMode, SuppressedTriggerEvent, TriggerCause};
+use crate::types::statics::{
+    StaticMode, SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
+};
 use crate::types::triggers::{AttackTargetFilter, TriggerMode};
 use crate::types::zones::Zone;
 
@@ -3163,7 +3165,17 @@ fn pending_trigger_has_no_legal_resolution_targets(
     );
     let empty = match super::ability_utils::build_target_slots(state, &pending.ability) {
         Ok(slots) => {
-            (pending.ability.effect.target_filter().is_some() && slots.is_empty())
+            // CR 115.1: only effects that DECLARE a target surface a chooseable
+            // slot. `extract_target_filter_from_effect` is the single authority
+            // the slot builder itself uses — it returns `None` not only for
+            // context-refs ("you may draw a card") but for every resolution-time
+            // selection (Sacrifice, at-resolution Bounce, put-from-hand
+            // ChangeZone/CastFromZone, etc.), all of which are ALWAYS resolvable.
+            // Testing raw `target_filter()` here would fork from that authority
+            // and silently drop an auto-accepted "you may put a creature from
+            // your hand …" trigger (Kaalia et al.).
+            (extract_target_filter_from_effect(&pending.ability.effect).is_some()
+                && slots.is_empty())
                 || (!slots.is_empty() && slots.iter().all(|slot| slot.legal_targets.is_empty()))
         }
         Err(_) => true,
@@ -5179,6 +5191,21 @@ fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerCon
     pending.extend(extra);
 }
 
+/// CR 603.6a + CR 603.6c: Disjunctive qualifier check against a zone-change
+/// snapshot. Empty qualifiers match any permanent.
+fn zone_change_qualifiers_match(
+    record: &crate::types::game_state::ZoneChangeRecord,
+    qualifiers: &[ZoneChangeQualifier],
+) -> bool {
+    if qualifiers.is_empty() {
+        return true;
+    }
+    qualifiers.iter().any(|qualifier| match qualifier {
+        ZoneChangeQualifier::CoreType(core_type) => record.core_types.contains(core_type),
+        ZoneChangeQualifier::Supertype(supertype) => record.supertypes.contains(supertype),
+    })
+}
+
 /// CR 603.2d: Predicate check — does a `TriggerCause` match the event that
 /// spawned a pending trigger? Called once per (doubler, pending-trigger) pair.
 ///
@@ -5299,6 +5326,27 @@ fn trigger_cause_matches(
                     .iter()
                     .any(|ct| core_types.contains(ct))
             })
+        }
+        TriggerCause::BattlefieldTransition {
+            enter,
+            leave,
+            qualifiers,
+        } => {
+            // CR 603.6a + CR 603.6c: Match zone changes to/from the battlefield
+            // whose causing permanent satisfies the disjunctive qualifier list.
+            let Some(GameEvent::ZoneChanged {
+                from, to, record, ..
+            }) = event
+            else {
+                return false;
+            };
+            let is_enter = *to == Zone::Battlefield;
+            let is_leave = from.as_ref() == Some(&Zone::Battlefield);
+            let direction_ok = (*enter && is_enter) || (*leave && is_leave);
+            if !direction_ok {
+                return false;
+            }
+            zone_change_qualifiers_match(record, qualifiers)
         }
     }
 }
