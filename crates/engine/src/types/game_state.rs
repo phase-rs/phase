@@ -1728,6 +1728,7 @@ pub enum LiminalTokenAbilityInjection {
     ResolvedToken,
 }
 
+/// CR 603.6a + CR 111.1: Copy-token batch members suppress per-entry emission until batch finalization emits the token entry once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TokenEntryEventEmission {
     Emit,
