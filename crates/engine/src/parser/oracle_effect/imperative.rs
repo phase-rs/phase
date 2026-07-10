@@ -16654,14 +16654,14 @@ mod tests {
         assert!(matches!(
             &*win.effect,
             Effect::CreateDamageReplacement {
-                source_filter: Some(TargetFilter::ChosenDamageSource),
+                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 ..
             }
         ));
         assert!(matches!(
             &*lose.effect,
             Effect::PreventDamage {
-                damage_source_filter: Some(TargetFilter::ChosenDamageSource),
+                damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 ..
             }
         ));

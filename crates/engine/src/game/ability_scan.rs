@@ -2511,11 +2511,17 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
         },
         TargetFilter::DefendingPlayer => Axes::NONE,
         TargetFilter::HasChosenName => Axes::NONE,
-        TargetFilter::ChosenDamageSource => Axes {
-            event: true,
-            sibling: false,
-            projected: false,
-        },
+        TargetFilter::ChosenDamageSource { filter } => {
+            let mut acc = Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+            };
+            if let Some(f) = filter {
+                acc = acc.or(scan_target_filter(f));
+            }
+            acc
+        }
         TargetFilter::Named { name: _ } => Axes::NONE,
         TargetFilter::Owner => Axes::NONE,
         TargetFilter::AllPlayers => Axes::NONE,

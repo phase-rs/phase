@@ -387,7 +387,9 @@ fn recipient_to_damage_target_filter(r: &SingleDamageRecipient) -> Option<Damage
 
 fn single_damage_source_to_filter(source: &SingleDamageSource) -> TargetFilter {
     match source {
-        SingleDamageSource::TheChosenDamageSource => TargetFilter::ChosenDamageSource,
+        SingleDamageSource::TheChosenDamageSource => {
+            TargetFilter::ChosenDamageSource { filter: None }
+        }
     }
 }
 
@@ -3442,7 +3444,10 @@ mod tests {
         else {
             panic!("expected PreventDamage, got {effect:?}");
         };
-        assert_eq!(damage_source_filter, Some(TargetFilter::ChosenDamageSource));
+        assert_eq!(
+            damage_source_filter,
+            Some(TargetFilter::ChosenDamageSource { filter: None })
+        );
     }
 
     #[test]

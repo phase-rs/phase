@@ -1962,7 +1962,7 @@ fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         | TargetFilter::AllPlayers => false,

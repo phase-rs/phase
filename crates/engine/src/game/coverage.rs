@@ -624,7 +624,10 @@ fn fmt_target(filter: &TargetFilter) -> String {
         }
         TargetFilter::ExiledBySource => "cards exiled by source".into(),
         TargetFilter::HasChosenName => "card with the chosen name".into(),
-        TargetFilter::ChosenDamageSource => "chosen damage source".into(),
+        TargetFilter::ChosenDamageSource { filter: Some(f) } => {
+            format!("chosen damage source matching {}", fmt_target(f))
+        }
+        TargetFilter::ChosenDamageSource { filter: None } => "chosen damage source".into(),
         TargetFilter::Named { name } => format!("card named {name}"),
         TargetFilter::Not { filter } => format!("not {}", fmt_target(filter)),
         TargetFilter::Or { filters } => filters

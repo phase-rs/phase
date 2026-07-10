@@ -4539,7 +4539,15 @@ pub enum TargetFilter {
     /// CR 609.7a: Matches the object stored as the source's chosen damage source.
     /// Resolution-time prevention effects should resolve this to `SpecificObject`
     /// when the shield is created so global shields do not depend on a live source.
-    ChosenDamageSource,
+    /// CR 609.7 + CR 609.7b: `filter` optionally constrains which sources are LEGAL
+    /// to choose — e.g. "a blue source of your choice" (Circle/Rune of Protection)
+    /// restricts the choice to blue sources and is rechecked against the chosen
+    /// object's live properties when damage would be dealt; `None` is the bare "a
+    /// source of your choice" / "that source" form (any source is a legal choice).
+    ChosenDamageSource {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<Box<TargetFilter>>,
+    },
     /// Matches objects with a specific hardcoded name.
     /// Used for "card named [literal]" patterns.
     Named {

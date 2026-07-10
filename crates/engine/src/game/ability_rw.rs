@@ -1376,7 +1376,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         | TargetFilter::AllPlayers => WriteScope::External,
@@ -2213,7 +2213,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
@@ -2407,7 +2407,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::ChosenCard
         | TargetFilter::HasChosenName
         | TargetFilter::SourceChosenPlayer
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::Neighbor { .. }
         | TargetFilter::OriginalController
@@ -6079,7 +6079,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::ChosenDamageSource => reads_event_live(),
+        | TargetFilter::ChosenDamageSource { .. } => reads_event_live(),
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
             rw_target_filter(filter)
         }

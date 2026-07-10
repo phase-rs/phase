@@ -77,13 +77,16 @@ pub fn resolve(
     // and re-enter this resolver as a continuation; on the second pass the choice
     // is recorded and we proceed.
     let resolved_source_filter = match &source_filter {
-        Some(TargetFilter::ChosenDamageSource) => {
+        Some(TargetFilter::ChosenDamageSource { filter: qualifier }) => {
             match state.last_chosen_damage_source.as_ref() {
                 Some(_choice) => {
                     // CR 609.7b: Resolve the chosen damage source filter to check if
-                    // the source matches the filter.
+                    // the source matches the filter (including any color/type
+                    // qualifier carried on the variant, rechecked live per 609.7b).
                     let resolved = resolve_source_filter(
-                        &TargetFilter::ChosenDamageSource,
+                        &TargetFilter::ChosenDamageSource {
+                            filter: qualifier.clone(),
+                        },
                         state,
                         ability.source_id,
                         &ability.targets,
@@ -95,17 +98,16 @@ pub fn resolve(
                     }
                 }
                 None => {
-                    // CR 609.7a: prompt the source choice; stash self so the
-                    // shield is built on the second pass with the choice known.
-                    // "a source of your choice" admits ANY damage source — the
-                    // `ChosenDamageSource` filter is the post-choice *referent*,
-                    // not a candidate constraint, so enumerate candidates with
-                    // `TargetFilter::Any`.
-                    let options = choose_damage_source::damage_source_options(
-                        state,
-                        ability,
-                        &TargetFilter::Any,
-                    );
+                    // CR 609.7 + CR 609.7a: prompt the source choice; stash self so
+                    // the shield is built on the second pass with the choice known.
+                    // The bare "a source of your choice" form admits ANY damage
+                    // source; the qualified form ("a blue source of your choice")
+                    // restricts the LEGAL candidates to the qualifier. A single
+                    // `prompt_filter` binding drives BOTH candidate enumeration and
+                    // the `WaitingFor` prompt so they cannot diverge.
+                    let prompt_filter = qualifier.as_deref().cloned().unwrap_or(TargetFilter::Any);
+                    let options =
+                        choose_damage_source::damage_source_options(state, ability, &prompt_filter);
                     // If no legal source exists, the replacement does nothing
                     // (CR 609.7a) — fall through with no source filter rather
                     // than wedging on an empty prompt.
@@ -114,7 +116,7 @@ pub fn resolve(
                             Some(PendingContinuation::new(Box::new(ability.clone())));
                         state.waiting_for = WaitingFor::DamageSourceChoice {
                             player: ability.controller,
-                            source_filter: TargetFilter::Any,
+                            source_filter: prompt_filter,
                             options,
                         };
                         events.push(GameEvent::EffectResolved {
@@ -777,7 +779,7 @@ mod tests {
         ResolvedAbility::new(
             Effect::CreateDamageReplacement {
                 // "a source of your choice" → ChosenDamageSource.
-                source_filter: Some(TargetFilter::ChosenDamageSource),
+                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 combat_scope: None,
                 target_filter: None,
                 modification: None,
@@ -835,7 +837,7 @@ mod tests {
         // resolver) while the choice is live, then clears it.
         state.last_chosen_damage_source = Some(ChosenDamageSource {
             source_id: chosen_source,
-            source_filter: TargetFilter::ChosenDamageSource,
+            source_filter: TargetFilter::ChosenDamageSource { filter: None },
         });
         let cont = state
             .pending_continuation
@@ -896,7 +898,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::CreateDamageReplacement {
-                source_filter: Some(TargetFilter::ChosenDamageSource),
+                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 combat_scope: None,
                 target_filter: None,
                 modification: Some(DamageModification::Double),
@@ -935,7 +937,7 @@ mod tests {
         // Drive directly to the captured state (choice already made).
         state.last_chosen_damage_source = Some(ChosenDamageSource {
             source_id: chosen_source,
-            source_filter: TargetFilter::ChosenDamageSource,
+            source_filter: TargetFilter::ChosenDamageSource { filter: None },
         });
         let ability = chosen_source_redirect_ability(host, PlayerId(0));
         let mut events = Vec::new();
@@ -1107,11 +1109,11 @@ mod tests {
         // Source already chosen (covered separately by the source-choice tests).
         state.last_chosen_damage_source = Some(ChosenDamageSource {
             source_id: chosen_source,
-            source_filter: TargetFilter::ChosenDamageSource,
+            source_filter: TargetFilter::ChosenDamageSource { filter: None },
         });
         let ability = ResolvedAbility::new(
             Effect::CreateDamageReplacement {
-                source_filter: Some(TargetFilter::ChosenDamageSource),
+                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 combat_scope: None,
                 target_filter: None,
                 modification: None,

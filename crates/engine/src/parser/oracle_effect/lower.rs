@@ -3496,12 +3496,12 @@ fn rewrite_oneshot_selfref_to_chosen_in_effect(effect: &mut Effect) {
             damage_source_filter,
             ..
         } if matches!(damage_source_filter, Some(TargetFilter::SelfRef)) => {
-            *damage_source_filter = Some(TargetFilter::ChosenDamageSource);
+            *damage_source_filter = Some(TargetFilter::ChosenDamageSource { filter: None });
         }
         Effect::CreateDamageReplacement { source_filter, .. }
             if matches!(source_filter, Some(TargetFilter::SelfRef)) =>
         {
-            *source_filter = Some(TargetFilter::ChosenDamageSource);
+            *source_filter = Some(TargetFilter::ChosenDamageSource { filter: None });
         }
         Effect::FlipCoin {
             win_effect,

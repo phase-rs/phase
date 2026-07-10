@@ -1,3 +1,4 @@
+use crate::game::effects::choose_damage_source;
 use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{
     CombatDamageScope, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
@@ -5,7 +6,7 @@ use crate::types::ability::{
     ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingContinuation, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
@@ -51,7 +52,7 @@ pub(crate) fn resolve_source_filter(
             })
             .map(|id| TargetFilter::SpecificObject { id })
             .unwrap_or(TargetFilter::None),
-        TargetFilter::ChosenDamageSource => state
+        TargetFilter::ChosenDamageSource { .. } => state
             .last_chosen_damage_source
             .as_ref()
             .map(|choice| {
@@ -59,7 +60,7 @@ pub(crate) fn resolve_source_filter(
                     id: choice.source_id,
                 };
                 match &choice.source_filter {
-                    TargetFilter::ChosenDamageSource | TargetFilter::Any => identity,
+                    TargetFilter::ChosenDamageSource { .. } | TargetFilter::Any => identity,
                     other => {
                         let recheck =
                             resolve_source_filter(other, state, source_id, ability_targets);
@@ -284,6 +285,48 @@ pub fn resolve(
     ) {
         shield = shield.expiry(expiry);
     }
+
+    // CR 609.7 + CR 609.7a: "prevent that damage" from "a <color/type> source of
+    // your choice" (Circle/Rune of Protection cycles) — the source is a player
+    // choice. Unlike `create_damage_replacement::resolve`, this resolver had no
+    // self-prompt path, so the choice was never offered. Prompt it now and
+    // re-enter as a continuation; the recorded choice (with its qualifier stored
+    // on `last_chosen_damage_source.source_filter`) is then resolved into a
+    // durable `SpecificObject` + qualifier `And` shield by `resolve_source_filter`
+    // below. A single `prompt_filter` drives both candidate enumeration and the
+    // `WaitingFor` prompt so they cannot diverge.
+    let effect_source_filter = match &effect_source_filter {
+        Some(TargetFilter::ChosenDamageSource { filter: qualifier }) => {
+            if state.last_chosen_damage_source.is_none() {
+                let prompt_filter = qualifier.as_deref().cloned().unwrap_or(TargetFilter::Any);
+                let options =
+                    choose_damage_source::damage_source_options(state, ability, &prompt_filter);
+                if !options.is_empty() {
+                    state.pending_continuation =
+                        Some(PendingContinuation::new(Box::new(ability.clone())));
+                    state.waiting_for = WaitingFor::DamageSourceChoice {
+                        player: ability.controller,
+                        source_filter: prompt_filter,
+                        options,
+                    };
+                    events.push(GameEvent::EffectResolved {
+                        kind: EffectKind::PreventDamage,
+                        source_id: ability.source_id,
+                    });
+                    return Ok(());
+                }
+                // CR 609.7a: no legal candidate — falls through with the record
+                // still absent; the post-choice logic below then resolves
+                // `resolve_source_filter`'s ChosenDamageSource arm against an empty
+                // `last_chosen_damage_source`, producing a `TargetFilter::None`
+                // shield that matches nothing (this activation does nothing).
+                effect_source_filter.clone()
+            } else {
+                effect_source_filter.clone()
+            }
+        }
+        other => other.clone(),
+    };
 
     // CR 615 + CR 614.1a: Resolve damage source filter from effect definition.
     // Filters using IsChosenColor need the chosen color resolved from the source object
@@ -616,7 +659,7 @@ mod tests {
                 amount_dynamic: None,
                 target: TargetFilter::Any,
                 scope: PreventionScope::AllDamage,
-                damage_source_filter: Some(TargetFilter::ChosenDamageSource),
+                damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 prevention_duration: None,
             },
             vec![],
@@ -633,6 +676,327 @@ mod tests {
                 filters: vec![TargetFilter::SpecificObject { id: chosen }, source_filter],
             })
         );
+    }
+
+    // ---- Circle/Rune of Protection: "a <color/type> source of your choice" ----
+
+    /// A `Typed` color qualifier matching objects whose color includes `color`.
+    fn color_qualifier(color: ManaColor) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::HasColor { color }]))
+    }
+
+    /// A Circle/Rune of Protection prevention ability: "prevent that damage" from
+    /// "a <qualifier> source of your choice". `qualifier: None` is the bare form.
+    fn source_choice_prevent_ability(
+        source: ObjectId,
+        qualifier: Option<TargetFilter>,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: Some(TargetFilter::ChosenDamageSource {
+                    filter: qualifier.map(Box::new),
+                }),
+                prevention_duration: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// Deal `amount` noncombat damage from `source` to player 0.
+    fn deal_source_damage_to_p0(state: &mut GameState, source: ObjectId, amount: i32) {
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: amount },
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        deal_damage::resolve(state, &ability, &mut events).expect("damage resolves");
+    }
+
+    fn add_colored_source(
+        state: &mut GameState,
+        card: u64,
+        owner: PlayerId,
+        name: &str,
+        color: ManaColor,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().color = vec![color];
+        id
+    }
+
+    /// CR 609.7 + CR 609.7b: the PROMPT for "a red source of your choice" must
+    /// offer ONLY red sources as legal choices. Reverting the resolver's new
+    /// self-prompt block leaves `waiting_for` unchanged (no prompt), so the match
+    /// arm panics — this is the primary discriminating assertion.
+    #[test]
+    fn circle_of_protection_red_prompt_options_are_color_filtered() {
+        let mut state = GameState::new_two_player(42);
+        let cop = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Circle of Protection: Red".to_string(),
+            Zone::Battlefield,
+        );
+        let red = add_colored_source(&mut state, 2, PlayerId(1), "Red Source", ManaColor::Red);
+        let blue = add_colored_source(&mut state, 3, PlayerId(1), "Blue Source", ManaColor::Blue);
+
+        let ability = source_choice_prevent_ability(cop, Some(color_qualifier(ManaColor::Red)));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DamageSourceChoice { options, .. } => {
+                assert!(options.contains(&red), "red source must be a legal choice");
+                assert!(
+                    !options.contains(&blue),
+                    "blue source must NOT be offered for Circle of Protection: Red"
+                );
+            }
+            other => panic!("expected DamageSourceChoice prompt, got {other:?}"),
+        }
+    }
+
+    /// Sibling/negative: the BARE "a source of your choice" form (qualifier None)
+    /// must offer BOTH the red and blue sources — proving the qualified and bare
+    /// paths are genuinely distinguished, not both hard-filtered/unfiltered.
+    #[test]
+    fn bare_source_of_your_choice_prompt_offers_all_colors() {
+        let mut state = GameState::new_two_player(42);
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jade Monolith".to_string(),
+            Zone::Battlefield,
+        );
+        let red = add_colored_source(&mut state, 2, PlayerId(1), "Red Source", ManaColor::Red);
+        let blue = add_colored_source(&mut state, 3, PlayerId(1), "Blue Source", ManaColor::Blue);
+
+        let ability = source_choice_prevent_ability(host, None);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DamageSourceChoice { options, .. } => {
+                assert!(
+                    options.contains(&red),
+                    "bare form must offer the red source"
+                );
+                assert!(
+                    options.contains(&blue),
+                    "bare form must offer the blue source"
+                );
+            }
+            other => panic!("expected DamageSourceChoice prompt, got {other:?}"),
+        }
+    }
+
+    /// CR 609.7b + multi-authority: with TWO red sources present, the shield built
+    /// after choosing one via the real `GameAction::ChooseDamageSource` pipeline
+    /// prevents ONLY the chosen source's damage — the other red source's damage is
+    /// dealt normally even though it also matches the color qualifier.
+    #[test]
+    fn circle_of_protection_red_prevents_only_chosen_red_source() {
+        let mut state = GameState::new_two_player(42);
+        let cop = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Circle of Protection: Red".to_string(),
+            Zone::Battlefield,
+        );
+        let red1 = add_colored_source(&mut state, 2, PlayerId(1), "Red One", ManaColor::Red);
+        let red2 = add_colored_source(&mut state, 3, PlayerId(1), "Red Two", ManaColor::Red);
+
+        let ability = source_choice_prevent_ability(cop, Some(color_qualifier(ManaColor::Red)));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Drive the real choice through the engine resolution pipeline (this
+        // exercises `engine_resolution_choices` + the pending-continuation
+        // re-entry that builds the durable shield).
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseDamageSource { source: red1 },
+        )
+        .expect("submit damage source choice");
+
+        // Chosen red source: damage prevented.
+        deal_source_damage_to_p0(&mut state, red1, 3);
+        assert_eq!(
+            state.players[0].life, 20,
+            "chosen red source's damage must be prevented"
+        );
+        // Other red source: damage NOT prevented (identity mismatch, CR 609.7b).
+        deal_source_damage_to_p0(&mut state, red2, 3);
+        assert_eq!(
+            state.players[0].life, 17,
+            "a different red source's damage must NOT be prevented"
+        );
+    }
+
+    /// CR 609.7b: the shield rechecks the chosen source's live color at damage
+    /// time. If the chosen source loses its red color before dealing damage, the
+    /// shield does not apply (and, having never matched, is not consumed).
+    #[test]
+    fn recolored_chosen_source_defeats_color_qualified_shield() {
+        let mut state = GameState::new_two_player(42);
+        let cop = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Circle of Protection: Red".to_string(),
+            Zone::Battlefield,
+        );
+        let red = add_colored_source(&mut state, 2, PlayerId(1), "Red Source", ManaColor::Red);
+
+        let ability = source_choice_prevent_ability(cop, Some(color_qualifier(ManaColor::Red)));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseDamageSource { source: red },
+        )
+        .expect("submit damage source choice");
+        // CR 615.3: the source (Circle of Protection) is a battlefield permanent,
+        // so the untargeted shield hosts on the source object, not the pending
+        // registry. Reach-guard: prove the shield was actually installed.
+        assert_eq!(
+            state
+                .objects
+                .get(&cop)
+                .unwrap()
+                .replacement_definitions
+                .len(),
+            1,
+            "shield must exist before the recheck"
+        );
+
+        // CR 609.7b: chosen source becomes colorless before it deals damage.
+        state.objects.get_mut(&red).unwrap().color = vec![];
+        deal_source_damage_to_p0(&mut state, red, 3);
+        assert_eq!(
+            state.players[0].life, 17,
+            "damage from a now-colorless source must NOT be prevented"
+        );
+        // CR 609.7b: a shield that never matched must not be consumed.
+        assert!(
+            !state.objects.get(&cop).unwrap().replacement_definitions[0].is_consumed,
+            "a shield that never matched must not be consumed (CR 609.7b)"
+        );
+    }
+
+    /// CR 609.7a: no legal source (no red objects anywhere) — no prompt fires and
+    /// the ability resolves as a no-op shield that matches nothing; the game does
+    /// not hang or error.
+    #[test]
+    fn circle_of_protection_red_no_legal_source_is_noop() {
+        let mut state = GameState::new_two_player(42);
+        let cop = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Circle of Protection: Red".to_string(),
+            Zone::Battlefield,
+        );
+        let blue = add_colored_source(&mut state, 2, PlayerId(1), "Blue Source", ManaColor::Blue);
+
+        let ability = source_choice_prevent_ability(cop, Some(color_qualifier(ManaColor::Red)));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::DamageSourceChoice { .. }),
+            "no legal red source means no prompt should fire"
+        );
+        // The blue source's damage is not prevented (the no-op shield matches
+        // nothing).
+        deal_source_damage_to_p0(&mut state, blue, 3);
+        assert_eq!(
+            state.players[0].life, 17,
+            "no-op shield must not prevent any damage"
+        );
+    }
+
+    /// Rune of Protection: Lands exercises the TYPE-qualifier branch: the prompt
+    /// must offer only Land sources, not a creature source.
+    #[test]
+    fn rune_of_protection_lands_prompt_options_are_type_filtered() {
+        let mut state = GameState::new_two_player(42);
+        let rune = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Rune of Protection: Lands".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Damaging Land".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "A Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let land_qualifier = TargetFilter::Typed(TypedFilter::land());
+        let ability = source_choice_prevent_ability(rune, Some(land_qualifier));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DamageSourceChoice { options, .. } => {
+                assert!(
+                    options.contains(&land),
+                    "land source must be a legal choice"
+                );
+                assert!(
+                    !options.contains(&creature),
+                    "creature source must NOT be offered for Rune of Protection: Lands"
+                );
+            }
+            other => panic!("expected DamageSourceChoice prompt, got {other:?}"),
+        }
     }
 
     #[test]

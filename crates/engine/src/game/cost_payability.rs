@@ -93,7 +93,7 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         // CR 201.5a: a granter self-ref carries no pitch-bound X.
@@ -171,7 +171,7 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         // CR 201.5a: no pitch-bound X constraint to relax.

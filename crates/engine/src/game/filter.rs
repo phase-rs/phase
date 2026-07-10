@@ -100,7 +100,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         // CR 201.5a: append-only; GrantingObject is concretized to SpecificObject
@@ -317,7 +317,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         // CR 201.5a: append-only; GrantingObject is concretized to SpecificObject
@@ -1935,7 +1935,7 @@ fn filter_inner_for_object(
         }
         // CR 609.7a: "the chosen source" — match the ObjectId selected by
         // the prior damage-source choice while its continuation resolves.
-        TargetFilter::ChosenDamageSource => {
+        TargetFilter::ChosenDamageSource { .. } => {
             let recheck_ctx = FilterContext {
                 source_id,
                 source_controller,
@@ -1952,7 +1952,7 @@ fn filter_inner_for_object(
                     choice.source_id == object_id
                         && (matches!(
                             &choice.source_filter,
-                            TargetFilter::Any | TargetFilter::ChosenDamageSource
+                            TargetFilter::Any | TargetFilter::ChosenDamageSource { .. }
                         ) || matches_target_filter(
                             state,
                             object_id,
@@ -2168,7 +2168,7 @@ fn zone_change_filter_inner(
             });
             chosen_name.is_some_and(|name| record.name.eq_ignore_ascii_case(name))
         }
-        TargetFilter::ChosenDamageSource => false,
+        TargetFilter::ChosenDamageSource { .. } => false,
         TargetFilter::Named { name } => record.name == *name,
 
         // CR 603.10a + CR 603.6e + CR 702.6: `AttachedTo` against a zone-change
@@ -2516,7 +2516,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         // CR 201.5a: append-only (concretized before runtime).
         | TargetFilter::GrantingObject
         | TargetFilter::Owner => false,
@@ -2826,7 +2826,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         // CR 201.5a: append-only (concretized before runtime).
         | TargetFilter::GrantingObject

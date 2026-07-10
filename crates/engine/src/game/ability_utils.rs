@@ -12386,7 +12386,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::CreateDamageReplacement {
-                source_filter: Some(TargetFilter::ChosenDamageSource),
+                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 combat_scope: None,
                 target_filter: None,
                 modification: None,
