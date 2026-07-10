@@ -11227,6 +11227,9 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
     object_id: ObjectId,
 ) -> Result<Vec<TargetSelectionSlot>, EngineError> {
     if let Some(obj) = state.objects.get(&object_id) {
+        // CR 715.3 / CR 720.3 / CR 712.11b: Adventure, Omen, and modal DFC
+        // face choices happen before target selection, so no single target-slot
+        // preview exists until the face is chosen.
         if (cast_face_choice_offered_from_zone(state, obj)
             && alternative_spell_layout(obj).is_some())
             || cast_spell_face_choice_offered_from_zone(state, obj)
@@ -11235,6 +11238,8 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
         }
     }
 
+    // CR 601.2b: Alternative/additional cost choices are announced before
+    // targets, so casts with multiple viable variants are target-ambiguous.
     let choices = casting_variant_choice_set(state, player, object_id);
     if choices.options.len() > 1 {
         return Ok(Vec::new());
@@ -11244,6 +11249,8 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
     }
 
     let prepared = prepare_spell_cast(state, player, object_id)?;
+    // CR 601.2b: Modal choices are announced before targets, so a modal spell
+    // has no single target-slot preview until modes are chosen.
     if prepared.modal.is_some() {
         return Ok(Vec::new());
     }
@@ -11266,6 +11273,7 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
         return Ok(Vec::new());
     };
 
+    // CR 303.4a: An Aura spell requires a target defined by its enchant ability.
     if obj.card_types.subtypes.iter().any(|s| s == "Aura") {
         return Ok(obj
             .keywords
@@ -11290,6 +11298,8 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
             .collect());
     }
 
+    // CR 702.140a: A mutating creature spell targets a non-Human creature with
+    // the same owner as the spell.
     if obj.mutate_form.is_some() {
         let legal = targeting::find_legal_targets(
             state,
@@ -11314,6 +11324,8 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
     if ability_target_legality_needs_chosen_x(&resolved, distribute.as_ref()) {
         return Ok(Vec::new());
     }
+    // CR 601.2b: Target-dependent kicker/additional-cost declarations happen
+    // before target selection, so defer the preview until the cost is chosen.
     let has_kicker_cost = state
         .objects
         .get(&prepared.object_id)
@@ -11323,6 +11335,8 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
         return Ok(Vec::new());
     }
 
+    // CR 601.2c: Once all earlier casting choices are known, enumerate the
+    // targets the spell requires.
     let mut target_slots = build_target_slots(state, &resolved)?;
     super::ability_utils::cap_distribution_target_slots(
         state,
