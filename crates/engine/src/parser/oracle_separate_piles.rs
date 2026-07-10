@@ -285,14 +285,10 @@ fn parse_pile_disposition_sentence(input: &str) -> Option<(Zone, Zone)> {
     let (rest, ()) = res.ok()?;
     let (rest, chosen_zone) = parse_zone_name(rest)?;
     // Consume the independently varying unchosen-pile reference and prefix.
-    let res: nom::IResult<&str, (), OracleError<'_>> =
-        value((), tag_no_case(" and ")).parse(rest);
+    let res: nom::IResult<&str, (), OracleError<'_>> = value((), tag_no_case(" and ")).parse(rest);
     let (rest, ()) = res.ok()?;
-    let res: nom::IResult<&str, (), OracleError<'_>> = value(
-        (),
-        alt((tag_no_case("the other"), tag_no_case("the rest"))),
-    )
-    .parse(rest);
+    let res: nom::IResult<&str, (), OracleError<'_>> =
+        value((), alt((tag_no_case("the other"), tag_no_case("the rest")))).parse(rest);
     let (rest, ()) = res.ok()?;
     let res: nom::IResult<&str, (), OracleError<'_>> =
         value((), tag_no_case(" into your ")).parse(rest);
@@ -444,8 +440,7 @@ mod tests {
 
     #[test]
     fn rejects_trailing_pile_disposition_rider() {
-        let rider_free =
-            "Put one pile into your hand and the other into your graveyard.";
+        let rider_free = "Put one pile into your hand and the other into your graveyard.";
         assert_eq!(
             parse_pile_disposition_sentence(rider_free),
             Some((Zone::Hand, Zone::Graveyard))
