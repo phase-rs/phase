@@ -1259,9 +1259,10 @@ pub fn list_token_presets_js() -> JsValue {
 pub fn export_game_state_json() -> Result<String, JsValue> {
     with_state_mut(|state| {
         // Capture the live ChaCha20 stream position so `restore_game_state` can
-        // fast-forward to it (issue #5466): `rng` is `#[serde(skip)]`, so only
-        // the serialized `rng_word_pos` carries the offset across the round trip.
-        state.rng_word_pos = state.rng.get_word_pos();
+        // fast-forward to it (issue #5466); `rng` is `#[serde(skip)]`. The
+        // randomness logic lives in the engine (`GameState::capture_rng_word_pos`),
+        // keeping this WASM boundary a thin serialization step.
+        state.capture_rng_word_pos();
         serde_json::to_string(state)
             .map_err(|e| JsValue::from_str(&format!("Failed to serialize GameState: {e}")))
     })?
@@ -1283,12 +1284,12 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
     }
     let mut state: GameState = serde_json::from_str(json_str)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
-    state.rng = ChaCha20Rng::seed_from_u64(state.rng_seed);
-    // Fast-forward the reseeded stream to the offset captured at export
-    // (issue #5466) so the restored game draws the values that would have come
-    // NEXT rather than replaying from origin. Pre-#5466 snapshots default
-    // `rng_word_pos` to 0, preserving the previous rewind-to-origin behavior.
-    state.rng.set_word_pos(state.rng_word_pos);
+    // Reseed the skipped `rng` and fast-forward it to the offset captured at
+    // export (issue #5466) so the restored game draws the values that would have
+    // come NEXT rather than replaying from origin. The engine owns this logic
+    // (`GameState::rehydrate_rng`); pre-#5466 snapshots carry `rng_word_pos == 0`
+    // and reproduce the previous rewind-to-origin behavior.
+    state.rehydrate_rng();
     state.debug_mode = true;
     CARD_DB.with(|cell| {
         if let Some(db) = cell.borrow().as_ref() {

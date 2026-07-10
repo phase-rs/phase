@@ -8436,6 +8436,25 @@ const _: fn() = || {
 };
 
 impl GameState {
+    /// Capture the live ChaCha20 stream offset into `rng_word_pos` so it
+    /// survives serialization — `rng` is `#[serde(skip)]`, so this field is the
+    /// only carrier of the position across a snapshot (issue #5466). Callers
+    /// serializing a faithfully-restorable snapshot invoke this first; the
+    /// randomness logic lives here in the engine, not in transport layers.
+    pub fn capture_rng_word_pos(&mut self) {
+        self.rng_word_pos = self.rng.get_word_pos();
+    }
+
+    /// Reconstruct `rng` from the serialized `rng_seed` and fast-forward it to
+    /// the saved `rng_word_pos`, so a restored snapshot resumes the random
+    /// stream where it left off instead of rewinding to origin and replaying
+    /// already-consumed values (issue #5466). Pre-#5466 snapshots carry
+    /// `rng_word_pos == 0`, which reproduces the previous from-origin behavior.
+    pub fn rehydrate_rng(&mut self) {
+        self.rng = ChaCha20Rng::seed_from_u64(self.rng_seed);
+        self.rng.set_word_pos(self.rng_word_pos);
+    }
+
     /// CR 118.3a: Mint the next stable `ManaPipId` for a pool unit. Monotonic,
     /// never returns the `ManaPipId(0)` unstamped sentinel (counter starts at 1).
     fn next_pip_id(&mut self) -> ManaPipId {
@@ -10185,24 +10204,23 @@ mod tests {
     }
 
     #[test]
-    fn rng_word_pos_survives_serde_and_restores_stream_position() {
-        // Issue #5466: a restored snapshot must resume the ChaCha20 stream at
-        // the offset it held when exported — not rewind to origin and replay the
-        // values the game already consumed. Mirrors the export (sync
-        // `rng_word_pos`) / restore (reseed + `set_word_pos`) seam in
-        // engine-wasm's `export_game_state_json` / `restore_game_state`.
+    fn rng_word_pos_survives_serde_and_rehydrate_resumes_stream() {
+        // Issue #5466: a restored snapshot must resume the ChaCha20 stream at the
+        // offset it held when exported — not rewind to origin and replay the
+        // values the game already consumed. Exercises the ENGINE seam that the
+        // WASM bridge delegates to (`capture_rng_word_pos` on export /
+        // `rehydrate_rng` on restore); reverting either method breaks this test.
         use rand::RngCore;
         let mut state = GameState::new_two_player(0xABCD_1234);
         for _ in 0..7 {
             state.rng.next_u32(); // consume randomness as gameplay would
         }
-        state.rng_word_pos = state.rng.get_word_pos(); // export-time sync
+        state.capture_rng_word_pos(); // production export-time capture
         let mut expected = state.rng.clone(); // the values that come next
         let json = serde_json::to_string(&state).unwrap();
 
         let mut restored: GameState = serde_json::from_str(&json).unwrap();
-        restored.rng = ChaCha20Rng::seed_from_u64(restored.rng_seed);
-        restored.rng.set_word_pos(restored.rng_word_pos); // restore-time fast-forward
+        restored.rehydrate_rng(); // production restore-time reseed + fast-forward
 
         assert_ne!(
             restored.rng_word_pos, 0,
