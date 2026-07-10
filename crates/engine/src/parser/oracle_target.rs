@@ -5451,12 +5451,19 @@ fn parse_ownership_or_controller_suffix(
     // ActivePlayer subject is recognized — no card in the corpus was found
     // using a "you've controlled/you have controlled continuously..." form
     // for this clause, so that variant is not built ahead of a card that
-    // needs it.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(
-        "the active player has controlled continuously since the beginning of the turn",
+    // needs it. The clause is sequenced from three composable atoms — subject
+    // ("the active player"), verb ("has controlled"), and continuity tail
+    // ("continuously since the beginning of the turn") — rather than one
+    // verbatim tag, mirroring `parse_continuity_exemption_clause` (oracle.rs)
+    // and the "owned by" tuple idiom immediately above.
+    let active_player_continuity: nom::IResult<&str, (), OracleError<'_>> = (
+        tag("the active player"),
+        tag(" has controlled"),
+        tag(" continuously since the beginning of the turn"),
     )
-    .parse(own_ctrl)
-    {
+        .map(|_| ())
+        .parse(own_ctrl);
+    if let Ok((rest, ())) = active_player_continuity {
         *controller = Some(ControllerRef::ActivePlayer);
         properties.push(FilterProp::ControlledContinuouslySinceTurnBegan);
         return own_ctrl_offset + (own_ctrl.len() - rest.len());
