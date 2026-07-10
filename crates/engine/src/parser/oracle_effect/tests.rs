@@ -1228,6 +1228,23 @@ fn infer_origin_zone_handles_top_of_your_library() {
 }
 
 #[test]
+fn infer_origin_zone_handles_command_zone() {
+    // CR 408.1 + CR 903.6: "put your commander into your hand from the command
+    // zone" (Command Beacon, Road of Return, Netherborn Altar) and "put a
+    // commander you own from the command zone onto the battlefield" (Hellkite
+    // Courser, #5256). Before this the origin was inferred as None, so the
+    // resolver searched the wrong zone for the commander.
+    assert_eq!(
+        infer_origin_zone("put your commander into your hand from the command zone"),
+        Some(Zone::Command)
+    );
+    assert_eq!(
+        infer_origin_zone("put a commander you own from the command zone onto the battlefield"),
+        Some(Zone::Command)
+    );
+}
+
+#[test]
 fn inferred_top_of_your_library_origin_adds_owner_constraint() {
     let filter = add_inferred_origin_constraints_to_target(
         TargetFilter::Typed(TypedFilter::card()),

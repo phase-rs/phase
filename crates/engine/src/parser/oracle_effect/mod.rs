@@ -28393,6 +28393,13 @@ fn infer_origin_zone(lower: &str) -> Option<Zone> {
         || contains_possessive(lower, "from", "library")
     {
         Some(Zone::Library)
+    } else if scan_contains_phrase(lower, "from the command zone") {
+        // CR 408.1 + CR 903.6: The command zone holds a player's commander(s)
+        // until moved. "put a commander you own from the command zone onto the
+        // battlefield" (Hellkite Courser, #5256) reanimates from the command
+        // zone; without this the origin was inferred as None and the commander
+        // was never found.
+        Some(Zone::Command)
     } else if scan_contains_phrase(lower, "graveyard") && !scan_contains_phrase(lower, "from") {
         // CR 404.1: Possessive graveyard references without "from" — e.g.,
         // "exile each opponent's graveyard", "exile target player's graveyard"
