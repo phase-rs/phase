@@ -545,6 +545,30 @@ pub(crate) struct OracleDocBuilder {
     /// Inert until unit 3b emits exact spans; fixed here, before it can fire.
     items: BTreeMap<(usize, usize, u32), OracleItemIr>,
     next_item_id: u32,
+    /// Per-line `ordinal_within_span` allocator, keyed on `first_line` ONLY —
+    /// deliberately category-BLIND (unit 4).
+    ///
+    /// The item map key `(first_line, start_byte, ordinal_within_span)` carries no
+    /// category, so any two items on the SAME line with the SAME `start_byte` and
+    /// ordinal `0` collide as `DuplicateItemPosition` regardless of category. Same-
+    /// line multi-category emissions are common (casting_option+trigger,
+    /// static+replacement, `push_same_is_true_*` static+ability, multi-keyword
+    /// lines, a Saga ETB replacement on the chapter-1 line, a multi-numeral Saga
+    /// chapter line — CR 714.2c). A per-site counter cannot see cross-category or
+    /// cross-stage siblings and would make those collisions a latent parse failure,
+    /// so every emitter that holds `&mut self` draws its ordinal from this ONE map
+    /// via `next_ordinal_for_line`: pre-loop scans (strive, the Saga ETB
+    /// replacement), the preprocessors, the dispatch loop, and any post-loop
+    /// emission.
+    ///
+    /// Allocation order across different `start_byte`s on one line may hand a
+    /// later-byte item a smaller ordinal, but the map key sorts by `start_byte`
+    /// BEFORE `ordinal_within_span`, so source order is preserved regardless of the
+    /// order in which ordinals are drawn. Ordinals need only be distinct, not
+    /// dense: a `take_last_spell` re-emit fresh-allocates and the skipped value is
+    /// harmless.
+    #[allow(dead_code)] // wired by the unit-4 dispatch-loop/preprocessor cutover.
+    next_ordinal_by_line: BTreeMap<usize, u32>,
     /// CR 707.9a printed-**trigger** index: the slot the next emitted trigger
     /// occupies.
     ///
@@ -613,6 +637,22 @@ impl ItemSlot {
 impl OracleDocBuilder {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Allocate the next distinct `ordinal_within_span` for `first_line`.
+    ///
+    /// Single cross-category authority (unit 4): see `next_ordinal_by_line`. Every
+    /// emitter holding `&mut self` — pre-loop scans, preprocessors, the dispatch
+    /// loop, post-loop emission — draws its ordinal from here so no two items on
+    /// one line can collide on the map key. The counter never decrements; a
+    /// `take_last_spell` re-emit fresh-allocates and any skipped value is harmless
+    /// because ordinals need only be distinct, not dense.
+    #[allow(dead_code)] // wired by the unit-4 dispatch-loop/preprocessor cutover.
+    pub(crate) fn next_ordinal_for_line(&mut self, first_line: usize) -> u32 {
+        let slot = self.next_ordinal_by_line.entry(first_line).or_insert(0);
+        let ordinal = *slot;
+        *slot += 1;
+        ordinal
     }
 
     /// The printed slot the next emitted ability will occupy (CR 707.9a). Read

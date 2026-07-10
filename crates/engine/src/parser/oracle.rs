@@ -61,8 +61,8 @@ use super::oracle_effect::{
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
-    OracleDocBuilder, OracleDocIr, OracleNodeIr, OracleSourceSpan, PrintedAbilityIndex,
-    PrintedTriggerIndex,
+    OracleDocBuilder, OracleDocIr, OracleItemIr, OracleNodeIr, OracleSourceSpan, OracleUnitSource,
+    PrintedAbilityIndex, PrintedTriggerIndex,
 };
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
@@ -2701,6 +2701,194 @@ fn parse_strive_cost_line(line: &str) -> Option<ManaCost> {
         .parse(i)
     })?;
     Some(cost)
+}
+
+/// Single-authority source-order emission surface for the unit-4 cutover.
+///
+/// Owns the `OracleDocBuilder` and the parse-local line→byte geometry so EVERY
+/// emission in `parse_oracle_ir` — the per-line dispatch loop, the preprocessors,
+/// and the post-loop singletons — routes through ONE place that (a) computes the
+/// item's exact source span, (b) draws its `ordinal_within_span` from the
+/// builder's single `next_ordinal_for_line` authority, and (c) calls
+/// `begin_item` + `emit`. Every typed method is trivial and uniform — it does
+/// EXACTLY `begin_item(exact_span, Some(fragment)) + emit(node)` and nothing else
+/// (no reordering, no per-method divergence): the method bodies are the fidelity
+/// surface, so the source-order guarantee is a property of this one type rather
+/// than of 90 hand-written call sites.
+///
+/// This replaces the former category-ordered `parsed_abilities_to_doc_ir` on
+/// every non-Class path. `whole_document` spans survive only in the Class shim.
+#[allow(dead_code)] // wired by the dispatch-loop/preprocessor cutover in this unit.
+struct DocEmitter<'a> {
+    builder: OracleDocBuilder,
+    lines: &'a [&'a str],
+    /// Byte offset of the start of each line in the normalized Oracle text:
+    /// `line_start[i] = Σ_{j<i} (lines[j].len() + 1)` (one `'\n'` per prior line).
+    /// Byte values only order items — they are parser-internal and never reach
+    /// `card-data.json` (spans are not serialized into the lowered output).
+    line_start: Vec<usize>,
+}
+
+#[allow(dead_code)] // wired by the dispatch-loop/preprocessor cutover in this unit.
+impl<'a> DocEmitter<'a> {
+    fn new(lines: &'a [&'a str]) -> Self {
+        let mut line_start = Vec::with_capacity(lines.len());
+        let mut acc = 0usize;
+        for line in lines {
+            line_start.push(acc);
+            acc += line.len() + 1; // +1 for the '\n' separator split() removed.
+        }
+        Self {
+            builder: OracleDocBuilder::new(),
+            lines,
+            line_start,
+        }
+    }
+
+    /// Exact byte range `[start, end)` of `line` in the normalized text.
+    fn byte_range(&self, line: usize) -> (usize, usize) {
+        let start = self.line_start[line];
+        (start, start + self.lines[line].len())
+    }
+
+    /// An Exact span for `line`, drawing a fresh ordinal from the single per-line
+    /// authority so no two items on one line can collide on the map key.
+    fn exact_span(&mut self, line: usize) -> OracleSourceSpan {
+        let ordinal = self.builder.next_ordinal_for_line(line);
+        let (start, end) = self.byte_range(line);
+        OracleSourceSpan::exact(line, line, start, end, ordinal)
+    }
+
+    /// The one emit primitive; every typed method funnels here. The `expect` is
+    /// sound: `emit` only rejects a duplicate `(first_line, start_byte, ordinal)`
+    /// key or an overlapping same-ordinal sibling, and the single-authority
+    /// ordinal makes every same-line item's key distinct.
+    fn emit_at(&mut self, line: usize, node: OracleNodeIr) {
+        let span = self.exact_span(line);
+        let fragment = self.lines[line];
+        let slot = self.builder.begin_item(span, Some(fragment));
+        self.builder.emit(slot, node).expect(
+            "single-authority ordinals keep same-line item keys distinct, so emit cannot reject",
+        );
+    }
+
+    /// Emit an item spanning `first_line..=last_line` (a multi-line unit, e.g. a
+    /// leveler block-summary static whose span ends at the last
+    /// modification-contributing line). Ordinal is drawn on `first_line`.
+    fn emit_span(&mut self, first_line: usize, last_line: usize, node: OracleNodeIr) {
+        let ordinal = self.builder.next_ordinal_for_line(first_line);
+        let (start, _) = self.byte_range(first_line);
+        let (_, end) = self.byte_range(last_line);
+        let span = OracleSourceSpan::exact(first_line, last_line, start, end, ordinal);
+        // Fragment must be the verbatim covered slice for an Exact span; the
+        // caller passes contiguous lines, so the byte range is honest.
+        let slot = self.builder.begin_item(span, Some(self.lines[first_line]));
+        self.builder
+            .emit(slot, node)
+            .expect("single-authority ordinals keep multi-line item keys distinct");
+    }
+
+    fn ability_at(&mut self, line: usize, def: AbilityDefinition) {
+        self.emit_at(line, OracleNodeIr::PreLoweredSpell(def));
+    }
+    fn trigger_at(&mut self, line: usize, def: TriggerDefinition) {
+        self.emit_at(line, OracleNodeIr::PreLoweredTrigger(def));
+    }
+    fn static_at(&mut self, line: usize, def: StaticDefinition) {
+        self.emit_at(line, OracleNodeIr::PreLoweredStatic(def));
+    }
+    fn replacement_at(&mut self, line: usize, def: ReplacementDefinition) {
+        self.emit_at(line, OracleNodeIr::PreLoweredReplacement(def));
+    }
+    fn keyword_at(&mut self, line: usize, kw: Keyword) {
+        self.emit_at(line, OracleNodeIr::Keyword(kw));
+    }
+    fn casting_restriction_at(&mut self, line: usize, r: CastingRestriction) {
+        self.emit_at(line, OracleNodeIr::CastingRestriction(r));
+    }
+    fn casting_option_at(&mut self, line: usize, o: SpellCastingOption) {
+        self.emit_at(line, OracleNodeIr::CastingOption(o));
+    }
+    fn additional_cost_at(&mut self, line: usize, c: AdditionalCost) {
+        self.emit_at(line, OracleNodeIr::AdditionalCost(c));
+    }
+    fn solve_condition_at(&mut self, line: usize, c: SolveCondition) {
+        self.emit_at(line, OracleNodeIr::SolveCondition(c));
+    }
+    fn strive_cost_at(&mut self, line: usize, c: ManaCost) {
+        self.emit_at(line, OracleNodeIr::StriveCost(c));
+    }
+    fn modal_at(&mut self, line: usize, m: ModalChoice) {
+        self.emit_at(line, OracleNodeIr::Modal(m));
+    }
+
+    /// A card-data (MTGJSON) keyword that has NO printed source line: a zero-width
+    /// Exact span anchored at `(0, 0, 0)`-bytes, ordinal drawn from the SAME
+    /// `next_ordinal_for_line(0)` authority so multiple card-data keywords keep
+    /// their emission order. `whole_document` is deliberately NOT used — it must
+    /// remain a reliable Class-shim-only marker. The empty fragment is honest: a
+    /// zero-width span covers no text.
+    fn card_data_keyword(&mut self, kw: Keyword) {
+        let ordinal = self.builder.next_ordinal_for_line(0);
+        let span = OracleSourceSpan::exact(0, 0, 0, 0, ordinal);
+        let slot = self.builder.begin_item(span, Some(""));
+        self.builder
+            .emit(slot, OracleNodeIr::Keyword(kw))
+            .expect("distinct ordinals keep zero-width card-data keyword keys distinct");
+    }
+
+    /// Remove and return the most recently emitted spell item — the typed
+    /// `result.abilities.pop()` for the cross-line "instead" fold. The caller
+    /// folds it into a new ability and re-emits via `reemit_spell` at the base
+    /// item's ORIGINAL span.
+    fn pop_last_spell(&mut self) -> Option<OracleItemIr> {
+        self.builder.take_last_spell()
+    }
+
+    /// Re-emit a spell at a template item's ORIGINAL span — same `first_line`,
+    /// bytes, AND `ordinal_within_span`, the key `take_last_spell` just freed.
+    ///
+    /// m2-shell correction: reuse the original ordinal, never fresh-allocate. The
+    /// key was freed by the take, so re-emit cannot collide; and a fresh (higher)
+    /// ordinal would REORDER the spell past any co-located sibling that shares its
+    /// `(first_line, start_byte)` (e.g. a `push_same_is_true_*` static + ability
+    /// from one line). Original-ordinal re-emit is position- and slot-preserving.
+    fn reemit_spell(&mut self, source: &OracleUnitSource, def: AbilityDefinition) {
+        let span = source.span().clone();
+        let fragment = source.fragment();
+        let slot = self.builder.begin_item(span, fragment);
+        self.builder
+            .emit(slot, OracleNodeIr::PreLoweredSpell(def))
+            .expect("re-emitting at the just-freed original key cannot collide");
+    }
+
+    /// The typed `result.abilities.last_mut()` for min_x_value stamping: pop the
+    /// last emitted spell, mutate it, re-emit at its original span. A no-op when
+    /// no spell has been emitted (mirrors `last_mut()` returning `None`).
+    ///
+    /// `take_last_spell` pops the emission-ordered spell stack, which equals
+    /// `abilities.last_mut()` regardless of triggers/statics emitted in between.
+    fn mutate_last_spell(&mut self, f: impl FnOnce(&mut AbilityDefinition)) {
+        let Some(item) = self.builder.take_last_spell() else {
+            return;
+        };
+        let OracleItemIr { source, node, .. } = item;
+        let OracleNodeIr::PreLoweredSpell(mut def) = node else {
+            unreachable!("take_last_spell returns only PreLoweredSpell items");
+        };
+        f(&mut def);
+        self.reemit_spell(&source, def);
+    }
+
+    /// Finish, producing items already in Oracle source order.
+    fn finish(
+        self,
+        oracle_text: &str,
+        card_name: &str,
+        diagnostics: Vec<OracleDiagnostic>,
+    ) -> OracleDocIr {
+        self.builder.finish(oracle_text, card_name, diagnostics)
+    }
 }
 
 /// Produce an `OracleDocIr` from Oracle text — the IR-production half of the
