@@ -8058,21 +8058,62 @@ fn parse_cant_become_untapped_replacement(
     )
 }
 
-/// CR 614.1a: Parse damage redirection replacement effects.
+/// CR 614.9 + CR 509.1h: Extract the optional "by <source>" scope-restriction
+/// clause from a damage-redirection body — "...would be dealt to you by
+/// unblocked creatures is dealt to ~ instead." (Veteran Bodyguard, Weathered
+/// Bodyguards). Delegates entirely to `parse_damage_source_subject_filter`
+/// (the same subject-typing helper every other damage-source clause in this
+/// module already uses), which itself falls back to `parse_type_phrase` — the
+/// SAME combinator that already resolves "unblocked creatures" / "unblocked
+/// attacking creatures" to `FilterProp::Unblocked` via
+/// `parse_combat_status_prefix` (`oracle_target.rs`), proven by the existing
+/// `parse_type_phrase_unblocked_attacking_creatures_you_control` test. This
+/// function adds NO new unblocked-detection — only the "by ... is dealt to"
+/// boundary extraction that the redirection grammar does not yet have.
+/// Returns `None` when no "by " clause is present, so the unrestricted-source
+/// class (Pariah / Palisade Giant) is unaffected.
+fn parse_damage_redirection_source_clause(working_lower: &str) -> Option<TargetFilter> {
+    let (_, (_, after_by)) = nom_primitives::split_once_on(working_lower, " by ").ok()?;
+    let (_, (subject, _)) = nom_primitives::split_once_on(after_by, " is dealt to").ok()?;
+    parse_damage_source_subject_filter(subject.trim())
+}
+
+/// CR 614.1a + CR 604.2: Parse damage redirection replacement effects.
 /// Handles "all damage that would be dealt to [target] is dealt to ~ instead" (Pariah, Palisade Giant)
 /// and "if a source would deal damage to you, prevent that damage. ~ deals that much damage to
 /// any target" (Pariah's Shield).
+///
+/// CR 604.2: an optional leading "as long as <tap-state>, " gate (a printed
+/// static ability's own continuous-effect activation condition) is stripped and
+/// lifted to a typed `ReplacementCondition` before the body is parsed, so the
+/// redirect only applies while the condition holds (Veteran Bodyguard's
+/// "as long as this creature is untapped" — the redirect must NOT fire while the
+/// permanent is tapped).
+///
+/// CR 614.9 + CR 509.1h: an optional "by <source>" clause ("...by unblocked
+/// creatures...") scopes the redirect to a damage-source filter, and a
+/// "combat damage" qualifier scopes it to combat damage only — so the redirect
+/// applies only to combat damage from unblocked creatures rather than to all
+/// damage from every source (Veteran Bodyguard is source-restricted only;
+/// Weathered Bodyguards is both source- and combat-restricted).
 fn parse_damage_redirection_replacement(
     norm_lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
+    // CR 604.2: lift a leading "as long as <tap-state>, " gate to a typed
+    // condition before parsing the body. `working_lower` is the bare body used
+    // for every subsequent check (Pattern 1 and Pattern 3). Pariah / Pariah's
+    // Shield never carry this prefix, so this is a no-op for them.
+    let (working_lower, prefix_condition) = strip_as_long_as_condition_prefix(norm_lower);
+
     // Pattern 1: "all damage that would be dealt to [X] is dealt to ~ instead" (Pariah)
     // Pattern 2: "damage that would be dealt to [X] is dealt to ~ instead" (Palisade Giant)
     // CR 615.1a: Redirect = prevent original + deal to new target
-    if nom_primitives::scan_contains(norm_lower, "would be dealt to")
-        && nom_primitives::scan_contains(norm_lower, "is dealt to")
+    if nom_primitives::scan_contains(working_lower, "would be dealt to")
+        && nom_primitives::scan_contains(working_lower, "is dealt to")
     {
-        let target_filter = if nom_primitives::scan_contains(norm_lower, "would be dealt to you") {
+        let target_filter = if nom_primitives::scan_contains(working_lower, "would be dealt to you")
+        {
             Some(damage_target_controller())
         } else {
             // "would be dealt to ~" or other targets — no specific filter
@@ -8080,12 +8121,17 @@ fn parse_damage_redirection_replacement(
         };
 
         // Determine redirect destination
-        let redirect = if nom_primitives::scan_contains(norm_lower, "is dealt to ~ instead") {
+        let redirect = if nom_primitives::scan_contains(working_lower, "is dealt to ~ instead") {
             // Redirect to self (the permanent with this ability)
             Some(TargetFilter::SelfRef)
         } else {
             None
         };
+
+        // CR 614.9 + CR 509.1h: optional "by <source>" scope-restriction.
+        let source_filter = parse_damage_redirection_source_clause(working_lower);
+        // CR 615: optional "combat damage" qualifier scopes to combat damage only.
+        let combat_scope = scan_combat_scope(working_lower);
 
         let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
             .prevention_shield(PreventionAmount::All)
@@ -8096,14 +8142,24 @@ fn parse_damage_redirection_replacement(
         if let Some(rt) = redirect {
             def = def.redirect_target(rt);
         }
+        // CR 604.2: attach the leading "as long as <tap-state>" gate.
+        if let Some(cond) = prefix_condition {
+            def = def.condition(cond);
+        }
+        if let Some(sf) = source_filter {
+            def = def.damage_source_filter(sf);
+        }
+        if let Some(cs) = combat_scope {
+            def = def.combat_scope(cs);
+        }
         return Some(def);
     }
 
     // Pattern 3: "if a source would deal damage to you, prevent that damage"
     // followed by "~ deals that much damage to any target" (Pariah's Shield)
     // CR 615.1a: Prevention + redirect combination
-    if nom_primitives::scan_contains(norm_lower, "would deal damage to you")
-        && nom_primitives::scan_contains(norm_lower, "prevent that damage")
+    if nom_primitives::scan_contains(working_lower, "would deal damage to you")
+        && nom_primitives::scan_contains(working_lower, "prevent that damage")
     {
         return Some(
             ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -8238,10 +8294,17 @@ fn parse_damage_to_player_instead_followup(
     )
 }
 
-/// CR 614.1a: Strip a leading "as long as <condition>, " gate from a damage
-/// prevention replacement's normalized lowercase text and lift it to a typed
+/// CR 604.2: Strip a leading "as long as <condition>, " gate — a printed static
+/// ability's own continuous-effect activation condition — from a damage
+/// replacement's normalized lowercase text and lift it to a typed
 /// `ReplacementCondition`. Returns the trimmed slice plus the gate (or the
 /// untouched input and `None` when no parseable gate is present).
+///
+/// Shared by both `parse_damage_prevention_replacement` and
+/// `parse_damage_redirection_replacement` — both need to lift a leading
+/// `"as long as <tap-state>, "` gate into a typed `ReplacementCondition` before
+/// parsing the replacement body (prevention: Multiclass Baldric; redirection:
+/// Veteran Bodyguard, Weathered Bodyguards).
 ///
 /// Shares `replacement_condition_from_static` with `parse_source_state_external_entry`
 /// so any condition shape the static-condition lifter supports — quantity
@@ -8251,12 +8314,10 @@ fn parse_damage_to_player_instead_followup(
 /// When the prefix is present but the body fails to parse or doesn't lift to a
 /// supported `ReplacementCondition`, the function returns the untouched input
 /// and `None`. The caller continues with the original text rather than failing
-/// — preserving prior coverage for prevention lines whose gate the typed
-/// surface can't yet carry (still applies the description-based shield, same
-/// as before this gate-extraction was added).
-fn strip_as_long_as_prefix_for_prevention(
-    norm_lower: &str,
-) -> (&str, Option<ReplacementCondition>) {
+/// — preserving prior coverage for lines whose gate the typed surface can't yet
+/// carry (still applies the description-based shield, same as before this
+/// gate-extraction was added).
+fn strip_as_long_as_condition_prefix(norm_lower: &str) -> (&str, Option<ReplacementCondition>) {
     let parsed = (|| -> Option<(&str, ReplacementCondition)> {
         let (rest, _) = tag::<_, _, OracleError<'_>>("as long as ")
             .parse(norm_lower)
@@ -8305,7 +8366,7 @@ fn parse_damage_prevention_replacement(
     // and lift it to a typed `ReplacementCondition` so the rest of the parser
     // operates on the bare prevention clause. Shares `replacement_condition_from_static`
     // with `parse_source_state_external_entry` and other "as long as" callers.
-    let (working_lower, prefix_condition) = strip_as_long_as_prefix_for_prevention(norm_lower);
+    let (working_lower, prefix_condition) = strip_as_long_as_condition_prefix(norm_lower);
 
     // Must contain "prevent" and "damage" to be a prevention pattern
     if !nom_primitives::scan_contains(working_lower, "prevent")
@@ -11163,7 +11224,7 @@ mod tests {
     #[test]
     fn strip_as_long_as_prefix_returns_input_unchanged_when_absent() {
         // No "as long as" prefix: function leaves the slice untouched and reports no gate.
-        let (rest, cond) = strip_as_long_as_prefix_for_prevention(
+        let (rest, cond) = strip_as_long_as_condition_prefix(
             "prevent all damage that would be dealt to equipped creature.",
         );
         assert_eq!(
@@ -11179,7 +11240,7 @@ mod tests {
         // Function leaves the slice untouched so the rest of the parser can still
         // produce a description-only replacement (no regression vs. pre-fix behavior).
         let input = "as long as ~ has flying, prevent all damage that would be dealt to it.";
-        let (rest, cond) = strip_as_long_as_prefix_for_prevention(input);
+        let (rest, cond) = strip_as_long_as_condition_prefix(input);
         assert_eq!(rest, input);
         assert!(cond.is_none());
     }
@@ -15645,6 +15706,88 @@ mod tests {
             }
         ));
         assert_eq!(def.redirect_target, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn veteran_bodyguard_redirect_source_restricted_no_combat_scope() {
+        // CR 604.2 (static "as long as" gate) + CR 614.9 (redirection) + CR 509.1h
+        // (unblocked). Veteran Bodyguard has NO "combat" qualifier — it redirects
+        // ALL damage from unblocked creatures, combat or not.
+        let def = parse_replacement_line(
+            "As long as this creature is untapped, all damage that would be dealt to you by unblocked creatures is dealt to this creature instead.",
+            "Veteran Bodyguard",
+        )
+        .expect("Veteran Bodyguard's redirect must parse");
+
+        assert_eq!(
+            def.combat_scope, None,
+            "Veteran Bodyguard has no \"combat\" qualifier and must not be combat-scoped"
+        );
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::SourceTappedState { tapped: false }),
+            "the leading \"as long as this creature is untapped\" gate must lift to SourceTappedState{{ tapped: false }}"
+        );
+        match &def.damage_source_filter {
+            Some(TargetFilter::Typed(tf)) => assert!(
+                tf.properties.contains(&FilterProp::Unblocked),
+                "expected Unblocked property, got {:?}",
+                tf.properties
+            ),
+            other => panic!("expected a Typed damage_source_filter with Unblocked, got {other:?}"),
+        }
+        assert_eq!(def.damage_target_filter, Some(damage_target_controller()));
+        assert_eq!(def.redirect_target, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn weathered_bodyguards_redirect_is_combat_only_and_source_restricted() {
+        // CR 604.2 + CR 614.9 + CR 509.1h. Weathered Bodyguards HAS the "combat"
+        // qualifier — only combat damage from unblocked creatures redirects.
+        let def = parse_replacement_line(
+            "As long as this creature is untapped, all combat damage that would be dealt to you by unblocked creatures is dealt to this creature instead.",
+            "Weathered Bodyguards",
+        )
+        .expect("Weathered Bodyguards' redirect must parse");
+
+        assert_eq!(
+            def.combat_scope,
+            Some(CombatDamageScope::CombatOnly),
+            "Weathered Bodyguards' \"combat damage\" qualifier must scope the redirect to combat damage only"
+        );
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::SourceTappedState { tapped: false })
+        );
+        match &def.damage_source_filter {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.properties.contains(&FilterProp::Unblocked))
+            }
+            other => panic!("expected a Typed damage_source_filter with Unblocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn palisade_giant_current_oracle_no_unblocked_source_restriction() {
+        // Palisade Giant's REAL current Oracle text (Scryfall-verified) has NO
+        // tap-condition and NO combat/unblocked qualifier. The recipient-list half
+        // ("and other permanents you control") has its own separate, pre-existing
+        // bug in this same conditional — deferred as a separate follow-up, NOT
+        // fixed by this PR. This test only guards the redirection-scope
+        // regression this PR touches.
+        let def = parse_replacement_line(
+            "All damage that would be dealt to you and other permanents you control is dealt to this creature instead.",
+            "Palisade Giant",
+        )
+        .expect("Palisade Giant's redirect must still parse after the Bodyguard fix");
+
+        // Positive: the redirect itself still applies (reach guard).
+        assert_eq!(def.redirect_target, Some(TargetFilter::SelfRef));
+
+        // Negative: no unblocked/combat restriction was spuriously attached.
+        assert_eq!(def.combat_scope, None);
+        assert_eq!(def.damage_source_filter, None);
+        assert_eq!(def.condition, None);
     }
 
     #[test]

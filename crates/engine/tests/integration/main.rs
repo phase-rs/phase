@@ -875,6 +875,7 @@ mod umbra_stalker_graveyard_chroma_4066;
 mod unless_pay_routes_through_authority;
 mod valakut_fireboar_switch_pt_on_attack;
 mod vannifar_cloak_from_hand;
+mod veteran_bodyguard_tap_redirect;
 mod weeping_angel_combat_prevention;
 mod winding_way_reveal_partition_2931;
 mod witchs_oven_food_tokens;
