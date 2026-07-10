@@ -13,7 +13,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActivationResidual, CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption,
     ConvokeMode, CostResume, GameState, NextSpellModifier, PayCostKind, PendingCast,
-    SneakPlacement, SpellCastRecord, SpellCostSource, StackEntry, StackEntryKind, WaitingFor,
+    SneakPlacement, SpellCastRecord, SpellCostSource, StackEntry, StackEntryKind,
+    TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -11200,6 +11201,136 @@ pub fn spell_has_legal_targets_with_probe(
     let mut simulated = state.clone();
     super::layers::flush_layers(&mut simulated);
     spell_has_legal_targets_in_flushed_state(&simulated, object_id, player)
+}
+
+/// CR 601.2c: Read-only preview of the target slots a currently castable spell
+/// would ask the caster to choose. Returns an empty list for uncastable spells,
+/// untargeted spells, and casts that must first choose a face, variant, mode, or X.
+pub fn legal_target_slots_for_castable_spell(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Vec<TargetSelectionSlot> {
+    let WaitingFor::Priority { player } = &state.waiting_for else {
+        return Vec::new();
+    };
+    let player = *player;
+
+    let mut simulated = state.clone();
+    super::layers::flush_layers(&mut simulated);
+    legal_target_slots_for_castable_spell_in_flushed_state(&simulated, player, object_id)
+        .unwrap_or_default()
+}
+
+fn legal_target_slots_for_castable_spell_in_flushed_state(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Result<Vec<TargetSelectionSlot>, EngineError> {
+    if let Some(obj) = state.objects.get(&object_id) {
+        if (cast_face_choice_offered_from_zone(state, obj)
+            && alternative_spell_layout(obj).is_some())
+            || cast_spell_face_choice_offered_from_zone(state, obj)
+        {
+            return Ok(Vec::new());
+        }
+    }
+
+    let choices = casting_variant_choice_set(state, player, object_id);
+    if choices.options.len() > 1 {
+        return Ok(Vec::new());
+    }
+    if !can_cast_object_now(state, player, object_id) {
+        return Ok(Vec::new());
+    }
+
+    let prepared = prepare_spell_cast(state, player, object_id)?;
+    if prepared.modal.is_some() {
+        return Ok(Vec::new());
+    }
+
+    let resolved = if let Some(ref ability_def) = prepared.ability_def {
+        build_resolved_from_def(ability_def, prepared.object_id, player)
+    } else {
+        ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            Vec::new(),
+            prepared.object_id,
+            player,
+        )
+    };
+
+    let Some(obj) = state.objects.get(&prepared.object_id) else {
+        return Ok(Vec::new());
+    };
+
+    if obj.card_types.subtypes.iter().any(|s| s == "Aura") {
+        return Ok(obj
+            .keywords
+            .iter()
+            .find_map(|keyword| {
+                if let Keyword::Enchant(filter) = keyword {
+                    Some(TargetSelectionSlot {
+                        legal_targets: targeting::find_legal_targets(
+                            state,
+                            filter,
+                            player,
+                            prepared.object_id,
+                        ),
+                        optional: false,
+                    })
+                } else {
+                    None
+                }
+            })
+            .filter(|slot| !slot.legal_targets.is_empty())
+            .into_iter()
+            .collect());
+    }
+
+    if obj.mutate_form.is_some() {
+        let legal = targeting::find_legal_targets(
+            state,
+            &mutate_target_filter(),
+            player,
+            prepared.object_id,
+        );
+        return Ok(if legal.is_empty() {
+            Vec::new()
+        } else {
+            vec![TargetSelectionSlot {
+                legal_targets: legal,
+                optional: false,
+            }]
+        });
+    }
+
+    let distribute = prepared
+        .ability_def
+        .as_ref()
+        .and_then(|ability| ability.distribute.clone());
+    if ability_target_legality_needs_chosen_x(&resolved, distribute.as_ref()) {
+        return Ok(Vec::new());
+    }
+    let has_kicker_cost = state
+        .objects
+        .get(&prepared.object_id)
+        .and_then(|obj| obj.additional_cost.as_ref())
+        .is_some_and(|additional| matches!(additional, AdditionalCost::Kicker { .. }));
+    if has_kicker_cost && requires_additional_cost_declaration_before_targets(&resolved) {
+        return Ok(Vec::new());
+    }
+
+    let mut target_slots = build_target_slots(state, &resolved)?;
+    super::ability_utils::cap_distribution_target_slots(
+        state,
+        &resolved,
+        distribute.as_ref(),
+        &mut target_slots,
+    );
+    Ok(target_slots)
 }
 
 fn spell_has_legal_targets_in_flushed_state(

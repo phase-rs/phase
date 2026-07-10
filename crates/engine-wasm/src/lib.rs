@@ -1172,6 +1172,22 @@ pub fn get_legal_actions_for_viewer_js(player_id: u32) -> JsValue {
     }
 }
 
+/// Read-only preview of cast-time target slots for a currently castable spell.
+/// Returns `[]` for uncastable, untargeted, or target-ambiguous casts.
+#[wasm_bindgen]
+pub fn legal_targets_for_castable_js(object_id: u32) -> JsValue {
+    match with_state(|state| {
+        let slots = engine::game::casting::legal_target_slots_for_castable_spell(
+            state,
+            ObjectId(object_id as u64),
+        );
+        to_js(&slots)
+    }) {
+        Ok(val) => val,
+        Err(_) => JsValue::NULL,
+    }
+}
+
 /// Combined filtered-state + viewer-scoped legal-actions snapshot. Collapses
 /// two WASM round-trips into one for the P2P host broadcast loop. Field names
 /// match `LegalActionsResult` so the existing `legalActionsToWire` helper on

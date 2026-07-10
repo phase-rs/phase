@@ -2880,6 +2880,36 @@ fn create_instant_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
 }
 
 #[test]
+fn legal_target_slots_for_castable_spell_returns_cast_time_slot_shape() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_instant_in_hand(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    let slots = legal_target_slots_for_castable_spell(&state, spell);
+
+    assert_eq!(slots.len(), 1);
+    assert!(!slots[0].optional);
+    assert!(
+        slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(1))),
+        "Lightning Bolt-style any-target spell should expose opponent as a legal target"
+    );
+}
+
+#[test]
+fn legal_target_slots_for_castable_spell_is_read_only_and_empty_when_uncastable() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_instant_in_hand(&mut state, PlayerId(0));
+    let before = serde_json::to_value(&state).unwrap();
+
+    let slots = legal_target_slots_for_castable_spell(&state, spell);
+
+    assert!(slots.is_empty());
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+}
+
+#[test]
 fn prepare_spell_cast_chains_all_non_modal_spell_abilities_in_order() {
     let mut state = setup_game_at_main_phase();
     let obj_id = create_object(
