@@ -547,12 +547,26 @@ impl UnitAllocator {
 
 /// Source-positioned document collector.
 ///
-/// Keyed by `(first_line, ordinal_within_span)` so emission order is irrelevant
-/// and the final `Vec` is always in Oracle source order. This is what makes the
+/// Emission order is irrelevant: items are keyed by their source position (see
+/// the `items` field for the exact key and why each component is load-bearing)
+/// so the final `Vec` is always in Oracle source order. This is what makes the
 /// document IR source-ordered rather than category-ordered.
 #[derive(Debug, Default)]
 pub(crate) struct OracleDocBuilder {
-    items: BTreeMap<(usize, u32), OracleItemIr>,
+    /// Keyed by `(first_line, start_byte, ordinal_within_span)`.
+    ///
+    /// `start_byte` is load-bearing even though it is `0` for every item today.
+    /// `OracleSourceSpan`'s contract says byte ranges exist "so two clauses on one
+    /// physical line remain distinguishable" — but `conflicts_with` only rejects
+    /// siblings whose bytes OVERLAP. Two exact, non-overlapping clauses on one
+    /// line with the same `ordinal_within_span` therefore pass the conflict check
+    /// and then collide on the map key, and a `(first_line, ordinal)` key would
+    /// also order same-line siblings by ordinal rather than by position — so an
+    /// emitter assigning ordinals out of byte order would have `finish()` return
+    /// them reversed, and `lower_oracle_ir` would lower them reversed. Silently.
+    ///
+    /// Inert until unit 3b emits exact spans; fixed here, before it can fire.
+    items: BTreeMap<(usize, usize, u32), OracleItemIr>,
     next_item_id: u32,
     /// CR 707.9a printed-**trigger** index: the slot the next emitted trigger
     /// occupies.
@@ -687,7 +701,7 @@ impl OracleDocBuilder {
     ) -> Result<OracleItemId, DocBuilderError> {
         slot.source.check_fragment_precision()?;
         let span = slot.source.span.clone();
-        let key = (span.first_line, span.ordinal_within_span);
+        let key = (span.first_line, span.start_byte, span.ordinal_within_span);
         if self.items.contains_key(&key) {
             return Err(DocBuilderError::DuplicateItemPosition { span });
         }
@@ -866,6 +880,50 @@ mod tests {
         assert!(
             matches!(err, Err(DocBuilderError::OverlappingSiblingSpans { .. })),
             "overlapping bytes at the same ordinal must be rejected, got {err:?}"
+        );
+    }
+
+    /// DISCRIMINATING. Two exact, NON-OVERLAPPING clauses on one physical line,
+    /// both at `ordinal_within_span: 0`.
+    ///
+    /// `conflicts_with` accepts them — it only rejects siblings whose bytes
+    /// overlap. Against the old `(first_line, ordinal_within_span)` key they then
+    /// collided on `DuplicateItemPosition`, and the second clause was lost. With
+    /// `start_byte` in the key they coexist and, crucially, `finish()` returns
+    /// them in BYTE order rather than in emission or ordinal order.
+    ///
+    /// This is the shape unit 3b produces the moment it emits exact spans:
+    /// `"Destroy target creature. It can't be regenerated."` is two clauses on
+    /// one line.
+    #[test]
+    fn two_exact_clauses_on_one_line_coexist_and_order_by_byte() {
+        let mut b = OracleDocBuilder::new();
+
+        // Emit the LATER clause first, to prove ordering comes from the key and
+        // not from emission order.
+        let second = b.begin_item(span(0, 24, 48, 0), Some("It can't be regenerated."));
+        let second_id = second.id();
+        b.emit(second, OracleNodeIr::Keyword(Keyword::Vigilance))
+            .unwrap();
+
+        let first = b.begin_item(span(0, 0, 24, 0), Some("Destroy target creature."));
+        let first_id = first.id();
+        let emitted = b.emit(first, OracleNodeIr::Keyword(Keyword::Flying));
+        assert!(
+            emitted.is_ok(),
+            "non-overlapping same-ordinal clauses on one line must coexist: {emitted:?}"
+        );
+
+        let doc = b.finish(
+            "Destroy target creature. It can't be regenerated.",
+            "Probe",
+            vec![],
+        );
+        let ids: Vec<OracleItemId> = doc.items.iter().map(|i| i.id).collect();
+        assert_eq!(
+            ids,
+            vec![first_id, second_id],
+            "items must be ordered by start_byte, not by emission order or ordinal"
         );
     }
 
