@@ -686,7 +686,12 @@ jobs:
     name: Build Server (${{ matrix.os }})
     needs: [resolve-release-ref, tauri-preflight, build-wasm, build-server-binary]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 35
+    # The Windows leg ran ~33-34 min warm against a 35-min ceiling, so any cache
+    # miss tripped the timeout and cancelled the release (a timed-out job reports
+    # as `cancelled`, which fails the publish job's `build-server == success`
+    # gate). The server-release profile change cuts this well below 35; the
+    # headroom here guards against a cold cache or a slow runner.
+    timeout-minutes: 55
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
