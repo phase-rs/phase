@@ -30,6 +30,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // handle for good measure) closes the wire leak without affecting
     // server-side randomness or session restore.
     filtered.rng_seed = 0;
+    // Also drop the serialized stream position (issue #5466 sibling): a leaked
+    // word offset would give an attacker the keystream alignment for free. Zero
+    // it so no viewer snapshot carries either the seed or its stream position.
+    filtered.rng_word_pos = 0;
     filtered.rng = <rand_chacha::ChaCha20Rng as rand::SeedableRng>::seed_from_u64(0);
 
     let can_view_private_for_player = |player: PlayerId| {

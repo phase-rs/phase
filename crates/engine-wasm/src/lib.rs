@@ -1257,7 +1257,11 @@ pub fn list_token_presets_js() -> JsValue {
 /// Used by the engine worker to transfer state to AI workers for root parallelism.
 #[wasm_bindgen]
 pub fn export_game_state_json() -> Result<String, JsValue> {
-    with_state(|state| {
+    with_state_mut(|state| {
+        // Capture the live ChaCha20 stream position so `restore_game_state` can
+        // fast-forward to it (issue #5466): `rng` is `#[serde(skip)]`, so only
+        // the serialized `rng_word_pos` carries the offset across the round trip.
+        state.rng_word_pos = state.rng.get_word_pos();
         serde_json::to_string(state)
             .map_err(|e| JsValue::from_str(&format!("Failed to serialize GameState: {e}")))
     })?
@@ -1280,6 +1284,11 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
     let mut state: GameState = serde_json::from_str(json_str)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
     state.rng = ChaCha20Rng::seed_from_u64(state.rng_seed);
+    // Fast-forward the reseeded stream to the offset captured at export
+    // (issue #5466) so the restored game draws the values that would have come
+    // NEXT rather than replaying from origin. Pre-#5466 snapshots default
+    // `rng_word_pos` to 0, preserving the previous rewind-to-origin behavior.
+    state.rng.set_word_pos(state.rng_word_pos);
     state.debug_mode = true;
     CARD_DB.with(|cell| {
         if let Some(db) = cell.borrow().as_ref() {
@@ -1339,11 +1348,16 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
     let mut state: GameState = serde_json::from_str(json_str)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
 
-    // Stale `rng_seed` replays the pre-save ChaCha20 sequence because
-    // stream position is `#[serde(skip)]`. Mirrors server-core.
+    // Deliberately re-roll a fresh seed on multiplayer host resume so continued
+    // play diverges from any pre-save sequence (mirrors server-core). This is a
+    // multiplayer-resume policy choice, independent of the #5466 undo fix: even
+    // though the stream position now round-trips via `rng_word_pos`, a resumed
+    // host should NOT replay the exact saved randomness. Reset the offset to 0
+    // to match the freshly seeded stream.
     let fresh_seed: u64 = rand::rng().random();
     state.rng_seed = fresh_seed;
     state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
+    state.rng_word_pos = 0;
 
     CARD_DB.with(|cell| {
         if let Some(db) = cell.borrow().as_ref() {
