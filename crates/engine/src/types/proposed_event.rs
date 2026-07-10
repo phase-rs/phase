@@ -68,16 +68,13 @@ impl AppliedReplacementKeyCompat {
             AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::StepEndMana {
                 index,
             }) => AppliedReplacementKey::StepEndMana { index },
-            AppliedReplacementKeyCompat::Legacy(ReplacementId { source, index })
-                if source == ObjectId(0) =>
-            {
-                match sentinel_carrier {
-                    LegacySentinelCarrier::Floating => AppliedReplacementKey::Floating { index },
-                    LegacySentinelCarrier::StepEndMana => {
-                        AppliedReplacementKey::StepEndMana { index }
-                    }
-                }
-            }
+            AppliedReplacementKeyCompat::Legacy(ReplacementId {
+                source: ObjectId(0),
+                index,
+            }) => match sentinel_carrier {
+                LegacySentinelCarrier::Floating => AppliedReplacementKey::Floating { index },
+                LegacySentinelCarrier::StepEndMana => AppliedReplacementKey::StepEndMana { index },
+            },
             AppliedReplacementKeyCompat::Legacy(ReplacementId { source, index }) => {
                 AppliedReplacementKey::Object { source, index }
             }

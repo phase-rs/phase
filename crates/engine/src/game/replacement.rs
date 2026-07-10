@@ -926,7 +926,8 @@ fn change_zone_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameSt
         ProposedEvent::ZoneChange {
             to: Zone::Battlefield,
             ..
-        } | ProposedEvent::TokenEntry { .. }
+        } | ProposedEvent::CreateToken { .. }
+            | ProposedEvent::TokenEntry { .. }
     )
 }
 
@@ -4466,6 +4467,9 @@ fn apply_state_level_gates(
     if let Some(ref dest_zone) = repl_def.destination_zone {
         let matches_dest = match event {
             ProposedEvent::ZoneChange { to, .. } => to == dest_zone,
+            ProposedEvent::CreateToken { .. } => {
+                repl_def.event == ReplacementEvent::ChangeZone && *dest_zone == Zone::Battlefield
+            }
             ProposedEvent::TokenEntry { .. } => {
                 matches!(
                     repl_def.event,
@@ -4580,6 +4584,7 @@ fn replacement_event_keys_for_event(event: &ProposedEvent) -> Vec<ReplacementEve
         },
         ProposedEvent::CreateToken { .. } => {
             push_replacement_event_key(&mut keys, ReplacementEvent::CreateToken);
+            push_replacement_event_key(&mut keys, ReplacementEvent::ChangeZone);
         }
         ProposedEvent::TokenEntry { .. } => {
             push_replacement_event_key(&mut keys, ReplacementEvent::ChangeZone);
@@ -7964,7 +7969,10 @@ mod tests {
                 },
                 vec![ReplacementEvent::AddCounter],
             ),
-            (token_event, vec![ReplacementEvent::CreateToken]),
+            (
+                token_event,
+                vec![ReplacementEvent::CreateToken, ReplacementEvent::ChangeZone],
+            ),
             (
                 ProposedEvent::TokenEntry {
                     entry_ref: ObjectId(77),
