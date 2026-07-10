@@ -3055,6 +3055,38 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
         }
     }
 
+    // CR 509.1g / CR 509.1h: strip a trailing "blocking or blocked by ~" /
+    // "blocking or blocked by this creature" combat-relationship qualifier and
+    // attach a source-anchored `FilterProp::CombatRelation` (Alms Beast,
+    // "Creatures blocking or blocked by ~ have lifelink"). The self-reference is
+    // normalized to "~"; "this creature" is accepted for the literal phrasing.
+    // Mirrors the already-parsed target-relative form in `oracle_target`;
+    // `game::filter` evaluates `CombatRelationSubject::Source` authoritatively,
+    // so this is a grammar-only seam.
+    for needle in [
+        " blocking or blocked by ~",
+        " blocking or blocked by this creature",
+    ] {
+        let mut parse_trailing_qualifier = all_consuming(terminated(
+            take_until::<_, _, OracleError<'_>>(needle),
+            tag::<_, _, OracleError<'_>>(needle),
+        ));
+        if let Ok((_, base_lower)) = parse_trailing_qualifier.parse(tp.lower) {
+            if !base_lower.trim().is_empty() {
+                let base = lower_subslice_to_original(&tp, base_lower)?.trim();
+                return parse_continuous_subject_filter(base).map(|f| {
+                    add_property(
+                        f,
+                        FilterProp::CombatRelation {
+                            relation: CombatRelation::BlockingOrBlockedBy,
+                            subject: CombatRelationSubject::Source,
+                        },
+                    )
+                });
+            }
+        }
+    }
+
     if let Some(filter) = parse_shared_controller_compound_subject_filter(&tp) {
         return Some(filter);
     }
