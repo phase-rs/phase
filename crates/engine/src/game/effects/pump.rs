@@ -95,6 +95,14 @@ pub fn resolve_all(
         _ => return Ok(()),
     };
 
+    // CR 608.2c: Concretize contextual filters against this ability's inherited
+    // target before the mass scan — e.g. `Not{ParentTarget}` from a "target X and
+    // all other X with the same name get -N/-M" chain (Bile Blight) becomes
+    // `Not{SpecificObject{target}}`, excluding the already-pumped target so it is
+    // not shrunk twice. No-op for filters without contextual refs, mirroring the
+    // single `resolve` (above) and `destroy`/`bounce`.
+    let target_filter = crate::game::effects::resolved_object_filter(ability, &target_filter);
+
     let dur = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
 
     // CR 608.2h + CR 613.4c: same recipient-relative parity as `resolve` — an
@@ -497,6 +505,54 @@ mod tests {
         // Opponent unchanged
         assert_eq!(state.objects[&opp].power, Some(3));
         assert_eq!(state.objects[&opp].toughness, Some(3));
+    }
+
+    /// Issue #4727 (CR 611.2a): "Target creature and all other creatures with the
+    /// same name as that creature get -N/-M" (Bile Blight). The mass
+    /// `PumpAll{ And[ SameNameAsParentTarget, Not{ParentTarget} ] }` sub-ability
+    /// must shrink OTHER same-name creatures but EXCLUDE the announced target
+    /// (which the paired single `Pump` already covers) so it is not shrunk twice.
+    /// Guards the `resolved_object_filter` line in `resolve_all`: without it,
+    /// `Not{ParentTarget}` never concretizes and the target is wrongly caught.
+    #[test]
+    fn pump_all_same_name_excludes_parent_target() {
+        let mut state = GameState::new_two_player(42);
+        let target = make_creature(&mut state, "Grizzly Bears", 5, 5, PlayerId(0));
+        let same_name = make_creature(&mut state, "Grizzly Bears", 5, 5, PlayerId(0));
+        let other = make_creature(&mut state, "Runeclaw Bear", 5, 5, PlayerId(0));
+
+        let ability = ResolvedAbility::new(
+            Effect::PumpAll {
+                power: PtValue::Fixed(-3),
+                toughness: PtValue::Fixed(-3),
+                target: TargetFilter::And {
+                    filters: vec![
+                        TypedFilter::creature()
+                            .properties(vec![FilterProp::SameNameAsParentTarget])
+                            .into(),
+                        TargetFilter::Not {
+                            filter: Box::new(TargetFilter::ParentTarget),
+                        },
+                    ],
+                },
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        // Announced target is EXCLUDED from the mass debuff (Not{ParentTarget}).
+        assert_eq!(state.objects[&target].power, Some(5));
+        assert_eq!(state.objects[&target].toughness, Some(5));
+        // Another creature sharing the name IS shrunk -3/-3.
+        assert_eq!(state.objects[&same_name].power, Some(2));
+        assert_eq!(state.objects[&same_name].toughness, Some(2));
+        // Differently-named creature is unaffected.
+        assert_eq!(state.objects[&other].power, Some(5));
+        assert_eq!(state.objects[&other].toughness, Some(5));
     }
 
     /// Regression: Prowess-style abilities use `SelfRef` with an empty `targets` list.

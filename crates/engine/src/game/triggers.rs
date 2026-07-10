@@ -4728,6 +4728,18 @@ fn dispatch_pending_trigger_context(
                 &mut unavailable_modes,
             );
             restore_trigger_event_context(state, context_snapshot);
+            let Some(modal_for_player) =
+                super::ability_utils::modal_choice_with_target_assignment_limit(
+                    state,
+                    trigger.source_id,
+                    trigger.controller,
+                    &modal_for_player,
+                    &trigger.mode_abilities,
+                    &unavailable_modes,
+                )
+            else {
+                return TriggerDispatchDisposition::DroppedNoLegalMode;
+            };
             if unavailable_modes.len() >= modal_for_player.mode_count {
                 // CR 603.3c: No legal mode; drop the trigger entirely.
                 return TriggerDispatchDisposition::DroppedNoLegalMode;

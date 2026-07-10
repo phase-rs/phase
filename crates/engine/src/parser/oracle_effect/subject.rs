@@ -130,6 +130,14 @@ pub(super) fn try_parse_subject_predicate_ast(
         ));
     }
 
+    // CR 611.2 + CR 201.2a: "target <T> and all other <T>s with the same name as
+    // that <T> get -N/-M" (Bile Blight, Echoing Decay/Courage). Must run before
+    // the generic continuous clause, which resolves only the first conjunct and
+    // drops the same-name mass debuff (issue #4727).
+    if let Some(clause) = try_parse_target_and_same_name_pump_clause(text, ctx) {
+        return Some(clause);
+    }
+
     if let Some(clause) = try_parse_subject_additive_type_clause(text, ctx) {
         return Some(clause);
     }
@@ -1286,6 +1294,120 @@ fn try_parse_source_and_other_restriction_clause(
             sub_ability: Some(Box::new(secondary_def)),
         }),
     })
+}
+
+/// CR 611.2 + CR 201.2a + CR 115.1: "target &lt;T&gt; and all other &lt;T&gt;s with the same
+/// name as that &lt;T&gt; get -N/-M [until end of turn]" (Bile Blight, Echoing Decay,
+/// Echoing Courage's +2/+2). A compound subject sharing one pump predicate: the
+/// announced creature is a single `Pump` and the same-name others are a mass
+/// `PumpAll`. CR 611.2a — each object receives the continuous P/T change exactly
+/// once, so the `PumpAll` must EXCLUDE the announced target (which the primary
+/// `Pump` already covers); the `Not{ParentTarget}` conjunct is concretized
+/// against the inherited target at resolution (`pump::resolve_all`), mirroring
+/// Maelstrom Pulse's `Destroy`+`DestroyAll`. Runs before the generic continuous
+/// clause, which resolves only the first conjunct and silently drops the mass
+/// debuff (issue #4727).
+fn try_parse_target_and_same_name_pump_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ClauseAst> {
+    let lower = text.to_lowercase();
+
+    // Locate the pump predicate boundary (" gets " / " get ") with nom take_until
+    // (nom-combinator dispatch, not string methods).
+    let ((), predicate_with_space) = nom_on_lower(text, &lower, |input| {
+        alt((
+            value((), take_until::<_, _, OracleError<'_>>(" gets ")),
+            value((), take_until::<_, _, OracleError<'_>>(" get ")),
+        ))
+        .parse(input)
+    })?;
+    let subject = text[..text.len() - predicate_with_space.len()].trim();
+    let predicate = predicate_with_space.trim_start();
+
+    // Class gate: the predicate must be a P/T pump ("get -3/-3 until end of turn").
+    // Non-pump predicates fall through to the generic subject grammar.
+    let (power, toughness, duration) =
+        super::lower::parse_pump_clause_with_context(predicate, ctx)?;
+
+    // The subject must be a two-part conjunction "&lt;target&gt; and &lt;same-name mass&gt;".
+    let subject_lower = subject.to_lowercase();
+    let subject_pair = TextPair::new(subject, &subject_lower);
+    let (primary_tp, secondary_tp) = subject_pair.split_around(" and ")?;
+
+    // Primary conjunct must announce a target ("target creature") — this is what
+    // carries the CR 115.1 target slot the mass sub-ability inherits.
+    let primary = parse_subject_application(primary_tp.original.trim(), ctx)?;
+    primary.target.as_ref()?;
+
+    // Secondary conjunct must be the same-name mass ("all other creatures with
+    // the same name as that creature") — a class filter, not a target slot. The
+    // `SameNameAsParentTarget` gate is the load-bearing discriminator: a plain
+    // "target creature and each creature you control get +1/+1" secondary lacks
+    // it and returns `None`, leaving the generic path untouched.
+    let (secondary_filter, rest) = parse_target(secondary_tp.original.trim());
+    if !rest.trim().is_empty() || !filter_carries_same_name_as_parent_target(&secondary_filter) {
+        return None;
+    }
+
+    // Primary: single-target Pump on the announced creature.
+    let primary_effect = build_pump_effect(&primary, power.clone(), toughness.clone());
+
+    // Mass: PumpAll over the same-name others, EXCLUDING the announced target.
+    let mass_target = TargetFilter::And {
+        filters: vec![
+            secondary_filter,
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::ParentTarget),
+            },
+        ],
+    };
+    let mass_clause = ParsedEffectClause {
+        effect: Effect::PumpAll {
+            power,
+            toughness,
+            target: mass_target,
+        },
+        duration: duration.clone().or(Some(Duration::UntilEndOfTurn)),
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    };
+    let mass_def = super::ability_definition_from_clause(AbilityKind::Spell, mass_clause);
+
+    Some(ClauseAst::SubjectPredicate {
+        subject: Box::new(SubjectPhraseAst {
+            affected: primary.affected,
+            target: primary.target,
+            multi_target: None,
+            inherits_parent: primary.inherits_parent,
+            is_optional: primary.is_optional,
+        }),
+        predicate: Box::new(PredicateAst::Continuous {
+            effect: primary_effect,
+            duration: duration.or(Some(Duration::UntilEndOfTurn)),
+            sub_ability: Some(Box::new(mass_def)),
+        }),
+    })
+}
+
+/// Walks a `TargetFilter` for `FilterProp::SameNameAsParentTarget` (parser-side
+/// mirror of the runtime `filter_refs_same_name_as_parent_target`).
+fn filter_carries_same_name_as_parent_target(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::SameNameAsParentTarget)),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(filter_carries_same_name_as_parent_target),
+        TargetFilter::Not { filter } => filter_carries_same_name_as_parent_target(filter),
+        _ => false,
+    }
 }
 
 fn try_parse_subject_restriction_clause(

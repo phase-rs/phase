@@ -8130,7 +8130,7 @@ fn parse_damage_redirection_replacement(
 
         // CR 614.9 + CR 509.1h: optional "by <source>" scope-restriction.
         let source_filter = parse_damage_redirection_source_clause(working_lower);
-        // CR 615: optional "combat damage" qualifier scopes to combat damage only.
+        // CR 120.2a: optional "combat damage" qualifier scopes to combat damage only.
         let combat_scope = scan_combat_scope(working_lower);
 
         let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -8161,13 +8161,18 @@ fn parse_damage_redirection_replacement(
     if nom_primitives::scan_contains(working_lower, "would deal damage to you")
         && nom_primitives::scan_contains(working_lower, "prevent that damage")
     {
-        return Some(
-            ReplacementDefinition::new(ReplacementEvent::DamageDone)
-                .prevention_shield(PreventionAmount::All)
-                .damage_target_filter(damage_target_controller())
-                .redirect_target(TargetFilter::SelfRef)
-                .description(original_text.to_string()),
-        );
+        let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::All)
+            .damage_target_filter(damage_target_controller())
+            .redirect_target(TargetFilter::SelfRef)
+            .description(original_text.to_string());
+        // CR 604.2: attach the leading "as long as <tap-state>" gate, same as
+        // Pattern 1/2 above — no current card matches Pattern 3 with this
+        // prefix, but silently dropping it would be wrong if one existed.
+        if let Some(cond) = prefix_condition {
+            def = def.condition(cond);
+        }
+        return Some(def);
     }
 
     None

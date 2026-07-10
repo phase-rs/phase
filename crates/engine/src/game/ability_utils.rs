@@ -771,6 +771,67 @@ pub fn filter_modes_by_target_legality(
     unavailable_modes.dedup();
 }
 
+/// CR 700.2a-b + CR 115.1: Cap a modal choice by the largest mode set whose
+/// combined targeting slots can satisfy modal target constraints.
+///
+/// Per-mode filtering only proves each mode is individually legal. Modal
+/// constraints such as `DifferentTargetPlayers` can make a larger selected set
+/// impossible even when every selected mode is legal on its own.
+pub fn modal_choice_with_target_assignment_limit(
+    state: &GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    modal: &ModalChoice,
+    mode_abilities: &[AbilityDefinition],
+    unavailable_modes: &[usize],
+) -> Option<ModalChoice> {
+    let target_constraints = target_constraints_from_modal(modal);
+    if target_constraints.is_empty() || !modal.mode_pawprints.is_empty() {
+        return Some(modal.clone());
+    }
+
+    let max_legal_choices = generate_modal_index_sequences(modal)
+        .into_iter()
+        .filter(|indices| indices.iter().all(|idx| !unavailable_modes.contains(idx)))
+        .filter(|indices| {
+            modal_indices_have_legal_target_assignment(
+                state,
+                source_id,
+                controller,
+                mode_abilities,
+                indices,
+                &target_constraints,
+            )
+        })
+        .map(|indices| indices.len())
+        .max()?;
+
+    let mut effective = modal.clone();
+    effective.max_choices = effective.max_choices.min(max_legal_choices);
+    Some(effective)
+}
+
+fn modal_indices_have_legal_target_assignment(
+    state: &GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    mode_abilities: &[AbilityDefinition],
+    indices: &[usize],
+    target_constraints: &[TargetSelectionConstraint],
+) -> bool {
+    let Ok(resolved) = build_chained_resolved(mode_abilities, indices, source_id, controller)
+    else {
+        return false;
+    };
+    match build_target_slots(state, &resolved) {
+        Ok(slots) if slots.is_empty() => true,
+        Ok(slots) => {
+            has_legal_target_assignment_for_ability(state, &resolved, &slots, target_constraints)
+        }
+        Err(_) => false,
+    }
+}
+
 /// Records chosen mode indices for NoRepeat constraint enforcement.
 /// CR 700.2: Inserts into per-turn and/or per-game tracking maps.
 pub fn record_modal_mode_choices(
