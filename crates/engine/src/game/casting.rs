@@ -29,7 +29,7 @@ use crate::types::statics::{
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_targets_in_chain, auto_select_targets,
@@ -11213,12 +11213,53 @@ pub fn legal_target_slots_for_castable_spell(
     let WaitingFor::Priority { player } = &state.waiting_for else {
         return Vec::new();
     };
-    let player = *player;
+    legal_target_slots_for_castable_spell_with_probe(state, *player, object_id, None)
+}
 
+pub fn legal_target_slots_for_castable_spell_with_probe(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    probe: Option<&PriorityCastProbe>,
+) -> Vec<TargetSelectionSlot> {
+    if let Some(probe) = probe.filter(|probe| probe.player() == player && probe.is_for_state(state))
+    {
+        return legal_target_slots_for_castable_spell_in_flushed_state(
+            probe.state(),
+            player,
+            object_id,
+        )
+        .unwrap_or_default();
+    }
     let mut simulated = state.clone();
     super::layers::flush_layers(&mut simulated);
     legal_target_slots_for_castable_spell_in_flushed_state(&simulated, player, object_id)
         .unwrap_or_default()
+}
+
+pub fn legal_target_slots_for_castable_spells(
+    state: &GameState,
+    object_ids: impl IntoIterator<Item = ObjectId>,
+) -> HashMap<ObjectId, Vec<TargetSelectionSlot>> {
+    let WaitingFor::Priority { player } = &state.waiting_for else {
+        return HashMap::new();
+    };
+    let player = *player;
+    let probe = PriorityCastProbe::new(state, player);
+    object_ids
+        .into_iter()
+        .map(|object_id| {
+            (
+                object_id,
+                legal_target_slots_for_castable_spell_with_probe(
+                    probe.state(),
+                    player,
+                    object_id,
+                    Some(&probe),
+                ),
+            )
+        })
+        .collect()
 }
 
 fn legal_target_slots_for_castable_spell_in_flushed_state(
@@ -11268,6 +11309,19 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
             player,
         )
     };
+
+    // CR 702.47a + CR 601.2b: Splice is announced before targets and can add
+    // spell text, including additional targets, so preview waits for that choice.
+    if !splice::eligible_splice_cards(state, player, prepared.object_id).is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // CR 702.119a + CR 702.119b + CR 702.119c + CR 601.2b + CR 601.2h:
+    // Emerge chooses a sacrifice before target selection, so target legality
+    // may change before targets are chosen.
+    if prepared.casting_variant == CastingVariant::Emerge {
+        return Ok(Vec::new());
+    }
 
     let Some(obj) = state.objects.get(&prepared.object_id) else {
         return Ok(Vec::new());
@@ -11338,6 +11392,25 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
     // CR 601.2c: Once all earlier casting choices are known, enumerate the
     // targets the spell requires.
     let mut target_slots = build_target_slots(state, &resolved)?;
+    if !target_slots.is_empty() {
+        // CR 601.2b: Casualty is an optional sacrifice declared before targets.
+        if casting_costs::effective_casualty_additional_cost(state, player, prepared.object_id)
+            .is_some()
+        {
+            return Ok(Vec::new());
+        }
+        // CR 702.56a: Replicate is a repeatable optional additional cost
+        // declared before targets, just like Casualty.
+        if casting_costs::effective_replicate_additional_cost(state, player, prepared.object_id)
+            .is_some()
+        {
+            return Ok(Vec::new());
+        }
+        // CR 702.48a + CR 702.48b: Offering sacrifice is declared before targets.
+        if casting_costs::effective_offering_quality(state, player, prepared.object_id).is_some() {
+            return Ok(Vec::new());
+        }
+    }
     super::ability_utils::cap_distribution_target_slots(
         state,
         &resolved,

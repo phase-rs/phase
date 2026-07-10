@@ -2910,6 +2910,94 @@ fn legal_target_slots_for_castable_spell_is_read_only_and_empty_when_uncastable(
 }
 
 #[test]
+fn legal_target_slots_for_castable_spells_batches_previews() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_instant_in_hand(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    let batched = legal_target_slots_for_castable_spells(&state, [spell]);
+    let slots = batched.get(&spell).expect("batch includes requested spell");
+
+    assert_eq!(slots.len(), 1);
+    assert!(
+        slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(1))),
+        "batched preview should match the single-card target slot"
+    );
+}
+
+#[test]
+fn legal_target_slots_for_castable_spell_empty_before_splice_choice() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_instant_in_hand(&mut state, PlayerId(0));
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .card_types
+        .subtypes
+        .push("Arcane".to_string());
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    let splicer = create_object(
+        &mut state,
+        CardId(9_970),
+        PlayerId(0),
+        "Splice Preview".to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&splicer)
+        .unwrap()
+        .keywords
+        .push(Keyword::Splice {
+            subtype: "Arcane".to_string(),
+            cost: ManaCost::NoCost,
+        });
+
+    let slots = legal_target_slots_for_castable_spell(&state, spell);
+
+    assert!(
+        slots.is_empty(),
+        "splice can add targets before CR 601.2c target selection, so preview waits for the splice choice"
+    );
+}
+
+#[test]
+fn legal_target_slots_for_castable_spell_empty_before_casualty_choice() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_instant_in_hand(&mut state, PlayerId(0));
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .keywords
+        .push(Keyword::Casualty(1));
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    let creature = create_object(
+        &mut state,
+        CardId(9_971),
+        PlayerId(0),
+        "Casualty Fodder".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&creature).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.power = Some(1);
+    obj.toughness = Some(1);
+
+    let slots = legal_target_slots_for_castable_spell(&state, spell);
+
+    assert!(
+        slots.is_empty(),
+        "casualty sacrifice is declared before targets, so preview waits for that choice"
+    );
+}
+
+#[test]
 fn prepare_spell_cast_chains_all_non_modal_spell_abilities_in_order() {
     let mut state = setup_game_at_main_phase();
     let obj_id = create_object(

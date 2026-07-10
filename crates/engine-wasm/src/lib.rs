@@ -23,6 +23,7 @@ use engine::game::{
     PlayerDeckList, ReplayPlayer,
 };
 use engine::types::format::{FormatConfig, GameFormat};
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
@@ -1177,10 +1178,36 @@ pub fn get_legal_actions_for_viewer_js(player_id: u32) -> JsValue {
 #[wasm_bindgen]
 pub fn legal_targets_for_castable_js(object_id: u32) -> JsValue {
     match with_state(|state| {
-        let slots = engine::game::casting::legal_target_slots_for_castable_spell(
-            state,
-            ObjectId(object_id as u64),
-        );
+        let slots = if let WaitingFor::Priority { player } = &state.waiting_for {
+            let probe = engine::game::casting::PriorityCastProbe::new(state, *player);
+            engine::game::casting::legal_target_slots_for_castable_spell_with_probe(
+                probe.state(),
+                *player,
+                ObjectId(object_id as u64),
+                Some(&probe),
+            )
+        } else {
+            Vec::new()
+        };
+        to_js(&slots)
+    }) {
+        Ok(val) => val,
+        Err(_) => JsValue::NULL,
+    }
+}
+
+/// Batch variant for hover/drag clients that need previews for many castable
+/// cards. The engine flushes layers once and reuses that snapshot for every id.
+#[wasm_bindgen]
+pub fn legal_targets_for_castables_js(object_ids: JsValue) -> JsValue {
+    let object_ids: Vec<u32> = serde_wasm_bindgen::from_value(object_ids).unwrap_or_default();
+    match with_state(|state| {
+        let object_ids = object_ids
+            .into_iter()
+            .map(|id| ObjectId(id as u64))
+            .collect::<Vec<_>>();
+        let slots =
+            engine::game::casting::legal_target_slots_for_castable_spells(state, object_ids);
         to_js(&slots)
     }) {
         Ok(val) => val,
