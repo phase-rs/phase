@@ -9,7 +9,6 @@ import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { activeAttachmentIds } from "../../viewmodel/attachments.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import {
   boardChoiceMaxSelection,
@@ -98,8 +97,8 @@ export function AttachmentFan() {
   const host = hostId != null ? objects?.[hostId] : undefined;
 
   const cardIds = useMemo<ObjectId[]>(
-    () => (host ? [host.id, ...activeAttachmentIds(objects, host)] : []),
-    [objects, host],
+    () => (host ? [host.id, ...host.attachments] : []),
+    [host],
   );
 
   const boardChoice = useMemo(() => {

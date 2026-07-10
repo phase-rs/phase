@@ -16,7 +16,6 @@ import {
   buildTargetSelectionWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
-import { AttachmentFan } from "../AttachmentFan.tsx";
 import { PermanentCard } from "../PermanentCard.tsx";
 
 vi.mock("../../../game/dispatch.ts", () => ({
@@ -215,70 +214,6 @@ describe("PermanentCard attachments", () => {
 
     expect(container.querySelectorAll('[data-object-id="1"]')).toHaveLength(1);
     expect(container.querySelectorAll('[data-object-id="2"]')).toHaveLength(1);
-  });
-
-  it("does not render a stale attachment id after the attachment leaves the battlefield", () => {
-    const gameState = makeState();
-    gameState.objects[2] = {
-      ...gameState.objects[2],
-      zone: "Graveyard",
-    };
-    gameState.battlefield = [1, 3];
-    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
-
-    const { container } = renderPermanent();
-
-    expect(container.querySelector('[data-object-id="1"]')).not.toBeNull();
-    expect(container.querySelector('[data-object-id="2"]')).toBeNull();
-    expect(container.textContent).not.toContain("+1");
-    expect(container.querySelector("button")).toBeNull();
-  });
-
-  it("does not render a stale attachment id that no longer points at the host", () => {
-    const gameState = makeState();
-    gameState.objects[2] = {
-      ...gameState.objects[2],
-      attached_to: null,
-    };
-    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
-
-    const { container } = renderPermanent();
-
-    expect(container.querySelector('[data-object-id="1"]')).not.toBeNull();
-    expect(container.querySelector('[data-object-id="2"]')).toBeNull();
-    expect(container.querySelector("button")).toBeNull();
-  });
-
-  it("does not render stale attachment ids in the attachment fan", () => {
-    const secondEquipment = makeObject({
-      id: 4,
-      card_id: 400,
-      attached_to: { type: "Object", data: 1 },
-      name: "Second Equipment",
-      power: null,
-      toughness: null,
-      base_power: null,
-      base_toughness: null,
-      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
-      color: [],
-      base_color: [],
-    });
-    const gameState = makeState();
-    gameState.objects[1].attachments = [2, 4];
-    gameState.objects[2] = {
-      ...gameState.objects[2],
-      zone: "Graveyard",
-    };
-    gameState.objects[4] = secondEquipment;
-    gameState.battlefield = [1, 3, 4];
-    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
-    useUiStore.setState({ attachmentFanHostId: 1 });
-
-    const { queryAllByLabelText } = render(<AttachmentFan />);
-
-    expect(queryAllByLabelText("Test Creature").length).toBeGreaterThan(0);
-    expect(queryAllByLabelText("Second Equipment").length).toBeGreaterThan(0);
-    expect(queryAllByLabelText("Test Equipment")).toHaveLength(0);
   });
 
   it("collapses multiple direct attachments until the host is hovered", () => {

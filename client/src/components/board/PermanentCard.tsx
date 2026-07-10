@@ -19,7 +19,6 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildGrantedKeywordSources, buildPTSources } from "../../viewmodel/attribution.ts";
-import { activeAttachmentIds } from "../../viewmodel/attachments.ts";
 import { COUNTER_COLORS, computePTDisplay, counterIconClass, formatCounterType, toRoman } from "../../viewmodel/cardProps.ts";
 import { loyaltyStartIconClasses } from "../../viewmodel/costLabel.ts";
 import { getCardDisplayColors } from "../card/cardFrame.ts";
@@ -104,7 +103,7 @@ function attachmentTreeContains(
     visited.add(id);
     const current = objects?.[id];
     if (current) {
-      remaining.push(...activeAttachmentIds(objects, current));
+      remaining.push(...current.attachments);
     }
   }
 
@@ -264,15 +263,11 @@ export const PermanentCard = memo(function PermanentCard({
   // flips — not every PermanentCard on the board. O(1) per hover, not O(N).
   const isHovered = useUiStore((s) => s.hoveredObjectId === objectId);
   const isInspected = useUiStore((s) => s.inspectedObjectId === objectId);
-  const attachmentIds = useMemo(
-    () => activeAttachmentIds(gameObjects, obj),
-    [gameObjects, obj],
-  );
   // Lifting a host's attachments only applies to cards that HAVE attachments;
   // for the common (unattached) card this selector is a constant `false`, so it
   // never re-renders on hover. Attached cards re-render only when their lifted
-  // state changes. Mirrors the active attachment gate below.
-  const hasAttachments = attachmentIds.length > 0;
+  // state changes. Mirrors the `obj.attachments.length > 0` gate below.
+  const hasAttachments = (obj?.attachments.length ?? 0) > 0;
   const isInHoveredAttachmentTree = useUiStore((s) =>
     hasAttachments ? attachmentTreeContains(gameObjects, objectId, s.hoveredObjectId) : false,
   );
@@ -381,8 +376,8 @@ export const PermanentCard = memo(function PermanentCard({
   // a host's attachments whenever any of them is actionable in the current
   // waiting state so each is independently clickable without requiring a hover.
   const attachmentsActionable =
-    attachmentIds.length > 0
-    && attachmentIds.some(
+    obj.attachments.length > 0
+    && obj.attachments.some(
       (id) =>
         validTargetObjectIds.has(id)
         || activatableObjectIds.has(id)
@@ -398,13 +393,13 @@ export const PermanentCard = memo(function PermanentCard({
         || undoableTapObjectIds.has(id),
     );
   const attachmentsLifted =
-    attachmentIds.length > 0
+    obj.attachments.length > 0
     && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree || isSelected || isInspected || attachmentsActionable);
-  const attachmentsExpanded = attachmentIds.length <= 1 || attachmentsLifted;
-  const visibleAttachmentIds = attachmentsExpanded ? attachmentIds : attachmentIds.slice(0, 1);
+  const attachmentsExpanded = obj.attachments.length <= 1 || attachmentsLifted;
+  const visibleAttachmentIds = attachmentsExpanded ? obj.attachments : obj.attachments.slice(0, 1);
   const attachmentPathIds = new Set([...attachmentRenderPath, objectId]);
   const renderableAttachmentIds = visibleAttachmentIds.filter((id) => !attachmentPathIds.has(id));
-  const hiddenAttachmentCount = attachmentIds.length - visibleAttachmentIds.length;
+  const hiddenAttachmentCount = obj.attachments.length - visibleAttachmentIds.length;
   const exileLinksExpanded = exileLinks.length <= 1 || isHovered || isSelected || isInspected;
   const visibleExileLinks = exileLinksExpanded ? exileLinks : exileLinks.slice(0, 1);
   const hiddenExileCount = exileLinks.length - visibleExileLinks.length;
@@ -976,11 +971,11 @@ export const PermanentCard = memo(function PermanentCard({
              group badge works: it lives OUTSIDE the capturing element.
           2. The hover preview (CardPreview `z-[100]`) paints above the dialog
              (`z-50`); clearing it on click makes the opened dialog visible. */}
-      {attachmentIds.length > 0 && (isHovered || isInHoveredAttachmentTree || isInspected || isSelected || !canHover) && (
+      {obj.attachments.length > 0 && (isHovered || isInHoveredAttachmentTree || isInspected || isSelected || !canHover) && (
         <button
           type="button"
-          aria-label={t("permanent.viewAttachments", { count: attachmentIds.length })}
-          title={t("permanent.viewAttachments", { count: attachmentIds.length })}
+          aria-label={t("permanent.viewAttachments", { count: obj.attachments.length })}
+          title={t("permanent.viewAttachments", { count: obj.attachments.length })}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
@@ -993,8 +988,8 @@ export const PermanentCard = memo(function PermanentCard({
           className="absolute -left-3 -top-3 z-40 flex h-6 min-w-6 items-center justify-center gap-0.5 rounded-full bg-black px-1.5 text-[11px] font-extrabold leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105"
         >
           <span aria-hidden className="text-[12px] leading-none">⧉</span>
-          {attachmentIds.length > 1 && (
-            <span className="tabular-nums">{attachmentIds.length}</span>
+          {obj.attachments.length > 1 && (
+            <span className="tabular-nums">{obj.attachments.length}</span>
           )}
         </button>
       )}

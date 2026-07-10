@@ -2965,6 +2965,50 @@ mod tests {
     }
 
     #[test]
+    fn equipment_leaving_battlefield_clears_host_attachment_entry() {
+        use crate::game::effects::attach::attach_to;
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        let equipment = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let equipment_obj = state.objects.get_mut(&equipment).unwrap();
+            equipment_obj
+                .card_types
+                .subtypes
+                .push("Equipment".to_string());
+            equipment_obj.card_types.core_types.push(CoreType::Artifact);
+        }
+        attach_to(&mut state, equipment, host);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, equipment, Zone::Graveyard, &mut events);
+
+        assert_eq!(state.objects[&equipment].zone, Zone::Graveyard);
+        assert!(
+            state.objects[&equipment].attached_to.is_none(),
+            "attached_to must be cleared when the Equipment leaves the battlefield"
+        );
+        assert!(
+            !state.objects[&host].attachments.contains(&equipment),
+            "host must not visually retain Equipment that left the battlefield"
+        );
+    }
+
+    #[test]
     fn sba_pipeline_graveyard_clears_attached_to() {
         use crate::game::effects::attach::attach_to;
         use crate::game::zone_pipeline::{ZoneChangeCause, ZoneMoveRequest, ZoneMoveResult};
