@@ -2942,17 +2942,28 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             amount,
             target,
             scope,
+            damage_source_filter,
             ..
         } => {
             d.push(("amount".into(), format!("{amount:?}")));
             d.push(("target".into(), fmt_target(target)));
             d.push(("scope".into(), format!("{scope:?}")));
+            // CR 615 + CR 614.1a: the source-restriction qualifier (#5492). Omitting
+            // it made a change from unqualified `ChosenDamageSource` to
+            // `ChosenDamageSource { filter: Some(..) }` (the Circle/Rune of
+            // Protection cycles) invisible to the parse-diff sticky — a real parser
+            // change reading as "No card-parse changes".
+            if let Some(f) = damage_source_filter {
+                d.push(("damage_source_filter".into(), fmt_target(f)));
+            }
         }
         Effect::CreateDamageReplacement {
             modification,
             redirect_to,
             redirect_amount,
             combat_scope,
+            source_filter,
+            target_filter,
             redirect_object_filter,
             recipient_object_filter,
             ..
@@ -2968,6 +2979,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(cs) = combat_scope {
                 d.push(("combat_scope".into(), format!("{cs:?}")));
+            }
+            // #5492: `source_filter` shares `PreventDamage`'s
+            // `parse_oneshot_source_filter` binding and had the same blind spot;
+            // `target_filter` is likewise parser-alterable. Emit both so any change
+            // to which sources/targets a replacement covers is diff-visible.
+            if let Some(f) = source_filter {
+                d.push(("source_filter".into(), fmt_target(f)));
+            }
+            if let Some(f) = target_filter {
+                d.push(("target_filter".into(), format!("{f:?}")));
             }
             if let Some(f) = redirect_object_filter {
                 d.push(("redirect_object_filter".into(), fmt_target(f)));
@@ -10252,6 +10273,40 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{BlockExceptionKind, ProhibitionScope};
     use crate::types::zones::Zone;
+
+    #[test]
+    fn prevent_damage_signature_exposes_damage_source_filter() {
+        // #5492: a change to `damage_source_filter` (e.g. unqualified
+        // `ChosenDamageSource` → `ChosenDamageSource { filter: Some(..) }`, the
+        // Circle/Rune of Protection cycles) must be visible to the
+        // coverage-parse-diff signature. When set, the field appears; when None
+        // it is omitted so unqualified prevention's signature is unchanged.
+        let signature_keys = |dsf: Option<TargetFilter>| -> Vec<String> {
+            effect_details(&Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: dsf,
+                prevention_duration: None,
+            })
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+        };
+        assert!(
+            signature_keys(Some(TargetFilter::Any))
+                .iter()
+                .any(|k| k == "damage_source_filter"),
+            "a set damage_source_filter must appear in the parse-diff signature",
+        );
+        assert!(
+            !signature_keys(None)
+                .iter()
+                .any(|k| k == "damage_source_filter"),
+            "an absent damage_source_filter must not appear",
+        );
+    }
 
     fn make_obj() -> GameObject {
         GameObject::new(
