@@ -13,6 +13,7 @@ on:
       - 'Dockerfile'
       - '.dockerignore'
       - 'docker/**'
+      - '.github/actions/**'
       - '.github/workflows/ci.yml'
       - '.github/workflows/deploy.yml'
       - '.github/workflows/release.yml'
@@ -200,10 +201,11 @@ jobs:
         # at step start against the clean checkout, so oracle-gen's later
         # write-if-changed rewrite of oracle-subtypes.json cannot feed back in.
         #
-        # ai-gate.yml intentionally uses the same `cardgen-` key expression, so
-        # main pushes can seed generated-card-data entries that AI PR gates reuse.
-        # Both workflows download AtomicCards.json before this step so the
-        # gitignored MTGJSON input participates in `hashFiles`.
+        # The AI gate's shared card-data-cache action intentionally uses the
+        # same `cardgen-` key expression, so main pushes can seed generated
+        # entries that AI PR gates reuse. Both paths download AtomicCards.json
+        # before evaluating the key so the gitignored MTGJSON input participates
+        # in `hashFiles`.
         id: cardgen-cache
         uses: actions/cache@v4
         with:
