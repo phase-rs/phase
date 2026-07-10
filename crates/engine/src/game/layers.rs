@@ -2129,6 +2129,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::ControlledByEachPlayer { .. }

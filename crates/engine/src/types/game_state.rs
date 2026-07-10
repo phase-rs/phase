@@ -8061,6 +8061,14 @@ pub struct GameState {
     /// Event-context filters that can legally compare against a group read this.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub current_trigger_events: Vec<GameEvent>,
+    /// CR 701.57a: The mana-value limit `N` of the most recently resolved
+    /// discover. Set when a `discover N` resolves so that a "whenever you
+    /// discover" trigger's effect can reference "the same value" (Curator of
+    /// Sun's Creation: "discover again for the same value" →
+    /// `QuantityRef::TriggeringDiscoverValue`). Transient — not part of durable
+    /// game state, but serialized so a mid-resolution pause round-trips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_discover_value: Option<i32>,
     /// Full event batches for triggered abilities currently on the stack,
     /// keyed by stack entry id. Single-event triggers omit an entry here.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -8910,6 +8918,7 @@ impl GameState {
             current_trigger_match_count: None,
             resolving_stack_entry: None,
             current_trigger_events: Vec::new(),
+            last_discover_value: None,
             stack_trigger_event_batches: HashMap::new(),
             lki_cache: HashMap::new(),
             linked_exile_lki: HashMap::new(),

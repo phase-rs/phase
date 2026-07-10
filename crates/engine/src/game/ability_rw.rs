@@ -2034,6 +2034,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::ObjectCount { .. }
         | QuantityRef::ObjectCountDistinct { .. }
@@ -5526,6 +5527,10 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             reads_player_of(StateKind::PlayerLife)
         }
         QuantityRef::StartingLifeTotal => RwProfile::empty(),
+        // CR 701.57a: reads the transient last-discover scalar, written only by
+        // discover resolution (never by a sibling trigger) — no ordering-relevant
+        // read/write, mirroring StartingLifeTotal.
+        QuantityRef::TriggeringDiscoverValue => RwProfile::empty(),
         QuantityRef::GraveyardSize { .. } => reads_zone_membership(),
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }

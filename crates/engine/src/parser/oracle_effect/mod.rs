@@ -7765,6 +7765,28 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         });
     }
 
+    // CR 701.57a: "discover again for the same value" (Curator of Sun's
+    // Creation) — a re-discover whose N is the mana-value limit of the discover
+    // that fired the current "whenever you discover" trigger, read back via
+    // `QuantityRef::TriggeringDiscoverValue`. Composed from tags (the "again"
+    // marks the re-discover; "for the same value" is the fixed anaphor).
+    if let Ok((rest, _)) = (
+        tag::<_, _, OracleError<'_>>("discover "),
+        tag("again "),
+        tag("for the same value"),
+    )
+        .parse(tp.lower)
+    {
+        if rest.trim().trim_end_matches('.').trim().is_empty() {
+            return parsed_clause(Effect::Discover {
+                mana_value_limit: QuantityExpr::Ref {
+                    qty: QuantityRef::TriggeringDiscoverValue,
+                },
+                player: TargetFilter::Controller,
+            });
+        }
+    }
+
     // CR 701.57a: "[player] discover[s] N" / "[player] discover[s] X" — effect
     // variant. An optional leading player subject ("you", "that player", "target
     // opponent", …) redirects who performs the discover (Zoyowa's Justice: "Then

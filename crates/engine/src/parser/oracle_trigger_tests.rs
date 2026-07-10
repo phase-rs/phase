@@ -10434,6 +10434,41 @@ fn trigger_you_investigate_bare() {
 }
 
 #[test]
+fn trigger_curator_discover_again_for_the_same_value() {
+    // Curator of Sun's Creation (#5270): "Whenever you discover, discover again
+    // for the same value. This ability triggers only once each turn." The bare
+    // discover subject maps to the dedicated TriggerMode::Discover (matched on
+    // EffectResolved{Discover}); "the same value" re-discovers with N equal to
+    // the triggering discover's mana-value limit (TriggeringDiscoverValue).
+    let def = parse_trigger_line(
+        "Whenever you discover, discover again for the same value. This ability triggers only once each turn.",
+        "Curator of Sun's Creation",
+    );
+    assert_eq!(def.mode, TriggerMode::Discover);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    assert_eq!(
+        def.constraint,
+        Some(crate::types::ability::TriggerConstraint::OncePerTurn),
+    );
+    let execute = def
+        .execute
+        .as_ref()
+        .expect("trigger should have execute step");
+    match execute.effect.as_ref() {
+        Effect::Discover {
+            mana_value_limit, ..
+        } => assert_eq!(
+            mana_value_limit,
+            &crate::types::ability::QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::TriggeringDiscoverValue,
+            },
+            "\"discover again for the same value\" must reuse the triggering discover's value",
+        ),
+        other => panic!("expected Effect::Discover, got {other:?}"),
+    }
+}
+
+#[test]
 fn trigger_you_collect_evidence() {
     // Surveillance Monitor (MKM): "Whenever you collect evidence, create a 1/1 colorless
     // Thopter artifact creature token with flying."

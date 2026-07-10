@@ -350,6 +350,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::ObjectCount { .. }
         | QuantityRef::ObjectCountDistinct { .. }
         | QuantityRef::ObjectCountBySharedQuality { .. }
@@ -627,6 +628,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
@@ -821,6 +823,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
@@ -1663,6 +1666,10 @@ fn resolve_ref(
         }),
         // CR 103.4: The format's starting life total.
         QuantityRef::StartingLifeTotal => state.format_config.starting_life,
+        // CR 701.57a: the mana-value limit of the discover that fired the current
+        // "whenever you discover" trigger (Curator of Sun's Creation, "the same
+        // value"). 0 outside a discover-trigger context.
+        QuantityRef::TriggeringDiscoverValue => state.last_discover_value.unwrap_or(0),
         // CR 118.4 + CR 119.3: Life lost this turn, scoped via PlayerScope (Π-3).
         QuantityRef::LifeLostThisTurn { player } => {
             resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
@@ -12330,6 +12337,22 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 3);
+    }
+
+    #[test]
+    fn triggering_discover_value_reads_last_discover_scalar() {
+        // CR 701.57a: "discover again for the same value" (Curator of Sun's
+        // Creation) reads `GameState::last_discover_value`, set when the prior
+        // discover resolved.
+        let mut state = GameState::new_two_player(42);
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::TriggeringDiscoverValue,
+        };
+        // Unset → 0 (fail-safe outside a discover-trigger context).
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 0);
+        // Set by a resolved `discover 5` → 5.
+        state.last_discover_value = Some(5);
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 5);
     }
 
     #[test]

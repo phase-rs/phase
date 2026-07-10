@@ -13126,6 +13126,19 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
         let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
+        // CR 701.57a: "whenever/when <player> discover[s]" — the discover keyword
+        // action is NOT a `PlayerActionKind`; it has a dedicated `TriggerMode::
+        // Discover` matched against the `EffectResolved{Discover}` event by
+        // `match_discover` (Curator of Sun's Creation). Intercept the BARE
+        // discover form here, before the `parse_player_action_list` path (which
+        // does not recognize "discover"). A compound "discover, investigate, …"
+        // subject (Val, Marooned Surveyor) is left to the action-list path.
+        if is_bare_discover_subject(rest) {
+            let mut def = make_base();
+            def.valid_target = valid_target.clone();
+            def.mode = TriggerMode::Discover;
+            return Some((TriggerMode::Discover, def));
+        }
         let actions = parse_player_action_list(rest)?;
         let mut def = make_base();
         def.valid_target = valid_target.clone();
@@ -13168,6 +13181,22 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
     }
 
     None
+}
+
+/// CR 701.57a: True when `text` is a BARE "discover"/"discovers" trigger subject
+/// (end-of-condition or trailing `.`/`;`) — NOT a compound action list such as
+/// "discover, investigate, scry, surveil, or seek …" (Val, Marooned Surveyor),
+/// which must reach `parse_player_action_list`. The discover keyword action has a
+/// dedicated `TriggerMode::Discover` (matched on `EffectResolved{Discover}`), so
+/// this routes "whenever you discover" straight to it.
+fn is_bare_discover_subject(text: &str) -> bool {
+    let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("discovers"), tag("discover"))).parse(text)
+    else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    rest.is_empty() || rest.starts_with(['.', ';'])
 }
 
 fn parse_player_action_list(text: &str) -> Option<Vec<PlayerActionKind>> {

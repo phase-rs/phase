@@ -34,6 +34,11 @@ pub fn resolve(
         _ => return Err(EffectError::InvalidParam("Expected Discover".to_string())),
     };
 
+    // CR 701.57a: record this discover's mana-value limit so a "whenever you
+    // discover" trigger's effect can reference "the same value" (Curator of
+    // Sun's Creation). Set before the trigger fires on the EffectResolved event.
+    state.last_discover_value = Some(limit as i32);
+
     let player = state
         .players
         .iter()

@@ -4885,6 +4885,12 @@ pub enum QuantityRef {
     LifeAboveStarting,
     /// CR 103.4: The format's starting life total (20 for Standard, 40 for Commander, etc.).
     StartingLifeTotal,
+    /// CR 701.57a: The mana-value limit `N` of the discover that fired the
+    /// current "whenever you discover" trigger — read from
+    /// `GameState::last_discover_value`. Curator of Sun's Creation: "discover
+    /// again for the same value". Resolves to 0 outside a discover-trigger
+    /// context (fail-safe; no card references it elsewhere).
+    TriggeringDiscoverValue,
     /// Count of objects on the battlefield matching a filter.
     /// Used for "for each creature you control" and similar patterns.
     ObjectCount { filter: TargetFilter },
