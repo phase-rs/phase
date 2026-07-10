@@ -2537,7 +2537,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
             let can_recurse = if separator.starts_with(',') {
                 starts_with_or_article_type_segment(after_trimmed)
             } else {
-                // CR 205.3a: a bare "and"/"or" disjunct may lead with an article
+                // A bare "and"/"or" disjunct may lead with an article
                 // ("non-Avatar creature card or *a* planeswalker card" — Overlord
                 // of the Balemurk, #5331). The comma path already accepts that via
                 // `starts_with_or_article_type_segment`; without it here the
