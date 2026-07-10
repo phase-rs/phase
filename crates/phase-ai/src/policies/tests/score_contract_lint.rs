@@ -181,8 +181,17 @@ fn production_source(contents: &str) -> &str {
         if !at_line_start {
             continue;
         }
-        let after = &contents[idx + "#[cfg(test)]".len()..];
-        let next_non_blank = after.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        // Skip to the end of the `#[cfg(test)]` line first, so a trailing comment
+        // on that line (`#[cfg(test)] // note`) can't be mistaken for the next
+        // item. The module boundary is the first non-blank line *after* it.
+        let line_end = contents[idx..]
+            .find('\n')
+            .map_or(contents.len(), |i| idx + i);
+        let after_line = &contents[line_end..];
+        let next_non_blank = after_line
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
         if next_non_blank.trim_start().starts_with("mod ") {
             return &contents[..idx];
         }
@@ -223,4 +232,28 @@ mod tests {
         !production.contains("mod tests"),
         "the test module must be excluded"
     );
+}
+
+/// A trailing comment on the `#[cfg(test)]` module attribute must not fool the
+/// boundary scan (the scan starts on the *next* line). Guards the gemini review
+/// nit on #5478 — the boundary is still detected and the module still excluded.
+#[test]
+fn production_source_ignores_trailing_comment_on_cfg_test_line() {
+    let src = "\
+fn verdict() -> u8 {
+    PolicyVerdict::Score { delta: 0 }
+}
+
+#[cfg(test)] // module below
+mod tests {
+    fn t() { PolicyVerdict::Score { delta: 9 } }
+}
+";
+    let production = production_source(src);
+    assert_eq!(
+        production.matches("PolicyVerdict::Score {").count(),
+        1,
+        "the test module must still be excluded despite the trailing comment"
+    );
+    assert!(!production.contains("mod tests"));
 }

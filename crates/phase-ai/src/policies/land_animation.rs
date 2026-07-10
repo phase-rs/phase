@@ -31,6 +31,9 @@ const MANA_NEEDED_PENALTY: f64 = -2.0;
 /// discouragement the score contract allows. Issue #5473: this was a raw -100.0
 /// sentinel that bypassed the band helpers and tripped the registry's
 /// critical-band assert once scaled by `activation` (turn_only, up to 1.3x).
+///
+/// Note: pinned at the critical ceiling, this branch is inert to `activation()`
+/// tuning — `-CRITICAL_MAX × any activation` re-bands back to `-CRITICAL_MAX`.
 const TAPPED_LAND_PENALTY: f64 = -super::registry::CRITICAL_MAX;
 
 /// Bonus for animating when sufficient alternative mana sources exist.

@@ -31,6 +31,9 @@ use crate::features::DeckFeatures;
 /// this stays an overridable penalty rather than a veto). Issue #5473: this was
 /// a raw -100.0 sentinel that bypassed the band helpers and tripped the
 /// registry's critical-band assert once scaled.
+///
+/// Note: pinned at the critical ceiling, this branch is inert to `activation()`
+/// tuning — `-CRITICAL_MAX × any activation` re-bands back to `-CRITICAL_MAX`.
 const CONTROL_CHANGE_PENALTY: f64 = -super::registry::CRITICAL_MAX;
 
 pub struct ControlChangeAwarenessPolicy;

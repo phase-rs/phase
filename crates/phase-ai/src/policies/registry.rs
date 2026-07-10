@@ -247,6 +247,35 @@ impl PolicyVerdict {
     }
 }
 
+/// Map a policy's wide analog signal into the critical band while **preserving
+/// order**, for policies whose natural range exceeds `CRITICAL_MAX` (e.g.
+/// `copy_value`, whose `+100` preferred-X anchor and copy-target penalty sums
+/// reach ~±125). Unlike routing a raw ±125 value straight through
+/// `PolicyVerdict::score` — which *saturates*, collapsing every magnitude past
+/// `STRONG_MAX` to a single `CRITICAL_MAX` and flattening the top of the
+/// distribution — this rescales:
+///   * magnitudes within `STRONG_MAX` pass through unchanged (below-band
+///     ordering stays exact), and
+///   * magnitudes in `(STRONG_MAX, raw_ceiling]` map linearly into
+///     `(STRONG_MAX, CRITICAL_MAX]`, so two distinct large signals stay
+///     distinguishable in the softmax prior instead of colliding at the ceiling.
+///
+/// `raw_ceiling` is the policy's own max expected magnitude; magnitudes beyond
+/// it saturate at `CRITICAL_MAX` (only the extreme tail, where ordering no
+/// longer matters). The result is always in `[-CRITICAL_MAX, CRITICAL_MAX]`, so
+/// it still routes through `PolicyVerdict::score` as identity to keep the single
+/// clamp authority. This is the `anti_self_harm` self-ceiling idea generalized
+/// to a policy whose range is too wide for a bare clamp to preserve.
+pub fn rescale_into_critical_band(raw: f64, raw_ceiling: f64) -> f64 {
+    let magnitude = raw.abs();
+    if magnitude <= STRONG_MAX {
+        return raw;
+    }
+    let ceiling = raw_ceiling.max(STRONG_MAX + f64::EPSILON);
+    let over = ((magnitude - STRONG_MAX) / (ceiling - STRONG_MAX)).clamp(0.0, 1.0);
+    raw.signum() * (STRONG_MAX + over * (CRITICAL_MAX - STRONG_MAX))
+}
+
 /// The clean `TacticalPolicy` trait — four required methods, zero defaults.
 ///
 /// Scaling discipline (CR-equivalent invariant for the AI layer):
@@ -776,5 +805,41 @@ mod shared_invariant_tests {
             "critical delta x activation 2.6 must clamp to -CRITICAL_MAX ({}), got {delta}",
             -CRITICAL_MAX
         );
+    }
+
+    /// Regression for the #5478 review (copy_value saturation): rescaling a wide
+    /// analog range must keep two distinct large signals distinguishable and
+    /// order-preserving, where a bare `score()` saturation collapses them both to
+    /// the ceiling.
+    #[test]
+    fn rescale_into_critical_band_preserves_order_where_saturation_collapses() {
+        let ceiling = 130.0;
+
+        // Below STRONG_MAX: exact identity, sign-preserving.
+        assert_eq!(rescale_into_critical_band(3.0, ceiling), 3.0);
+        assert_eq!(rescale_into_critical_band(-4.5, ceiling), -4.5);
+        assert_eq!(rescale_into_critical_band(0.0, ceiling), 0.0);
+
+        // The maintainer's case: -110 and -30 both saturate to -CRITICAL_MAX under
+        // a bare clamp; rescaling keeps them distinct and correctly ordered.
+        let a = rescale_into_critical_band(-110.0, ceiling);
+        let b = rescale_into_critical_band(-30.0, ceiling);
+        let c = rescale_into_critical_band(-8.0, ceiling);
+        assert!(a < b && b < c, "ordering must survive: {a} < {b} < {c}");
+        assert!(
+            (a - b).abs() > 1.0,
+            "distinct large signals must stay distinguishable, got {a} vs {b}"
+        );
+
+        // Everything stays within the critical band, and beyond the ceiling it
+        // saturates (only the extreme tail, where ordering no longer matters).
+        for raw in [-500.0, -130.0, -15.0, 15.0, 130.0, 500.0] {
+            let out = rescale_into_critical_band(raw, ceiling);
+            assert!(
+                out.abs() <= CRITICAL_MAX + 1e-9,
+                "{raw} -> {out} exceeds band"
+            );
+        }
+        assert!((rescale_into_critical_band(-500.0, ceiling) + CRITICAL_MAX).abs() < 1e-9);
     }
 }
