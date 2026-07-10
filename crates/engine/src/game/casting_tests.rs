@@ -14811,6 +14811,59 @@ fn delve_no_mode_without_graveyard_cards() {
 }
 
 #[test]
+fn delve_stale_noncard_graveyard_residents_do_not_make_spell_castable() {
+    let mut state = setup_game_at_main_phase();
+    let obj_id = make_delve_spell(&mut state);
+    // Deliberately stale token/copy residents must not make Delve available.
+    let token = create_object(
+        &mut state,
+        CardId(71),
+        PlayerId(0),
+        "Stale Treasure".to_string(),
+        Zone::Graveyard,
+    );
+    let copy = create_object(
+        &mut state,
+        CardId(72),
+        PlayerId(0),
+        "Stale Copy".to_string(),
+        Zone::Graveyard,
+    );
+    state.objects.get_mut(&token).unwrap().is_token = true;
+    state.objects.get_mut(&copy).unwrap().is_copy = true;
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    let offered = crate::ai_support::candidate_actions(&state);
+    assert!(
+        !offered.iter().any(|candidate| matches!(
+            candidate.action,
+            GameAction::CastSpell { object_id, .. } if object_id == obj_id
+        )),
+        "with only stale token/copy graveyard residents, the Delve spell must not be offered"
+    );
+
+    let mut reducer_state = state.clone();
+    let result = handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new());
+    assert!(
+        result.is_err(),
+        "with only {{R}} and stale token/copy residents, Delve cannot pay the missing {{3}}"
+    );
+    assert!(
+        apply_as_current(
+            &mut reducer_state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(22),
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            },
+        )
+        .is_err(),
+        "the reducer must reject a Delve cast that only stale noncards could fund"
+    );
+}
+
+#[test]
 fn delve_exiles_graveyard_card_for_generic() {
     use super::super::engine::apply_as_current;
     let mut state = setup_game_at_main_phase();
@@ -15004,6 +15057,16 @@ fn delve_makes_spell_castable_via_graveyard() {
             Zone::Graveyard,
         );
     }
+
+    assert!(
+        crate::ai_support::candidate_actions(&state)
+            .iter()
+            .any(|candidate| matches!(
+                candidate.action,
+                GameAction::CastSpell { object_id, .. } if object_id == obj_id
+            )),
+        "real cards in the graveyard must make the Delve spell castable and offered"
+    );
 
     let result = handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new());
     assert!(

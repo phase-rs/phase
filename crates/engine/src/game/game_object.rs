@@ -529,13 +529,14 @@ pub struct GameObject {
     // Timestamp for layer ordering
     pub timestamp: u64,
 
-    /// CR 400.7: Monotonic per-object incarnation, bumped on every battlefield
-    /// entry (`reset_for_battlefield_entry`). A permanent that leaves and
-    /// re-enters the battlefield becomes a new object even though the engine
-    /// reuses its `ObjectId` as storage identity. Pairing the id with this
-    /// counter distinguishes the new object from the old one at the same id, so
-    /// a pending ability that captured the previous incarnation no longer
-    /// resolves its self-reference against the re-entered permanent (blink/flicker).
+    /// CR 400.7: Monotonic per-object incarnation, bumped on every real zone
+    /// change (`bump_incarnation`) — battlefield entry via
+    /// `reset_for_battlefield_entry`, plus every non-battlefield move in the zone
+    /// movers. An object that leaves and re-enters any zone becomes a new object
+    /// even though the engine reuses its `ObjectId` as storage identity. Pairing
+    /// the id with this counter distinguishes the new object from the old one at
+    /// the same id, so a pending ability that captured the previous incarnation no
+    /// longer resolves its self-reference against the moved object (blink/flicker).
     #[serde(default)]
     pub incarnation: u64,
 
@@ -1644,6 +1645,15 @@ impl GameObject {
         }
     }
 
+    /// CR 400.7: Advance this object's incarnation epoch by one. The single bump
+    /// primitive — every real zone change (battlefield entry via
+    /// `reset_for_battlefield_entry`, and every non-battlefield move in the zone
+    /// movers) routes through here so a self-reference captured for the previous
+    /// incarnation no longer matches the new object.
+    pub fn bump_incarnation(&mut self) {
+        self.incarnation += 1;
+    }
+
     /// CR 400.7: Reset transient battlefield state when a permanent enters the battlefield.
     /// A permanent entering the battlefield is a new object with no memory of its previous
     /// existence. Callers that need enter_tapped=true override `tapped` after this call.
@@ -1651,7 +1661,7 @@ impl GameObject {
         // CR 400.7: This (re-)entry creates a new object at the same storage id.
         // Bump the incarnation so self-references captured by abilities created
         // for the previous incarnation no longer match this permanent.
-        self.incarnation += 1;
+        self.bump_incarnation();
         // CR 613.7d: an object receives a timestamp when it enters a zone. Stage 2
         // stamps battlefield entries only; all-zone entry stamping (graveyard/exile-
         // functioning statics) is a deferred hook (see scope boundary).
@@ -2021,6 +2031,11 @@ impl GameObject {
     /// card" (Cipher's encode-on-resolution, CR 702.99a) gate on this.
     pub fn is_represented_by_a_card(&self) -> bool {
         !self.is_token && !self.is_copy
+    }
+
+    /// CR 702.66a: Delve may exile only a card from its owner's graveyard.
+    pub fn is_delve_eligible(&self, player: PlayerId) -> bool {
+        self.owner == player && self.zone == Zone::Graveyard && self.is_represented_by_a_card()
     }
 
     /// CR 714.1: Returns the final chapter number for a Saga, or None if not a Saga.

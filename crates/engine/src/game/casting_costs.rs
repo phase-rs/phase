@@ -5879,8 +5879,8 @@ pub(super) fn pay_and_push_adventure(
             ConvokeMode::Convoke => o.is_convoke_eligible(player),
             ConvokeMode::Waterbend => o.is_waterbend_eligible(player),
             ConvokeMode::Improvise => o.is_improvise_eligible(player),
-            // CR 702.66a: delve needs at least one card in the caster's graveyard.
-            ConvokeMode::Delve => o.zone == Zone::Graveyard && o.owner == player,
+            // CR 702.66a: delve needs at least one eligible card in the caster's graveyard.
+            ConvokeMode::Delve => o.is_delve_eligible(player),
         })
     });
 
@@ -8170,8 +8170,7 @@ pub(super) fn max_x_value_excluding(
             .objects
             .iter()
             .filter(|(id, obj)| {
-                obj.zone == Zone::Graveyard
-                    && obj.owner == player
+                obj.is_delve_eligible(player)
                     && Some(**id) != object_id
                     && !excluded_sources.contains(*id)
             })
@@ -18046,5 +18045,81 @@ its replicate cost was paid.)\nDraw a card.";
             matches!(result, Err(EngineError::ActionNotAllowed(_))),
             "lingering KeywordCostOfCastSpell with unresolvable keyword cost must abort, not free-cast; got {result:?}"
         );
+    }
+
+    #[test]
+    fn delve_max_x_counts_only_eligible_graveyard_cards_and_respects_exclusions() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(8_000),
+            PlayerId(0),
+            "Empty the Pits".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Delve);
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X],
+            generic: 0,
+        };
+        let real_a = create_object(
+            &mut state,
+            CardId(8_001),
+            PlayerId(0),
+            "Real A".to_string(),
+            Zone::Graveyard,
+        );
+        let real_b = create_object(
+            &mut state,
+            CardId(8_002),
+            PlayerId(0),
+            "Real B".to_string(),
+            Zone::Graveyard,
+        );
+        let token = create_object(
+            &mut state,
+            CardId(8_003),
+            PlayerId(0),
+            "Stale Treasure".to_string(),
+            Zone::Graveyard,
+        );
+        let copy = create_object(
+            &mut state,
+            CardId(8_004),
+            PlayerId(0),
+            "Stale Copy".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&token).unwrap().is_token = true;
+        state.objects.get_mut(&copy).unwrap().is_copy = true;
+
+        assert_eq!(
+            max_x_value_excluding(
+                &state,
+                PlayerId(0),
+                &cost,
+                Some(spell),
+                &std::collections::HashSet::new(),
+            ),
+            1,
+            "two real cards pay exactly the two generic mana required for X=1"
+        );
+        assert_eq!(
+            max_x_value_excluding(
+                &state,
+                PlayerId(0),
+                &cost,
+                Some(spell),
+                &std::collections::HashSet::from([real_a]),
+            ),
+            0,
+            "excluding one real card leaves insufficient Delve capacity for {{X}}{{X}}"
+        );
+        assert!(state.objects[&real_b].is_delve_eligible(PlayerId(0)));
     }
 }

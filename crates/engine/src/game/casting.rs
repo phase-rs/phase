@@ -9297,6 +9297,8 @@ pub fn handle_cast_spell_with_payment_mode(
     // resolution for deferred self-copy choices, but a fresh normal cast starts
     // a new stack-object announcement outside that old resolution context.
     state.resolving_stack_entry = None;
+    // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
+    state.resolution_source_relatch = None;
 
     // CR 715.3 / CR 720.3: Adventure-family cards from hand (or a commander cast
     // from the command zone) require choosing the normal creature face or
@@ -12303,7 +12305,7 @@ fn can_pay_with_tap_payment_mode(
             // like Improvise, so a spell castable only with delve is offered.
             let mut pool = player_data.mana_pool.clone();
             for (&object_id, obj) in &state.objects {
-                if obj.zone == Zone::Graveyard && obj.owner == player {
+                if obj.is_delve_eligible(player) {
                     pool.add(crate::types::mana::ManaUnit::convoke_payment(
                         crate::types::mana::ManaType::Colorless,
                         object_id,

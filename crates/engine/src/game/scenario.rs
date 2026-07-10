@@ -1780,6 +1780,7 @@ pub struct SpellCast<'a> {
     cost_objects: Vec<ObjectId>,
     distribution: Option<Vec<(TargetRef, u32)>>,
     convoke_with: Vec<ObjectId>,
+    delve_with: Vec<ObjectId>,
     optional: OptionalPolicy,
     search_pick: SearchPolicy,
     modal_back_face: Option<bool>,
@@ -1806,6 +1807,7 @@ impl<'a> SpellCast<'a> {
             cost_objects: Vec::new(),
             distribution: None,
             convoke_with: Vec::new(),
+            delve_with: Vec::new(),
             optional: OptionalPolicy::default(),
             search_pick: SearchPolicy::default(),
             modal_back_face: None,
@@ -1985,6 +1987,13 @@ impl<'a> SpellCast<'a> {
         self
     }
 
+    /// Exile these cards from the caster's graveyard to pay generic mana via
+    /// Delve (CR 702.66a).
+    pub fn delve_with(mut self, cards: &[ObjectId]) -> Self {
+        self.delve_with.extend_from_slice(cards);
+        self
+    }
+
     /// Drive the cast pipeline until the spell is committed to the stack and a
     /// priority window opens (CR 601.2i). Use this when a test must inspect the
     /// live stack object before resolution.
@@ -2007,6 +2016,7 @@ impl<'a> SpellCast<'a> {
             cost_objects,
             distribution,
             convoke_with,
+            delve_with,
             optional,
             search_pick,
             modal_back_face,
@@ -2178,36 +2188,49 @@ impl<'a> SpellCast<'a> {
                         &mut events,
                     )?;
                 }
-                // CR 702.51a / CR 601.2g–h: mana payment, possibly via convoke.
+                // CR 702.51a / CR 702.66a / CR 601.2g–h: mana payment, possibly
+                // via convoke or delve.
                 //
                 // Most pool-funded casts auto-pay and never surface this window.
-                // But a Convoke (CR 702.51) spell always opens a `ManaPayment
-                // { convoke_mode }` window to offer tapping creatures — even when
-                // the controller intends to pay entirely from their pool. With no
-                // convoke creatures declared, the convoke loop is a no-op and the
-                // trailing `PassPriority` finalizes the remaining cost from the
-                // pool (the engine auto-allocates pool mana, incl. the generic
-                // portion). If the pool can't cover it, `PassPriority` errors and
-                // the `.expect` below fails loudly — fund the pool in the scenario.
-                WaitingFor::ManaPayment { .. } => {
-                    for &creature in &convoke_with {
-                        // CR 702.51b: pay one mana of the creature's color, or
-                        // colorless toward the generic portion of the cost.
-                        let mana_type = runner
-                            .state
-                            .objects
-                            .get(&creature)
-                            .and_then(|obj| obj.color.first().copied())
-                            .map(ManaType::from)
-                            .unwrap_or(ManaType::Colorless);
-                        act_collect(
-                            runner,
-                            GameAction::TapForConvoke {
-                                object_id: creature,
-                                mana_type,
-                            },
-                            &mut events,
-                        )?;
+                // Convoke (CR 702.51) and Delve (CR 702.66a) each open a
+                // `ManaPayment { convoke_mode }` window even when the controller
+                // intends to pay entirely from their pool. With no declared
+                // contributors, their loops are no-ops and the trailing
+                // `PassPriority` finalizes the remaining cost from the pool. If
+                // the pool can't cover it, `PassPriority` errors and the `.expect`
+                // below fails loudly — fund the pool in the scenario.
+                WaitingFor::ManaPayment { convoke_mode, .. } => {
+                    if matches!(convoke_mode, Some(ConvokeMode::Delve)) {
+                        for &card in &delve_with {
+                            act_collect(
+                                runner,
+                                GameAction::TapForConvoke {
+                                    object_id: card,
+                                    mana_type: ManaType::Colorless,
+                                },
+                                &mut events,
+                            )?;
+                        }
+                    } else {
+                        for &creature in &convoke_with {
+                            // CR 702.51b: pay one mana of the creature's color, or
+                            // colorless toward the generic portion of the cost.
+                            let mana_type = runner
+                                .state
+                                .objects
+                                .get(&creature)
+                                .and_then(|obj| obj.color.first().copied())
+                                .map(ManaType::from)
+                                .unwrap_or(ManaType::Colorless);
+                            act_collect(
+                                runner,
+                                GameAction::TapForConvoke {
+                                    object_id: creature,
+                                    mana_type,
+                                },
+                                &mut events,
+                            )?;
+                        }
                     }
                     // CR 601.2h: finalize the (now fully convoke-paid) cost.
                     act_collect(runner, GameAction::PassPriority, &mut events)?;

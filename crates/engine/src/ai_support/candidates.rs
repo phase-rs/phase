@@ -3568,8 +3568,9 @@ pub(crate) fn priority_actions_with_probe(
                                 Some(
                                     crate::types::ability::ActivationRestriction::OnlyOnceEachTurn
                                 )
-                            ) && state.crew_activated_this_turn.contains(&obj_id)
-                            {
+                            ) && crate::game::engine::crew_activated_this_turn_contains(
+                                state, obj_id,
+                            ) {
                                 break;
                             }
                             // CR 702.122a: a Vehicle can't crew itself, so exclude
@@ -4415,11 +4416,11 @@ fn mana_payment_actions(
                 _ => None,
             });
         if mode == ConvokeMode::Delve {
-            if let Some(p) = state.players.iter().find(|p| p.id == player) {
-                for obj_id in &p.graveyard {
+            for (&obj_id, obj) in &state.objects {
+                if obj.is_delve_eligible(player) {
                     actions.push(candidate(
                         GameAction::TapForConvoke {
-                            object_id: *obj_id,
+                            object_id: obj_id,
                             mana_type: crate::types::mana::ManaType::Colorless,
                         },
                         TacticalClass::Mana,
