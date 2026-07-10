@@ -154,9 +154,7 @@ pub(crate) fn parse_class_oracle_text(
                 let mut triggers = parse_trigger_lines_at_index(
                     line,
                     card_name,
-                    Some(PrintedTriggerIndex::from_category_vector_len(
-                        result.triggers.len(),
-                    )),
+                    Some(PrintedTriggerIndex::placeholder()),
                     &mut ParseContext::default(),
                 );
                 // CR 716.2a: Gate continuous triggers at levels > 1.
@@ -223,9 +221,7 @@ pub(crate) fn parse_class_oracle_text(
                     let mut triggers = parse_trigger_lines_at_index(
                         &effect_text,
                         card_name,
-                        Some(PrintedTriggerIndex::from_category_vector_len(
-                            result.triggers.len(),
-                        )),
+                        Some(PrintedTriggerIndex::placeholder()),
                         &mut ParseContext::default(),
                     );
                     if section.level > 1 {
@@ -360,17 +356,23 @@ fn wrap_replacement_with_class_level(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{ContinuousModification, Effect};
 
     /// CR 707.9a + CR 716.2a: A Class-level trigger body using "becomes a copy
-    /// of <X>, except <pronoun> has this ability" must emit
-    /// `RetainPrintedTriggerFromSource { source_trigger_index: <N> }` where
-    /// `<N>` is the trigger's index in the card's full printed-trigger list.
-    /// This guards against the regression where Class-level triggers called
-    /// `parse_trigger_lines` (no index thread), causing the retain modification
-    /// to either silently drop or point at trigger index 0 regardless of where
-    /// the trigger actually sits in the printed list.
+    /// of <X>, except <pronoun> has this ability" must resolve
+    /// `RetainPrintedTriggerFromSource { source_trigger_index: <N> }` to `<N>` =
+    /// the trigger's index in the card's full printed-trigger list.
+    ///
+    /// Drives the FULL pipeline (`parse_oracle_text`) rather than the
+    /// `parse_class_oracle_text` preprocessor alone: under late-binding the
+    /// dispatch/preprocessor path bakes a `placeholder()` (= 0) into the retain
+    /// modification, and only `finish()` resolves it to the item's real printed
+    /// slot from the source-ordered document. A preprocessor-only call would
+    /// observe the unresolved placeholder, so this test must run the whole path.
+    /// It guards both the class trigger-index threading and the `finish()`-time
+    /// resolution: reverting the `finish()` stamp yields `source_trigger_index:
+    /// 0` and this assertion fails.
     #[test]
     fn class_level_trigger_become_copy_threads_trigger_index() {
         // Synthetic two-level Class enchantment: level 1 has a trigger
@@ -379,38 +381,20 @@ mod tests {
         // "At the beginning of your upkeep, ~ becomes a copy of … and
         // it has this ability".
         //
-        // Without the index thread, `RetainPrintedTriggerFromSource` would
-        // come out as `source_trigger_index: 0`, pointing at the wrong
-        // trigger. With the thread, it correctly points at index 1.
-        //
         // The level-2 body uses a phase trigger (At the beginning of …)
         // rather than the class-level `When ~ becomes level N` trigger,
         // because the latter takes a special path that doesn't dispatch
         // to the chain parser for the body — the AtClassLevel trigger is
         // a registration-time event, not a body-effect trigger.
-        let lines = vec![
-            "When this Class enters, draw a card.",
-            "{2}: Level 2",
-            "At the beginning of your upkeep, ~ becomes a copy of target creature you control, except its name is ~ and it has this ability.",
-        ];
-        let result = parse_class_oracle_text(
-            &lines,
+        let oracle_text = "When this Class enters, draw a card.\n\
+             {2}: Level 2\n\
+             At the beginning of your upkeep, ~ becomes a copy of target creature you control, except its name is ~ and it has this ability.";
+        let result = parse_oracle_text(
+            oracle_text,
             "Test Class",
             &[],
-            ParsedAbilities {
-                abilities: Vec::new(),
-                triggers: Vec::new(),
-                statics: Vec::new(),
-                replacements: Vec::new(),
-                extracted_keywords: Vec::new(),
-                modal: None,
-                additional_cost: None,
-                casting_restrictions: Vec::new(),
-                casting_options: Vec::new(),
-                solve_condition: None,
-                strive_cost: None,
-                parse_warnings: Vec::new(),
-            },
+            &["Enchantment".to_string()],
+            &["Class".to_string()],
         );
 
         // Find the level-2 BecomeCopy trigger.

@@ -20417,3 +20417,164 @@ fn violent_urge_delirium_scopes_to_parent_target_not_all_creatures() {
         "expected a single AddKeyword(DoubleStrike) modification"
     );
 }
+
+/// CR 707.9a: the printed slot of an "…except it has this ability" clause is
+/// resolved at `finish()` from the source-ordered document, not baked at parse
+/// time. This synthetic two-trigger creature drives the full pipeline
+/// (`parse_oracle_text`): the ETB trigger prints first (slot 0) and the upkeep
+/// `BecomeCopy` trigger prints second (slot 1). The dispatch loop bakes a
+/// `placeholder()` (= 0) `source_trigger_index`; only the `finish()`-time
+/// `stamp_retained_printed_slot` walk resolves it to the item's real printed
+/// slot.
+///
+/// DISCRIMINATING: the assertion reads `source_trigger_index == 1`. Reverting the
+/// `finish()` stamp leaves the placeholder `0`, so this test would then fail —
+/// it is a regression guard on the late-bind resolution, not a shape assertion.
+/// (The two triggers are non-preprocessor, so the pre-edit `from_category_vector_len`
+/// value was also 1; this commit is byte-identical by construction, and the test
+/// pins the *new* resolution mechanism against a broken/missing `finish()` walk.)
+#[test]
+fn become_copy_except_this_ability_resolves_printed_slot_at_finish() {
+    let parsed = parse_oracle_text(
+        "When ~ enters, draw a card.\n\
+         At the beginning of your upkeep, ~ becomes a copy of target creature you control, except it has this ability.",
+        "Slot Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+
+    assert_eq!(
+        parsed.triggers.len(),
+        2,
+        "expected exactly two printed triggers (ETB + upkeep BecomeCopy): {:?}",
+        parsed.triggers
+    );
+
+    // Positive reach-guard: the BecomeCopy trigger must be the SECOND printed
+    // trigger (index 1). If this fails the fixture is degenerate and the
+    // resolved-index assertion below would be vacuous.
+    let become_copy_pos = parsed
+        .triggers
+        .iter()
+        .position(|t| {
+            t.execute
+                .as_ref()
+                .is_some_and(|e| matches!(*e.effect, Effect::BecomeCopy { .. }))
+        })
+        .expect("upkeep trigger must produce a BecomeCopy effect");
+    assert_eq!(
+        become_copy_pos, 1,
+        "reach-guard: BecomeCopy trigger must occupy printed slot 1 (ETB at 0); \
+         fixture setup is wrong otherwise"
+    );
+
+    let execute = parsed.triggers[become_copy_pos]
+        .execute
+        .as_deref()
+        .expect("BecomeCopy trigger must have an execute body");
+    let Effect::BecomeCopy {
+        additional_modifications,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected BecomeCopy, got {:?}", execute.effect);
+    };
+    let resolved = additional_modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::RetainPrintedTriggerFromSource {
+                source_trigger_index,
+            } => Some(*source_trigger_index),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a RetainPrintedTriggerFromSource modification, got {additional_modifications:?}"
+            )
+        });
+    assert_eq!(
+        resolved, 1,
+        "CR 707.9a: finish() must resolve the printed slot to this trigger's \
+         source-ordered index (1); a placeholder 0 means the finish() stamp is missing"
+    );
+}
+
+/// CR 707.9a: the `finish()` stamp must reach the retain modification through the
+/// SECOND real receiver carrier, `Effect::CopyTokenOf.additional_modifications`
+/// (token.rs), not only through `BecomeCopy`. The sole producer
+/// `parse_has_this_ability` lands `RetainPrinted*FromSource` in exactly two
+/// carriers under a real `ParseContext` (become-copy and token-copy); this drives
+/// the token-copy path end-to-end so a `CopyTokenOf` arm that skipped its inner
+/// vec — or stamped the wrong slot — is caught.
+///
+/// (`EachPlayerCopyChosen` is deliberately NOT covered: it parses its except body
+/// with a fresh `ParseContext::default()` (mod.rs), so `parse_has_this_ability`
+/// always declines there and no `RetainPrinted` mod can reach it — a test through
+/// it would assert zero stamps and be vacuous.)
+///
+/// DISCRIMINATING: the copy trigger is the SECOND printed trigger (slot 1), so the
+/// assertion `source_trigger_index == 1` flips to the placeholder `0` if the
+/// `CopyTokenOf` arm is broken or the `finish()` stamp is reverted.
+#[test]
+fn token_copy_except_this_ability_resolves_printed_slot_at_finish() {
+    let parsed = parse_oracle_text(
+        "When ~ enters, draw a card.\n\
+         Whenever another creature you control enters, create a token that's a copy of that creature, except it has this ability.",
+        "Token Slot Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+
+    assert_eq!(
+        parsed.triggers.len(),
+        2,
+        "expected two printed triggers (ETB draw + copy-token): {:?}",
+        parsed.triggers
+    );
+
+    let copy_pos = parsed
+        .triggers
+        .iter()
+        .position(|t| {
+            t.execute
+                .as_ref()
+                .is_some_and(|e| matches!(*e.effect, Effect::CopyTokenOf { .. }))
+        })
+        .expect("second trigger must produce a CopyTokenOf effect");
+    assert_eq!(
+        copy_pos, 1,
+        "reach-guard: CopyTokenOf trigger must occupy printed slot 1 (ETB at 0)"
+    );
+
+    let execute = parsed.triggers[copy_pos]
+        .execute
+        .as_deref()
+        .expect("CopyTokenOf trigger must have an execute body");
+    let Effect::CopyTokenOf {
+        additional_modifications,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected CopyTokenOf, got {:?}", execute.effect);
+    };
+    let resolved = additional_modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::RetainPrintedTriggerFromSource {
+                source_trigger_index,
+            } => Some(*source_trigger_index),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a RetainPrintedTriggerFromSource in CopyTokenOf, got {additional_modifications:?}"
+            )
+        });
+    assert_eq!(
+        resolved, 1,
+        "CR 707.9a: finish() must resolve the CopyTokenOf printed slot to the \
+         trigger's source-ordered index (1)"
+    );
+}

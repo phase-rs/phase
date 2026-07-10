@@ -31,8 +31,9 @@ use super::replacement::ReplacementIr;
 use super::static_ir::StaticIr;
 use super::trigger::TriggerIr;
 use crate::types::ability::{
-    AbilityDefinition, AdditionalCost, CastingRestriction, ModalChoice, ReplacementDefinition,
-    SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, AdditionalCost, CastingPermission, CastingRestriction,
+    ContinuousModification, Effect, ModalChoice, ReplacementDefinition, SolveCondition,
+    SpellCastingOption, StaticDefinition, TriggerDefinition, VoteSubject,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
@@ -354,47 +355,23 @@ macro_rules! printed_index_impl {
                 Self(self.0 + n)
             }
 
-            /// **UNIT-3B DEBT — the sole legal way to build a printed index from
-            /// a category-vector length.**
+            /// A parse-time placeholder printed slot (always `0`).
             ///
-            /// In unit 3a the builder is constructed inside
-            /// `parsed_abilities_to_doc_ir`, i.e. *after* the dispatch loop has
-            /// run, so the loop's index reads have no builder in scope and must
-            /// still derive the slot from `Vec::len()`. That is correct today and
-            /// only today: emission is category-ordered, so `len()` *is* the
-            /// printed slot. Unit 3b emits in source order and the equality dies.
+            /// CR 707.9a: an "…except it has this ability" clause must resolve to
+            /// the ability's **printed** slot, which is its final position in the
+            /// source-ordered document. That position is not known while the
+            /// dispatch loop is still running, so the loop bakes this placeholder
+            /// into `RetainPrinted{Trigger,Ability}FromSource` and `finish()`
+            /// overwrites it via `stamp_retained_printed_slot` from the item's
+            /// resolved slot.
             ///
-            /// Rather than trust a comment, the newtype forces every such read to
-            /// name this function, so `rg from_category_vector_len` enumerates every
-            /// site that derives an **absolute** printed slot from a category vector.
-            /// Unit 3b deletes this constructor; afterwards
-            /// `Some(result.triggers.len())` does not compile and
-            /// `OracleDocBuilder` is the only producer.
-            ///
-            /// **That grep is complete for absolute derivations and for nothing else.**
-            /// `offset(n)` displaces an already-correct base and is NOT part of this
-            /// cutover, but its argument can carry debt of its own:
-            ///
-            /// * `oracle_trigger.rs` (`base.offset(i)`, two sites) — `i` indexes the
-            ///   compound halves of ONE trigger line. Structural; correct under any
-            ///   emission order; not debt.
-            /// * `oracle_spacecraft.rs` (`base.offset(output.triggers.len())`) — a
-            ///   `len()` read of the preprocessor's OWN local vector, so it is
-            ///   relative and survives document reordering, but unit 4 replaces it
-            ///   with an emission counter when that preprocessor emits through the
-            ///   builder.
-            ///
-            /// So: `rg from_category_vector_len` for the 3b cutover; `rg '\.offset\('`
-            /// to review the relative sites, one of which is unit-4 debt. Claiming a
-            /// single grep is exhaustive would be a false safety promise, which is the
-            /// defect class this whole type exists to remove.
-            ///
-            /// A `debug_assert_eq!(counter, vec.len())` was considered and rejected:
-            /// it holds only while emission is category-ordered, so it would fire on
-            /// *correct* code the moment 3b reorders, and it is compiled out of the
-            /// release profile that generates `card-data.json`.
-            pub(crate) fn from_category_vector_len(len: usize) -> Self {
-                Self(len)
+            /// This replaces the former `from_category_vector_len` constructor.
+            /// Deriving the slot from a category-vector length was correct only
+            /// while emission was category-ordered; the source-ordered document
+            /// builder makes that equality false, so the late-bind at `finish()`
+            /// is the single authority and the length constructor is gone.
+            pub(crate) fn placeholder() -> Self {
+                Self(0)
             }
         }
     };
@@ -405,8 +382,8 @@ printed_index_impl!(PrintedTriggerIndex);
 
 /// Test-only constructors. Kept behind `cfg(test)` so production code cannot
 /// mint a printed index out of a bare integer: the only production producers are
-/// `OracleDocBuilder::{ability_index, trigger_index}` and the loudly-named
-/// `from_category_vector_len` escape hatch that unit 3b deletes.
+/// `OracleDocBuilder::{ability_index, trigger_index}` and the const-zero
+/// `placeholder()` that the dispatch loop bakes in and `finish()` overwrites.
 #[cfg(test)]
 impl PrintedTriggerIndex {
     pub(crate) fn from_slot_for_test(slot: usize) -> Self {
@@ -803,17 +780,519 @@ impl OracleDocBuilder {
 
     /// Finish, producing items already in Oracle source order.
     pub(crate) fn finish(
-        self,
+        mut self,
         source_text: &str,
         card_name: &str,
         diagnostics: Vec<OracleDiagnostic>,
     ) -> OracleDocIr {
+        // CR 707.9a: resolve every "…except it has this ability" printed slot now.
+        //
+        // The load-bearing invariant is PER-CATEGORY COUNTING, not source order:
+        // `parsed_abilities_to_doc_ir` still emits items in CATEGORY order today
+        // (all abilities, then all triggers, …) — see its own note — so
+        // `values_mut()` does NOT yet visit in printed source order. The walk is
+        // correct regardless because it counts each category SEPARATELY
+        // (`trigger_slot` among triggers, `ability_slot` among abilities), which
+        // reproduces exactly the position the parse-time `from_category_vector_len`
+        // computed. Each `RetainPrinted{Trigger,Ability}FromSource` is a
+        // self-reference to its enclosing item (CR 603.1 / CR 602.1), stamped with
+        // that item's per-category slot, replacing the `placeholder()` (= 0) the
+        // dispatch loop baked in. This per-category counting stays correct when a
+        // later commit makes item ordering truly source-based.
+        //
+        // Match is EXHAUSTIVE over `OracleNodeIr` (no `_`), mirroring `emit`'s
+        // printed-slot match above: a future node variant — or the currently
+        // never-constructed `Trigger`/`Spell` IR variants once a later commit emits
+        // them — must fail to compile here until its slot behavior is decided,
+        // rather than being silently skipped (which would mis-index every later
+        // trigger/ability).
+        let mut trigger_slot = 0usize;
+        let mut ability_slot = 0usize;
+        for item in self.items.values_mut() {
+            match &mut item.node {
+                OracleNodeIr::PreLoweredTrigger(trigger) => {
+                    stamp_trigger_printed_slot(trigger, trigger_slot, PrintedItemKind::Trigger);
+                    trigger_slot += 1;
+                }
+                OracleNodeIr::PreLoweredSpell(def) => {
+                    stamp_retained_printed_slot(def, ability_slot, PrintedItemKind::Ability);
+                    ability_slot += 1;
+                }
+                // No retain modification can reach these today: the `*` IR variants
+                // are never constructed in unit 3a, and the remaining categories do
+                // not carry a copy-except body. Left explicit (not `_`) so a new
+                // slot-bearing node is a compile error, per the note above.
+                OracleNodeIr::Trigger(_)
+                | OracleNodeIr::Spell(_)
+                | OracleNodeIr::Static(_)
+                | OracleNodeIr::PreLoweredStatic(_)
+                | OracleNodeIr::Replacement(_)
+                | OracleNodeIr::PreLoweredReplacement(_)
+                | OracleNodeIr::Keyword(_)
+                | OracleNodeIr::Modal(_)
+                | OracleNodeIr::AdditionalCost(_)
+                | OracleNodeIr::CastingRestriction(_)
+                | OracleNodeIr::CastingOption(_)
+                | OracleNodeIr::SolveCondition(_)
+                | OracleNodeIr::StriveCost(_) => {}
+            }
+        }
         OracleDocIr {
             items: self.items.into_values().collect(),
             source_text: source_text.to_string(),
             card_name: card_name.to_string(),
             diagnostics,
         }
+    }
+}
+
+/// Which printed category a finish()-time slot stamp targets.
+///
+/// A walk parameter local to this module — deliberately NOT a `ParseContext`
+/// field. `ParseContext`'s `current_trigger_index`/`current_ability_index` carry
+/// the parse-time placeholder; this enum only selects which
+/// `RetainPrinted*FromSource` variant `finish()` rewrites for a given item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrintedItemKind {
+    Trigger,
+    Ability,
+}
+
+/// Stamp the resolved printed slot into a pre-lowered trigger's body.
+///
+/// The retain modification lives inside the trigger's `execute` ability
+/// (CR 603.1: "this ability" refers to the triggered ability itself), so the
+/// walk descends into it.
+fn stamp_trigger_printed_slot(trigger: &mut TriggerDefinition, slot: usize, kind: PrintedItemKind) {
+    if let Some(execute) = &mut trigger.execute {
+        stamp_retained_printed_slot(execute, slot, kind);
+    }
+}
+
+/// CR 707.9a: rewrite every `RetainPrinted{Trigger,Ability}FromSource` reachable
+/// from `def` with the enclosing item's resolved printed slot.
+///
+/// Mirrors the immutable `collect_effects`/`collect_effects_in_effect`
+/// (`analysis/ability_graph.rs`) as a `&mut` walk: the head effect plus the
+/// chained `sub_ability`/`else_ability`/`mode_abilities` and the nested-`Effect`
+/// ability payloads.
+fn stamp_retained_printed_slot(def: &mut AbilityDefinition, slot: usize, kind: PrintedItemKind) {
+    stamp_effect_printed_slot(&mut def.effect, slot, kind);
+    if let Some(sub) = &mut def.sub_ability {
+        stamp_retained_printed_slot(sub, slot, kind);
+    }
+    if let Some(els) = &mut def.else_ability {
+        stamp_retained_printed_slot(els, slot, kind);
+    }
+    for m in &mut def.mode_abilities {
+        stamp_retained_printed_slot(m, slot, kind);
+    }
+}
+
+/// Stamp the printed slot into a static ability's continuous modifications.
+fn stamp_static_printed_slot(sd: &mut StaticDefinition, slot: usize, kind: PrintedItemKind) {
+    stamp_retained_mods(&mut sd.modifications, slot, kind);
+}
+
+/// Stamp the printed slot into a granted casting permission's modifications.
+///
+/// Exhaustive over `CastingPermission` (no `_`): a future permission variant that
+/// carries continuous modifications must fail to compile until its arm visits
+/// them, so a CR 707.9a stamp can never silently miss a carrier here either.
+fn stamp_permission_printed_slot(
+    permission: &mut CastingPermission,
+    slot: usize,
+    kind: PrintedItemKind,
+) {
+    match permission {
+        CastingPermission::ExileWithAltCost {
+            enters_with_modifications,
+            ..
+        } => stamp_retained_mods(enters_with_modifications, slot, kind),
+        CastingPermission::AdventureCreature | CastingPermission::ExileWithEnergyCost => {}
+        CastingPermission::PlayFromExile { .. }
+        | CastingPermission::ExileWithAltAbilityCost { .. }
+        | CastingPermission::WarpExile { .. }
+        | CastingPermission::Plotted { .. }
+        | CastingPermission::Foretold { .. } => {}
+    }
+}
+
+/// Rewrite the printed slot on the retain modifications for `kind`.
+///
+/// A trigger item only ever holds `RetainPrintedTriggerFromSource`, an ability
+/// item only `RetainPrintedAbilityFromSource` — `parse_has_this_ability` selects
+/// the variant from whichever `ParseContext` index is set — so the stamp is
+/// keyed on `kind`. The modification-variant match keeps a `_` arm on purpose:
+/// only two of `ContinuousModification`'s many variants carry a printed slot.
+fn stamp_retained_mods(mods: &mut [ContinuousModification], slot: usize, kind: PrintedItemKind) {
+    for m in mods.iter_mut() {
+        match (kind, m) {
+            (
+                PrintedItemKind::Trigger,
+                ContinuousModification::RetainPrintedTriggerFromSource {
+                    source_trigger_index,
+                },
+            ) => *source_trigger_index = slot,
+            (
+                PrintedItemKind::Ability,
+                ContinuousModification::RetainPrintedAbilityFromSource {
+                    source_ability_index,
+                },
+            ) => *source_ability_index = slot,
+            _ => {}
+        }
+    }
+}
+
+/// CR 707.9a: stamp every retain modification reachable from a single `Effect`.
+///
+/// The match is EXHAUSTIVE ON PURPOSE — no `_` arm. Every `Effect` variant that
+/// carries a `Vec<ContinuousModification>` (directly, or via a nested
+/// `StaticDefinition`/`TriggerDefinition`/`CastingPermission`), and every variant
+/// that carries a nested `AbilityDefinition`, has an explicit arm. A future
+/// variant that adds a modification carrier must fail to compile until its arm
+/// visits that carrier, so the "…except it has this ability" stamp can never
+/// silently miss a slot (the exact defect class this walk closes). Leaf variants
+/// carry no printed-slot self-reference and resolve to `=> {}`.
+fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItemKind) {
+    match effect {
+        // ---- Direct Vec<ContinuousModification> carriers ---------------------
+        // The "…except it has this ability" copy-except clause (CR 707.9a) lands
+        // in one of these on the enclosing trigger/ability.
+        Effect::CopySpell {
+            additional_modifications,
+            ..
+        }
+        | Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        }
+        | Effect::BecomeCopy {
+            additional_modifications,
+            ..
+        } => stamp_retained_mods(additional_modifications, slot, kind),
+        Effect::ReturnAsAura { grants, .. } => stamp_retained_mods(grants, slot, kind),
+        Effect::AddPendingEntersModifications { modifications, .. } => {
+            stamp_retained_mods(modifications, slot, kind)
+        }
+        Effect::EachPlayerCopyChosen {
+            copy_modifications, ..
+        } => stamp_retained_mods(copy_modifications, slot, kind),
+        Effect::GrantCastingPermission { permission, .. } => {
+            stamp_permission_printed_slot(permission, slot, kind)
+        }
+        // ---- StaticDefinition / TriggerDefinition carriers -------------------
+        Effect::Token {
+            static_abilities, ..
+        }
+        | Effect::GenericEffect {
+            static_abilities, ..
+        } => {
+            for sd in static_abilities {
+                stamp_static_printed_slot(sd, slot, kind);
+            }
+        }
+        Effect::CreateEmblem {
+            statics, triggers, ..
+        } => {
+            for sd in statics {
+                stamp_static_printed_slot(sd, slot, kind);
+            }
+            for td in triggers {
+                stamp_trigger_printed_slot(td, slot, kind);
+            }
+        }
+        // ---- Nested AbilityDefinition payloads (mirror collect_effects) ------
+        Effect::Vote {
+            per_choice_effect,
+            subject,
+            ..
+        } => {
+            for d in per_choice_effect {
+                stamp_retained_printed_slot(d, slot, kind);
+            }
+            if let VoteSubject::Objects {
+                outcome_template, ..
+            } = subject
+            {
+                stamp_retained_printed_slot(outcome_template, slot, kind);
+            }
+        }
+        Effect::SeparateIntoPiles {
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => {
+            stamp_retained_printed_slot(chosen_pile_effect, slot, kind);
+            if let Some(unchosen) = unchosen_pile_effect {
+                stamp_retained_printed_slot(unchosen, slot, kind);
+            }
+        }
+        Effect::RevealFromHand { on_decline, .. } => {
+            if let Some(d) = on_decline {
+                stamp_retained_printed_slot(d, slot, kind);
+            }
+        }
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            stamp_retained_printed_slot(effect, slot, kind)
+        }
+        Effect::RollDie { results, .. } => {
+            for branch in results {
+                stamp_retained_printed_slot(&mut branch.effect, slot, kind);
+            }
+        }
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(d) = win_effect {
+                stamp_retained_printed_slot(d, slot, kind);
+            }
+            if let Some(d) = lose_effect {
+                stamp_retained_printed_slot(d, slot, kind);
+            }
+        }
+        Effect::FlipCoinUntilLose { win_effect } => {
+            stamp_retained_printed_slot(win_effect, slot, kind)
+        }
+        Effect::ChooseOneOf { branches, .. } => {
+            for d in branches {
+                stamp_retained_printed_slot(d, slot, kind);
+            }
+        }
+        // ---- Leaf variants: no printed-slot self-reference -------------------
+        Effect::StartYourEngines { .. } => {}
+        Effect::ChangeSpeed { .. } => {}
+        Effect::DealDamage { .. } => {}
+        Effect::ApplyPostReplacementDamage { .. } => {}
+        Effect::EachDealsDamageEqualToPower { .. } => {}
+        Effect::EachSourceDealsDamage { .. } => {}
+        Effect::Draw { .. } => {}
+        Effect::Pump { .. } => {}
+        Effect::PairWith { .. } => {}
+        Effect::Destroy { .. } => {}
+        Effect::Regenerate { .. } => {}
+        Effect::RemoveAllDamage { .. } => {}
+        Effect::Counter { .. } => {}
+        Effect::CounterAll { .. } => {}
+        Effect::GainLife { .. } => {}
+        Effect::LoseLife { .. } => {}
+        Effect::SetTapState { .. } => {}
+        Effect::RemoveCounter { .. } => {}
+        Effect::Sacrifice { .. } => {}
+        Effect::DiscardCard { .. } => {}
+        Effect::Mill { .. } => {}
+        Effect::Scry { .. } => {}
+        Effect::PumpAll { .. } => {}
+        Effect::DamageAll { .. } => {}
+        Effect::DamageEachPlayer { .. } => {}
+        Effect::DestroyAll { .. } => {}
+        Effect::ChangeZone { .. } => {}
+        Effect::ChangeZoneAll { .. } => {}
+        Effect::Dig { .. } => {}
+        Effect::GainControl { .. } => {}
+        Effect::GainControlAll { .. } => {}
+        Effect::ControlNextTurn { .. } => {}
+        Effect::Attach { .. } => {}
+        Effect::UnattachAll { .. } => {}
+        Effect::Surveil { .. } => {}
+        Effect::Fight { .. } => {}
+        Effect::Bounce { .. } => {}
+        Effect::BounceAll { .. } => {}
+        Effect::Explore => {}
+        Effect::ExploreAll { .. } => {}
+        Effect::Investigate => {}
+        Effect::Tribute { .. } => {}
+        Effect::TimeTravel => {}
+        Effect::BecomeMonarch => {}
+        Effect::NoOp => {}
+        Effect::Proliferate => {}
+        Effect::ProliferateTarget { .. } => {}
+        Effect::Populate => {}
+        Effect::Clash => {}
+        Effect::Behold { .. } => {}
+        Effect::EndTheTurn => {}
+        Effect::EndCombatPhase => {}
+        Effect::SwitchPT { .. } => {}
+        Effect::EpicCopy { .. } => {}
+        Effect::CastCopyOfCard { .. } => {}
+        Effect::CreateTokenCopyFromPool { .. } => {}
+        Effect::Myriad => {}
+        Effect::Encore => {}
+        Effect::CombineHost { .. } => {}
+        Effect::ChooseAugmentAndCombineWithHost { .. } => {}
+        Effect::Meld { .. } => {}
+        Effect::ExileHaunting { .. } => {}
+        Effect::HideawayConceal { .. } => {}
+        Effect::CopyTokenBlockingAttacker { .. } => {}
+        Effect::GainActivatedAbilitiesOfTarget { .. } => {}
+        Effect::ChooseCard { .. } => {}
+        Effect::PutCounter { .. } => {}
+        Effect::ChooseCounterKind { .. } => {}
+        Effect::PutChosenCounter { .. } => {}
+        Effect::PutCounterAll { .. } => {}
+        Effect::MultiplyCounter { .. } => {}
+        Effect::ChooseCounterAdjustment { .. } => {}
+        Effect::DoublePT { .. } => {}
+        Effect::DoublePTAll { .. } => {}
+        Effect::MoveCounters { .. } => {}
+        Effect::Animate { .. } => {}
+        Effect::RegisterBending { .. } => {}
+        Effect::Cleanup { .. } => {}
+        Effect::Mana { .. } => {}
+        Effect::Discard { .. } => {}
+        Effect::Shuffle { .. } => {}
+        Effect::Transform { .. } => {}
+        Effect::SearchLibrary { .. } => {}
+        Effect::SearchOutsideGame { .. } => {}
+        Effect::RevealHand { .. } => {}
+        Effect::Reveal { .. } => {}
+        Effect::RevealTop { .. } => {}
+        Effect::ExileTop { .. } => {}
+        Effect::TargetOnly { .. } => {}
+        Effect::Choose { .. } => {}
+        Effect::OpponentGuess { .. } => {}
+        Effect::SwapChosenLabels { .. } => {}
+        Effect::ChooseDamageSource { .. } => {}
+        Effect::Suspect { .. } => {}
+        Effect::Unsuspect { .. } => {}
+        Effect::Connive { .. } => {}
+        Effect::PhaseOut { .. } => {}
+        Effect::PhaseIn { .. } => {}
+        Effect::ForceBlock { .. } => {}
+        Effect::ForceAttack { .. } => {}
+        Effect::SolveCase => {}
+        Effect::BecomePrepared { .. } => {}
+        Effect::BecomeUnprepared { .. } => {}
+        Effect::BecomeSaddled { .. } => {}
+        Effect::SetClassLevel { .. } => {}
+        // Nested-definition boundary — deliberately NOT recursed (see the grouped
+        // note on `CreateDrawReplacement`/`CreatePlaneswalkReplacement` below).
+        // `AddTargetReplacement.replacement: Box<ReplacementDefinition>` is built
+        // structurally here (oracle_effect/mod.rs:1697 hand-constructs a fixed
+        // `ChangeZone` `ReplacementDefinition`), never from a copy-except body, so
+        // no `RetainPrinted*FromSource` can appear inside it.
+        Effect::AddTargetReplacement { .. } => {}
+        Effect::AddRestriction { .. } => {}
+        Effect::ReduceNextSpellCost { .. } => {}
+        Effect::GrantNextSpellAbility { .. } => {}
+        Effect::AddPendingETBCounters { .. } => {}
+        Effect::PayCost { .. } => {}
+        Effect::CastFromZone { .. } => {}
+        Effect::FreeCastFromZones { .. } => {}
+        Effect::ExileResolvingSpellInsteadOfGraveyard => {}
+        Effect::PreventDamage { .. } => {}
+        Effect::CreateDamageReplacement { .. } => {}
+        // Nested-definition boundary — intentionally NOT recursed. Both carry a
+        // nested substitute (`replacement_effect: Box<Effect>`) parsed by
+        // `parse_effect` (oracle_replacement.rs:5464 / :5520), which threads a bare
+        // `ParseContext::default()` (oracle_effect/mod.rs:564) — an index-less ctx.
+        // `parse_has_this_ability` reads `ctx.current_{trigger,ability}_index`, both
+        // `None` there, so it declines and no `RetainPrinted*FromSource` can be
+        // produced past this boundary; the `=> {}` is correct, not a missed carrier.
+        //
+        // The asymmetry is deliberate: top-level mod-vec carriers above are
+        // over-visited defensively (the stamp is a no-op on non-retain mods), but a
+        // nested-definition boundary resets the parse context and severs producer
+        // propagation, so recursion would be inert. If a future change ever threads
+        // a live trigger/ability index past a nested-definition boundary into a
+        // copy-except-capable substitute, recurse here.
+        Effect::CreateDrawReplacement { .. } => {}
+        Effect::CreatePlaneswalkReplacement { .. } => {}
+        Effect::LoseTheGame { .. } => {}
+        Effect::WinTheGame { .. } => {}
+        Effect::RingTemptsYou => {}
+        Effect::VentureIntoDungeon => {}
+        Effect::VentureInto { .. } => {}
+        Effect::TakeTheInitiative => {}
+        Effect::Planeswalk => {}
+        Effect::ChaosEnsues => {}
+        Effect::ReverseTurnOrder => {}
+        Effect::RedistributeLifeTotals => {}
+        Effect::OpenAttractions { .. } => {}
+        Effect::RollToVisitAttractions => {}
+        Effect::AssembleContraptions { .. } => {}
+        Effect::AssembleContraptionsFromRollDifference => {}
+        Effect::CrankContraptions { .. } => {}
+        Effect::ReassembleContraption { .. } => {}
+        Effect::AssembleContraptionOnSprocket { .. } => {}
+        Effect::ReassembleContraptionOnSprocket { .. } => {}
+        Effect::PutSticker { .. } => {}
+        Effect::ApplySticker { .. } => {}
+        Effect::ProcessRadCounters => {}
+        Effect::ChooseFromZone { .. } => {}
+        Effect::RememberCard { .. } => {}
+        Effect::ForEachCategoryExile { .. } => {}
+        Effect::ChooseObjectsIntoTrackedSet { .. } => {}
+        Effect::ChooseAndSacrificeRest { .. } => {}
+        Effect::Exploit { .. } => {}
+        Effect::GainEnergy { .. } => {}
+        Effect::GivePlayerCounter { .. } => {}
+        Effect::LoseAllPlayerCounters { .. } => {}
+        Effect::ExileFromTopUntil { .. } => {}
+        Effect::RevealUntil { .. } => {}
+        Effect::Discover { .. } => {}
+        Effect::Heist { .. } => {}
+        Effect::HeistExile => {}
+        Effect::Cascade => {}
+        Effect::Ripple { .. } => {}
+        Effect::MiracleCast { .. } => {}
+        Effect::MadnessCast { .. } => {}
+        Effect::PutAtLibraryPosition { .. } => {}
+        Effect::ChooseDrawnThisTurnPayOrTopdeck { .. } => {}
+        Effect::PutOnTopOrBottom { .. } => {}
+        Effect::GiftDelivery { .. } => {}
+        Effect::Goad { .. } => {}
+        Effect::GoadAll { .. } => {}
+        Effect::Detain { .. } => {}
+        Effect::SetRoomDoorLock { .. } => {}
+        Effect::ExchangeControl { .. } => {}
+        Effect::ChangeTargets { .. } => {}
+        Effect::Manifest { .. } => {}
+        Effect::ManifestDread => {}
+        Effect::Cloak { .. } => {}
+        Effect::TurnFaceUp { .. } => {}
+        Effect::TurnFaceDown { .. } => {}
+        Effect::ExtraTurn { .. } => {}
+        Effect::GrantExtraLoyaltyActivations { .. } => {}
+        Effect::SkipNextTurn { .. } => {}
+        Effect::SkipNextStep { .. } => {}
+        Effect::AdditionalPhase { .. } => {}
+        Effect::Double { .. } => {}
+        Effect::RuntimeHandled { .. } => {}
+        Effect::Incubate { .. } => {}
+        Effect::Amass { .. } => {}
+        Effect::Monstrosity { .. } => {}
+        Effect::Specialize => {}
+        Effect::Renown { .. } => {}
+        Effect::Bolster { .. } => {}
+        Effect::Adapt { .. } => {}
+        Effect::Learn => {}
+        Effect::Forage => {}
+        Effect::Harness => {}
+        Effect::CollectEvidence { .. } => {}
+        Effect::Endure { .. } => {}
+        Effect::BlightEffect { .. } => {}
+        Effect::Seek { .. } => {}
+        Effect::SetLifeTotal { .. } => {}
+        Effect::ExchangeLifeWithStat { .. } => {}
+        Effect::ExchangeLifeTotals { .. } => {}
+        Effect::SetDayNight { .. } => {}
+        Effect::GiveControl { .. } => {}
+        Effect::RemoveFromCombat { .. } => {}
+        Effect::BecomeBlocked { .. } => {}
+        Effect::Conjure { .. } => {}
+        Effect::ApplyPerpetual { .. } => {}
+        Effect::Intensify { .. } => {}
+        Effect::DraftFromSpellbook { .. } => {}
+        Effect::Unimplemented { .. } => {}
     }
 }
 

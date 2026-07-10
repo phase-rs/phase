@@ -2859,9 +2859,7 @@ pub(crate) fn parse_oracle_ir(
         let mut triggers = parse_trigger_lines_at_index(
             ability_text,
             card_name,
-            Some(PrintedTriggerIndex::from_category_vector_len(
-                result.triggers.len(),
-            )),
+            Some(PrintedTriggerIndex::placeholder()),
             &mut ctx,
         );
         for trigger in &mut triggers {
@@ -2880,11 +2878,8 @@ pub(crate) fn parse_oracle_ir(
         // CR 707.9a: Pass the running trigger count so any "has this ability"
         // retain modification inside a Spacecraft threshold trigger body
         // resolves to the correct printed-trigger slot.
-        let (sc_statics, sc_triggers, sc_abilities, consumed) = parse_spacecraft_threshold_lines(
-            &lines,
-            card_name,
-            PrintedTriggerIndex::from_category_vector_len(result.triggers.len()),
-        );
+        let (sc_statics, sc_triggers, sc_abilities, consumed) =
+            parse_spacecraft_threshold_lines(&lines, card_name, PrintedTriggerIndex::placeholder());
         result.statics.extend(sc_statics);
         result.triggers.extend(sc_triggers);
         for mut def in sc_abilities {
@@ -3493,9 +3488,7 @@ pub(crate) fn parse_oracle_ir(
                 effect_text,
                 &line,
                 card_name,
-                Some(PrintedAbilityIndex::from_category_vector_len(
-                    result.abilities.len(),
-                )),
+                Some(PrintedAbilityIndex::placeholder()),
                 &mut ctx,
             );
             // CR 702.186b: ∞ ("As long as harnessed, it has [ability]") gates an
@@ -3580,9 +3573,7 @@ pub(crate) fn parse_oracle_ir(
             let mut triggers = parse_trigger_lines_at_index(
                 &line,
                 card_name,
-                Some(PrintedTriggerIndex::from_category_vector_len(
-                    result.triggers.len(),
-                )),
+                Some(PrintedTriggerIndex::placeholder()),
                 &mut ctx,
             );
             i += 1;
@@ -3619,9 +3610,7 @@ pub(crate) fn parse_oracle_ir(
                         activated_effect_text,
                         &line,
                         card_name,
-                        Some(PrintedAbilityIndex::from_category_vector_len(
-                            result.abilities.len(),
-                        )),
+                        Some(PrintedAbilityIndex::placeholder()),
                         &mut ctx,
                     );
                     result.abilities.push(def);
@@ -3634,9 +3623,7 @@ pub(crate) fn parse_oracle_ir(
                 let mut triggers = parse_trigger_lines_at_index(
                     &effect_text,
                     card_name,
-                    Some(PrintedTriggerIndex::from_category_vector_len(
-                        result.triggers.len(),
-                    )),
+                    Some(PrintedTriggerIndex::placeholder()),
                     &mut ctx,
                 );
                 // B7: Attach ability-word condition as fallback when extract_if_condition
@@ -4727,9 +4714,7 @@ pub(crate) fn parse_oracle_ir(
                 let mut triggers = parse_trigger_lines_at_index(
                     &effect_text,
                     card_name,
-                    Some(PrintedTriggerIndex::from_category_vector_len(
-                        result.triggers.len(),
-                    )),
+                    Some(PrintedTriggerIndex::placeholder()),
                     &mut ctx,
                 );
                 i += 1;
