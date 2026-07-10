@@ -440,6 +440,7 @@ mod issue_5285_senu_keen_eyed_protector;
 mod issue_5286_lulu_loyal_hollyphant;
 mod issue_5287_samwise_stouthearted;
 mod issue_5328_attacks_alone_observer;
+mod issue_5334_furious_rise_may_play;
 mod issue_5335_stonehoof_mass_attack;
 mod issue_5336_kodama_mana_value_filter;
 mod issue_5339_armory_automaton;
