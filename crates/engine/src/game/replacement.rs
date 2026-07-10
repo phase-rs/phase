@@ -4736,6 +4736,10 @@ fn object_replacement_candidate_applies(
         return false;
     }
     if is_liminal_source {
+        // CR 614.12a: a not-yet-committed liminal token can apply only its own
+        // self-replacement as it enters. External replacement sources are still
+        // found through battlefield/command scanning, not through the liminal
+        // source map.
         if rid.source == ObjectId(0)
             || entering_object_id != Some(obj.id)
             || repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)

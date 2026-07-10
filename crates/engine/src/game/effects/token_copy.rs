@@ -1312,6 +1312,10 @@ fn apply_token_modifications(
 pub(crate) fn copy_token_modifications_are_liminal_immediate(
     modifications: &[ContinuousModification],
 ) -> bool {
+    // CR 707.2 + CR 707.9: only copy modifications that can be stamped onto
+    // copiable values before replacement consultation may use the liminal entry
+    // path. Dynamic P/T and ETB counters need the committed object/replacement
+    // pipeline instead.
     modifications.iter().all(|modification| {
         !matches!(
             modification,
@@ -1327,6 +1331,9 @@ pub(crate) fn apply_immediate_copy_token_modifications_to_object(
     modifications: &[ContinuousModification],
     all_creature_types: &[String],
 ) {
+    // CR 707.2 + CR 707.9: apply immediate "except" copy modifications to the
+    // not-yet-committed token's copiable characteristics so self as-enters
+    // replacements consult the final copied shape.
     for modification in modifications {
         match modification {
             ContinuousModification::RemoveSupertype { supertype } => {

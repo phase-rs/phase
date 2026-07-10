@@ -1723,6 +1723,18 @@ pub struct PendingPlayerAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LiminalTokenAbilityInjection {
+    PredefinedToken,
+    ResolvedToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenEntryEventEmission {
+    Emit,
+    Suppress,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingCounterPostAction {
     EmitEffectResolved {
         kind: EffectKind,
@@ -1785,6 +1797,25 @@ pub enum PendingCounterPostAction {
         source_id: ObjectId,
         controller: PlayerId,
         remaining_modifications: Vec<ContinuousModification>,
+    },
+    FinalizeCommittedLiminalTokenEntry {
+        object_id: ObjectId,
+        name: String,
+        source_id: ObjectId,
+        controller: PlayerId,
+        enters_attacking: bool,
+        attach_to: Option<AttachTarget>,
+        sacrifice_at: Option<Duration>,
+        created_ids: Vec<ObjectId>,
+        ability_injection: LiminalTokenAbilityInjection,
+        entry_events: TokenEntryEventEmission,
+    },
+    ContinueLiminalCopyTokenBatch {
+        owner: PlayerId,
+        copy: Box<CopyTokenSpec>,
+        enter_tapped: EtbTapState,
+        enter_with_counters: Vec<(CounterType, u32)>,
+        remaining_count: u32,
     },
     EmitCommittedCopyTokenEntry {
         object_id: ObjectId,
