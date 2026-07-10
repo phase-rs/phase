@@ -7597,6 +7597,290 @@ mod tests {
     }
 
     #[test]
+    fn game_scenario_mana_echoes_shares_type_count_with_triggering_source() {
+        use crate::game::quantity::object_count_matching_ids;
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::{ManaProduction, QuantityExpr, QuantityRef};
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::ZoneChangeRecord;
+        use crate::types::zones::Zone;
+
+        const ORACLE: &str = "Whenever a creature enters, you may add an amount of {C} equal to the number of creatures you control that share a creature type with it.";
+
+        let mut scenario = GameScenario::new();
+        let mana_echoes = scenario
+            .add_creature_from_oracle(P0, "Mana Echoes", 0, 0, ORACLE)
+            .id();
+        scenario
+            .add_creature(P0, "Goblin A", 1, 1)
+            .with_subtypes(vec!["Goblin"]);
+        scenario
+            .add_creature(P0, "Goblin B", 1, 1)
+            .with_subtypes(vec!["Goblin"]);
+        let mut runner = scenario.build();
+        runner.state_mut().all_creature_types = vec!["Goblin".to_string()];
+
+        let entering = {
+            let state = runner.state_mut();
+            let card_id = crate::types::identifiers::CardId(state.next_object_id);
+            let id = crate::game::zones::create_object(
+                state,
+                card_id,
+                P0,
+                "Goblin C".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+            id
+        };
+
+        let trigger = &runner.state().objects[&mana_echoes].trigger_definitions[0];
+        let execute = trigger.execute.as_ref().expect("execute");
+        let ability = crate::game::triggers::build_triggered_ability(
+            runner.state(),
+            trigger,
+            mana_echoes,
+            P0,
+        );
+
+        let filter = match execute.effect.as_ref() {
+            crate::types::ability::Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => {
+                let QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                } = count
+                else {
+                    panic!("expected ObjectCount quantity");
+                };
+                filter
+            }
+            other => panic!("expected colorless mana, got {other:?}"),
+        };
+
+        let mut state = runner.state().clone();
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: entering,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                entering,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        });
+        let ctx = super::FilterContext::from_ability_with_controller(&ability, P0);
+        assert_eq!(
+            object_count_matching_ids(&state, filter, &ctx, mana_echoes).len(),
+            3,
+            "GameScenario-built Mana Echoes must count three sharing Goblins"
+        );
+    }
+
+    #[test]
+    fn mana_echoes_optional_stack_pause_preserves_shares_type_count() {
+        use crate::game::quantity::{object_count_matching_ids, resolve_quantity_with_targets};
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::triggers::{drain_order_triggers_with_identity, process_triggers};
+        use crate::game::zones::move_to_zone;
+        use crate::types::ability::{ManaProduction, QuantityExpr, QuantityRef};
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        const ORACLE: &str = "Whenever a creature enters, you may add an amount of {C} equal to the number of creatures you control that share a creature type with it.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let mana_echoes = scenario
+            .add_creature_from_oracle(P0, "Mana Echoes", 0, 0, ORACLE)
+            .id();
+        scenario
+            .add_creature(P0, "Goblin A", 1, 1)
+            .with_subtypes(vec!["Goblin"]);
+        scenario
+            .add_creature(P0, "Goblin B", 1, 1)
+            .with_subtypes(vec!["Goblin"]);
+        let mut runner = scenario.build();
+        runner.state_mut().all_creature_types = vec!["Goblin".to_string()];
+        runner.advance_until_stack_empty();
+
+        let entering = {
+            let state = runner.state_mut();
+            let card_id = CardId(state.next_object_id);
+            let id = crate::game::zones::create_object(
+                state,
+                card_id,
+                P0,
+                "Goblin C".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+            id
+        };
+
+        let mut events = Vec::new();
+        move_to_zone(runner.state_mut(), entering, Zone::Battlefield, &mut events);
+        process_triggers(runner.state_mut(), &events);
+        drain_order_triggers_with_identity(runner.state_mut());
+
+        for _ in 0..48 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ) {
+                break;
+            }
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority to optional mana");
+        }
+
+        let pending = runner
+            .state()
+            .pending_optional_effect
+            .as_ref()
+            .expect("optional mana must stash pending ability");
+        let pending_event = runner
+            .state()
+            .pending_optional_trigger_event
+            .clone()
+            .expect("optional mana must stash trigger event");
+
+        let filter = match &pending.effect {
+            crate::types::ability::Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => {
+                let QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                } = count
+                else {
+                    panic!("expected ObjectCount");
+                };
+                filter.clone()
+            }
+            other => panic!("expected Mana effect, got {other:?}"),
+        };
+
+        let mut probe = runner.state().clone();
+        probe.current_trigger_event = Some(pending_event);
+        let ctx = super::FilterContext::from_ability_with_controller(pending, P0);
+        assert_eq!(
+            object_count_matching_ids(&probe, &filter, &ctx, mana_echoes).len(),
+            3,
+            "paused optional ability must count three sharing Goblins"
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(
+                &probe,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: filter.clone()
+                    },
+                },
+                pending,
+            ),
+            3
+        );
+
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("accept optional mana");
+        assert_eq!(
+            runner.state().players[P0.0 as usize]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Colorless),
+            3,
+            "accepting optional Mana Echoes must add three colorless"
+        );
+    }
+
+    #[test]
+    fn object_count_shares_creature_type_with_triggering_source_for_mana_echoes() {
+        use crate::game::quantity::object_count_matching_ids;
+        use crate::types::ability::{
+            ControllerRef, Effect, ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility,
+            SharedQualityRelation, TypedFilter,
+        };
+        use crate::types::events::GameEvent;
+
+        let mut state = setup();
+        state.all_creature_types = vec!["Goblin".to_string()];
+        let mana_echoes = add_creature(&mut state, PlayerId(0), "Mana Echoes");
+        let goblin_a = add_creature(&mut state, PlayerId(0), "Goblin A");
+        let goblin_b = add_creature(&mut state, PlayerId(0), "Goblin B");
+        let entering = add_creature(&mut state, PlayerId(0), "Goblin C");
+        for id in [goblin_a, goblin_b, entering] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .subtypes
+                .push("Goblin".to_string());
+        }
+
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: entering,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                entering,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        });
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::CreatureType,
+                    reference: Some(Box::new(TargetFilter::TriggeringSource)),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: filter.clone(),
+                        },
+                    },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            vec![],
+            mana_echoes,
+            PlayerId(0),
+        );
+        let ctx = FilterContext::from_ability(&ability);
+
+        assert_eq!(
+            object_count_matching_ids(&state, &filter, &ctx, mana_echoes).len(),
+            3,
+            "all three Goblins share a creature type with the entering creature"
+        );
+    }
+
+    #[test]
     fn shares_quality_reference_can_use_discarded_trigger_object() {
         let mut state = setup();
         let source = add_creature(&mut state, PlayerId(0), "Diviner");

@@ -441,6 +441,7 @@ mod issue_5285_senu_keen_eyed_protector;
 mod issue_5286_lulu_loyal_hollyphant;
 mod issue_5287_samwise_stouthearted;
 mod issue_5328_attacks_alone_observer;
+mod issue_5329_mana_echoes;
 mod issue_5330_scavengers_talent_graveyard_return;
 mod issue_5332_gandalf_trigger_doubling;
 mod issue_5334_furious_rise_may_play;

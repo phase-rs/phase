@@ -2338,4 +2338,107 @@ mod tests {
         .unwrap();
         assert_eq!(state.players[0].mana_pool.total(), 0);
     }
+
+    #[test]
+    fn colorless_production_counts_creatures_sharing_type_with_triggering_source() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            ControllerRef, FilterProp, QuantityExpr, QuantityRef, SharedQuality,
+            SharedQualityRelation, TypedFilter,
+        };
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::ZoneChangeRecord;
+        use crate::types::identifiers::CardId;
+        use crate::types::player::PlayerId;
+
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec!["Goblin".to_string()];
+        let mana_echoes = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mana Echoes".to_string(),
+            Zone::Battlefield,
+        );
+        let goblin_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Goblin A".to_string(),
+            Zone::Battlefield,
+        );
+        let goblin_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Goblin B".to_string(),
+            Zone::Battlefield,
+        );
+        let entering = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Goblin C".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [goblin_a, goblin_b, entering] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+        }
+
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: entering,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                entering,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        });
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::CreatureType,
+                    reference: Some(Box::new(TargetFilter::TriggeringSource)),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: filter.clone(),
+                        },
+                    },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            vec![],
+            mana_echoes,
+            PlayerId(0),
+        );
+
+        let produced = super::resolve_mana_types_for_ability(
+            &ManaProduction::Colorless {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            },
+            &state,
+            &ability,
+        );
+        assert_eq!(
+            produced.len(),
+            3,
+            "Mana Echoes must produce one colorless per matching creature"
+        );
+    }
 }
