@@ -12,13 +12,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 1,
           "last_line": 1,
-          "start_byte": 0,
+          "start_byte": 47,
           "end_byte": 92,
-          "precision": "WholeDocument",
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Target creature gets -5/-5 until end of turn."
       },
       "node": {
         "PreLoweredSpell": {

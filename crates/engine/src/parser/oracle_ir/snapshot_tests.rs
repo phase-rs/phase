@@ -28,7 +28,7 @@ fn parse_two_layer_with_keywords(
     let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
     let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
     let ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
-    let lowered = lower_oracle_ir(&ir);
+    let lowered = lower_oracle_ir(&ir, &types);
     (ir, lowered)
 }
 

@@ -16,9 +16,10 @@ expression: "&ir"
           "last_line": 0,
           "start_byte": 0,
           "end_byte": 125,
-          "precision": "WholeDocument",
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Whenever you cast a creature spell that has an Adventure, draw a card. (It doesn't need to have gone on the adventure first.)"
       },
       "node": {
         "PreLoweredTrigger": {

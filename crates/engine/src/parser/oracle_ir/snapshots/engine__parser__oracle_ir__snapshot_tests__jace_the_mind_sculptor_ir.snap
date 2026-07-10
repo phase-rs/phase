@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 3,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 374,
-          "precision": "WholeDocument",
+          "end_byte": 116,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "[+2]: Look at the top card of target player's library. You may put that card on the bottom of that player's library."
       },
       "node": {
         "PreLoweredSpell": {
@@ -95,13 +96,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
-          "last_line": 3,
-          "start_byte": 0,
-          "end_byte": 374,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 117,
+          "end_byte": 210,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "[0]: Draw three cards, then put two cards from your hand on top of your library in any order."
       },
       "node": {
         "PreLoweredSpell": {
@@ -178,13 +180,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
-          "last_line": 3,
-          "start_byte": 0,
-          "end_byte": 374,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 2
-        }
+          "first_line": 2,
+          "last_line": 2,
+          "start_byte": 211,
+          "end_byte": 262,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "[−1]: Return target creature to its owner's hand."
       },
       "node": {
         "PreLoweredSpell": {
@@ -229,13 +232,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 3,
           "last_line": 3,
-          "start_byte": 0,
+          "start_byte": 263,
           "end_byte": 374,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 3
-        }
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "[−12]: Exile all cards from target player's library, then that player shuffles their hand into their library."
       },
       "node": {
         "PreLoweredSpell": {

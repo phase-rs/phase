@@ -16,9 +16,10 @@ expression: "&ir"
           "last_line": 0,
           "start_byte": 0,
           "end_byte": 71,
-          "precision": "WholeDocument",
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Flying, first strike, lifelink, protection from Demons and from Dragons"
       },
       "node": {
         "PreLoweredSpell": {

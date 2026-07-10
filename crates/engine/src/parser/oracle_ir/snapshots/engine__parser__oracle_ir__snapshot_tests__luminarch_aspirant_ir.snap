@@ -16,9 +16,10 @@ expression: "&ir"
           "last_line": 0,
           "start_byte": 0,
           "end_byte": 92,
-          "precision": "WholeDocument",
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control."
       },
       "node": {
         "PreLoweredTrigger": {

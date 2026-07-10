@@ -13,111 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 2,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 168,
-          "precision": "WholeDocument",
+          "end_byte": 37,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
-      },
-      "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "PutCounter",
-            "counter_type": "P1P1",
-            "count": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "target": {
-              "type": "SelfRef"
-            }
-          },
-          "cost": {
-            "type": "Mana",
-            "cost": {
-              "type": "Cost",
-              "shards": [],
-              "generic": 4
-            }
-          },
-          "sub_ability": null,
-          "duration": null,
-          "description": "{4}: Put a +1/+1 counter on ~.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
-        }
-      }
-    },
-    {
-      "id": 1,
-      "source": {
-        "id": {
-          "item": 1,
-          "ordinal": 0
         },
-        "span": {
-          "first_line": 0,
-          "last_line": 2,
-          "start_byte": 0,
-          "end_byte": 168,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
-      },
-      "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "DealDamage",
-            "amount": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "target": {
-              "type": "Any"
-            }
-          },
-          "cost": {
-            "type": "RemoveCounter",
-            "count": 1,
-            "counter_type": {
-              "type": "OfType",
-              "data": "P1P1"
-            },
-            "target": null,
-            "selection": "SingleObject"
-          },
-          "sub_ability": null,
-          "duration": null,
-          "description": "Remove a +1/+1 counter from ~: It deals 1 damage to any target.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
-        }
-      }
-    },
-    {
-      "id": 2,
-      "source": {
-        "id": {
-          "item": 2,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 2,
-          "start_byte": 0,
-          "end_byte": 168,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 2
-        }
+        "fragment": "~ enters with X +1/+1 counters on it."
       },
       "node": {
         "PreLoweredReplacement": {
@@ -156,6 +58,107 @@ expression: "&ir"
           "description": "~ enters with X +1/+1 counters on it.",
           "condition": null,
           "destination_zone": "Battlefield"
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 38,
+          "end_byte": 68,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{4}: Put a +1/+1 counter on ~."
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "PutCounter",
+            "counter_type": "P1P1",
+            "count": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "target": {
+              "type": "SelfRef"
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [],
+              "generic": 4
+            }
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "{4}: Put a +1/+1 counter on ~.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 2,
+          "last_line": 2,
+          "start_byte": 69,
+          "end_byte": 132,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Remove a +1/+1 counter from ~: It deals 1 damage to any target."
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": {
+            "type": "RemoveCounter",
+            "count": 1,
+            "counter_type": {
+              "type": "OfType",
+              "data": "P1P1"
+            },
+            "target": null,
+            "selection": "SingleObject"
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "Remove a +1/+1 counter from ~: It deals 1 damage to any target.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
         }
       }
     }

@@ -13,85 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 205,
-          "precision": "WholeDocument",
+          "end_byte": 113,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
-      },
-      "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Hand",
-            "destination": "Battlefield",
-            "target": {
-              "type": "Typed",
-              "type_filters": [
-                {
-                  "Subtype": "Equipment"
-                }
-              ],
-              "controller": "You",
-              "properties": [
-                {
-                  "type": "InZone",
-                  "zone": "Hand"
-                }
-              ]
-            },
-            "owner_library": false,
-            "enter_transformed": false,
-            "enter_tapped": false,
-            "enters_attacking": false
-          },
-          "cost": {
-            "type": "Composite",
-            "costs": [
-              {
-                "type": "Mana",
-                "cost": {
-                  "type": "Cost",
-                  "shards": [
-                    "White"
-                  ],
-                  "generic": 1
-                }
-              },
-              {
-                "type": "Tap"
-              }
-            ]
-          },
-          "sub_ability": null,
-          "duration": null,
-          "description": "{1}{W}, {T}: You may put an Equipment card from your hand onto the battlefield.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": true,
-          "target_choice_timing": "Resolution",
-          "forward_result": false
-        }
-      }
-    },
-    {
-      "id": 1,
-      "source": {
-        "id": {
-          "item": 1,
-          "ordinal": 0
         },
-        "span": {
-          "first_line": 0,
-          "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 205,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+        "fragment": "When ~ enters, you may search your library for an Equipment card, reveal it, put it into your hand, then shuffle."
       },
       "node": {
         "PreLoweredTrigger": {
@@ -185,6 +113,80 @@ expression: "&ir"
           "constraint": null,
           "condition": null,
           "batched": false
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 114,
+          "end_byte": 193,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{1}{W}, {T}: You may put an Equipment card from your hand onto the battlefield."
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "ChangeZone",
+            "origin": "Hand",
+            "destination": "Battlefield",
+            "target": {
+              "type": "Typed",
+              "type_filters": [
+                {
+                  "Subtype": "Equipment"
+                }
+              ],
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "InZone",
+                  "zone": "Hand"
+                }
+              ]
+            },
+            "owner_library": false,
+            "enter_transformed": false,
+            "enter_tapped": false,
+            "enters_attacking": false
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": {
+                  "type": "Cost",
+                  "shards": [
+                    "White"
+                  ],
+                  "generic": 1
+                }
+              },
+              {
+                "type": "Tap"
+              }
+            ]
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "{1}{W}, {T}: You may put an Equipment card from your hand onto the battlefield.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": true,
+          "target_choice_timing": "Resolution",
+          "forward_result": false
         }
       }
     }

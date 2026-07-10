@@ -16,9 +16,10 @@ expression: "&ir"
           "last_line": 0,
           "start_byte": 0,
           "end_byte": 89,
-          "precision": "WholeDocument",
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Whenever you cast an instant or sorcery spell, create a 1/1 red Elemental creature token."
       },
       "node": {
         "PreLoweredTrigger": {

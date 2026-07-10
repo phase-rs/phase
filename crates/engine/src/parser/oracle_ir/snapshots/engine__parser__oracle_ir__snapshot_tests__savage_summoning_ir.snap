@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 201,
-          "precision": "WholeDocument",
+          "end_byte": 30,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "This spell can't be countered."
       },
       "node": {
         "PreLoweredStatic": {
@@ -44,13 +45,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 1,
           "last_line": 1,
-          "start_byte": 0,
+          "start_byte": 31,
           "end_byte": 201,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "The next creature spell you cast this turn can be cast as though it had flash. That spell can't be countered. That creature enters with an additional +1/+1 counter on it."
       },
       "node": {
         "PreLoweredReplacement": {

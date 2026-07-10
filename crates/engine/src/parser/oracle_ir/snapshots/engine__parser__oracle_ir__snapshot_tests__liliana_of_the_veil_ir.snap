@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 2,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 217,
-          "precision": "WholeDocument",
+          "end_byte": 34,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "[+1]: Each player discards a card."
       },
       "node": {
         "PreLoweredSpell": {
@@ -64,13 +65,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
-          "last_line": 2,
-          "start_byte": 0,
-          "end_byte": 217,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 35,
+          "end_byte": 79,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "[−2]: Target player sacrifices a creature."
       },
       "node": {
         "PreLoweredSpell": {
@@ -118,13 +120,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 2,
           "last_line": 2,
-          "start_byte": 0,
+          "start_byte": 80,
           "end_byte": 217,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 2
-        }
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "[−6]: Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice."
       },
       "node": {
         "PreLoweredSpell": {

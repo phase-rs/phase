@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 2,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 222,
-          "precision": "WholeDocument",
+          "end_byte": 5,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Haste"
       },
       "node": {
         "PreLoweredSpell": {
@@ -48,13 +49,78 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
-          "last_line": 2,
-          "start_byte": 0,
-          "end_byte": 222,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 6,
+          "end_byte": 95,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Whenever ~ attacks, exile the top card of your library face down. (You can't look at it.)"
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "Attacks",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "ExileTop",
+              "player": {
+                "type": "Controller"
+              },
+              "count": {
+                "type": "Fixed",
+                "value": 1
+              },
+              "face_down": true
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "valid_card": {
+            "type": "SelfRef"
+          },
+          "origin": null,
+          "destination": null,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "phase": null,
+          "optional": false,
+          "damage_kind": "Any",
+          "secondary": false,
+          "valid_target": null,
+          "valid_source": null,
+          "description": "Whenever ~ attacks, exile the top card of your library face down.",
+          "constraint": null,
+          "condition": null,
+          "batched": false
         }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 2,
+          "last_line": 2,
+          "start_byte": 96,
+          "end_byte": 186,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{R}, Discard your hand, Sacrifice ~: Put all cards exiled with ~ into their owners' hands."
       },
       "node": {
         "PreLoweredSpell": {
@@ -112,69 +178,6 @@ expression: "&ir"
           "optional_targeting": false,
           "optional": false,
           "forward_result": false
-        }
-      }
-    },
-    {
-      "id": 2,
-      "source": {
-        "id": {
-          "item": 2,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 2,
-          "start_byte": 0,
-          "end_byte": 222,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 2
-        }
-      },
-      "node": {
-        "PreLoweredTrigger": {
-          "mode": "Attacks",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "ExileTop",
-              "player": {
-                "type": "Controller"
-              },
-              "count": {
-                "type": "Fixed",
-                "value": 1
-              },
-              "face_down": true
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "Whenever ~ attacks, exile the top card of your library face down.",
-          "constraint": null,
-          "condition": null,
-          "batched": false
         }
       }
     }

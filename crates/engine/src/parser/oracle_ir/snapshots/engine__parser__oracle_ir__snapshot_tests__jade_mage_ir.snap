@@ -16,9 +16,10 @@ expression: "&ir"
           "last_line": 0,
           "start_byte": 0,
           "end_byte": 52,
-          "precision": "WholeDocument",
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "{2}{G}: Create a 1/1 green Saproling creature token."
       },
       "node": {
         "PreLoweredSpell": {

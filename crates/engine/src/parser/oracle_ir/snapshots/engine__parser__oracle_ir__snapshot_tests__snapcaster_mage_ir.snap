@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 246,
-          "precision": "WholeDocument",
+          "end_byte": 5,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Flash"
       },
       "node": {
         "PreLoweredSpell": {
@@ -48,13 +49,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 1,
           "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 246,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "start_byte": 6,
+          "end_byte": 234,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "When ~ enters, target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost. (You may cast that card from your graveyard for its flashback cost. Then exile it.)"
       },
       "node": {
         "PreLoweredTrigger": {

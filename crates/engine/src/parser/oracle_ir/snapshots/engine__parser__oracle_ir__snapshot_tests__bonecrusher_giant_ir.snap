@@ -15,10 +15,11 @@ expression: "&ir"
           "first_line": 0,
           "last_line": 0,
           "start_byte": 0,
-          "end_byte": 110,
-          "precision": "WholeDocument",
+          "end_byte": 86,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Whenever ~ becomes the target of a spell, ~ deals 2 damage to that spell's controller."
       },
       "node": {
         "PreLoweredTrigger": {

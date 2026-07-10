@@ -15,10 +15,11 @@ expression: "&ir"
           "first_line": 0,
           "last_line": 0,
           "start_byte": 0,
-          "end_byte": 61,
-          "precision": "WholeDocument",
+          "end_byte": 49,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "~ can't attack unless you control a 1/1 creature."
       },
       "node": {
         "PreLoweredStatic": {

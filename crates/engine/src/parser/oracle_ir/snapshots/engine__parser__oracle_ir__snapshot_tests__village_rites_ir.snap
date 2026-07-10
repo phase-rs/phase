@@ -5,6 +5,41 @@ expression: "&ir"
 {
   "items": [
     {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 63,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "As an additional cost to cast this spell, sacrifice a creature."
+      },
+      "node": {
+        "AdditionalCost": {
+          "type": "Required",
+          "data": {
+            "type": "Sacrifice",
+            "target": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": []
+            },
+            "count": 1
+          }
+        }
+      }
+    },
+    {
       "id": 0,
       "source": {
         "id": {
@@ -12,13 +47,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 1,
           "last_line": 1,
-          "start_byte": 0,
+          "start_byte": 64,
           "end_byte": 79,
-          "precision": "WholeDocument",
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Draw two cards."
       },
       "node": {
         "PreLoweredSpell": {
@@ -42,40 +78,6 @@ expression: "&ir"
           "optional_targeting": false,
           "optional": false,
           "forward_result": false
-        }
-      }
-    },
-    {
-      "id": 1,
-      "source": {
-        "id": {
-          "item": 1,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 79,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
-      },
-      "node": {
-        "AdditionalCost": {
-          "type": "Required",
-          "data": {
-            "type": "Sacrifice",
-            "target": {
-              "type": "Typed",
-              "type_filters": [
-                "Creature"
-              ],
-              "controller": null,
-              "properties": []
-            },
-            "count": 1
-          }
         }
       }
     }

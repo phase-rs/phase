@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 341,
-          "precision": "WholeDocument",
+          "end_byte": 130,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Evolve (Whenever a creature you control enters, if that creature has greater power or toughness than ~, put a +1/+1 counter on ~.)"
       },
       "node": {
         "PreLoweredSpell": {
@@ -48,13 +49,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 1,
           "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 341,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "start_byte": 131,
+          "end_byte": 293,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Remove two +1/+1 counters from ~: Regenerate it. (The next time ~ would be destroyed this turn, instead tap it, remove it from combat, and heal all damage on it.)"
       },
       "node": {
         "PreLoweredSpell": {

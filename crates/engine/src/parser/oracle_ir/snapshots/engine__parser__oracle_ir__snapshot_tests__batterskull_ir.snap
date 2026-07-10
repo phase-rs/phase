@@ -13,40 +13,16 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 3,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 236,
-          "precision": "WholeDocument",
+          "end_byte": 104,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Living weapon (When ~ enters, create a 0/0 black Phyrexian Germ creature token, then attach this to it.)"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Bounce",
-            "target": {
-              "type": "SelfRef"
-            },
-            "destination": null
-          },
-          "cost": {
-            "type": "Mana",
-            "cost": {
-              "type": "Cost",
-              "shards": [],
-              "generic": 3
-            }
-          },
-          "sub_ability": null,
-          "duration": null,
-          "description": "{3}: Return ~ to its owner's hand.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
-        }
+        "Keyword": "LivingWeapon"
       }
     },
     {
@@ -57,70 +33,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
-          "last_line": 3,
-          "start_byte": 0,
-          "end_byte": 236,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
-      },
-      "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Attach",
-            "target": {
-              "type": "Typed",
-              "type_filters": [
-                "Creature"
-              ],
-              "controller": "You",
-              "properties": []
-            }
-          },
-          "cost": {
-            "type": "Mana",
-            "cost": {
-              "type": "Cost",
-              "shards": [],
-              "generic": 5
-            }
-          },
-          "sub_ability": null,
-          "duration": null,
-          "description": "Equip {5}",
-          "target_prompt": null,
-          "activation_restrictions": [
-            {
-              "type": "AsSorcery"
-            }
-          ],
-          "ability_tag": {
-            "type": "Equip"
-          },
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
-        }
-      }
-    },
-    {
-      "id": 2,
-      "source": {
-        "id": {
-          "item": 2,
-          "ordinal": 0
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 105,
+          "end_byte": 165,
+          "precision": "Exact",
+          "ordinal_within_span": 0
         },
-        "span": {
-          "first_line": 0,
-          "last_line": 3,
-          "start_byte": 0,
-          "end_byte": 236,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 2
-        }
+        "fragment": "Equipped creature gets +4/+4 and has vigilance and lifelink."
       },
       "node": {
         "PreLoweredStatic": {
@@ -165,6 +85,52 @@ expression: "&ir"
       }
     },
     {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 2,
+          "last_line": 2,
+          "start_byte": 166,
+          "end_byte": 200,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{3}: Return ~ to its owner's hand."
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Bounce",
+            "target": {
+              "type": "SelfRef"
+            },
+            "destination": null
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [],
+              "generic": 3
+            }
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "{3}: Return ~ to its owner's hand.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    },
+    {
       "id": 3,
       "source": {
         "id": {
@@ -172,16 +138,54 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 3,
           "last_line": 3,
-          "start_byte": 0,
-          "end_byte": 236,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 3
-        }
+          "start_byte": 201,
+          "end_byte": 210,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Equip {5}"
       },
       "node": {
-        "Keyword": "LivingWeapon"
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Attach",
+            "target": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": "You",
+              "properties": []
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [],
+              "generic": 5
+            }
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "Equip {5}",
+          "target_prompt": null,
+          "activation_restrictions": [
+            {
+              "type": "AsSorcery"
+            }
+          ],
+          "ability_tag": {
+            "type": "Equip"
+          },
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     }
   ],

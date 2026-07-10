@@ -13,12 +13,58 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 196,
-          "precision": "WholeDocument",
+          "end_byte": 137,
+          "precision": "Exact",
           "ordinal_within_span": 0
+        },
+        "fragment": "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on that creature instead."
+      },
+      "node": {
+        "PreLoweredReplacement": {
+          "event": "AddCounter",
+          "execute": null,
+          "mode": {
+            "type": "Mandatory"
+          },
+          "valid_card": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": "You",
+            "properties": []
+          },
+          "description": "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on that creature instead.",
+          "condition": null,
+          "quantity_modification": {
+            "type": "Plus",
+            "value": 1
+          },
+          "counter_match": {
+            "type": "OfType",
+            "data": "P1P1"
+          }
         }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 138,
+          "end_byte": 184,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "When ~ dies, you gain life equal to its power."
       },
       "node": {
         "PreLoweredTrigger": {
@@ -65,50 +111,6 @@ expression: "&ir"
           "constraint": null,
           "condition": null,
           "batched": false
-        }
-      }
-    },
-    {
-      "id": 1,
-      "source": {
-        "id": {
-          "item": 1,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 196,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
-      },
-      "node": {
-        "PreLoweredReplacement": {
-          "event": "AddCounter",
-          "execute": null,
-          "mode": {
-            "type": "Mandatory"
-          },
-          "valid_card": {
-            "type": "Typed",
-            "type_filters": [
-              "Creature"
-            ],
-            "controller": "You",
-            "properties": []
-          },
-          "description": "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on that creature instead.",
-          "condition": null,
-          "quantity_modification": {
-            "type": "Plus",
-            "value": 1
-          },
-          "counter_match": {
-            "type": "OfType",
-            "data": "P1P1"
-          }
         }
       }
     }

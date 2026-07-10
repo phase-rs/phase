@@ -13,12 +13,42 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 2,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 245,
-          "precision": "WholeDocument",
+          "end_byte": 112,
+          "precision": "Exact",
           "ordinal_within_span": 0
+        },
+        "fragment": "Surge {1}{R} (You may cast this spell for its surge cost if you or a teammate has cast another spell this turn.)"
+      },
+      "node": {
+        "Keyword": {
+          "Surge": {
+            "type": "Cost",
+            "shards": [
+              "Red"
+            ],
+            "generic": 1
+          }
         }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 113,
+          "end_byte": 118,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Haste"
       },
       "node": {
         "PreLoweredSpell": {
@@ -41,20 +71,21 @@ expression: "&ir"
       }
     },
     {
-      "id": 1,
+      "id": 2,
       "source": {
         "id": {
-          "item": 1,
+          "item": 2,
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 2,
           "last_line": 2,
-          "start_byte": 0,
-          "end_byte": 245,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "start_byte": 119,
+          "end_byte": 233,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "When ~ enters, if its surge cost was paid, other creatures you control get +1/+0 and gain haste until end of turn."
       },
       "node": {
         "PreLoweredTrigger": {
@@ -134,34 +165,6 @@ expression: "&ir"
             "variant": "Surge"
           },
           "batched": false
-        }
-      }
-    },
-    {
-      "id": 2,
-      "source": {
-        "id": {
-          "item": 2,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 2,
-          "start_byte": 0,
-          "end_byte": 245,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 2
-        }
-      },
-      "node": {
-        "Keyword": {
-          "Surge": {
-            "type": "Cost",
-            "shards": [
-              "Red"
-            ],
-            "generic": 1
-          }
         }
       }
     }

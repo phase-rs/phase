@@ -16,9 +16,10 @@ expression: "&ir"
           "last_line": 0,
           "start_byte": 0,
           "end_byte": 111,
-          "precision": "WholeDocument",
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn."
       },
       "node": {
         "PreLoweredSpell": {

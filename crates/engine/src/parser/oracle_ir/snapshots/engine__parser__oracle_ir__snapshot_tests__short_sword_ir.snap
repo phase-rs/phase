@@ -13,12 +13,64 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 110,
-          "precision": "WholeDocument",
+          "end_byte": 29,
+          "precision": "Exact",
           "ordinal_within_span": 0
+        },
+        "fragment": "Equipped creature gets +1/+1."
+      },
+      "node": {
+        "PreLoweredStatic": {
+          "mode": "Continuous",
+          "affected": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": null,
+            "properties": [
+              {
+                "type": "EquippedBy"
+              }
+            ]
+          },
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            },
+            {
+              "type": "AddToughness",
+              "value": 1
+            }
+          ],
+          "condition": null,
+          "affected_zone": null,
+          "effect_zone": null,
+          "active_zones": [],
+          "characteristic_defining": false,
+          "description": "Equipped creature gets +1/+1."
         }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 30,
+          "end_byte": 110,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Equip {1} ({1}: Attach to target creature you control. Equip only as a sorcery.)"
       },
       "node": {
         "PreLoweredSpell": {
@@ -58,56 +110,6 @@ expression: "&ir"
           "optional_targeting": false,
           "optional": false,
           "forward_result": false
-        }
-      }
-    },
-    {
-      "id": 1,
-      "source": {
-        "id": {
-          "item": 1,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 110,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
-      },
-      "node": {
-        "PreLoweredStatic": {
-          "mode": "Continuous",
-          "affected": {
-            "type": "Typed",
-            "type_filters": [
-              "Creature"
-            ],
-            "controller": null,
-            "properties": [
-              {
-                "type": "EquippedBy"
-              }
-            ]
-          },
-          "modifications": [
-            {
-              "type": "AddPower",
-              "value": 1
-            },
-            {
-              "type": "AddToughness",
-              "value": 1
-            }
-          ],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "Equipped creature gets +1/+1."
         }
       }
     }

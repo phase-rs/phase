@@ -15,10 +15,11 @@ expression: "&ir"
           "first_line": 0,
           "last_line": 0,
           "start_byte": 0,
-          "end_byte": 91,
-          "precision": "WholeDocument",
+          "end_byte": 79,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Hexproof (~ can't be the target of spells or abilities your opponents control.)"
       },
       "node": {
         "PreLoweredSpell": {

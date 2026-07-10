@@ -13,12 +13,41 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 104,
-          "precision": "WholeDocument",
+          "end_byte": 81,
+          "precision": "Exact",
           "ordinal_within_span": 0
+        },
+        "fragment": "If you control a commander, you may cast this spell without paying its mana cost."
+      },
+      "node": {
+        "CastingOption": {
+          "kind": "CastWithoutManaCost",
+          "condition": {
+            "type": "YouControlSubtypeCountAtLeast",
+            "subtype": "commander",
+            "count": 1
+          }
         }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 82,
+          "end_byte": 104,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Exile target creature."
       },
       "node": {
         "PreLoweredSpell": {
@@ -49,33 +78,6 @@ expression: "&ir"
           "optional_targeting": false,
           "optional": false,
           "forward_result": false
-        }
-      }
-    },
-    {
-      "id": 1,
-      "source": {
-        "id": {
-          "item": 1,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 104,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
-      },
-      "node": {
-        "CastingOption": {
-          "kind": "CastWithoutManaCost",
-          "condition": {
-            "type": "YouControlSubtypeCountAtLeast",
-            "subtype": "commander",
-            "count": 1
-          }
         }
       }
     }

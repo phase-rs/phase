@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 54,
-          "precision": "WholeDocument",
+          "end_byte": 12,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "First strike"
       },
       "node": {
         "PreLoweredSpell": {
@@ -48,13 +49,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 1,
           "last_line": 1,
-          "start_byte": 0,
+          "start_byte": 13,
           "end_byte": 54,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Noncreature spells cost {1} more to cast."
       },
       "node": {
         "PreLoweredStatic": {

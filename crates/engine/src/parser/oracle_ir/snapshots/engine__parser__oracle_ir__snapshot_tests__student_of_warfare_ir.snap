@@ -1,9 +1,39 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 312
 expression: "&ir"
 ---
 {
   "items": [
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 76,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Level up {W} ({W}: Put a level counter on this. Level up only as a sorcery.)"
+      },
+      "node": {
+        "Keyword": {
+          "LevelUp": {
+            "type": "Cost",
+            "shards": [
+              "White"
+            ],
+            "generic": 0
+          }
+        }
+      }
+    },
     {
       "id": 0,
       "source": {
@@ -12,13 +42,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
-          "last_line": 6,
-          "start_byte": 0,
-          "end_byte": 130,
-          "precision": "WholeDocument",
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 77,
+          "end_byte": 86,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "LEVEL 2-6"
       },
       "node": {
         "PreLoweredStatic": {
@@ -65,13 +96,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
-          "last_line": 6,
-          "start_byte": 0,
-          "end_byte": 130,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "first_line": 4,
+          "last_line": 4,
+          "start_byte": 104,
+          "end_byte": 112,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "LEVEL 7+"
       },
       "node": {
         "PreLoweredStatic": {
@@ -106,34 +138,6 @@ expression: "&ir"
           "active_zones": [],
           "characteristic_defining": false,
           "description": "LEVEL 7+ / 4/4 / Double strike"
-        }
-      }
-    },
-    {
-      "id": 2,
-      "source": {
-        "id": {
-          "item": 2,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 6,
-          "start_byte": 0,
-          "end_byte": 130,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 2
-        }
-      },
-      "node": {
-        "Keyword": {
-          "LevelUp": {
-            "type": "Cost",
-            "shards": [
-              "White"
-            ],
-            "generic": 0
-          }
         }
       }
     }

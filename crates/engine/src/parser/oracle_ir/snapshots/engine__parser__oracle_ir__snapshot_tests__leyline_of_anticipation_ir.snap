@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 134,
-          "precision": "WholeDocument",
+          "end_byte": 88,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "If this card is in your opening hand, you may begin the game with it on the battlefield."
       },
       "node": {
         "PreLoweredSpell": {
@@ -55,13 +56,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 1,
           "last_line": 1,
-          "start_byte": 0,
+          "start_byte": 89,
           "end_byte": 134,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "You may cast spells as though they had flash."
       },
       "node": {
         "PreLoweredStatic": {

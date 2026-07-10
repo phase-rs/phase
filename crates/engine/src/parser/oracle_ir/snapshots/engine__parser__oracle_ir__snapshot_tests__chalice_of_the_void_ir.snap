@@ -13,12 +13,70 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 175,
-          "precision": "WholeDocument",
+          "end_byte": 38,
+          "precision": "Exact",
           "ordinal_within_span": 0
+        },
+        "fragment": "~ enters with X charge counters on it."
+      },
+      "node": {
+        "PreLoweredReplacement": {
+          "event": "Moved",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "PutCounter",
+              "counter_type": "charge",
+              "count": {
+                "type": "Ref",
+                "qty": {
+                  "type": "CostXPaid"
+                }
+              },
+              "target": {
+                "type": "SelfRef"
+              }
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "mode": {
+            "type": "Mandatory"
+          },
+          "valid_card": {
+            "type": "SelfRef"
+          },
+          "description": "~ enters with X charge counters on it.",
+          "condition": null,
+          "destination_zone": "Battlefield"
         }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 39,
+          "end_byte": 151,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Whenever a player casts a spell with mana value equal to the number of charge counters on ~, counter that spell."
       },
       "node": {
         "PreLoweredTrigger": {
@@ -79,62 +137,6 @@ expression: "&ir"
           "constraint": null,
           "condition": null,
           "batched": false
-        }
-      }
-    },
-    {
-      "id": 1,
-      "source": {
-        "id": {
-          "item": 1,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 175,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
-      },
-      "node": {
-        "PreLoweredReplacement": {
-          "event": "Moved",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "PutCounter",
-              "counter_type": "charge",
-              "count": {
-                "type": "Ref",
-                "qty": {
-                  "type": "CostXPaid"
-                }
-              },
-              "target": {
-                "type": "SelfRef"
-              }
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "mode": {
-            "type": "Mandatory"
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "description": "~ enters with X charge counters on it.",
-          "condition": null,
-          "destination_zone": "Battlefield"
         }
       }
     }

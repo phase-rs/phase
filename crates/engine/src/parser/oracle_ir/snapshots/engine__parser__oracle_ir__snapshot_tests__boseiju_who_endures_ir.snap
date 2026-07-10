@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 330,
-          "precision": "WholeDocument",
+          "end_byte": 13,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "{T}: Add {G}."
       },
       "node": {
         "PreLoweredSpell": {
@@ -55,13 +56,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 1,
           "last_line": 1,
-          "start_byte": 0,
+          "start_byte": 14,
           "end_byte": 330,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Channel — {1}{G}, Discard this card: Destroy target artifact, enchantment, or nonbasic land an opponent controls. That player may search their library for a land card with a basic land type, put it onto the battlefield, then shuffle. This ability costs {1} less to activate for each legendary creature you control."
       },
       "node": {
         "PreLoweredSpell": {

@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 38,
-          "precision": "WholeDocument",
+          "end_byte": 6,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Flying"
       },
       "node": {
         "PreLoweredSpell": {
@@ -48,13 +49,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 1,
           "last_line": 1,
-          "start_byte": 0,
+          "start_byte": 7,
           "end_byte": 38,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{T}: Add one mana of any color."
       },
       "node": {
         "PreLoweredSpell": {

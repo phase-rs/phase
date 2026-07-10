@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 3,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 264,
-          "precision": "WholeDocument",
+          "end_byte": 107,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "{U}: Exile ~. Return it to the battlefield under its owner's control at the beginning of the next end step."
       },
       "node": {
         "PreLoweredSpell": {
@@ -108,13 +109,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
-          "last_line": 3,
-          "start_byte": 0,
-          "end_byte": 264,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 108,
+          "end_byte": 142,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{U}: ~ can't be blocked this turn."
       },
       "node": {
         "PreLoweredSpell": {
@@ -173,13 +175,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
-          "last_line": 3,
-          "start_byte": 0,
-          "end_byte": 264,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 2
-        }
+          "first_line": 2,
+          "last_line": 2,
+          "start_byte": 143,
+          "end_byte": 179,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{1}: ~ gets +1/-1 until end of turn."
       },
       "node": {
         "PreLoweredSpell": {
@@ -225,13 +228,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 3,
           "last_line": 3,
-          "start_byte": 0,
-          "end_byte": 264,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 3
-        }
+          "start_byte": 180,
+          "end_byte": 216,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{1}: ~ gets -1/+1 until end of turn."
       },
       "node": {
         "PreLoweredSpell": {

@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 78,
-          "precision": "WholeDocument",
+          "end_byte": 8,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Lifelink"
       },
       "node": {
         "PreLoweredSpell": {
@@ -48,13 +49,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 1,
           "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 78,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "start_byte": 9,
+          "end_byte": 66,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "When ~ dies, put it on the bottom of its owner's library."
       },
       "node": {
         "PreLoweredTrigger": {

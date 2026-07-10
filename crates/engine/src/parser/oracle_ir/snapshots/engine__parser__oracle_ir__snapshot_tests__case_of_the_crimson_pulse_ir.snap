@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 2,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 239,
-          "precision": "WholeDocument",
+          "end_byte": 56,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "When this ~ enters, discard a card, then draw two cards."
       },
       "node": {
         "PreLoweredTrigger": {
@@ -88,6 +89,46 @@ expression: "&ir"
       }
     },
     {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 57,
+          "end_byte": 152,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "To solve — You have no cards in hand. (If unsolved, solve at the beginning of your end step.)"
+      },
+      "node": {
+        "SolveCondition": {
+          "type": "Condition",
+          "condition": {
+            "type": "QuantityComparison",
+            "lhs": {
+              "type": "Ref",
+              "qty": {
+                "type": "HandSize",
+                "player": {
+                  "type": "Controller"
+                }
+              }
+            },
+            "comparator": "EQ",
+            "rhs": {
+              "type": "Fixed",
+              "value": 0
+            }
+          }
+        }
+      }
+    },
+    {
       "id": 1,
       "source": {
         "id": {
@@ -95,13 +136,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 2,
           "last_line": 2,
-          "start_byte": 0,
-          "end_byte": 239,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "start_byte": 153,
+          "end_byte": 236,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Solved — At the beginning of your upkeep, discard your hand, then draw two cards."
       },
       "node": {
         "PreLoweredTrigger": {
@@ -172,45 +214,6 @@ expression: "&ir"
           },
           "condition": null,
           "batched": false
-        }
-      }
-    },
-    {
-      "id": 2,
-      "source": {
-        "id": {
-          "item": 2,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 2,
-          "start_byte": 0,
-          "end_byte": 239,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 2
-        }
-      },
-      "node": {
-        "SolveCondition": {
-          "type": "Condition",
-          "condition": {
-            "type": "QuantityComparison",
-            "lhs": {
-              "type": "Ref",
-              "qty": {
-                "type": "HandSize",
-                "player": {
-                  "type": "Controller"
-                }
-              }
-            },
-            "comparator": "EQ",
-            "rhs": {
-              "type": "Fixed",
-              "value": 0
-            }
-          }
         }
       }
     }

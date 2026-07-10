@@ -564,9 +564,10 @@ pub(crate) struct OracleDocBuilder {
     /// Allocation order across different `start_byte`s on one line may hand a
     /// later-byte item a smaller ordinal, but the map key sorts by `start_byte`
     /// BEFORE `ordinal_within_span`, so source order is preserved regardless of the
-    /// order in which ordinals are drawn. Ordinals need only be distinct, not
-    /// dense: a `take_last_spell` re-emit fresh-allocates and the skipped value is
-    /// harmless.
+    /// order in which ordinals are drawn. A `take_last_spell` re-emit does NOT draw
+    /// a new ordinal from here — it reuses the popped item's ORIGINAL span+ordinal
+    /// (the key it just freed), which is position-preserving; so this allocator only
+    /// ever hands out fresh ordinals to genuinely new emissions.
     #[allow(dead_code)] // wired by the unit-4 dispatch-loop/preprocessor cutover.
     next_ordinal_by_line: BTreeMap<usize, u32>,
     /// CR 707.9a printed-**trigger** index: the slot the next emitted trigger
@@ -644,9 +645,10 @@ impl OracleDocBuilder {
     /// Single cross-category authority (unit 4): see `next_ordinal_by_line`. Every
     /// emitter holding `&mut self` — pre-loop scans, preprocessors, the dispatch
     /// loop, post-loop emission — draws its ordinal from here so no two items on
-    /// one line can collide on the map key. The counter never decrements; a
-    /// `take_last_spell` re-emit fresh-allocates and any skipped value is harmless
-    /// because ordinals need only be distinct, not dense.
+    /// one line can collide on the map key. The counter never decrements. A
+    /// `take_last_spell` re-emit does NOT call this — it reuses the popped item's
+    /// ORIGINAL span+ordinal (the freed key), which is position-preserving — so this
+    /// allocator only ever advances for genuinely new emissions.
     #[allow(dead_code)] // wired by the unit-4 dispatch-loop/preprocessor cutover.
     pub(crate) fn next_ordinal_for_line(&mut self, first_line: usize) -> u32 {
         let slot = self.next_ordinal_by_line.entry(first_line).or_insert(0);
@@ -816,6 +818,26 @@ impl OracleDocBuilder {
         // `spells_emitted` can never name an id absent from `items` — `emit` inserts
         // both together, and this is the only removal path.
         self.items.remove(&key)
+    }
+
+    /// Peek the most-recently-EMITTED spell's definition without removing it —
+    /// INSERTION recency, via the `spells_emitted` stack. This is the pop-aware
+    /// source of truth for the old `result.abilities.last()` read: `take_last_spell`
+    /// pops this stack and the "instead"/min_x re-emit re-pushes, so a peek derived
+    /// from it is correct across any pop/re-emit interleave — unlike a clone-on-emit
+    /// mirror, which a pop would not revert. Deliberately NOT a `self.items` span
+    /// maximum: a preprocessor may emit a higher-line spell before the dispatch loop
+    /// emits a lower-line one, and the reader wants the JUST-emitted (loop) spell.
+    #[allow(dead_code)] // used by the dispatch-loop reader in unit 4.
+    pub(crate) fn peek_last_spell(&self) -> Option<&AbilityDefinition> {
+        let id = *self.spells_emitted.last()?;
+        self.items
+            .values()
+            .find(|i| i.id == id)
+            .and_then(|i| match &i.node {
+                OracleNodeIr::PreLoweredSpell(def) => Some(def),
+                _ => None,
+            })
     }
 
     /// Finish, producing items already in Oracle source order.

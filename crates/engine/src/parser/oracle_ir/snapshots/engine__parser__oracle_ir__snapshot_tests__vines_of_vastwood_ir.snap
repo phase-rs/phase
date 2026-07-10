@@ -13,12 +13,79 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 229,
-          "precision": "WholeDocument",
+          "end_byte": 66,
+          "precision": "Exact",
           "ordinal_within_span": 0
+        },
+        "fragment": "Kicker {G} (You may pay an additional {G} as you cast this spell.)"
+      },
+      "node": {
+        "Keyword": {
+          "Kicker": {
+            "type": "Cost",
+            "shards": [
+              "Green"
+            ],
+            "generic": 0
+          }
         }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 66,
+          "precision": "Exact",
+          "ordinal_within_span": 1
+        },
+        "fragment": "Kicker {G} (You may pay an additional {G} as you cast this spell.)"
+      },
+      "node": {
+        "AdditionalCost": {
+          "type": "Kicker",
+          "data": {
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": {
+                  "type": "Cost",
+                  "shards": [
+                    "Green"
+                  ],
+                  "generic": 0
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 67,
+          "end_byte": 229,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Target creature can't be the target of spells or abilities your opponents control this turn. If this spell was kicked, that creature gets +4/+4 until end of turn."
       },
       "node": {
         "PreLoweredSpell": {
@@ -92,70 +159,6 @@ expression: "&ir"
           "optional_targeting": false,
           "optional": false,
           "forward_result": false
-        }
-      }
-    },
-    {
-      "id": 1,
-      "source": {
-        "id": {
-          "item": 1,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 229,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
-      },
-      "node": {
-        "Keyword": {
-          "Kicker": {
-            "type": "Cost",
-            "shards": [
-              "Green"
-            ],
-            "generic": 0
-          }
-        }
-      }
-    },
-    {
-      "id": 2,
-      "source": {
-        "id": {
-          "item": 2,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 229,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 2
-        }
-      },
-      "node": {
-        "AdditionalCost": {
-          "type": "Kicker",
-          "data": {
-            "costs": [
-              {
-                "type": "Mana",
-                "cost": {
-                  "type": "Cost",
-                  "shards": [
-                    "Green"
-                  ],
-                  "generic": 0
-                }
-              }
-            ]
-          }
         }
       }
     }

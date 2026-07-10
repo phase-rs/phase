@@ -13,12 +13,64 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 1,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 152,
-          "precision": "WholeDocument",
+          "end_byte": 98,
+          "precision": "Exact",
           "ordinal_within_span": 0
+        },
+        "fragment": "Cast this spell only during the declare attackers step and only if you've been attacked this step."
+      },
+      "node": {
+        "CastingRestriction": {
+          "type": "DeclareAttackersStep"
         }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 98,
+          "precision": "Exact",
+          "ordinal_within_span": 1
+        },
+        "fragment": "Cast this spell only during the declare attackers step and only if you've been attacked this step."
+      },
+      "node": {
+        "CastingRestriction": {
+          "type": "RequiresCondition",
+          "data": {
+            "condition": {
+              "type": "BeenAttackedThisStep"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 99,
+          "end_byte": 152,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Return target attacking creature to its owner's hand."
       },
       "node": {
         "PreLoweredSpell": {
@@ -48,55 +100,6 @@ expression: "&ir"
           "optional_targeting": false,
           "optional": false,
           "forward_result": false
-        }
-      }
-    },
-    {
-      "id": 1,
-      "source": {
-        "id": {
-          "item": 1,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 152,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
-      },
-      "node": {
-        "CastingRestriction": {
-          "type": "DeclareAttackersStep"
-        }
-      }
-    },
-    {
-      "id": 2,
-      "source": {
-        "id": {
-          "item": 2,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 152,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 2
-        }
-      },
-      "node": {
-        "CastingRestriction": {
-          "type": "RequiresCondition",
-          "data": {
-            "condition": {
-              "type": "BeenAttackedThisStep"
-            }
-          }
         }
       }
     }

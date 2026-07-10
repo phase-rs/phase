@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 2,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 365,
-          "precision": "WholeDocument",
+          "end_byte": 68,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "{R/W}: ~ becomes a Kithkin Spirit with base power and toughness 2/2."
       },
       "node": {
         "PreLoweredSpell": {
@@ -97,13 +98,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
-          "last_line": 2,
-          "start_byte": 0,
-          "end_byte": 365,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 69,
+          "end_byte": 174,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{R/W}{R/W}{R/W}: If ~ is a Spirit, it becomes a Kithkin Spirit Warrior with base power and toughness 4/4."
       },
       "node": {
         "PreLoweredSpell": {
@@ -200,13 +202,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 2,
           "last_line": 2,
-          "start_byte": 0,
-          "end_byte": 365,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 2
-        }
+          "start_byte": 175,
+          "end_byte": 329,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "{R/W}{R/W}{R/W}{R/W}{R/W}{R/W}: If ~ is a Warrior, it becomes a Kithkin Spirit Warrior Avatar with base power and toughness 8/8, flying, and first strike."
       },
       "node": {
         "PreLoweredSpell": {

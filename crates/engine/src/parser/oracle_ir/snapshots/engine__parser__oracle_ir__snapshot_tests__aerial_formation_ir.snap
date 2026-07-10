@@ -5,6 +5,33 @@ expression: "&ir"
 {
   "items": [
     {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 81,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Strive — This spell costs {2}{U} more to cast for each target beyond the first."
+      },
+      "node": {
+        "StriveCost": {
+          "type": "Cost",
+          "shards": [
+            "Blue"
+          ],
+          "generic": 2
+        }
+      }
+    },
+    {
       "id": 0,
       "source": {
         "id": {
@@ -12,13 +39,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 1,
           "last_line": 1,
-          "start_byte": 0,
+          "start_byte": 82,
           "end_byte": 162,
-          "precision": "WholeDocument",
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "Any number of target creatures each get +1/+1 and gain flying until end of turn."
       },
       "node": {
         "PreLoweredSpell": {
@@ -76,32 +104,6 @@ expression: "&ir"
             "max": null
           },
           "forward_result": false
-        }
-      }
-    },
-    {
-      "id": 1,
-      "source": {
-        "id": {
-          "item": 1,
-          "ordinal": 0
-        },
-        "span": {
-          "first_line": 0,
-          "last_line": 1,
-          "start_byte": 0,
-          "end_byte": 162,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
-      },
-      "node": {
-        "StriveCost": {
-          "type": "Cost",
-          "shards": [
-            "Blue"
-          ],
-          "generic": 2
         }
       }
     }

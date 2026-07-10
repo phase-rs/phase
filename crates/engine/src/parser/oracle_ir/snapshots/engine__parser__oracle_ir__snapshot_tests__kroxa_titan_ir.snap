@@ -13,12 +13,13 @@ expression: "&ir"
         },
         "span": {
           "first_line": 0,
-          "last_line": 2,
+          "last_line": 0,
           "start_byte": 0,
-          "end_byte": 324,
-          "precision": "WholeDocument",
+          "end_byte": 46,
+          "precision": "Exact",
           "ordinal_within_span": 0
-        }
+        },
+        "fragment": "When ~ enters, sacrifice it unless it escaped."
       },
       "node": {
         "PreLoweredTrigger": {
@@ -80,13 +81,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
-          "last_line": 2,
-          "start_byte": 0,
-          "end_byte": 324,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 1
-        }
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 47,
+          "end_byte": 183,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Whenever ~ enters or attacks, each opponent discards a card, then each opponent who didn't discard a nonland card this way loses 3 life."
       },
       "node": {
         "PreLoweredTrigger": {
@@ -166,13 +168,14 @@ expression: "&ir"
           "ordinal": 0
         },
         "span": {
-          "first_line": 0,
+          "first_line": 2,
           "last_line": 2,
-          "start_byte": 0,
-          "end_byte": 324,
-          "precision": "WholeDocument",
-          "ordinal_within_span": 2
-        }
+          "start_byte": 184,
+          "end_byte": 316,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Escape—{B}{B}{R}{R}, Exile five other cards from your graveyard. (You may cast this card from your graveyard for its escape cost.)"
       },
       "node": {
         "Keyword": {
