@@ -15,6 +15,7 @@ import {
   buildTargetSelectionProgress,
   buildTargetSelectionWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
+import { AttachmentFan } from "../AttachmentFan.tsx";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
 import { PermanentCard } from "../PermanentCard.tsx";
 
@@ -286,6 +287,43 @@ describe("PermanentCard attachments", () => {
     expect(useUiStore.getState().attachmentFanHostId).toBe(1);
     expect(useUiStore.getState().selectedObjectId).toBeNull();
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
+  });
+
+  it("refreshes the attachment fan when the engine clears host attachments", () => {
+    const gameState = makeState();
+    const host = gameState.objects[1];
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+    });
+    useUiStore.setState({ attachmentFanHostId: 1 });
+
+    const { queryAllByLabelText } = render(<AttachmentFan />);
+
+    expect(queryAllByLabelText("Test Creature").length).toBeGreaterThan(0);
+    expect(queryAllByLabelText("Test Equipment").length).toBeGreaterThan(0);
+
+    act(() => {
+      host.attachments = [];
+      gameState.objects[2] = {
+        ...gameState.objects[2],
+        zone: "Graveyard",
+        attached_to: null,
+      };
+      const nextState = {
+        ...gameState,
+        objects: { ...gameState.objects },
+        battlefield: [1],
+        graveyard: [2],
+      };
+      useGameStore.setState({
+        gameState: nextState,
+        waitingFor: nextState.waiting_for,
+      });
+    });
+
+    expect(queryAllByLabelText("Test Creature").length).toBeGreaterThan(0);
+    expect(queryAllByLabelText("Test Equipment")).toHaveLength(0);
   });
 
   it("auto-expands collapsed attachments when one is a valid target", () => {
