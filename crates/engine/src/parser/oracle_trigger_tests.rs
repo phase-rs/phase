@@ -16817,6 +16817,69 @@ fn trigger_while_attacking_composes_with_existing_condition() {
     }
 }
 
+/// CR 711.2a + CR 711.2b + CR 603.4 (issue #4728, Lighthouse Chronologist):
+/// level-block reparsing must AND-compose the level-counter gate with the
+/// printed intervening-if condition. Before the fix, the level-block pass
+/// overwrote `if it's not your turn`, so the extra-turn trigger fired at the
+/// controller's own end step once LEVEL 7+ was active.
+#[test]
+fn level_trigger_preserves_printed_intervening_if_condition() {
+    use crate::types::phase::Phase;
+
+    const LIGHTHOUSE_CHRONOLOGIST: &str =
+        "Level up {U} ({U}: Put a level counter on this. Level up only as a sorcery.)\n\
+LEVEL 4-6\n\
+2/4\n\
+LEVEL 7+\n\
+3/5\n\
+At the beginning of each end step, if it's not your turn, take an extra turn after this one.";
+
+    let parsed = parse_oracle_text(
+        LIGHTHOUSE_CHRONOLOGIST,
+        "Lighthouse Chronologist",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Wizard".to_string()],
+    );
+
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::Phase && trigger.phase == Some(Phase::End))
+        .unwrap_or_else(|| panic!("expected end-step phase trigger, got {:?}", parsed.triggers));
+
+    let Some(TriggerCondition::And { conditions }) = &trigger.condition else {
+        panic!(
+            "expected level gate AND not-your-turn gate, got {:?}",
+            trigger.condition
+        );
+    };
+    assert!(
+        conditions.iter().any(|condition| matches!(
+            condition,
+            TriggerCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic(name)),
+                minimum: 7,
+                maximum: None,
+            } if name == "level"
+        )),
+        "LEVEL 7+ counter gate missing from {conditions:?}"
+    );
+    assert!(
+        conditions.iter().any(|condition| matches!(
+            condition,
+            TriggerCondition::Not { condition }
+                if matches!(
+                    condition.as_ref(),
+                    TriggerCondition::DuringPlayersTurn {
+                        player: PlayerFilter::Controller
+                    }
+                )
+        )),
+        "`if it's not your turn` gate missing from {conditions:?}"
+    );
+}
+
 /// CR 603.4 + CR 122.1 (issue #2376, Pyromancer's Ascension): the
 /// `"while this enchantment has two or more quest counters on it"` gate on
 /// a cast trigger must surface as a `HasCounters` condition, not fire on

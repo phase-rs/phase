@@ -2865,7 +2865,16 @@ pub(crate) fn parse_oracle_ir(
             &mut ctx,
         );
         for trigger in &mut triggers {
-            trigger.condition = Some(trigger_condition.clone());
+            trigger.condition = Some(match trigger.condition.take() {
+                // CR 711.2a + CR 711.2b + CR 603.4: a level-gated trigger's
+                // level-counter range is an additional gate; it must compose
+                // with any printed intervening-if condition instead of
+                // replacing it.
+                Some(existing) => TriggerCondition::And {
+                    conditions: vec![existing, trigger_condition.clone()],
+                },
+                None => trigger_condition.clone(),
+            });
         }
         result.triggers.extend(triggers);
     }
