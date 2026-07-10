@@ -147,7 +147,9 @@ use self::subject::{
 };
 use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
-use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
+use crate::parser::oracle_ir::effect_chain::{
+    AbilityIr, AbilityShellIr, ClauseIr, EffectChainIr, SpecialClause,
+};
 use crate::types::mana::ManaExpiry;
 
 /// CR 608.2k: True when `text` is a standalone object pronoun referring to
@@ -23114,38 +23116,113 @@ fn rewrite_filter_prop_another_to_tracked_set(prop: &mut FilterProp) {
     }
 }
 
-pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
-    if let Some(def) =
-        try_parse_conditional_protection_grant_ability(text, kind, &mut ParseContext::default())
-    {
-        return def;
+/// Which whole-body bypass set a chain-lowering entry point runs.
+///
+/// The two entry points do **not** run the same set, and the difference is
+/// carried here as typed data rather than duplicated as two hand-maintained
+/// `if let` stacks:
+///
+/// | mode | bypasses | bypass #1's `ParseContext` |
+/// |---|---|---|
+/// | `Standalone` | 8 | a fresh `default()`, discarded |
+/// | `WithContext` | the same 8 as a strict prefix, plus `try_parse_exile_pile_shuffle_cloak` | the caller's real `ctx` |
+///
+/// Callers split cleanly: die-result branch bodies (`oracle_special.rs`) take
+/// `Standalone`; spell/activated dispatch takes `WithContext`.
+///
+/// **The asymmetry is suspected-accidental and is preserved byte-for-byte on
+/// purpose.** Nothing about a die-roll branch body should exclude the cloak
+/// recognizer, but unifying to 9 makes die branches newly take it and unifying
+/// to 8 makes spells lose it — either is silent lowered drift across the
+/// die-result cards. Fixing it is a separate, reviewed change with its own
+/// discriminating card; a parity migration never absorbs a bug fix.
+///
+/// Exhaustive match, no `_` arm and no `Default`: a third entry point must state
+/// which set it runs and fail to compile until it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChainLoweringMode {
+    Standalone,
+    WithContext,
+}
+
+/// Run the whole-body recognizers that build a definition directly, in order.
+///
+/// Returns `None` when the text falls through to the ordinary clause pipeline.
+fn try_parse_chain_bypass(
+    text: &str,
+    kind: AbilityKind,
+    mode: ChainLoweringMode,
+    ctx: &mut ParseContext,
+) -> Option<AbilityDefinition> {
+    // The eight shared bypasses, in their established order. Only the first
+    // consults `ctx`.
+    if let Some(def) = try_parse_conditional_protection_grant_ability(text, kind, ctx) {
+        return Some(def);
     }
     if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
-        return def;
+        return Some(def);
     }
     if let Some(def) = try_parse_grant_graveyard_keyword_to_target(text, kind) {
-        return def;
+        return Some(def);
     }
     if let Some(def) = try_parse_balance_equalization(text, kind) {
-        return def;
+        return Some(def);
     }
     if let Some(def) = try_parse_each_player_copy_chosen(text, kind) {
-        return def;
+        return Some(def);
     }
     if let Some(def) = try_parse_catch_up_draw(text, kind) {
-        return def;
+        return Some(def);
     }
     if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
-        return def;
+        return Some(def);
     }
     if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
+        return Some(def);
+    }
+    match mode {
+        ChainLoweringMode::Standalone => None,
+        ChainLoweringMode::WithContext => try_parse_exile_pile_shuffle_cloak(text, kind),
+    }
+}
+
+/// Lowering: assemble an `AbilityDefinition` from an `AbilityIr`.
+///
+/// The single authority for what an effect-chain entry point does *after*
+/// parsing: lower the chain, finalize it, anchor it, then apply the shell. Every
+/// caller that lowers a whole ability body goes through here, so no call site
+/// can forget a step.
+///
+/// `finalize_effect_chain` and the owner-library anchor belong here and not in
+/// `lower_effect_chain_ir`: pushing them down would newly apply them at the
+/// production callers that lower a *chain* without being a whole ability body.
+pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
+    let mut def = lower_effect_chain_ir(&ir.body);
+    finalize_effect_chain(&mut def);
+    apply_owner_library_reveal_anchor_from_text(&mut def, &ir.source_text);
+    // CR 608.2e: a root the chain cannot describe (it has no previous boundary).
+    if let Some(sub_link) = ir.shell.sub_link {
+        def.sub_link = sub_link;
+    }
+    def
+}
+
+pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
+    // A fresh context per call, exactly as before: the bypasses may mutate `ctx`
+    // before declining, and those mutations must not reach `parse_effect_chain_ir`.
+    if let Some(def) = try_parse_chain_bypass(
+        text,
+        kind,
+        ChainLoweringMode::Standalone,
+        &mut ParseContext::default(),
+    ) {
         return def;
     }
-    let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
-    let mut def = lower_effect_chain_ir(&ir);
-    finalize_effect_chain(&mut def);
-    apply_owner_library_reveal_anchor_from_text(&mut def, text);
-    def
+    lower_ability_ir(&AbilityIr {
+        source_text: text.to_string(),
+        body: parse_effect_chain_ir(text, kind, &mut ParseContext::default()),
+        shell: AbilityShellIr::default(),
+    })
 }
 
 /// Parse a compound effect chain with subject context for pronoun resolution.
@@ -23156,38 +23233,14 @@ pub(crate) fn parse_effect_chain_with_context(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> AbilityDefinition {
-    if let Some(def) = try_parse_conditional_protection_grant_ability(text, kind, ctx) {
+    if let Some(def) = try_parse_chain_bypass(text, kind, ChainLoweringMode::WithContext, ctx) {
         return def;
     }
-    if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
-        return def;
-    }
-    if let Some(def) = try_parse_grant_graveyard_keyword_to_target(text, kind) {
-        return def;
-    }
-    if let Some(def) = try_parse_balance_equalization(text, kind) {
-        return def;
-    }
-    if let Some(def) = try_parse_each_player_copy_chosen(text, kind) {
-        return def;
-    }
-    if let Some(def) = try_parse_catch_up_draw(text, kind) {
-        return def;
-    }
-    if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
-        return def;
-    }
-    if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
-        return def;
-    }
-    if let Some(def) = try_parse_exile_pile_shuffle_cloak(text, kind) {
-        return def;
-    }
-    let ir = parse_effect_chain_ir(text, kind, ctx);
-    let mut def = lower_effect_chain_ir(&ir);
-    finalize_effect_chain(&mut def);
-    apply_owner_library_reveal_anchor_from_text(&mut def, text);
-    def
+    lower_ability_ir(&AbilityIr {
+        source_text: text.to_string(),
+        body: parse_effect_chain_ir(text, kind, ctx),
+        shell: AbilityShellIr::default(),
+    })
 }
 
 /// CR 701.24a + CR 701.58a/e + CR 608.2c: Expose the Culprit mode 2 — "Exile any

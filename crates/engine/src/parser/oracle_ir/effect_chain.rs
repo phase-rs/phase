@@ -12,7 +12,7 @@ use super::ast::{ClauseBoundary, ContinuationAst, ParsedEffectClause};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef,
     DelayedTriggerCondition, MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr,
-    RoundingMode, TargetFilter, TargetSelectionMode, UnlessPayModifier,
+    RoundingMode, SubAbilityLink, TargetFilter, TargetSelectionMode, UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
@@ -40,6 +40,61 @@ pub(crate) struct EffectChainIr {
     /// this process" directive is recognized. Lowering applies it to the root
     /// `AbilityDefinition` so the resolver re-follows the whole chain.
     pub(crate) repeat_until: Option<crate::types::ability::RepeatContinuation>,
+}
+
+/// Root-level `AbilityDefinition` metadata that no `ClauseIr` can express.
+///
+/// The shell is the typed replacement for the `AbilityDefinition` escape hatch:
+/// a whole-body recognizer that must stamp a root field returns an `AbilityIr`
+/// carrying that field here, rather than a hand-built definition.
+///
+/// **Scope is measured, not guessed.** Auditing the `return` expressions of the
+/// nine effect-side bypasses (not a field-name grep — a field set on a *nested*
+/// sub-ability reads identically to one set on the returned root) shows they set
+/// exactly `kind`, `effect`, `sub_ability`, `duration`, `player_scope`, and
+/// `sub_link`. The first five are already `ParsedEffectClause`/`ClauseIr` fields.
+/// `sub_link` is the sole residue, so it is the sole shell field.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct AbilityShellIr {
+    /// CR 608.2e: how the lowered root attaches to its parent — a resolution step
+    /// of the parent's instruction, or an independent following instruction that
+    /// resolves even when an optional parent is declined.
+    ///
+    /// `None` = keep whatever `lower_effect_chain_ir` stamped. `Some(_)` overrides
+    /// it, which is required because the root clause has no *previous* boundary:
+    /// `lower.rs` derives `sub_link` from `prev_boundary`, and `None` maps
+    /// unconditionally to `ContinuationStep`. A recognizer whose root is three
+    /// independent steps (`try_parse_balance_equalization`) therefore cannot say so
+    /// through the chain, only through the shell.
+    ///
+    /// `Option<SubAbilityLink>` rather than a bare `SubAbilityLink`: the latter's
+    /// `Default` is `ContinuationStep`, so a defaulted shell would silently
+    /// *overwrite* the lowered stamp instead of deferring to it.
+    pub(crate) sub_link: Option<SubAbilityLink>,
+}
+
+/// An effect chain plus the root-level metadata applied around it.
+///
+/// Lowered by `lower_ability_ir`, which is the single authority for
+/// "lower the chain, then finalize it, then anchor it, then apply the shell".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct AbilityIr {
+    /// The verbatim text this ability was parsed from.
+    ///
+    /// **Not an `OracleUnitSource`, on purpose.** `OracleUnitSource`'s fields are
+    /// private and its only constructor is `UnitAllocator::allocate_with_span`,
+    /// which requires a containing item span. That allocator is not yet threaded
+    /// through `ParseContext`, and the entry points that build an `AbilityIr`
+    /// (`parse_effect_chain`, `parse_effect_chain_with_context`, and die-result
+    /// branch bodies) receive a bare fragment with no line/byte offsets into the
+    /// card. Minting a span here would mean fabricating precision — the exact
+    /// failure `SpanPrecision` exists to prevent. This becomes an
+    /// `OracleUnitSource` in the unit that threads the allocator, not before.
+    ///
+    /// Read by `apply_owner_library_reveal_anchor_from_text`, which is text-driven.
+    pub(crate) source_text: String,
+    pub(crate) body: EffectChainIr,
+    pub(crate) shell: AbilityShellIr,
 }
 
 /// CR 608.2c + CR 601.2c: Subject of a "does the same / does so" effect-replication
