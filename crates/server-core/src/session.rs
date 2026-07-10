@@ -623,8 +623,11 @@ impl GameSession {
         state.log_player_names = ps.display_names.clone();
         rehydrate_game_from_card_db(&mut state, db);
 
-        // Re-seed RNG with fresh randomness (stale rng_seed would produce
-        // deterministic sequences identical across all restored games)
+        // Re-seed with fresh randomness on resume: a crash-recovered session's
+        // future draws should be independent of the persisted snapshot.
+        // (`rng_word_pos` is now serialized, so a faithful same-stream resume is
+        // possible — this path opts out by design, matching the WASM
+        // `resume_multiplayer_host_state`.)
         let fresh_seed: u64 = rand::rng().random();
         state.rng_seed = fresh_seed;
         state.rng = rand_chacha::ChaCha20Rng::seed_from_u64(fresh_seed);

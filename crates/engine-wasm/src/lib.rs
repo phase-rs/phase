@@ -1279,7 +1279,11 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
     }
     let mut state: GameState = serde_json::from_str(json_str)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
-    state.rng = ChaCha20Rng::seed_from_u64(state.rng_seed);
+    // Undo/restore must resume the *same* random stream: reseed from
+    // `rng_seed` and re-apply the persisted `rng_word_pos` so the next
+    // shuffle/coin-flip/random-discard continues where the snapshot left off,
+    // instead of replaying the opening shuffle's values (issue #5466).
+    state.rehydrate_rng();
     state.debug_mode = true;
     CARD_DB.with(|cell| {
         if let Some(db) = cell.borrow().as_ref() {
@@ -1305,11 +1309,14 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
 ///
 /// Differs from `restore_game_state` in two load-bearing ways:
 ///
-/// 1. **Fresh RNG seed.** `restore_game_state` re-seeds from the saved
-///    `rng_seed`, which rewinds the ChaCha20 stream to position 0 —
-///    correct for undo (replay from origin) but wrong for resume
-///    (subsequent draws would replay the pre-save sequence). This
-///    function stamps a fresh seed so continued play diverges.
+/// 1. **Fresh RNG seed.** `restore_game_state` faithfully resumes the saved
+///    ChaCha20 stream (seed *and* `rng_word_pos`) — the right semantics for
+///    undo, which must continue exactly where the snapshot left off. Resume
+///    deliberately does not: a crash-recovered host stamps a fresh seed so the
+///    resumed game's future draws are independent of the persisted snapshot.
+///    Faithful same-stream resume is now *possible* (the stream position is
+///    serialized as of #5466); re-rolling here is a deliberate choice, not a
+///    workaround for lost stream state.
 /// 2. **Atomic multiplayer-flag flip.** Sets `MULTIPLAYER_MODE` in the
 ///    same call that loads state, so there's no window where a stray
 ///    `restore_game_state` (undo) would be accepted on the resumed
@@ -1339,8 +1346,10 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
     let mut state: GameState = serde_json::from_str(json_str)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
 
-    // Stale `rng_seed` replays the pre-save ChaCha20 sequence because
-    // stream position is `#[serde(skip)]`. Mirrors server-core.
+    // Deliberately re-roll rather than faithfully resume: a crash-recovered
+    // host's future draws should be independent of the persisted snapshot.
+    // (`rng_word_pos` is now serialized, so `rehydrate_rng` *could* resume the
+    // exact stream — resume opts out on purpose.) Mirrors server-core.
     let fresh_seed: u64 = rand::rng().random();
     state.rng_seed = fresh_seed;
     state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
@@ -2120,9 +2129,9 @@ mod tests {
         // Flag flipped atomically with state load.
         assert!(is_multiplayer_mode());
 
-        // RNG seed was replaced with a fresh random value — stale seed would
-        // replay the pre-save ChaCha20 stream from position 0 and cause
-        // deterministic redraws.
+        // RNG seed was replaced with a fresh random value: resume deliberately
+        // diverges from the persisted snapshot rather than faithfully resuming
+        // its stream (see `resume_multiplayer_host_state`).
         let restored: GameState = serde_wasm_bindgen::from_value(get_game_state()).unwrap();
         assert_ne!(
             restored.rng_seed, 0xDEAD_BEEF_0000_0001,

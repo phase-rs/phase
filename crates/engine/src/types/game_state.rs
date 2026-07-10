@@ -44,6 +44,39 @@ fn default_rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(0)
 }
 
+/// Serialize `rng` as just its exact ChaCha20 stream position
+/// (`get_word_pos`), emitted under the `rng_word_pos` key. The seed itself
+/// lives in the sibling `rng_seed` field; together they let
+/// [`GameState::rehydrate_rng`] reconstruct the precise stream after a load,
+/// so a restored snapshot continues the random sequence instead of rewinding
+/// to the opening shuffle (issue #5466). Reading the position off the live
+/// `rng` here means it is always captured fresh at serialize time — there is
+/// no companion field to keep in sync.
+fn serialize_rng_word_pos<S>(rng: &ChaCha20Rng, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_u128(rng.get_word_pos())
+}
+
+/// Deserialize a saved stream position into a throwaway seed-0 ChaCha20
+/// stream. The real seed is applied afterward by [`GameState::rehydrate_rng`]
+/// (which reads this position back off the stream, reseeds from `rng_seed`,
+/// and restores the position) — the sibling `rng_seed` field is not reachable
+/// from a field-level `deserialize_with`, so the position is carried here and
+/// married to the seed one step later. Pre-#5466 saves omit the `rng_word_pos`
+/// key and fall back to [`default_rng`] (position 0 = the historical
+/// rewind-to-origin behavior).
+fn deserialize_rng_word_pos<'de, D>(deserializer: D) -> Result<ChaCha20Rng, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let word_pos = u128::deserialize(deserializer)?;
+    let mut rng = ChaCha20Rng::seed_from_u64(0);
+    rng.set_word_pos(word_pos);
+    Ok(rng)
+}
+
 fn default_game_number() -> u8 {
     1
 }
@@ -6412,7 +6445,21 @@ pub struct GameState {
 
     // RNG
     pub rng_seed: u64,
-    #[serde(skip, default = "default_rng")]
+    /// The live ChaCha20 stream. Reseeded from `rng_seed` on load, but the
+    /// seed alone does not imply the stream *position* — a game mid-play sits
+    /// somewhere past the opening shuffle. We serialize only that position
+    /// (as the `rng_word_pos` key, via `serialize_rng_word_pos`) so
+    /// [`GameState::rehydrate_rng`] can restore the exact point in the
+    /// sequence after deserialization; without it a restored snapshot would
+    /// replay the values that drove the opening shuffle (issue #5466).
+    /// Pre-#5466 saves lack the key and default to position 0 (the old
+    /// rewind-to-origin behavior).
+    #[serde(
+        rename = "rng_word_pos",
+        serialize_with = "serialize_rng_word_pos",
+        deserialize_with = "deserialize_rng_word_pos",
+        default = "default_rng"
+    )]
     pub rng: ChaCha20Rng,
 
     // Combat
@@ -8916,6 +8963,27 @@ impl GameState {
         Self::new(FormatConfig::standard(), 2, seed)
     }
 
+    /// Reconstruct the live `rng` stream after deserialization so it resumes
+    /// exactly where the snapshot left off.
+    ///
+    /// `rng` is serialized as only its stream position (the `rng_word_pos`
+    /// key); on deserialize that position lands in a throwaway seed-0 stream
+    /// (see [`deserialize_rng_word_pos`]). This reseeds from the persisted
+    /// `rng_seed` and re-applies the saved position, so the next draw
+    /// continues the sequence rather than replaying it from the opening
+    /// shuffle (issue #5466). A pre-#5466 save carries no position and lands
+    /// at 0, reproducing the historical rewind-to-origin behavior exactly.
+    ///
+    /// Call this on every path that loads a `GameState` and intends to resume
+    /// the *same* random stream — most importantly the undo/restore primitive.
+    /// Paths that deliberately want a fresh, divergent stream (multiplayer
+    /// resume, AI-search worker seeding) reseed directly and skip this.
+    pub fn rehydrate_rng(&mut self) {
+        let word_pos = self.rng.get_word_pos();
+        self.rng = ChaCha20Rng::seed_from_u64(self.rng_seed);
+        self.rng.set_word_pos(word_pos);
+    }
+
     /// CR 732.2a: adopt a match's immutable configuration, projecting the per-game
     /// runtime gate(s) it controls. The combo-detector opt-in lives on [`MatchConfig`]
     /// (chosen at match creation, whole-table, immutable during play); this is the
@@ -10168,9 +10236,67 @@ mod tests {
         let state = GameState::default();
         let serialized = serde_json::to_string(&state).unwrap();
         let mut deserialized: GameState = serde_json::from_str(&serialized).unwrap();
-        // Reconstruct RNG from seed since it's skipped in serde
-        deserialized.rng = ChaCha20Rng::seed_from_u64(deserialized.rng_seed);
+        // `rng` serializes only its stream position; rehydrate reseeds from
+        // `rng_seed` and restores that position.
+        deserialized.rehydrate_rng();
         assert_eq!(state, deserialized);
+    }
+
+    /// Issue #5466: a restored snapshot must continue the ChaCha20 stream from
+    /// where it left off, not rewind to the opening shuffle. Draw N values,
+    /// serialize, record the next M values, then restore and assert the restored
+    /// state produces those same M values — i.e. the stream position survives the
+    /// round-trip.
+    #[test]
+    fn rehydrate_rng_resumes_stream_position_after_roundtrip() {
+        use rand::RngCore;
+
+        let mut state = GameState::new_two_player(0xABCD_1234);
+        // Advance the stream past origin (as gameplay randomness would).
+        for _ in 0..7 {
+            state.rng.next_u64();
+        }
+
+        let serialized = serde_json::to_string(&state).unwrap();
+
+        // The "future" values that would come next in the live game.
+        let expected: Vec<u64> = (0..5).map(|_| state.rng.next_u64()).collect();
+
+        let mut restored: GameState = serde_json::from_str(&serialized).unwrap();
+        restored.rehydrate_rng();
+        let actual: Vec<u64> = (0..5).map(|_| restored.rng.next_u64()).collect();
+
+        assert_eq!(
+            expected, actual,
+            "restored RNG must resume the stream, not replay from position 0"
+        );
+    }
+
+    /// Backward compatibility: a pre-#5466 save has no `rng_word_pos` key, so the
+    /// field defaults and `rehydrate_rng` lands at position 0 — reproducing the
+    /// historical rewind-to-origin behavior exactly, rather than erroring.
+    #[test]
+    fn rehydrate_rng_defaults_to_origin_for_legacy_saves() {
+        use rand::RngCore;
+
+        // A legacy blob: valid GameState JSON with the `rng_word_pos` key stripped.
+        let mut state = GameState::new_two_player(99);
+        for _ in 0..3 {
+            state.rng.next_u64();
+        }
+        let mut value: serde_json::Value = serde_json::to_value(&state).unwrap();
+        value
+            .as_object_mut()
+            .expect("GameState serializes as a JSON object")
+            .remove("rng_word_pos")
+            .expect("rng_word_pos is serialized");
+
+        let mut restored: GameState = serde_json::from_value(value).unwrap();
+        restored.rehydrate_rng();
+
+        // Position 0: matches a fresh stream seeded from the same seed.
+        let mut origin = ChaCha20Rng::seed_from_u64(restored.rng_seed);
+        assert_eq!(restored.rng.next_u64(), origin.next_u64());
     }
 
     /// Test E — deserialize-before-flush. `static_mode_presence` is `#[serde(skip)]` with an
