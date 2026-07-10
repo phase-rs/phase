@@ -8,10 +8,10 @@
 //!
 //! Hidden-information safety is guaranteed two ways: callers pass
 //! `filter_state_for_viewer` outputs (hands/libraries/face-down identities
-//! already redacted), AND this only reports transitions BETWEEN public zones
-//! plus life totals — so no hidden-zone movement (draws, random discards from
-//! hand, library shuffles) is ever surfaced, even for the acting player's
-//! opponents. CR 400.2 draws the public/hidden zone line.
+//! already redacted, including in `ZoneChange.name`), AND a transition is
+//! surfaced only when at least one endpoint is a public zone — so a
+//! fully-hidden hand↔library move (a draw) is never surfaced. CR 400.2 draws
+//! the public/hidden zone line.
 
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +38,18 @@ pub struct LifeDelta {
     pub delta: i32,
 }
 
+/// An object that ceased to exist during the action (`from` = the public zone it
+/// left). CR 111.7 / CR 704.5d: a token that leaves the battlefield/stack is
+/// removed by state-based actions, so it is simply gone from the after-snapshot —
+/// the headline "this kills that" case when the victim is a token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CeasedObject {
+    pub object_id: ObjectId,
+    pub name: String,
+    pub controller: PlayerId,
+    pub from: Zone,
+}
+
 /// The public, viewer-safe result of previewing an action.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PreviewDiff {
@@ -45,6 +57,10 @@ pub struct PreviewDiff {
     pub zone_changes: Vec<ZoneChange>,
     /// Objects newly present in a public zone (e.g. a created token).
     pub created: Vec<ObjectId>,
+    /// Objects that were in a public zone before and ceased to exist (e.g. a
+    /// token that died), so they appear in neither `after.objects` nor
+    /// `zone_changes`.
+    pub ceased: Vec<CeasedObject>,
 }
 
 /// CR 400.2: a zone whose contents every player can see. Hand and Library are
@@ -56,10 +72,15 @@ fn zone_is_public(zone: Zone) -> bool {
 /// Diff two snapshots (before/after an action) into the PUBLIC deltas a viewer
 /// could legitimately observe.
 ///
-/// Callers MUST pass `filter_state_for_viewer` outputs; on top of that this only
-/// emits public-zone-to-public-zone transitions and life-total changes, so
-/// hidden-zone movements never leak. Output ordering is deterministic (sorted by
-/// id) for stable client rendering.
+/// Callers MUST pass `filter_state_for_viewer` outputs, so any identity the
+/// viewer may not see (opponents' hands, libraries, face-down cards) is already
+/// redacted in the snapshots and in `ZoneChange.name`. On top of that, a
+/// transition is only surfaced when at least ONE endpoint is a public zone: a
+/// departure from a public zone is public information even if the destination is
+/// hidden (a bounce), and an arrival into a public zone is public even if the
+/// origin was hidden (a cast from hand, a mill). Only fully-hidden
+/// hand↔library moves (draws, hand shuffles) are elided, since neither endpoint
+/// is observable. Output ordering is deterministic (sorted by id).
 pub fn compute_preview_diff(before: &GameState, after: &GameState) -> PreviewDiff {
     let mut life_deltas = Vec::new();
     for a in &after.players {
@@ -77,11 +98,10 @@ pub fn compute_preview_diff(before: &GameState, after: &GameState) -> PreviewDif
     let mut zone_changes = Vec::new();
     let mut created = Vec::new();
     for (id, a) in &after.objects {
-        // Only surface transitions where BOTH ends are public — a hand→battlefield
-        // cast or library→hand draw is elided so the preview can't reveal a hidden
-        // card's identity or a random draw/discard outcome.
         match before.objects.get(id) {
-            Some(b) if b.zone != a.zone && zone_is_public(b.zone) && zone_is_public(a.zone) => {
+            // Observable iff at least one endpoint is public (fully-hidden
+            // hand↔library moves are elided).
+            Some(b) if b.zone != a.zone && (zone_is_public(b.zone) || zone_is_public(a.zone)) => {
                 zone_changes.push(ZoneChange {
                     object_id: *id,
                     name: a.name.clone(),
@@ -95,13 +115,32 @@ pub fn compute_preview_diff(before: &GameState, after: &GameState) -> PreviewDif
             None => {}
         }
     }
+
+    // Objects present before and gone after ceased to exist (CR 111.7 /
+    // CR 704.5d — a token leaving battlefield/stack via SBAs). Only report those
+    // that were in a public zone, so a token dying on the battlefield ("this
+    // kills that") surfaces while a hidden-zone disappearance stays hidden.
+    let mut ceased = Vec::new();
+    for (id, b) in &before.objects {
+        if !after.objects.contains_key(id) && zone_is_public(b.zone) {
+            ceased.push(CeasedObject {
+                object_id: *id,
+                name: b.name.clone(),
+                controller: b.controller,
+                from: b.zone,
+            });
+        }
+    }
+
     zone_changes.sort_by_key(|z| z.object_id.0);
     created.sort_by_key(|id| id.0);
+    ceased.sort_by_key(|c| c.object_id.0);
 
     PreviewDiff {
         life_deltas,
         zone_changes,
         created,
+        ceased,
     }
 }
 
@@ -171,40 +210,78 @@ mod tests {
     }
 
     #[test]
-    fn elides_hidden_zone_movements() {
-        // Hand↔Library↔Battlefield transitions that touch a hidden zone must NOT
-        // be reported — no draw/discard/cast leaks a hidden identity.
+    fn reports_public_endpoint_transitions_but_elides_pure_hidden_moves() {
+        // Widened predicate (#5491 review): a transition with at least one PUBLIC
+        // endpoint is observable and reported; only fully-hidden hand↔library
+        // moves (draws) are elided. A creation into a hidden zone is not reported.
         let mut before = GameState::new_two_player(1);
         let mut after = before.clone();
 
-        // Draw: library → hand (both partly hidden) — elided.
-        before
-            .objects
-            .insert(ObjectId(30), obj(30, 0, "Secret", Zone::Library));
-        after
-            .objects
-            .insert(ObjectId(30), obj(30, 0, "Secret", Zone::Hand));
-        // Cast: hand → stack (hand is hidden) — elided.
+        // Cast: hand → stack (arrival into a public zone) — REPORTED.
         before
             .objects
             .insert(ObjectId(31), obj(31, 0, "Bolt", Zone::Hand));
         after
             .objects
             .insert(ObjectId(31), obj(31, 0, "Bolt", Zone::Stack));
-        // A newly-created object that lands in the LIBRARY must not count as created.
+        // Bounce: battlefield → hand (departure from a public zone) — REPORTED.
+        before
+            .objects
+            .insert(ObjectId(32), obj(32, 0, "Bear", Zone::Battlefield));
         after
             .objects
-            .insert(ObjectId(32), obj(32, 0, "Milled", Zone::Library));
+            .insert(ObjectId(32), obj(32, 0, "Bear", Zone::Hand));
+        // Draw: library → hand (both hidden) — ELIDED.
+        before
+            .objects
+            .insert(ObjectId(33), obj(33, 0, "Secret", Zone::Library));
+        after
+            .objects
+            .insert(ObjectId(33), obj(33, 0, "Secret", Zone::Hand));
+        // Milled into the library (hidden arrival) — not `created`.
+        after
+            .objects
+            .insert(ObjectId(34), obj(34, 0, "Milled", Zone::Library));
 
         let diff = compute_preview_diff(&before, &after);
-        assert!(
-            diff.zone_changes.is_empty(),
-            "hidden-zone transitions must be elided: {:?}",
+        let changed: Vec<u64> = diff.zone_changes.iter().map(|z| z.object_id.0).collect();
+        assert_eq!(
+            changed,
+            vec![31, 32],
+            "cast + bounce reported, draw elided: {:?}",
             diff.zone_changes
         );
         assert!(
             diff.created.is_empty(),
-            "objects created in a hidden zone must not be reported"
+            "hidden-zone creation is not reported"
+        );
+    }
+
+    #[test]
+    fn reports_ceased_token_but_not_hidden_disappearance() {
+        // #5491 review blocker: a token that dies (removed from `after.objects` by
+        // state-based actions, CR 111.7 / 704.5d) must still surface — the headline
+        // "this kills that" case. A disappearance from a hidden zone must not.
+        let mut before = GameState::new_two_player(1);
+        let after = before.clone();
+        // These exist only in `before` → they ceased to exist during the action.
+        before
+            .objects
+            .insert(ObjectId(40), obj(40, 0, "Zombie Token", Zone::Battlefield));
+        before
+            .objects
+            .insert(ObjectId(41), obj(41, 0, "Milled Token", Zone::Library));
+
+        let diff = compute_preview_diff(&before, &after);
+        assert_eq!(
+            diff.ceased,
+            vec![CeasedObject {
+                object_id: ObjectId(40),
+                name: "Zombie Token".to_string(),
+                controller: PlayerId(0),
+                from: Zone::Battlefield,
+            }],
+            "public-zone token death surfaces; hidden-zone disappearance stays hidden",
         );
     }
 }

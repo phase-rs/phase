@@ -1216,14 +1216,16 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
 
 /// Issue #5468: non-mutating dry-run of `action` for `actor`. Runs the action on
 /// a throwaway clone (the live `GAME_STATE` is never touched) and returns the
-/// PUBLIC deltas — life-total changes and public-zone object transitions — a
-/// viewer could observe, for hover-preview UX ("this kills that", "you take 4").
+/// PUBLIC deltas — life-total changes, public-zone object transitions, created
+/// tokens, and objects that ceased to exist — a viewer could observe, for
+/// hover-preview UX ("this kills that", "you take 4").
 ///
 /// Hidden-zone movements never leak: the diff is taken over
-/// `filter_state_for_viewer` snapshots AND restricted to public zones (see
-/// `engine::game::preview`), so draws, random discards from hand, and library
-/// shuffles are elided even for the acting player's opponents. Returns an error
-/// string when `action` is malformed or illegal in the current state.
+/// `filter_state_for_viewer` snapshots (so any identity the viewer can't see is
+/// already redacted), AND a transition is surfaced only when at least one
+/// endpoint is a public zone (see `engine::game::preview`), so a fully-hidden
+/// hand↔library draw is elided even for the acting player's opponents. Returns
+/// an error string when `action` is malformed or illegal in the current state.
 #[wasm_bindgen]
 pub fn preview_action_js(actor: u8, action: JsValue) -> JsValue {
     let action: GameAction = match serde_wasm_bindgen::from_value(action) {

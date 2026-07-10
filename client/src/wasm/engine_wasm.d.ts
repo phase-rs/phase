@@ -268,6 +268,22 @@ export function load_replay_for_playback(json_str: string): number;
 export function ping(): string;
 
 /**
+ * Issue #5468: non-mutating dry-run of `action` for `actor`. Runs the action on
+ * a throwaway clone (the live `GAME_STATE` is never touched) and returns the
+ * PUBLIC deltas — life-total changes, public-zone object transitions, created
+ * tokens, and objects that ceased to exist — a viewer could observe, for
+ * hover-preview UX ("this kills that", "you take 4").
+ *
+ * Hidden-zone movements never leak: the diff is taken over
+ * `filter_state_for_viewer` snapshots (so any identity the viewer can't see is
+ * already redacted), AND a transition is surfaced only when at least one
+ * endpoint is a public zone (see `engine::game::preview`), so a fully-hidden
+ * hand↔library draw is elided even for the acting player's opponents. Returns
+ * an error string when `action` is malformed or illegal in the current state.
+ */
+export function preview_action_js(actor: number, action: any): any;
+
+/**
  * Project an authoritative seat view from Rust so frontend transports do not
  * need to understand format topology details.
  */
@@ -430,6 +446,7 @@ export interface InitOutput {
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly ping: () => [number, number];
+    readonly preview_action_js: (a: number, b: any) => any;
     readonly project_seat_view: (a: number, b: number) => [number, number, number];
     readonly replay_seek_js: (a: number) => [number, number, number];
     readonly resolve_all: (a: number, b: number, c: number, d: number) => [number, number, number];
