@@ -1370,9 +1370,12 @@ pub struct PendingPerPlayerZoneChoice {
     pub accumulated: bool,
 }
 
-/// CR 101.4 + CR 701.21a: Per-player sacrifice choices for one simultaneous
-/// instruction such as "each player sacrifices a creature." Players choose in
-/// APNAP order, then all chosen permanents are sacrificed together.
+/// CR 101.4: If players make choices for one instruction, they choose in
+/// APNAP order before the simultaneous action happens.
+/// CR 701.21a: To sacrifice a permanent, its controller moves it from the
+/// battlefield to its owner's graveyard.
+/// Per-player sacrifice choices for one simultaneous instruction such as
+/// "each player sacrifices a creature."
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingPlayerScopeSacrificeChoice {
     /// The scoped sacrifice ability template. The current chooser is rebound
@@ -7683,10 +7686,12 @@ pub struct GameState {
     /// tracked set before "put those cards onto the battlefield" resolves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_per_player_zone_choice: Option<PendingPerPlayerZoneChoice>,
-    /// CR 101.4 + CR 701.21a: Per-player sacrifice choices paused by the
-    /// current player's `EffectZoneChoice`. Drained by the choice handler before
-    /// normal `pending_continuation` so all choices are known before any
-    /// permanent is moved.
+    /// CR 101.4: If players make choices for one instruction, they choose in
+    /// APNAP order before the simultaneous action happens.
+    /// CR 701.21a: To sacrifice a permanent, its controller moves it from the
+    /// battlefield to its owner's graveyard.
+    /// Per-player sacrifice choices paused by the current player's
+    /// `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_sacrifice_choice: Option<PendingPlayerScopeSacrificeChoice>,
     /// CR 608.2c + CR 105.1 / CR 205.2a: Per-category-member

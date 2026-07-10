@@ -5511,6 +5511,15 @@ enum PlayerScopeSacrificeStep {
 
 pub(crate) enum PendingPlayerScopeSacrificeOutcome {
     WaitingForNextChoice,
+    PausedForReplacement,
+    Completed {
+        events_before_sacrifice: usize,
+        events_after_sacrifice: usize,
+    },
+}
+
+enum PlayerScopeSacrificePerformOutcome {
+    PausedForReplacement,
     Completed {
         events_before_sacrifice: usize,
         events_after_sacrifice: usize,
@@ -5535,6 +5544,7 @@ fn player_scope_sacrifice_step(
     original_controller: PlayerId,
     player: PlayerId,
 ) -> PlayerScopeSacrificeStep {
+    // CR 701.21a: a player can sacrifice only a permanent they control.
     let scoped = scoped_player_sacrifice_ability(template, original_controller, player);
     let Effect::Sacrifice {
         target,
@@ -5569,9 +5579,6 @@ fn player_scope_sacrifice_step(
         .collect();
 
     if eligible.is_empty() {
-        if !up_to {
-            state.cost_payment_failed_flag = true;
-        }
         return PlayerScopeSacrificeStep::Noop;
     }
 
@@ -5625,30 +5632,44 @@ fn set_player_scope_sacrifice_waiting_for(
 
 fn perform_player_scope_sacrifices(
     state: &mut GameState,
-    source_id: ObjectId,
-    selections: Vec<(PlayerId, Vec<ObjectId>)>,
+    ability: &ResolvedAbility,
+    mut selections: Vec<(PlayerId, Vec<ObjectId>)>,
     events: &mut Vec<GameEvent>,
-) -> Result<(usize, usize), EffectError> {
+) -> Result<PlayerScopeSacrificePerformOutcome, EffectError> {
     let events_before_sacrifice = events.len();
     let mut all_chosen = Vec::new();
     let mut sacrificed = 0;
 
-    // CR 101.4 + CR 701.21a: after every player has made the required APNAP
-    // choice, the chosen permanents are moved to their owners' graveyards as
-    // one simultaneous sacrifice instruction.
-    for (player, cards) in selections {
-        for card in cards {
+    // CR 101.4: after every player has made the required APNAP choice, the
+    // chosen permanents are moved as one simultaneous instruction.
+    // CR 701.21a: to sacrifice a permanent, its controller moves it from the
+    // battlefield to its owner's graveyard.
+    while !selections.is_empty() {
+        let (player, mut cards) = selections.remove(0);
+        while !cards.is_empty() {
+            let card = cards.remove(0);
             all_chosen.push(card);
             match crate::game::sacrifice::sacrifice_permanent(state, card, player, events)
                 .map_err(|error| EffectError::InvalidParam(error.to_string()))?
             {
                 crate::game::sacrifice::SacrificeOutcome::Complete => sacrificed += 1,
                 crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                    if !cards.is_empty() {
+                        selections.insert(0, (player, cards));
+                    }
+                    if !selections.is_empty() {
+                        state.pending_player_scope_sacrifice_choice =
+                            Some(PendingPlayerScopeSacrificeChoice {
+                                ability: Box::new(ability.clone()),
+                                remaining_players: vec![],
+                                selections,
+                            });
+                    }
                     state.waiting_for = crate::game::replacement::replacement_choice_waiting_for(
                         choice_player,
                         state,
                     );
-                    return Ok((events_before_sacrifice, events.len()));
+                    return Ok(PlayerScopeSacrificePerformOutcome::PausedForReplacement);
                 }
             }
         }
@@ -5661,7 +5682,7 @@ fn perform_player_scope_sacrifices(
     state.last_effect_count = Some(sacrificed);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Sacrifice,
-        source_id,
+        source_id: ability.source_id,
     });
     let events_after_sacrifice = events.len();
 
@@ -5677,7 +5698,10 @@ fn perform_player_scope_sacrifices(
     ids.dedup();
     state.last_zone_changed_ids = ids;
 
-    Ok((events_before_sacrifice, events_after_sacrifice))
+    Ok(PlayerScopeSacrificePerformOutcome::Completed {
+        events_before_sacrifice,
+        events_after_sacrifice,
+    })
 }
 
 fn should_collect_player_scope_sacrifice_choices(ability: &ResolvedAbility) -> bool {
@@ -5693,6 +5717,8 @@ fn start_player_scope_sacrifice_choices(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<(), EffectError> {
+    // CR 101.4: If multiple players make choices for one instruction, choices
+    // are announced in APNAP order before the simultaneous action happens.
     let mut selections = Vec::new();
     for (i, player) in matching_players.iter().copied().enumerate() {
         match player_scope_sacrifice_step(state, template, original_controller, player) {
@@ -5714,9 +5740,13 @@ fn start_player_scope_sacrifice_choices(
         }
     }
 
-    let _ = perform_player_scope_sacrifices(state, template.source_id, selections, events)?;
-    if let Some(after_scope) = after_scope {
-        resolve_ability_chain(state, &after_scope, events, depth + 1)?;
+    match perform_player_scope_sacrifices(state, template, selections, events)? {
+        PlayerScopeSacrificePerformOutcome::PausedForReplacement => {}
+        PlayerScopeSacrificePerformOutcome::Completed { .. } => {
+            if let Some(after_scope) = after_scope {
+                resolve_ability_chain(state, &after_scope, events, depth + 1)?;
+            }
+        }
     }
     Ok(())
 }
@@ -5727,6 +5757,8 @@ pub(crate) fn advance_pending_player_scope_sacrifice_choice(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<PendingPlayerScopeSacrificeOutcome, EffectError> {
+    // CR 101.4: Resume the APNAP choice walk until every player has chosen or a
+    // nested replacement choice pauses the simultaneous action.
     let Some(mut pending) = state.pending_player_scope_sacrifice_choice.take() else {
         return Ok(PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice);
     };
@@ -5752,16 +5784,41 @@ pub(crate) fn advance_pending_player_scope_sacrifice_choice(
         }
     }
 
-    let (events_before_sacrifice, events_after_sacrifice) = perform_player_scope_sacrifices(
-        state,
-        pending.ability.source_id,
-        pending.selections,
-        events,
-    )?;
-    Ok(PendingPlayerScopeSacrificeOutcome::Completed {
-        events_before_sacrifice,
-        events_after_sacrifice,
-    })
+    match perform_player_scope_sacrifices(state, &pending.ability, pending.selections, events)? {
+        PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
+            Ok(PendingPlayerScopeSacrificeOutcome::PausedForReplacement)
+        }
+        PlayerScopeSacrificePerformOutcome::Completed {
+            events_before_sacrifice,
+            events_after_sacrifice,
+        } => Ok(PendingPlayerScopeSacrificeOutcome::Completed {
+            events_before_sacrifice,
+            events_after_sacrifice,
+        }),
+    }
+}
+
+pub(crate) fn drain_pending_player_scope_sacrifice_after_replacement(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<PendingPlayerScopeSacrificeOutcome, EffectError> {
+    // CR 101.4: After a CR 616.1 replacement choice resumes one selected
+    // sacrifice, continue the remaining already-announced simultaneous action.
+    let Some(pending) = state.pending_player_scope_sacrifice_choice.take() else {
+        return Ok(PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice);
+    };
+    match perform_player_scope_sacrifices(state, &pending.ability, pending.selections, events)? {
+        PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
+            Ok(PendingPlayerScopeSacrificeOutcome::PausedForReplacement)
+        }
+        PlayerScopeSacrificePerformOutcome::Completed {
+            events_before_sacrifice,
+            events_after_sacrifice,
+        } => Ok(PendingPlayerScopeSacrificeOutcome::Completed {
+            events_before_sacrifice,
+            events_after_sacrifice,
+        }),
+    }
 }
 
 /// Resolve an ability and follow its sub_ability chain using typed nested structs.

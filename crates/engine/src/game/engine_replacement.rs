@@ -822,6 +822,28 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_player_scope_sacrifice_choice.is_some()
+            {
+                // CR 101.4: a simultaneous each-player sacrifice paused by a
+                // CR 616.1 replacement choice resumes the already-announced
+                // remaining sacrifices before any parked continuation can run.
+                match effects::drain_pending_player_scope_sacrifice_after_replacement(state, events)
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                {
+                    effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {}
+                    effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
+                        waiting_for = state.waiting_for.clone();
+                    }
+                    effects::PendingPlayerScopeSacrificeOutcome::Completed { .. } => {
+                        effects::drain_pending_continuation(state, events);
+                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                            waiting_for = state.waiting_for.clone();
+                        }
+                    }
+                }
+            }
+
             // CR 101.4 + CR 616.1: An `EachPlayerCopyChosen` per-player step
             // paused on a replacement choice for its inner token copy or its
             // +1/+1 counter placement. Both primitives drained above (copy at the

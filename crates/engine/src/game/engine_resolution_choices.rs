@@ -3193,12 +3193,20 @@ pub(super) fn handle_resolution_choice(
             if matches!(effect_kind, EffectKind::Sacrifice)
                 && state.pending_player_scope_sacrifice_choice.is_some()
             {
+                // CR 101.4: If multiple players make choices for one
+                // instruction, collect those choices before the simultaneous
+                // sacrifice action happens.
                 let outcome = effects::advance_pending_player_scope_sacrifice_choice(
                     state, player, &chosen, events,
                 )
                 .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                 match outcome {
                     effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                    effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
                         return Ok(ResolutionChoiceOutcome::WaitingFor(
                             state.waiting_for.clone(),
                         ));
