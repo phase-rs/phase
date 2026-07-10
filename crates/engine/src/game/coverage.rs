@@ -37,7 +37,7 @@ use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::triggers::TriggerMode;
-use crate::types::zones::Zone;
+use crate::types::zones::{EtbTapState, Zone};
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::space1;
@@ -2558,13 +2558,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             origin,
             destination,
             target,
-            ..
-        }
-        | Effect::ChangeZoneAll {
-            origin,
-            destination,
-            target,
-            ..
+            owner_library,
+            enter_transformed,
+            enters_under,
+            enter_tapped,
+            enters_attacking,
+            up_to,
+            enter_with_counters,
+            conditional_enter_with_counters,
+            face_down_profile,
+            enters_modified_if,
         } => {
             if let Some(o) = origin {
                 d.push(("from".into(), fmt_zone(o)));
@@ -2572,6 +2575,88 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("to".into(), fmt_zone(destination)));
             if !matches!(target, TargetFilter::None) {
                 d.push(("target".into(), fmt_target(target)));
+            }
+            // #5495 (follow-up to #5492): battlefield-entry qualifiers a parser
+            // change can flip, previously swallowed by `..` and thus invisible to
+            // the coverage-parse-diff sticky (e.g. `enters_attacking` for
+            // "put it onto the battlefield attacking", CR 508.4 — Senu). Emitted
+            // only when active, so a plain ChangeZone's signature is unchanged.
+            if *owner_library {
+                d.push(("owner_library".into(), "true".into()));
+            }
+            if *enter_transformed {
+                d.push(("enter_transformed".into(), "true".into()));
+            }
+            if let Some(u) = enters_under {
+                d.push(("enters_under".into(), format!("{u:?}")));
+            }
+            if !matches!(enter_tapped, EtbTapState::Unspecified) {
+                d.push(("enter_tapped".into(), format!("{enter_tapped:?}")));
+            }
+            if *enters_attacking {
+                d.push(("enters_attacking".into(), "true".into()));
+            }
+            if *up_to {
+                d.push(("up_to".into(), "true".into()));
+            }
+            if !enter_with_counters.is_empty() {
+                d.push((
+                    "enter_with_counters".into(),
+                    format!("{enter_with_counters:?}"),
+                ));
+            }
+            if !conditional_enter_with_counters.is_empty() {
+                d.push((
+                    "conditional_enter_with_counters".into(),
+                    format!("{conditional_enter_with_counters:?}"),
+                ));
+            }
+            if let Some(fd) = face_down_profile {
+                d.push(("face_down_profile".into(), format!("{fd:?}")));
+            }
+            if let Some(f) = enters_modified_if {
+                d.push(("enters_modified_if".into(), fmt_target(f)));
+            }
+        }
+        Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            enters_under,
+            enter_tapped,
+            enter_with_counters,
+            face_down_profile,
+            library_position,
+            random_order,
+        } => {
+            if let Some(o) = origin {
+                d.push(("from".into(), fmt_zone(o)));
+            }
+            d.push(("to".into(), fmt_zone(destination)));
+            if !matches!(target, TargetFilter::None) {
+                d.push(("target".into(), fmt_target(target)));
+            }
+            // #5495: same entry-qualifier audit for the `All` variant.
+            if let Some(u) = enters_under {
+                d.push(("enters_under".into(), format!("{u:?}")));
+            }
+            if !matches!(enter_tapped, EtbTapState::Unspecified) {
+                d.push(("enter_tapped".into(), format!("{enter_tapped:?}")));
+            }
+            if !enter_with_counters.is_empty() {
+                d.push((
+                    "enter_with_counters".into(),
+                    format!("{enter_with_counters:?}"),
+                ));
+            }
+            if let Some(fd) = face_down_profile {
+                d.push(("face_down_profile".into(), format!("{fd:?}")));
+            }
+            if let Some(lp) = library_position {
+                d.push(("library_position".into(), format!("{lp:?}")));
+            }
+            if *random_order {
+                d.push(("random_order".into(), "true".into()));
             }
         }
         Effect::Dig {
@@ -10275,7 +10360,45 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{BlockExceptionKind, ProhibitionScope};
-    use crate::types::zones::Zone;
+    use crate::types::zones::{EtbTapState, Zone};
+
+    #[test]
+    fn change_zone_signature_exposes_enters_attacking() {
+        // #5495: a parser change flipping `enters_attacking` (e.g. teaching
+        // `parse_battlefield_entry_qualifiers` to recognize "... onto the
+        // battlefield attacking", CR 508.4 — Senu) must be visible in the
+        // parse-diff signature; a plain ChangeZone has no such row.
+        let signature_keys = |attacking: bool| -> Vec<String> {
+            effect_details(&Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::None,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: attacking,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            })
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+        };
+        assert!(
+            signature_keys(true).iter().any(|k| k == "enters_attacking"),
+            "enters_attacking=true must appear in the parse-diff signature",
+        );
+        assert!(
+            !signature_keys(false)
+                .iter()
+                .any(|k| k == "enters_attacking"),
+            "a plain (non-attacking) ChangeZone must not add the row",
+        );
+    }
 
     #[test]
     fn prevent_damage_signature_exposes_damage_source_filter() {
