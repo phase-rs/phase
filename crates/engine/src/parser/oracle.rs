@@ -60,7 +60,10 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
-use super::oracle_ir::doc::{OracleDocIr, OracleItemIr};
+use super::oracle_ir::doc::{
+    OracleDocBuilder, OracleDocIr, OracleNodeIr, OracleSourceSpan, PrintedAbilityIndex,
+    PrintedTriggerIndex,
+};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     extract_keyword_line, is_keyword_cost_line, parse_keyword_from_oracle,
@@ -2398,10 +2401,14 @@ fn parse_flash_cleanup_sacrifice_casting_option(
 }
 
 /// Lower an `OracleDocIr` into the final `ParsedAbilities` via exhaustive match
-/// on each `OracleItemIr` variant.
+/// on each item's `OracleNodeIr` payload.
 ///
 /// Core IR variants are lowered through their dedicated lowering functions.
 /// PreLowered variants are identity-lowered (pushed directly to the result).
+///
+/// `ParsedAbilities` stays category-grouped because it is the runtime-facing
+/// type; only *within*-category order and explicit cross-item relations are
+/// semantic after lowering.
 pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
     let mut result = ParsedAbilities {
         abilities: Vec::new(),
@@ -2418,52 +2425,52 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
         parse_warnings: Vec::new(),
     };
     for item in &ir.items {
-        match item {
-            OracleItemIr::Spell(effect_ir) => {
+        match &item.node {
+            OracleNodeIr::Spell(effect_ir) => {
                 result.abilities.push(lower_effect_chain_ir(effect_ir));
             }
-            OracleItemIr::Trigger(trigger_ir) => {
+            OracleNodeIr::Trigger(trigger_ir) => {
                 result.triggers.push(lower_trigger_ir(trigger_ir));
             }
-            OracleItemIr::Static(static_ir) => {
+            OracleNodeIr::Static(static_ir) => {
                 result.statics.push(lower_static_ir(static_ir));
             }
-            OracleItemIr::Replacement(replacement_ir) => {
+            OracleNodeIr::Replacement(replacement_ir) => {
                 result
                     .replacements
                     .push(lower_replacement_ir(replacement_ir));
             }
-            OracleItemIr::Keyword(kw) => {
+            OracleNodeIr::Keyword(kw) => {
                 result.extracted_keywords.push(kw.clone());
             }
-            OracleItemIr::Modal(modal) => {
+            OracleNodeIr::Modal(modal) => {
                 result.modal = Some(modal.clone());
             }
-            OracleItemIr::AdditionalCost(cost) => {
+            OracleNodeIr::AdditionalCost(cost) => {
                 result.additional_cost = Some(cost.clone());
             }
-            OracleItemIr::CastingRestriction(restriction) => {
+            OracleNodeIr::CastingRestriction(restriction) => {
                 result.casting_restrictions.push(restriction.clone());
             }
-            OracleItemIr::CastingOption(option) => {
+            OracleNodeIr::CastingOption(option) => {
                 result.casting_options.push(option.clone());
             }
-            OracleItemIr::SolveCondition(condition) => {
+            OracleNodeIr::SolveCondition(condition) => {
                 result.solve_condition = Some(condition.clone());
             }
-            OracleItemIr::StriveCost(cost) => {
+            OracleNodeIr::StriveCost(cost) => {
                 result.strive_cost = Some(cost.clone());
             }
-            OracleItemIr::PreLoweredTrigger(def) => {
+            OracleNodeIr::PreLoweredTrigger(def) => {
                 result.triggers.push(def.clone());
             }
-            OracleItemIr::PreLoweredStatic(def) => {
+            OracleNodeIr::PreLoweredStatic(def) => {
                 result.statics.push(def.clone());
             }
-            OracleItemIr::PreLoweredReplacement(def) => {
+            OracleNodeIr::PreLoweredReplacement(def) => {
                 result.replacements.push(def.clone());
             }
-            OracleItemIr::PreLoweredSpell(def) => {
+            OracleNodeIr::PreLoweredSpell(def) => {
                 result.abilities.push(def.clone());
             }
         }
@@ -2852,7 +2859,9 @@ pub(crate) fn parse_oracle_ir(
         let mut triggers = parse_trigger_lines_at_index(
             ability_text,
             card_name,
-            Some(result.triggers.len()),
+            Some(PrintedTriggerIndex::from_category_vector_len(
+                result.triggers.len(),
+            )),
             &mut ctx,
         );
         for trigger in &mut triggers {
@@ -2871,8 +2880,11 @@ pub(crate) fn parse_oracle_ir(
         // CR 707.9a: Pass the running trigger count so any "has this ability"
         // retain modification inside a Spacecraft threshold trigger body
         // resolves to the correct printed-trigger slot.
-        let (sc_statics, sc_triggers, sc_abilities, consumed) =
-            parse_spacecraft_threshold_lines(&lines, card_name, result.triggers.len());
+        let (sc_statics, sc_triggers, sc_abilities, consumed) = parse_spacecraft_threshold_lines(
+            &lines,
+            card_name,
+            PrintedTriggerIndex::from_category_vector_len(result.triggers.len()),
+        );
         result.statics.extend(sc_statics);
         result.triggers.extend(sc_triggers);
         for mut def in sc_abilities {
@@ -3481,7 +3493,9 @@ pub(crate) fn parse_oracle_ir(
                 effect_text,
                 &line,
                 card_name,
-                Some(result.abilities.len()),
+                Some(PrintedAbilityIndex::from_category_vector_len(
+                    result.abilities.len(),
+                )),
                 &mut ctx,
             );
             // CR 702.186b: ∞ ("As long as harnessed, it has [ability]") gates an
@@ -3566,7 +3580,9 @@ pub(crate) fn parse_oracle_ir(
             let mut triggers = parse_trigger_lines_at_index(
                 &line,
                 card_name,
-                Some(result.triggers.len()),
+                Some(PrintedTriggerIndex::from_category_vector_len(
+                    result.triggers.len(),
+                )),
                 &mut ctx,
             );
             i += 1;
@@ -3603,7 +3619,9 @@ pub(crate) fn parse_oracle_ir(
                         activated_effect_text,
                         &line,
                         card_name,
-                        Some(result.abilities.len()),
+                        Some(PrintedAbilityIndex::from_category_vector_len(
+                            result.abilities.len(),
+                        )),
                         &mut ctx,
                     );
                     result.abilities.push(def);
@@ -3616,7 +3634,9 @@ pub(crate) fn parse_oracle_ir(
                 let mut triggers = parse_trigger_lines_at_index(
                     &effect_text,
                     card_name,
-                    Some(result.triggers.len()),
+                    Some(PrintedTriggerIndex::from_category_vector_len(
+                        result.triggers.len(),
+                    )),
                     &mut ctx,
                 );
                 // B7: Attach ability-word condition as fallback when extract_if_condition
@@ -4707,7 +4727,9 @@ pub(crate) fn parse_oracle_ir(
                 let mut triggers = parse_trigger_lines_at_index(
                     &effect_text,
                     card_name,
-                    Some(result.triggers.len()),
+                    Some(PrintedTriggerIndex::from_category_vector_len(
+                        result.triggers.len(),
+                    )),
                     &mut ctx,
                 );
                 i += 1;
@@ -4900,7 +4922,7 @@ fn parse_activated_ability_definition(
     effect_text: &str,
     description: &str,
     card_name: &str,
-    current_ability_index: Option<usize>,
+    current_ability_index: Option<PrintedAbilityIndex>,
     ctx: &mut ParseContext,
 ) -> (AbilityDefinition, String) {
     let (effect_text, constraints) = strip_activated_constraints(effect_text);
@@ -4921,7 +4943,8 @@ fn parse_activated_ability_definition(
     // CR 707.9a: thread the activated-ability index so "except it has this
     // ability" inside the effect body resolves to RetainPrintedAbilityFromSource.
     let prev_ability_index = ctx.current_ability_index;
-    ctx.current_ability_index = current_ability_index;
+    // `ParseContext` stores a raw `usize`; unwrap the printed-slot newtype here.
+    ctx.current_ability_index = current_ability_index.map(PrintedAbilityIndex::get);
 
     // Retry with `~` normalization if the first pass left an Unimplemented node
     // or emitted a target-fallback warning.
@@ -4956,55 +4979,78 @@ fn parse_activated_ability_definition(
 
 /// Convert a `ParsedAbilities` into an `OracleDocIr` using `PreLowered*` variants.
 ///
-/// Preserves source ordering: abilities, triggers, statics, replacements are pushed
-/// in their parsed order. Scalar fields (modal, additional_cost, solve_condition,
-/// strive_cost) are pushed as their corresponding `OracleItemIr` variants.
+/// UNIT-3B DEBT — this is the document façade, and it is still category-ordered.
+/// It runs *after* lowering and therefore has no access to the line cursor, so it
+/// cannot recover an exact source position for any item. Every item is emitted
+/// with `OracleSourceSpan::whole_document` (a true containing span, not a minimal
+/// one) and a distinct `ordinal_within_span` that reproduces today's category
+/// emission order exactly. Lowered output is therefore byte-identical.
+///
+/// Unit 3b moves emission into `parse_oracle_ir`'s dispatch loop, where the exact
+/// line/byte range is in hand; this function is deleted there (removal gate 5).
+///
+/// Routing through `OracleDocBuilder` now — rather than pushing a bare `Vec` — is
+/// what makes item identity, the CR 707.9a printed-slot counters, and the span
+/// invariants have a single authority before that move.
 fn parsed_abilities_to_doc_ir(
     result: ParsedAbilities,
     oracle_text: &str,
     card_name: &str,
     ctx: &mut ParseContext,
 ) -> OracleDocIr {
-    let mut items: Vec<OracleItemIr> = Vec::new();
+    let mut builder = OracleDocBuilder::new();
+    let mut ordinal: u32 = 0;
+
+    // One helper, so the ordinal can never be advanced without emitting, and an
+    // emission can never reuse an ordinal. Both are builder-rejected anyway; this
+    // makes the pairing structural.
+    let mut emit = |builder: &mut OracleDocBuilder, node: OracleNodeIr| {
+        let span = OracleSourceSpan::whole_document(oracle_text, ordinal);
+        ordinal += 1;
+        // `None`: a whole-document span cannot honestly name a fragment — the only
+        // text it covers is the entire card. Unit 3b supplies `Some(line)` with an
+        // `Exact` span. `emit` rejects any other combination.
+        let slot = builder.begin_item(span, None);
+        builder
+            .emit(slot, node)
+            .expect("whole-document spans carry distinct ordinals, so emit cannot reject");
+    };
+
     for def in result.abilities {
-        items.push(OracleItemIr::PreLoweredSpell(def));
+        emit(&mut builder, OracleNodeIr::PreLoweredSpell(def));
     }
     for def in result.triggers {
-        items.push(OracleItemIr::PreLoweredTrigger(def));
+        emit(&mut builder, OracleNodeIr::PreLoweredTrigger(def));
     }
     for def in result.statics {
-        items.push(OracleItemIr::PreLoweredStatic(def));
+        emit(&mut builder, OracleNodeIr::PreLoweredStatic(def));
     }
     for def in result.replacements {
-        items.push(OracleItemIr::PreLoweredReplacement(def));
+        emit(&mut builder, OracleNodeIr::PreLoweredReplacement(def));
     }
     for kw in result.extracted_keywords {
-        items.push(OracleItemIr::Keyword(kw));
+        emit(&mut builder, OracleNodeIr::Keyword(kw));
     }
     if let Some(modal) = result.modal {
-        items.push(OracleItemIr::Modal(modal));
+        emit(&mut builder, OracleNodeIr::Modal(modal));
     }
     if let Some(cost) = result.additional_cost {
-        items.push(OracleItemIr::AdditionalCost(cost));
+        emit(&mut builder, OracleNodeIr::AdditionalCost(cost));
     }
     for restriction in result.casting_restrictions {
-        items.push(OracleItemIr::CastingRestriction(restriction));
+        emit(&mut builder, OracleNodeIr::CastingRestriction(restriction));
     }
     for option in result.casting_options {
-        items.push(OracleItemIr::CastingOption(option));
+        emit(&mut builder, OracleNodeIr::CastingOption(option));
     }
     if let Some(condition) = result.solve_condition {
-        items.push(OracleItemIr::SolveCondition(condition));
+        emit(&mut builder, OracleNodeIr::SolveCondition(condition));
     }
     if let Some(cost) = result.strive_cost {
-        items.push(OracleItemIr::StriveCost(cost));
+        emit(&mut builder, OracleNodeIr::StriveCost(cost));
     }
-    OracleDocIr {
-        items,
-        source_text: oracle_text.to_string(),
-        card_name: card_name.to_string(),
-        diagnostics: std::mem::take(&mut ctx.diagnostics),
-    }
+
+    builder.finish(oracle_text, card_name, std::mem::take(&mut ctx.diagnostics))
 }
 
 /// Parse Oracle text into structured ability definitions.

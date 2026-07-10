@@ -5,83 +5,127 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredTrigger": {
-        "mode": "ChangesZone",
-        "execute": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Sacrifice",
-            "target": {
-              "type": "SelfRef"
-            },
-            "count": {
-              "type": "Fixed",
-              "value": 1
-            }
-          },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": null,
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "valid_card": {
-          "type": "SelfRef"
-        },
-        "origin": null,
-        "destination": "Battlefield",
-        "trigger_zones": [
-          "Battlefield"
-        ],
-        "phase": null,
-        "optional": false,
-        "damage_kind": "Any",
-        "secondary": false,
-        "valid_target": null,
-        "valid_source": null,
-        "description": "When ~ enters, sacrifice it unless it escaped.",
-        "constraint": null,
-        "condition": {
-          "type": "Not",
-          "condition": {
-            "type": "CastVariantPaid",
-            "variant": "Escape"
-          }
-        },
-        "batched": false
-      }
-    },
-    {
-      "PreLoweredTrigger": {
-        "mode": "EntersOrAttacks",
-        "execute": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Discard",
-            "count": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "target": {
-              "type": "Controller"
-            }
-          },
-          "cost": null,
-          "sub_ability": {
+        "span": {
+          "first_line": 0,
+          "last_line": 2,
+          "start_byte": 0,
+          "end_byte": 324,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "ChangesZone",
+          "execute": {
             "kind": "Spell",
             "effect": {
-              "type": "LoseLife",
-              "amount": {
+              "type": "Sacrifice",
+              "target": {
+                "type": "SelfRef"
+              },
+              "count": {
                 "type": "Fixed",
-                "value": 3
+                "value": 1
               }
             },
             "cost": null,
             "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "valid_card": {
+            "type": "SelfRef"
+          },
+          "origin": null,
+          "destination": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "phase": null,
+          "optional": false,
+          "damage_kind": "Any",
+          "secondary": false,
+          "valid_target": null,
+          "valid_source": null,
+          "description": "When ~ enters, sacrifice it unless it escaped.",
+          "constraint": null,
+          "condition": {
+            "type": "Not",
+            "condition": {
+              "type": "CastVariantPaid",
+              "variant": "Escape"
+            }
+          },
+          "batched": false
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 2,
+          "start_byte": 0,
+          "end_byte": 324,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 1
+        }
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "EntersOrAttacks",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "Discard",
+              "count": {
+                "type": "Fixed",
+                "value": 1
+              },
+              "target": {
+                "type": "Controller"
+              }
+            },
+            "cost": null,
+            "sub_ability": {
+              "kind": "Spell",
+              "effect": {
+                "type": "LoseLife",
+                "amount": {
+                  "type": "Fixed",
+                  "value": 3
+                }
+              },
+              "cost": null,
+              "sub_ability": null,
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false,
+              "player_scope": {
+                "type": "Opponent"
+              }
+            },
             "duration": null,
             "description": null,
             "target_prompt": null,
@@ -93,79 +137,86 @@ expression: "&ir"
               "type": "Opponent"
             }
           },
-          "duration": null,
-          "description": null,
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
+          "valid_card": {
+            "type": "SelfRef"
+          },
+          "origin": null,
+          "destination": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "phase": null,
           "optional": false,
-          "forward_result": false,
-          "player_scope": {
-            "type": "Opponent"
-          }
-        },
-        "valid_card": {
-          "type": "SelfRef"
-        },
-        "origin": null,
-        "destination": "Battlefield",
-        "trigger_zones": [
-          "Battlefield"
-        ],
-        "phase": null,
-        "optional": false,
-        "damage_kind": "Any",
-        "secondary": false,
-        "valid_target": null,
-        "valid_source": null,
-        "description": "Whenever ~ enters or attacks, each opponent discards a card, then each opponent who didn't discard a nonland card this way loses 3 life.",
-        "constraint": null,
-        "condition": null,
-        "batched": false
+          "damage_kind": "Any",
+          "secondary": false,
+          "valid_target": null,
+          "valid_source": null,
+          "description": "Whenever ~ enters or attacks, each opponent discards a card, then each opponent who didn't discard a nonland card this way loses 3 life.",
+          "constraint": null,
+          "condition": null,
+          "batched": false
+        }
       }
     },
     {
-      "Keyword": {
-        "Escape": {
-          "type": "NonMana",
-          "data": {
-            "type": "Composite",
-            "costs": [
-              {
-                "type": "Mana",
-                "cost": {
-                  "type": "Cost",
-                  "shards": [
-                    "Black",
-                    "Black",
-                    "Red",
-                    "Red"
-                  ],
-                  "generic": 0
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 2,
+          "start_byte": 0,
+          "end_byte": 324,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 2
+        }
+      },
+      "node": {
+        "Keyword": {
+          "Escape": {
+            "type": "NonMana",
+            "data": {
+              "type": "Composite",
+              "costs": [
+                {
+                  "type": "Mana",
+                  "cost": {
+                    "type": "Cost",
+                    "shards": [
+                      "Black",
+                      "Black",
+                      "Red",
+                      "Red"
+                    ],
+                    "generic": 0
+                  }
+                },
+                {
+                  "type": "Exile",
+                  "count": 5,
+                  "zone": "Graveyard",
+                  "filter": {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Card"
+                    ],
+                    "controller": "You",
+                    "properties": [
+                      {
+                        "type": "Another"
+                      },
+                      {
+                        "type": "InZone",
+                        "zone": "Graveyard"
+                      }
+                    ]
+                  }
                 }
-              },
-              {
-                "type": "Exile",
-                "count": 5,
-                "zone": "Graveyard",
-                "filter": {
-                  "type": "Typed",
-                  "type_filters": [
-                    "Card"
-                  ],
-                  "controller": "You",
-                  "properties": [
-                    {
-                      "type": "Another"
-                    },
-                    {
-                      "type": "InZone",
-                      "zone": "Graveyard"
-                    }
-                  ]
-                }
-              }
-            ]
+              ]
+            }
           }
         }
       }

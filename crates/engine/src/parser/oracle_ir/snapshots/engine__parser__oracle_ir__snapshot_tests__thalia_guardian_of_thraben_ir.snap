@@ -5,61 +5,95 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Spell",
-        "effect": {
-          "type": "Unimplemented",
-          "name": "unknown",
-          "description": "First strike"
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "cost": null,
-        "sub_ability": null,
-        "duration": null,
-        "description": "First strike",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 54,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Unimplemented",
+            "name": "unknown",
+            "description": "First strike"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": "First strike",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     },
     {
-      "PreLoweredStatic": {
-        "mode": {
-          "ModifyCost": {
-            "mode": "Raise",
-            "amount": {
-              "type": "Cost",
-              "shards": [],
-              "generic": 1
-            },
-            "spell_filter": {
-              "type": "Typed",
-              "type_filters": [
-                {
-                  "Non": "Creature"
-                }
-              ],
-              "controller": null,
-              "properties": []
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 54,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 1
+        }
+      },
+      "node": {
+        "PreLoweredStatic": {
+          "mode": {
+            "ModifyCost": {
+              "mode": "Raise",
+              "amount": {
+                "type": "Cost",
+                "shards": [],
+                "generic": 1
+              },
+              "spell_filter": {
+                "type": "Typed",
+                "type_filters": [
+                  {
+                    "Non": "Creature"
+                  }
+                ],
+                "controller": null,
+                "properties": []
+              }
             }
-          }
-        },
-        "affected": {
-          "type": "Typed",
-          "type_filters": [
-            "Card"
-          ],
-          "controller": null,
-          "properties": []
-        },
-        "modifications": [],
-        "condition": null,
-        "affected_zone": null,
-        "effect_zone": null,
-        "active_zones": [],
-        "characteristic_defining": false,
-        "description": "Noncreature spells cost {1} more to cast."
+          },
+          "affected": {
+            "type": "Typed",
+            "type_filters": [
+              "Card"
+            ],
+            "controller": null,
+            "properties": []
+          },
+          "modifications": [],
+          "condition": null,
+          "affected_zone": null,
+          "effect_zone": null,
+          "active_zones": [],
+          "characteristic_defining": false,
+          "description": "Noncreature spells cost {1} more to cast."
+        }
       }
     }
   ],

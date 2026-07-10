@@ -5,55 +5,89 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredStatic": {
-        "mode": "CantBeCountered",
-        "affected": {
-          "type": "SelfRef"
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "modifications": [],
-        "condition": null,
-        "affected_zone": null,
-        "effect_zone": null,
-        "active_zones": [],
-        "characteristic_defining": false,
-        "description": "This spell can't be countered."
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 201,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredStatic": {
+          "mode": "CantBeCountered",
+          "affected": {
+            "type": "SelfRef"
+          },
+          "modifications": [],
+          "condition": null,
+          "affected_zone": null,
+          "effect_zone": null,
+          "active_zones": [],
+          "characteristic_defining": false,
+          "description": "This spell can't be countered."
+        }
       }
     },
     {
-      "PreLoweredReplacement": {
-        "event": "Moved",
-        "execute": {
-          "kind": "Spell",
-          "effect": {
-            "type": "PutCounter",
-            "counter_type": "P1P1",
-            "count": {
-              "type": "Fixed",
-              "value": 1
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 201,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 1
+        }
+      },
+      "node": {
+        "PreLoweredReplacement": {
+          "event": "Moved",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "PutCounter",
+              "counter_type": "P1P1",
+              "count": {
+                "type": "Fixed",
+                "value": 1
+              },
+              "target": {
+                "type": "SelfRef"
+              }
             },
-            "target": {
-              "type": "SelfRef"
-            }
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": null,
-          "target_prompt": null,
+          "mode": {
+            "type": "Mandatory"
+          },
+          "valid_card": {
+            "type": "SelfRef"
+          },
+          "description": "The next creature spell you cast this turn can be cast as though it had flash. That spell can't be countered. That creature enters with an additional +1/+1 counter on it.",
           "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
-        },
-        "mode": {
-          "type": "Mandatory"
-        },
-        "valid_card": {
-          "type": "SelfRef"
-        },
-        "description": "The next creature spell you cast this turn can be cast as though it had flash. That spell can't be countered. That creature enters with an additional +1/+1 counter on it.",
-        "condition": null,
-        "destination_zone": "Battlefield"
+          "destination_zone": "Battlefield"
+        }
       }
     }
   ],

@@ -5,76 +5,110 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "Attach",
-          "target": {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 110,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Attach",
+            "target": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": "You",
+              "properties": []
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [],
+              "generic": 1
+            }
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "Equip {1}",
+          "target_prompt": null,
+          "activation_restrictions": [
+            {
+              "type": "AsSorcery"
+            }
+          ],
+          "ability_tag": {
+            "type": "Equip"
+          },
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 110,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 1
+        }
+      },
+      "node": {
+        "PreLoweredStatic": {
+          "mode": "Continuous",
+          "affected": {
             "type": "Typed",
             "type_filters": [
               "Creature"
             ],
-            "controller": "You",
-            "properties": []
-          }
-        },
-        "cost": {
-          "type": "Mana",
-          "cost": {
-            "type": "Cost",
-            "shards": [],
-            "generic": 1
-          }
-        },
-        "sub_ability": null,
-        "duration": null,
-        "description": "Equip {1}",
-        "target_prompt": null,
-        "activation_restrictions": [
-          {
-            "type": "AsSorcery"
-          }
-        ],
-        "ability_tag": {
-          "type": "Equip"
-        },
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
-      }
-    },
-    {
-      "PreLoweredStatic": {
-        "mode": "Continuous",
-        "affected": {
-          "type": "Typed",
-          "type_filters": [
-            "Creature"
-          ],
-          "controller": null,
-          "properties": [
-            {
-              "type": "EquippedBy"
-            }
-          ]
-        },
-        "modifications": [
-          {
-            "type": "AddPower",
-            "value": 1
+            "controller": null,
+            "properties": [
+              {
+                "type": "EquippedBy"
+              }
+            ]
           },
-          {
-            "type": "AddToughness",
-            "value": 1
-          }
-        ],
-        "condition": null,
-        "affected_zone": null,
-        "effect_zone": null,
-        "active_zones": [],
-        "characteristic_defining": false,
-        "description": "Equipped creature gets +1/+1."
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 1
+            },
+            {
+              "type": "AddToughness",
+              "value": 1
+            }
+          ],
+          "condition": null,
+          "affected_zone": null,
+          "effect_zone": null,
+          "active_zones": [],
+          "characteristic_defining": false,
+          "description": "Equipped creature gets +1/+1."
+        }
       }
     }
   ],

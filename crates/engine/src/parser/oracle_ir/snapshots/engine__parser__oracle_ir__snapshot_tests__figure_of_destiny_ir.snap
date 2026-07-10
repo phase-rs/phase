@@ -1,259 +1,309 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 706
 expression: "&ir"
 ---
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "GenericEffect",
-          "static_abilities": [
-            {
-              "mode": "Continuous",
-              "affected": {
-                "type": "SelfRef"
-              },
-              "modifications": [
-                {
-                  "type": "SetPower",
-                  "value": 2
-                },
-                {
-                  "type": "SetToughness",
-                  "value": 2
-                },
-                {
-                  "type": "AddType",
-                  "core_type": "Creature"
-                },
-                {
-                  "type": "RemoveAllSubtypes",
-                  "set": "Creature"
-                },
-                {
-                  "type": "AddSubtype",
-                  "subtype": "Kithkin"
-                },
-                {
-                  "type": "AddSubtype",
-                  "subtype": "Spirit"
-                }
-              ],
-              "condition": null,
-              "affected_zone": null,
-              "effect_zone": null,
-              "active_zones": [],
-              "characteristic_defining": false,
-              "description": "become a Kithkin Spirit with base power and toughness 2/2"
-            }
-          ],
-          "duration": "Permanent",
-          "target": null
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "cost": {
-          "type": "Mana",
-          "cost": {
-            "type": "Cost",
-            "shards": [
-              "RedWhite"
+        "span": {
+          "first_line": 0,
+          "last_line": 2,
+          "start_byte": 0,
+          "end_byte": 365,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "GenericEffect",
+            "static_abilities": [
+              {
+                "mode": "Continuous",
+                "affected": {
+                  "type": "SelfRef"
+                },
+                "modifications": [
+                  {
+                    "type": "SetPower",
+                    "value": 2
+                  },
+                  {
+                    "type": "SetToughness",
+                    "value": 2
+                  },
+                  {
+                    "type": "AddType",
+                    "core_type": "Creature"
+                  },
+                  {
+                    "type": "RemoveAllSubtypes",
+                    "set": "Creature"
+                  },
+                  {
+                    "type": "AddSubtype",
+                    "subtype": "Kithkin"
+                  },
+                  {
+                    "type": "AddSubtype",
+                    "subtype": "Spirit"
+                  }
+                ],
+                "condition": null,
+                "affected_zone": null,
+                "effect_zone": null,
+                "active_zones": [],
+                "characteristic_defining": false,
+                "description": "become a Kithkin Spirit with base power and toughness 2/2"
+              }
             ],
-            "generic": 0
-          }
-        },
-        "sub_ability": null,
-        "duration": "Permanent",
-        "description": "{R/W}: ~ becomes a Kithkin Spirit with base power and toughness 2/2.",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+            "duration": "Permanent",
+            "target": null
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [
+                "RedWhite"
+              ],
+              "generic": 0
+            }
+          },
+          "sub_ability": null,
+          "duration": "Permanent",
+          "description": "{R/W}: ~ becomes a Kithkin Spirit with base power and toughness 2/2.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     },
     {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "GenericEffect",
-          "static_abilities": [
-            {
-              "mode": "Continuous",
-              "affected": {
-                "type": "SelfRef"
-              },
-              "modifications": [
-                {
-                  "type": "SetPower",
-                  "value": 4
-                },
-                {
-                  "type": "SetToughness",
-                  "value": 4
-                },
-                {
-                  "type": "AddType",
-                  "core_type": "Creature"
-                },
-                {
-                  "type": "RemoveAllSubtypes",
-                  "set": "Creature"
-                },
-                {
-                  "type": "AddSubtype",
-                  "subtype": "Kithkin"
-                },
-                {
-                  "type": "AddSubtype",
-                  "subtype": "Spirit"
-                },
-                {
-                  "type": "AddSubtype",
-                  "subtype": "Warrior"
-                }
-              ],
-              "condition": null,
-              "affected_zone": null,
-              "effect_zone": null,
-              "active_zones": [],
-              "characteristic_defining": false,
-              "description": "become a Kithkin Spirit Warrior with base power and toughness 4/4"
-            }
-          ],
-          "duration": "Permanent",
-          "target": null
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
         },
-        "cost": {
-          "type": "Mana",
-          "cost": {
-            "type": "Cost",
-            "shards": [
-              "RedWhite",
-              "RedWhite",
-              "RedWhite"
-            ],
-            "generic": 0
-          }
-        },
-        "sub_ability": null,
-        "duration": "Permanent",
-        "description": "{R/W}{R/W}{R/W}: If ~ is a Spirit, it becomes a Kithkin Spirit Warrior with base power and toughness 4/4.",
-        "target_prompt": null,
-        "condition": {
-          "type": "SourceMatchesFilter",
-          "filter": {
-            "type": "Typed",
-            "type_filters": [
+        "span": {
+          "first_line": 0,
+          "last_line": 2,
+          "start_byte": 0,
+          "end_byte": 365,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 1
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "GenericEffect",
+            "static_abilities": [
               {
-                "Subtype": "Spirit"
+                "mode": "Continuous",
+                "affected": {
+                  "type": "SelfRef"
+                },
+                "modifications": [
+                  {
+                    "type": "SetPower",
+                    "value": 4
+                  },
+                  {
+                    "type": "SetToughness",
+                    "value": 4
+                  },
+                  {
+                    "type": "AddType",
+                    "core_type": "Creature"
+                  },
+                  {
+                    "type": "RemoveAllSubtypes",
+                    "set": "Creature"
+                  },
+                  {
+                    "type": "AddSubtype",
+                    "subtype": "Kithkin"
+                  },
+                  {
+                    "type": "AddSubtype",
+                    "subtype": "Spirit"
+                  },
+                  {
+                    "type": "AddSubtype",
+                    "subtype": "Warrior"
+                  }
+                ],
+                "condition": null,
+                "affected_zone": null,
+                "effect_zone": null,
+                "active_zones": [],
+                "characteristic_defining": false,
+                "description": "become a Kithkin Spirit Warrior with base power and toughness 4/4"
               }
             ],
-            "controller": null,
-            "properties": []
-          }
-        },
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+            "duration": "Permanent",
+            "target": null
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [
+                "RedWhite",
+                "RedWhite",
+                "RedWhite"
+              ],
+              "generic": 0
+            }
+          },
+          "sub_ability": null,
+          "duration": "Permanent",
+          "description": "{R/W}{R/W}{R/W}: If ~ is a Spirit, it becomes a Kithkin Spirit Warrior with base power and toughness 4/4.",
+          "target_prompt": null,
+          "condition": {
+            "type": "SourceMatchesFilter",
+            "filter": {
+              "type": "Typed",
+              "type_filters": [
+                {
+                  "Subtype": "Spirit"
+                }
+              ],
+              "controller": null,
+              "properties": []
+            }
+          },
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     },
     {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "GenericEffect",
-          "static_abilities": [
-            {
-              "mode": "Continuous",
-              "affected": {
-                "type": "SelfRef"
-              },
-              "modifications": [
-                {
-                  "type": "AddKeyword",
-                  "keyword": "Flying"
-                },
-                {
-                  "type": "AddKeyword",
-                  "keyword": "FirstStrike"
-                },
-                {
-                  "type": "RemoveAllSubtypes",
-                  "set": "Creature"
-                },
-                {
-                  "type": "AddSubtype",
-                  "subtype": "Kithkin"
-                },
-                {
-                  "type": "AddSubtype",
-                  "subtype": "Spirit"
-                },
-                {
-                  "type": "AddSubtype",
-                  "subtype": "Warrior"
-                },
-                {
-                  "type": "AddSubtype",
-                  "subtype": "Avatar"
-                },
-                {
-                  "type": "SetPower",
-                  "value": 8
-                },
-                {
-                  "type": "SetToughness",
-                  "value": 8
-                }
-              ],
-              "condition": null,
-              "affected_zone": null,
-              "effect_zone": null,
-              "active_zones": [],
-              "characteristic_defining": false,
-              "description": "become a Kithkin Spirit Warrior Avatar with base power and toughness 8/8, flying, and first strike"
-            }
-          ],
-          "duration": "Permanent",
-          "target": null
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
         },
-        "cost": {
-          "type": "Mana",
-          "cost": {
-            "type": "Cost",
-            "shards": [
-              "RedWhite",
-              "RedWhite",
-              "RedWhite",
-              "RedWhite",
-              "RedWhite",
-              "RedWhite"
-            ],
-            "generic": 0
-          }
-        },
-        "sub_ability": null,
-        "duration": "Permanent",
-        "description": "{R/W}{R/W}{R/W}{R/W}{R/W}{R/W}: If ~ is a Warrior, it becomes a Kithkin Spirit Warrior Avatar with base power and toughness 8/8, flying, and first strike.",
-        "target_prompt": null,
-        "condition": {
-          "type": "SourceMatchesFilter",
-          "filter": {
-            "type": "Typed",
-            "type_filters": [
+        "span": {
+          "first_line": 0,
+          "last_line": 2,
+          "start_byte": 0,
+          "end_byte": 365,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 2
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "GenericEffect",
+            "static_abilities": [
               {
-                "Subtype": "Warrior"
+                "mode": "Continuous",
+                "affected": {
+                  "type": "SelfRef"
+                },
+                "modifications": [
+                  {
+                    "type": "AddKeyword",
+                    "keyword": "Flying"
+                  },
+                  {
+                    "type": "AddKeyword",
+                    "keyword": "FirstStrike"
+                  },
+                  {
+                    "type": "RemoveAllSubtypes",
+                    "set": "Creature"
+                  },
+                  {
+                    "type": "AddSubtype",
+                    "subtype": "Kithkin"
+                  },
+                  {
+                    "type": "AddSubtype",
+                    "subtype": "Spirit"
+                  },
+                  {
+                    "type": "AddSubtype",
+                    "subtype": "Warrior"
+                  },
+                  {
+                    "type": "AddSubtype",
+                    "subtype": "Avatar"
+                  },
+                  {
+                    "type": "SetPower",
+                    "value": 8
+                  },
+                  {
+                    "type": "SetToughness",
+                    "value": 8
+                  }
+                ],
+                "condition": null,
+                "affected_zone": null,
+                "effect_zone": null,
+                "active_zones": [],
+                "characteristic_defining": false,
+                "description": "become a Kithkin Spirit Warrior Avatar with base power and toughness 8/8, flying, and first strike"
               }
             ],
-            "controller": null,
-            "properties": []
-          }
-        },
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+            "duration": "Permanent",
+            "target": null
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [
+                "RedWhite",
+                "RedWhite",
+                "RedWhite",
+                "RedWhite",
+                "RedWhite",
+                "RedWhite"
+              ],
+              "generic": 0
+            }
+          },
+          "sub_ability": null,
+          "duration": "Permanent",
+          "description": "{R/W}{R/W}{R/W}{R/W}{R/W}{R/W}: If ~ is a Warrior, it becomes a Kithkin Spirit Warrior Avatar with base power and toughness 8/8, flying, and first strike.",
+          "target_prompt": null,
+          "condition": {
+            "type": "SourceMatchesFilter",
+            "filter": {
+              "type": "Typed",
+              "type_filters": [
+                {
+                  "Subtype": "Warrior"
+                }
+              ],
+              "controller": null,
+              "properties": []
+            }
+          },
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     }
   ],

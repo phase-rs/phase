@@ -5,57 +5,74 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Spell",
-        "effect": {
-          "type": "Mana",
-          "produced": {
-            "type": "AnyCombination",
-            "count": {
-              "type": "Fixed",
-              "value": 2
-            },
-            "color_options": [
-              "White",
-              "Blue",
-              "Black",
-              "Red",
-              "Green"
-            ]
-          }
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "cost": null,
-        "sub_ability": {
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 55,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
           "kind": "Spell",
           "effect": {
-            "type": "Draw",
-            "count": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "target": {
-              "type": "Controller"
+            "type": "Mana",
+            "produced": {
+              "type": "AnyCombination",
+              "count": {
+                "type": "Fixed",
+                "value": 2
+              },
+              "color_options": [
+                "White",
+                "Blue",
+                "Black",
+                "Red",
+                "Green"
+              ]
             }
           },
           "cost": null,
-          "sub_ability": null,
+          "sub_ability": {
+            "kind": "Spell",
+            "effect": {
+              "type": "Draw",
+              "count": {
+                "type": "Fixed",
+                "value": 1
+              },
+              "target": {
+                "type": "Controller"
+              }
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false,
+            "sub_link": "SequentialSibling"
+          },
           "duration": null,
-          "description": null,
+          "description": "Add two mana in any combination of colors.\nDraw a card.",
           "target_prompt": null,
           "condition": null,
           "optional_targeting": false,
           "optional": false,
           "forward_result": false,
-          "sub_link": "SequentialSibling"
-        },
-        "duration": null,
-        "description": "Add two mana in any combination of colors.\nDraw a card.",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false,
-        "is_mana_ability": true
+          "is_mana_ability": true
+        }
       }
     }
   ],

@@ -5,62 +5,79 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredTrigger": {
-        "mode": "SpellCast",
-        "execute": {
-          "kind": "Spell",
-          "effect": {
-            "type": "DealDamage",
-            "amount": {
-              "type": "Fixed",
-              "value": 2
-            },
-            "target": {
-              "type": "TriggeringPlayer"
-            }
-          },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": null,
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "valid_card": {
-          "type": "Typed",
-          "type_filters": [
-            "Card"
-          ],
-          "controller": null,
-          "properties": [
-            {
-              "type": "Cmc",
-              "comparator": "LE",
-              "value": {
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 103,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "SpellCast",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "DealDamage",
+              "amount": {
                 "type": "Fixed",
-                "value": 3
+                "value": 2
+              },
+              "target": {
+                "type": "TriggeringPlayer"
               }
-            }
-          ]
-        },
-        "origin": null,
-        "destination": null,
-        "trigger_zones": [
-          "Battlefield"
-        ],
-        "phase": null,
-        "optional": false,
-        "damage_kind": "Any",
-        "secondary": false,
-        "valid_target": null,
-        "valid_source": null,
-        "description": "Whenever a player casts a spell with mana value 3 or less, ~ deals 2 damage to that player.",
-        "constraint": null,
-        "condition": null,
-        "batched": false
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "valid_card": {
+            "type": "Typed",
+            "type_filters": [
+              "Card"
+            ],
+            "controller": null,
+            "properties": [
+              {
+                "type": "Cmc",
+                "comparator": "LE",
+                "value": {
+                  "type": "Fixed",
+                  "value": 3
+                }
+              }
+            ]
+          },
+          "origin": null,
+          "destination": null,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "phase": null,
+          "optional": false,
+          "damage_kind": "Any",
+          "secondary": false,
+          "valid_target": null,
+          "valid_source": null,
+          "description": "Whenever a player casts a spell with mana value 3 or less, ~ deals 2 damage to that player.",
+          "constraint": null,
+          "condition": null,
+          "batched": false
+        }
       }
     }
   ],

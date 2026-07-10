@@ -3,6 +3,7 @@ use crate::game::scenario::{GameScenario, P0, P1};
 use crate::parser::oracle::parse_oracle_text;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute,
@@ -21288,7 +21289,7 @@ fn trigger_become_copy_with_set_name_and_retain_this_ability() {
     let def = parse_trigger_line_with_index(
             "At the beginning of combat on your turn, ~ becomes a copy of up to one other target creature you control, except her name is ~ and she has this ability. Then put a +1/+1 counter on her.",
             "Irma, Part-Time Mutant",
-            Some(0),
+            Some(PrintedTriggerIndex::from_slot_for_test(0)),
             &mut ParseContext::default(),
         );
     // Phase + constraint: BoC on your turn.
@@ -21375,7 +21376,7 @@ fn trigger_become_copy_he_has_this_ability() {
     let def = parse_trigger_line_with_index(
             "At the beginning of your upkeep, ~ becomes a copy of target creature you control, except his name is ~ and he has this ability.",
             "Test Mutant",
-            Some(0),
+            Some(PrintedTriggerIndex::from_slot_for_test(0)),
             &mut ParseContext::default(),
         );
     let execute = def.execute.as_deref().unwrap();
@@ -21411,7 +21412,7 @@ fn trigger_become_copy_it_has_this_ability_neuter() {
     let def = parse_trigger_line_with_index(
             "At the beginning of your upkeep, ~ becomes a copy of another target creature, except it has this ability.",
             "Test Cloner",
-            Some(0),
+            Some(PrintedTriggerIndex::from_slot_for_test(0)),
             &mut ParseContext::default(),
         );
     let execute = def.execute.as_deref().unwrap();
@@ -21456,7 +21457,7 @@ fn trigger_gogo_distributes_pump_haste_must_attack_to_both() {
     let def = parse_trigger_line_with_index(
             "At the beginning of combat on your turn, you may have ~ become a copy of another target creature you control until end of turn, except its name is ~. If you do, ~ and that creature each get +2/+0 and gain haste until end of turn and attack this turn if able.",
             "Gogo, Mysterious Mime",
-            Some(0),
+            Some(PrintedTriggerIndex::from_slot_for_test(0)),
             &mut ParseContext::default(),
         );
     assert_eq!(def.mode, TriggerMode::Phase);

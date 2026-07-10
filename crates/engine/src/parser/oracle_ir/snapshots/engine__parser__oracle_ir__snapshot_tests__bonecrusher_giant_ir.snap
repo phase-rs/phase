@@ -5,50 +5,67 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredTrigger": {
-        "mode": "BecomesTarget",
-        "execute": {
-          "kind": "Spell",
-          "effect": {
-            "type": "DealDamage",
-            "amount": {
-              "type": "Fixed",
-              "value": 2
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 110,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "BecomesTarget",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "DealDamage",
+              "amount": {
+                "type": "Fixed",
+                "value": 2
+              },
+              "target": {
+                "type": "TriggeringSpellController"
+              }
             },
-            "target": {
-              "type": "TriggeringSpellController"
-            }
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": null,
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
+          "valid_card": {
+            "type": "SelfRef"
+          },
+          "origin": null,
+          "destination": null,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "phase": null,
           "optional": false,
-          "forward_result": false
-        },
-        "valid_card": {
-          "type": "SelfRef"
-        },
-        "origin": null,
-        "destination": null,
-        "trigger_zones": [
-          "Battlefield"
-        ],
-        "phase": null,
-        "optional": false,
-        "damage_kind": "Any",
-        "secondary": false,
-        "valid_target": null,
-        "valid_source": {
-          "type": "StackSpell"
-        },
-        "description": "Whenever ~ becomes the target of a spell, ~ deals 2 damage to that spell's controller.",
-        "constraint": null,
-        "condition": null,
-        "batched": false
+          "damage_kind": "Any",
+          "secondary": false,
+          "valid_target": null,
+          "valid_source": {
+            "type": "StackSpell"
+          },
+          "description": "Whenever ~ becomes the target of a spell, ~ deals 2 damage to that spell's controller.",
+          "constraint": null,
+          "condition": null,
+          "batched": false
+        }
       }
     }
   ],

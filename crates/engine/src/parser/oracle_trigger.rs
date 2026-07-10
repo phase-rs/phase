@@ -13,6 +13,7 @@ use super::oracle_effect::{
     try_parse_grant_graveyard_keyword_to_target, try_parse_reanimator_aura_etb_effect,
 };
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_modal::try_parse_inline_modal;
 use super::oracle_nom::condition::parse_inner_condition;
@@ -597,7 +598,7 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
 pub(crate) fn parse_trigger_lines_at_index(
     text: &str,
     card_name: &str,
-    base_trigger_index: Option<usize>,
+    base_trigger_index: Option<PrintedTriggerIndex>,
     ctx: &mut ParseContext,
 ) -> Vec<TriggerDefinition> {
     parse_trigger_lines_at_index_ir(text, card_name, base_trigger_index, ctx)
@@ -611,7 +612,7 @@ pub(crate) fn parse_trigger_lines_at_index(
 pub(crate) fn parse_trigger_lines_at_index_ir(
     text: &str,
     card_name: &str,
-    base_trigger_index: Option<usize>,
+    base_trigger_index: Option<PrintedTriggerIndex>,
     ctx: &mut ParseContext,
 ) -> Vec<TriggerIr> {
     let stripped = strip_reminder_text(text);
@@ -636,7 +637,7 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
             results.push(parse_trigger_line_with_index_ir(
                 &trigger_text,
                 card_name,
-                base_trigger_index.map(|b| b + i),
+                base_trigger_index.map(|b| b.offset(i)),
                 ctx,
             ));
         }
@@ -673,7 +674,7 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
             results.push(parse_trigger_line_with_index_ir(
                 &trigger_text,
                 card_name,
-                base_trigger_index.map(|b| b + i),
+                base_trigger_index.map(|b| b.offset(i)),
                 ctx,
             ));
         }
@@ -995,7 +996,7 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
 pub(crate) fn parse_trigger_line_with_index_ir(
     text: &str,
     card_name: &str,
-    current_trigger_index: Option<usize>,
+    current_trigger_index: Option<PrintedTriggerIndex>,
     ctx: &mut ParseContext,
 ) -> TriggerIr {
     let text = strip_reminder_text(text);
@@ -1082,7 +1083,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     let mut effect_ctx = ParseContext {
         subject: Some(trigger_subject.clone()),
         card_name: Some(card_name.to_string()),
-        current_trigger_index,
+        // `ParseContext` still stores a raw `usize`; unwrap the printed-slot
+        // newtype at this boundary. Unit 3b may lift the newtype into `ctx`.
+        current_trigger_index: current_trigger_index.map(PrintedTriggerIndex::get),
         // CR 303.4 + CR 702.103: Propagate the enclosing card's typed host
         // self-reference (set by `parse_oracle_ir` for Aura/bestow cards) into
         // the per-trigger effect context. The trigger body's effect parser
@@ -1824,7 +1827,7 @@ fn introduces_chosen_object_target(effect: &Effect) -> bool {
 pub(crate) fn parse_trigger_line_with_index(
     text: &str,
     card_name: &str,
-    current_trigger_index: Option<usize>,
+    current_trigger_index: Option<PrintedTriggerIndex>,
     ctx: &mut ParseContext,
 ) -> TriggerDefinition {
     let ir = parse_trigger_line_with_index_ir(text, card_name, current_trigger_index, ctx);

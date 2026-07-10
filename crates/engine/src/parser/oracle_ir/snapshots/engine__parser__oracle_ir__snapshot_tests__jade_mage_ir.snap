@@ -5,55 +5,72 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "Token",
-          "name": "Saproling",
-          "power": {
-            "type": "Fixed",
-            "value": 1
-          },
-          "toughness": {
-            "type": "Fixed",
-            "value": 1
-          },
-          "types": [
-            "Creature",
-            "Saproling"
-          ],
-          "colors": [
-            "Green"
-          ],
-          "keywords": [],
-          "tapped": false,
-          "count": {
-            "type": "Fixed",
-            "value": 1
-          },
-          "owner": {
-            "type": "Controller"
-          },
-          "enters_attacking": false
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "cost": {
-          "type": "Mana",
-          "cost": {
-            "type": "Cost",
-            "shards": [
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 52,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Token",
+            "name": "Saproling",
+            "power": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "toughness": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "types": [
+              "Creature",
+              "Saproling"
+            ],
+            "colors": [
               "Green"
             ],
-            "generic": 2
-          }
-        },
-        "sub_ability": null,
-        "duration": null,
-        "description": "{2}{G}: Create a 1/1 green Saproling creature token.",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+            "keywords": [],
+            "tapped": false,
+            "count": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "owner": {
+              "type": "Controller"
+            },
+            "enters_attacking": false
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [
+                "Green"
+              ],
+              "generic": 2
+            }
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "{2}{G}: Create a 1/1 green Saproling creature token.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     }
   ],

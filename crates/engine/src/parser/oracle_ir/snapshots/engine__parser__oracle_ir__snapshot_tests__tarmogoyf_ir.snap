@@ -5,31 +5,31 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredStatic": {
-        "mode": "Continuous",
-        "affected": {
-          "type": "SelfRef"
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "modifications": [
-          {
-            "type": "SetDynamicPower",
-            "value": {
-              "type": "Ref",
-              "qty": {
-                "type": "DistinctCardTypes",
-                "source": {
-                  "type": "Zone",
-                  "zone": "Graveyard",
-                  "scope": "All"
-                }
-              }
-            }
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 134,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredStatic": {
+          "mode": "Continuous",
+          "affected": {
+            "type": "SelfRef"
           },
-          {
-            "type": "SetDynamicToughness",
-            "value": {
-              "type": "Offset",
-              "inner": {
+          "modifications": [
+            {
+              "type": "SetDynamicPower",
+              "value": {
                 "type": "Ref",
                 "qty": {
                   "type": "DistinctCardTypes",
@@ -39,17 +39,34 @@ expression: "&ir"
                     "scope": "All"
                   }
                 }
-              },
-              "offset": 1
+              }
+            },
+            {
+              "type": "SetDynamicToughness",
+              "value": {
+                "type": "Offset",
+                "inner": {
+                  "type": "Ref",
+                  "qty": {
+                    "type": "DistinctCardTypes",
+                    "source": {
+                      "type": "Zone",
+                      "zone": "Graveyard",
+                      "scope": "All"
+                    }
+                  }
+                },
+                "offset": 1
+              }
             }
-          }
-        ],
-        "condition": null,
-        "affected_zone": null,
-        "effect_zone": null,
-        "active_zones": [],
-        "characteristic_defining": true,
-        "description": "~'s power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1."
+          ],
+          "condition": null,
+          "affected_zone": null,
+          "effect_zone": null,
+          "active_zones": [],
+          "characteristic_defining": true,
+          "description": "~'s power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1."
+        }
       }
     }
   ],

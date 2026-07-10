@@ -1,56 +1,89 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 416
 expression: "&ir"
 ---
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Spell",
-        "effect": {
-          "type": "Unimplemented",
-          "name": "unknown",
-          "description": "Evolve"
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "cost": null,
-        "sub_ability": null,
-        "duration": null,
-        "description": "Evolve",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 341,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Unimplemented",
+            "name": "unknown",
+            "description": "Evolve"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": "Evolve",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     },
     {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "Regenerate",
-          "target": {
-            "type": "ParentTarget"
-          }
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
         },
-        "cost": {
-          "type": "RemoveCounter",
-          "count": 2,
-          "counter_type": {
-            "type": "OfType",
-            "data": "P1P1"
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 341,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 1
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Regenerate",
+            "target": {
+              "type": "ParentTarget"
+            }
           },
-          "target": null,
-          "selection": "SingleObject"
-        },
-        "sub_ability": null,
-        "duration": null,
-        "description": "Remove two +1/+1 counters from ~: Regenerate it.",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+          "cost": {
+            "type": "RemoveCounter",
+            "count": 2,
+            "counter_type": {
+              "type": "OfType",
+              "data": "P1P1"
+            },
+            "target": null,
+            "selection": "SingleObject"
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "Remove two +1/+1 counters from ~: Regenerate it.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     }
   ],
