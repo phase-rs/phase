@@ -2585,7 +2585,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("target".into(), fmt_target(target)));
             }
             if *owner_library {
-                d.push(("owner_library".into(), "true".into())); // CR 400.7
+                // CR 400.3: a card going to a library other than its owner's goes to its owner's instead.
+                d.push(("owner_library".into(), "true".into()));
             }
             if *enter_transformed {
                 d.push(("enter_transformed".into(), "true".into())); // CR 712.2
@@ -2594,7 +2595,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("enters_under".into(), format!("{u:?}"))); // CR 110.2a
             }
             if !enter_tapped.is_unspecified() {
-                d.push(("enter_tapped".into(), format!("{enter_tapped:?}"))); // CR 614.1
+                // CR 110.5b: permanents enter untapped unless a spell or ability says otherwise.
+                d.push(("enter_tapped".into(), format!("{enter_tapped:?}")));
             }
             if *enters_attacking {
                 d.push(("enters_attacking".into(), "true".into())); // CR 508.4
@@ -2658,7 +2660,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("library_position".into(), format!("{pos:?}"))); // CR 401.4
             }
             if *random_order {
-                d.push(("random_order".into(), "true".into())); // CR 401.4
+                d.push(("random_order".into(), "true".into()));
             }
         }
         Effect::Dig {
