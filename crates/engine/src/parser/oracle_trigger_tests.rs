@@ -1499,6 +1499,57 @@ fn trigger_dies_if_it_was_enchanted_attaches_attachment_lookback() {
 /// - Trigger-level `condition` is a `QuantityComparison` on Power(Source) >= 3.
 /// - The execute effect is Token creation (the Zombie Berserker), not Unimplemented.
 #[test]
+fn parse_wave_of_rats_dies_dealt_combat_damage_intervening_if() {
+    // CR 603.4 + CR 120.1 + CR 120.2a: Wave of Rats returns ONLY if it dealt
+    // combat damage to a player this turn. Pre-fix the intervening-if was
+    // swallowed (`condition: None`) and the creature returned unconditionally.
+    let def = parse_trigger_line(
+        "When this creature dies, if it dealt combat damage to a player this turn, \
+         return it to the battlefield under its owner's control.",
+        "Wave of Rats",
+    );
+
+    // Revert-guard: pre-fix `def.condition` is None.
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::DamageDealtThisTurn {
+                    source: Box::new(TargetFilter::SelfRef),
+                    target: Box::new(TargetFilter::Player),
+                    aggregate: AggregateFunction::Sum,
+                    group_by: None,
+                    damage_kind: crate::types::ability::DamageKindFilter::CombatOnly,
+                    channel: DamageChannel::Total,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }),
+        "dies intervening-if must lift to DamageDealtThisTurn(SelfRef->Player, CombatOnly) >= 1, got {:?}",
+        def.condition,
+    );
+
+    // The return effect must be preserved (positive reach-guard for the negative below).
+    let execute = def.execute.as_deref().expect("execute must be Some");
+    assert!(
+        matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "execute must be ChangeZone->Battlefield (return it), got {:?}",
+        execute.effect,
+    );
+    assert!(
+        !matches!(*execute.effect, Effect::Unimplemented { .. }),
+        "execute must not be Unimplemented",
+    );
+}
+
+#[test]
 fn parse_deathknell_berserker_dies_power_lki_intervening_if() {
     let def = parse_trigger_line(
         "When this creature dies, if its power was 3 or greater, create a 2/2 black Zombie Berserker creature token.",

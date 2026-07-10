@@ -399,8 +399,22 @@ fn parse_player_dealt_combat_damage_by_source_this_turn(
 fn parse_source_dealt_damage_to_opponent_this_turn(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("~"), tag("this creature"))).parse(input)?;
-    let (rest, _) = tag(" dealt damage to ").parse(rest)?;
+    // CR 120.1 + CR 120.2a + CR 603.4: "<source-anaphor> dealt [combat] damage to a
+    // player/opponent this turn" — the *dealing* direction (source = the ability's
+    // own permanent). "it" is the source anaphor for triggered-ability
+    // intervening-ifs (Wave of Rats' dies trigger); "~"/"this creature"/"this
+    // permanent" cover the self-ref forms. The optional "combat" qualifier narrows
+    // the damage channel (CR 120.2a) so combat-only history is required.
+    let (rest, _) = alt((
+        tag("~"),
+        tag("this creature"),
+        tag("this permanent"),
+        tag("it"),
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" dealt ").parse(rest)?;
+    let (rest, combat) = opt(tag("combat ")).parse(rest)?;
+    let (rest, _) = tag("damage to ").parse(rest)?;
     let (rest, target) = alt((
         value(
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
@@ -410,6 +424,11 @@ fn parse_source_dealt_damage_to_opponent_this_turn(
     ))
     .parse(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
+    let damage_kind = if combat.is_some() {
+        DamageKindFilter::CombatOnly
+    } else {
+        DamageKindFilter::Any
+    };
     Ok((
         rest,
         make_quantity_ge(
@@ -418,8 +437,7 @@ fn parse_source_dealt_damage_to_opponent_this_turn(
                 target: Box::new(target),
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
-                damage_kind: DamageKindFilter::Any,
-
+                damage_kind,
                 channel: DamageChannel::Total,
             },
             1,
@@ -14466,6 +14484,37 @@ mod tests {
                 assert_eq!(typed.controller, Some(ControllerRef::Opponent));
             }
             other => panic!("expected opponent damage threshold quantity, got {other:?}"),
+        }
+    }
+
+    /// CR 120.1 + CR 120.2a + CR 603.4: the "it" source anaphor + the "combat"
+    /// qualifier — Wave of Rats' dies intervening-if. Distinct from the no-"combat"
+    /// sibling below (which stays `DamageKindFilter::Any`).
+    #[test]
+    fn parse_it_dealt_combat_damage_to_a_player_this_turn() {
+        let (rest, c) =
+            parse_inner_condition("it dealt combat damage to a player this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::DamageDealtThisTurn {
+                                source,
+                                target,
+                                damage_kind: DamageKindFilter::CombatOnly,
+                                channel: DamageChannel::Total,
+                                ..
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(*source, TargetFilter::SelfRef);
+                assert_eq!(*target, TargetFilter::Player);
+            }
+            other => panic!("expected SelfRef->Player CombatOnly GE 1, got {other:?}"),
         }
     }
 
