@@ -77,22 +77,20 @@ pub fn compute_preview_diff(before: &GameState, after: &GameState) -> PreviewDif
     let mut zone_changes = Vec::new();
     let mut created = Vec::new();
     for (id, a) in &after.objects {
+        // Only surface transitions where BOTH ends are public — a hand→battlefield
+        // cast or library→hand draw is elided so the preview can't reveal a hidden
+        // card's identity or a random draw/discard outcome.
         match before.objects.get(id) {
-            Some(b) => {
-                // Only surface transitions where BOTH ends are public — a
-                // hand→battlefield cast or library→hand draw is elided so the
-                // preview can't reveal a hidden card's identity or a random
-                // draw/discard outcome.
-                if b.zone != a.zone && zone_is_public(b.zone) && zone_is_public(a.zone) {
-                    zone_changes.push(ZoneChange {
-                        object_id: *id,
-                        name: a.name.clone(),
-                        controller: a.controller,
-                        from: b.zone,
-                        to: a.zone,
-                    });
-                }
+            Some(b) if b.zone != a.zone && zone_is_public(b.zone) && zone_is_public(a.zone) => {
+                zone_changes.push(ZoneChange {
+                    object_id: *id,
+                    name: a.name.clone(),
+                    controller: a.controller,
+                    from: b.zone,
+                    to: a.zone,
+                });
             }
+            Some(_) => {}
             None if zone_is_public(a.zone) => created.push(*id),
             None => {}
         }
