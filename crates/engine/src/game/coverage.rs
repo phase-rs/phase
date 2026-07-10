@@ -2554,17 +2554,28 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("player_a".into(), fmt_target(player_a)));
             d.push(("player_b".into(), fmt_target(player_b)));
         }
+        // #5495 (follow-up to #5492/#5493): every ETB entry qualifier below is
+        // parser-alterable but was swallowed by `..`, so a parser change flipping
+        // one — e.g. `enters_attacking` false→true for "put it onto the battlefield
+        // attacking" (CR 508.4, Senu #5494) — produced no row in the
+        // coverage-parse-diff sticky, reading as "No card-parse changes". The two
+        // variants' qualifier sets diverge, so they are matched separately; each
+        // field is emitted only when set so unqualified signatures stay
+        // byte-identical (the "push only when set" pattern #5493 established).
         Effect::ChangeZone {
             origin,
             destination,
             target,
-            ..
-        }
-        | Effect::ChangeZoneAll {
-            origin,
-            destination,
-            target,
-            ..
+            owner_library,
+            enter_transformed,
+            enters_under,
+            enter_tapped,
+            enters_attacking,
+            up_to,
+            enter_with_counters,
+            conditional_enter_with_counters,
+            face_down_profile,
+            enters_modified_if,
         } => {
             if let Some(o) = origin {
                 d.push(("from".into(), fmt_zone(o)));
@@ -2572,6 +2583,82 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("to".into(), fmt_zone(destination)));
             if !matches!(target, TargetFilter::None) {
                 d.push(("target".into(), fmt_target(target)));
+            }
+            if *owner_library {
+                d.push(("owner_library".into(), "true".into())); // CR 400.7
+            }
+            if *enter_transformed {
+                d.push(("enter_transformed".into(), "true".into())); // CR 712.2
+            }
+            if let Some(u) = enters_under {
+                d.push(("enters_under".into(), format!("{u:?}"))); // CR 110.2a
+            }
+            if !enter_tapped.is_unspecified() {
+                d.push(("enter_tapped".into(), format!("{enter_tapped:?}"))); // CR 614.1
+            }
+            if *enters_attacking {
+                d.push(("enters_attacking".into(), "true".into())); // CR 508.4
+            }
+            if *up_to {
+                d.push(("up_to".into(), "true".into())); // CR 608.2d
+            }
+            if !enter_with_counters.is_empty() {
+                d.push((
+                    "enter_with_counters".into(),
+                    format!("{enter_with_counters:?}"),
+                )); // CR 122.1
+            }
+            if !conditional_enter_with_counters.is_empty() {
+                d.push((
+                    "conditional_enter_with_counters".into(),
+                    format!("{conditional_enter_with_counters:?}"),
+                )); // CR 122.1
+            }
+            if let Some(p) = face_down_profile {
+                d.push(("face_down_profile".into(), format!("{p:?}"))); // CR 708.2a
+            }
+            if let Some(f) = enters_modified_if {
+                d.push(("enters_modified_if".into(), fmt_target(f))); // CR 614.12
+            }
+        }
+        Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            enters_under,
+            enter_tapped,
+            enter_with_counters,
+            face_down_profile,
+            library_position,
+            random_order,
+        } => {
+            if let Some(o) = origin {
+                d.push(("from".into(), fmt_zone(o)));
+            }
+            d.push(("to".into(), fmt_zone(destination)));
+            if !matches!(target, TargetFilter::None) {
+                d.push(("target".into(), fmt_target(target)));
+            }
+            if let Some(u) = enters_under {
+                d.push(("enters_under".into(), format!("{u:?}"))); // CR 110.2a
+            }
+            if !enter_tapped.is_unspecified() {
+                d.push(("enter_tapped".into(), format!("{enter_tapped:?}"))); // CR 110.5b
+            }
+            if !enter_with_counters.is_empty() {
+                d.push((
+                    "enter_with_counters".into(),
+                    format!("{enter_with_counters:?}"),
+                )); // CR 122.1
+            }
+            if let Some(p) = face_down_profile {
+                d.push(("face_down_profile".into(), format!("{p:?}"))); // CR 708.2a
+            }
+            if let Some(pos) = library_position {
+                d.push(("library_position".into(), format!("{pos:?}"))); // CR 401.4
+            }
+            if *random_order {
+                d.push(("random_order".into(), "true".into())); // CR 401.4
             }
         }
         Effect::Dig {
@@ -10308,6 +10395,47 @@ mod tests {
                 .iter()
                 .any(|k| k == "damage_source_filter"),
             "an absent damage_source_filter must not appear",
+        );
+    }
+
+    #[test]
+    fn change_zone_signature_exposes_enters_attacking() {
+        use crate::types::zones::EtbTapState;
+
+        // #5495: a parser change flipping `enters_attacking` false→true (e.g.
+        // "put it onto the battlefield attacking", CR 508.4, Senu #5494) must be
+        // visible to the coverage-parse-diff signature. When set the field
+        // appears; when false it is omitted so an unqualified ChangeZone's
+        // signature is unchanged. (Mirrors #5493 for PreventDamage.)
+        let signature_keys = |enters_attacking: bool| -> Vec<String> {
+            effect_details(&Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::default(),
+                enters_attacking,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            })
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+        };
+        assert!(
+            signature_keys(true).iter().any(|k| k == "enters_attacking"),
+            "a set enters_attacking must appear in the parse-diff signature",
+        );
+        assert!(
+            !signature_keys(false)
+                .iter()
+                .any(|k| k == "enters_attacking"),
+            "an unset enters_attacking must not appear (unqualified signature unchanged)",
         );
     }
 
