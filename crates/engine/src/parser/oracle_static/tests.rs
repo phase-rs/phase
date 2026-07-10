@@ -4056,6 +4056,156 @@ fn peel_compound_all_quantified_conjuncts_single_quantifier_declines() {
     assert!(peel_compound_all_quantified_conjuncts("All Mountains are Plains").is_none());
 }
 
+// CR 611.3 + CR 613.4b + CR 205.1b: compound-subject animation whose subject is
+// a heterogeneous union of NEGATED-type legs — Bello, Bard of the Brambles.
+// Distinct from the "all X and all Y" family above (`parse_compound_all_subjects_type_change`
+// / `..._type_replacement`): Bello's subject has a SINGLE leading "each"
+// quantifier and per-conjunct negations ("non-Equipment", "non-Aura"), so it
+// is dispatched through `parse_each_compound_subject_type_change`, which
+// delegates the subject wholesale to the general target-phrase grammar. The
+// predicate also grants a MIXED bare-keyword + quoted-trigger list, which the
+// shared additive-type-clause helper alone would have silently reduced to
+// just the quoted trigger.
+#[test]
+fn bello_compound_negated_type_subject_animation_with_granted_abilities() {
+    use crate::types::card_type::CoreType;
+
+    let line = "During your turn, each non-Equipment artifact and non-Aura enchantment you \
+                control with mana value 4 or greater is a 4/4 Elemental creature in addition \
+                to its other types and has indestructible, haste, and \"Whenever this creature \
+                deals combat damage to a player, draw a card.\"";
+    let defs = parse_static_line_multi(line);
+    assert_eq!(defs.len(), 1, "Bello is one compound static: {defs:?}");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::DuringYourTurn),
+        "the leading During-your-turn scope must be preserved: {:?}",
+        def.condition
+    );
+
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!(
+            "affected must be an Or of the two subjects: {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filters.len(), 2, "one disjunct per subject: {filters:?}");
+
+    let cmc_ge_4 = FilterProp::Cmc {
+        comparator: Comparator::GE,
+        value: QuantityExpr::Fixed { value: 4 },
+    };
+    // Artifact conjunct: a non-Equipment artifact you control, mana value >= 4.
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Artifact)
+                && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype("Equipment".to_string()))))
+                && tf.controller == Some(ControllerRef::You)
+                && tf.properties.contains(&cmc_ge_4))),
+        "artifact conjunct must be non-Equipment artifact you control, MV>=4: {:?}",
+        def.affected
+    );
+    // Regression guard: the artifact conjunct's OWN negation (non-Equipment)
+    // must not cross-contaminate into the enchantment conjunct's non-Aura
+    // negation — each leg carries only its own qualifier.
+    assert!(
+        !filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Artifact)
+                && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype("Aura".to_string())))))),
+        "artifact conjunct must not also carry non-Aura: {:?}",
+        def.affected
+    );
+    // Enchantment conjunct: a non-Aura enchantment you control, mana value >= 4.
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Enchantment)
+                && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype("Aura".to_string()))))
+                && tf.controller == Some(ControllerRef::You)
+                && tf.properties.contains(&cmc_ge_4))),
+        "enchantment conjunct must be non-Aura enchantment you control, MV>=4: {:?}",
+        def.affected
+    );
+    // Regression guard (issue reported in code review): the enchantment
+    // conjunct must not also inherit the artifact conjunct's non-Equipment
+    // negation via `distribute_neg_type_filters_to_or` treating the two
+    // independently-negated legs as one shared-negation disjunction.
+    assert!(
+        !filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Enchantment)
+                && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype("Equipment".to_string())))))),
+        "enchantment conjunct must not also carry non-Equipment: {:?}",
+        def.affected
+    );
+
+    use ContinuousModification as CM;
+    for expected in [
+        CM::SetPower { value: 4 },
+        CM::SetToughness { value: 4 },
+        CM::AddType {
+            core_type: CoreType::Creature,
+        },
+        CM::AddSubtype {
+            subtype: "Elemental".to_string(),
+        },
+        CM::AddKeyword {
+            keyword: Keyword::Indestructible,
+        },
+        CM::AddKeyword {
+            keyword: Keyword::Haste,
+        },
+    ] {
+        assert!(
+            def.modifications.contains(&expected),
+            "missing {expected:?} in {:?}",
+            def.modifications
+        );
+    }
+    assert!(
+        def.modifications
+            .iter()
+            .any(|m| matches!(m, CM::GrantTrigger { .. })),
+        "the quoted combat-damage trigger must be granted, not silently dropped: {:?}",
+        def.modifications
+    );
+}
+
+// CR 205.1a vs CR 205.1b: `parse_each_compound_subject_type_change` applies
+// strictly ADDITIVE semantics, so it must decline a compound predicate lacking
+// the "in addition to its/their other types" marker — a bare replacement
+// compound is a different (unhandled here) semantics, not a gap in this
+// handler. Mirrors the same additive-marker gate the "all X and all Y" family
+// uses (`compound_subject_animation_replacement_predicate`).
+#[test]
+fn compound_negated_type_subject_animation_declines_non_additive_predicate() {
+    assert!(
+        parse_static_line_multi(
+            "each non-Equipment artifact and non-Aura enchantment you control with mana value \
+             4 or greater is a 4/4 Elemental creature."
+        )
+        .is_empty(),
+        "non-additive compound must not be additive-claimed"
+    );
+}
+
+// Single-subject lines (no "and" conjunction) must not be claimed by the
+// compound handler — they fall through unchanged (no other handler owns this
+// specific "each non-<Subtype> <Type> ... is ..." single-subject shape either,
+// so the expectation is the same unclaimed/Unimplemented status as today, not
+// a regression introduced by adding the compound handler).
+#[test]
+fn compound_negated_type_subject_animation_single_subject_falls_through() {
+    let line = "each non-Equipment artifact you control with mana value 4 or greater is a 4/4 \
+                Elemental creature in addition to its other types.";
+    let lower = line.to_lowercase();
+    let tp = crate::parser::oracle_util::TextPair::new(line, &lower);
+    assert!(
+        super::type_change::parse_each_compound_subject_type_change(&tp, line).is_none(),
+        "single-subject line must not be claimed by the compound-subject handler"
+    );
+}
+
 #[test]
 fn static_opponent_controlled_compound_subject_shares_continuous_predicate() {
     let def = parse_static_line(
@@ -10498,6 +10648,42 @@ fn static_grant_blitz_simple_form() {
 }
 
 #[test]
+fn static_grant_replicate_hatchery_sliver() {
+    // Issue #5323 — Hatchery Sliver: "Each Sliver spell you cast has replicate.
+    // The replicate cost is equal to its mana cost." lowers to a single
+    // `CastWithKeyword` granting `Replicate(SelfManaCost)` to the controller's
+    // Sliver spells (CR 702.56a). The self-referential cost resolves to each
+    // spell's own mana cost at cast time (same template as the granted-Blitz
+    // path), and the granted replicate functions end-to-end: the cost is read by
+    // `effective_replicate_additional_cost_instances` and the copy trigger by the
+    // `dynamically_granted_replicate` seam in `game/triggers.rs`.
+    use crate::types::mana::ManaCost;
+    let def = parse_static_line(
+        "Each Sliver spell you cast has replicate. The replicate cost is equal to its mana cost.",
+    )
+    .expect("Hatchery Sliver granted-replicate static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Replicate(ManaCost::SelfManaCost),
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!(
+            "affected must be a Typed Sliver filter, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert_eq!(
+        tf.get_subtype(),
+        Some("Sliver"),
+        "must scope to Sliver spells, got {:?}",
+        tf.type_filters
+    );
+}
+
+#[test]
 fn static_cast_as_though_flash_all_spells() {
     // CR 601.3b: the bare "spells" form (Leyline of Anticipation, Vedalken
     // Orrery) grants flash to every spell the controller casts.
@@ -15457,6 +15643,84 @@ fn lands_you_control_are_creatures_scope_and_pt() {
             assert_eq!(tf.controller, Some(ControllerRef::You));
         }
         _ => panic!("Expected Typed land filter scoped to you"),
+    }
+}
+
+/// CR 305.6 + CR 109.5 + CR 613.1d + CR 613.4b: a controller-scoped *basic-land-type*
+/// subject ("<basic land type> you control") resolves like its `All <type>` and
+/// `Lands you control` siblings. Ambush Commander — "Forests you control are 1/1
+/// green Elf creatures that are still lands." — previously strict-failed because the
+/// subject parser's basic-land-type arm did not peel the optional " you control"
+/// controller scope (only the generic "lands you control" and bare/`all ` forms
+/// were handled). The peel is a shared subject-parser parameterization, so it also
+/// covers the controller-scoped type-change form, not just this one card.
+#[test]
+fn controller_scoped_basic_land_type_subject_animates() {
+    use crate::types::card_type::CoreType;
+    use crate::types::mana::ManaColor;
+
+    let def =
+        parse_static_line("Forests you control are 1/1 green Elf creatures that are still lands.")
+            .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Land));
+            assert!(tf
+                .type_filters
+                .contains(&TypeFilter::Subtype("Forest".to_string())));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "\"you control\" must scope the Forest subject to the controller"
+            );
+        }
+        other => panic!("Expected Typed Forest+You land filter, got {other:?}"),
+    }
+    use ContinuousModification as CM;
+    assert_eq!(
+        def.modifications,
+        vec![
+            CM::SetPower { value: 1 },
+            CM::SetToughness { value: 1 },
+            CM::SetColor {
+                colors: vec![ManaColor::Green],
+            },
+            CM::AddType {
+                core_type: CoreType::Creature,
+            },
+            CM::AddSubtype {
+                subtype: "Elf".to_string(),
+            },
+        ],
+    );
+
+    // Same " you control" peel generalizes across the land-static class: a
+    // controller-scoped basic-land-type *type-change* resolves too, proving the fix
+    // is a shared subject-parser parameterization rather than a one-card special case.
+    let type_change = parse_static_line("Mountains you control are Islands.").unwrap();
+    match &type_change.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf
+                .type_filters
+                .contains(&TypeFilter::Subtype("Mountain".to_string())));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+        other => panic!("Expected Typed Mountain+You land filter, got {other:?}"),
+    }
+    assert!(type_change.modifications.iter().any(|m| matches!(
+        m,
+        ContinuousModification::SetBasicLandType { land_type } if *land_type == BasicLandType::Island
+    )));
+
+    // Regression: the unscoped "All Forests" form stays controller-agnostic.
+    let all_forests =
+        parse_static_line("All Forests are 1/1 green Elf creatures that are still lands.").unwrap();
+    match &all_forests.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.controller.is_none(), "all Forests — no controller scope")
+        }
+        other => panic!("Expected Typed Forest filter (all Forests), got {other:?}"),
     }
 }
 

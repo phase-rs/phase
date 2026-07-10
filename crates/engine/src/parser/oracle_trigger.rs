@@ -10,7 +10,7 @@ use nom::Parser;
 use super::oracle_effect::{
     condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
     try_parse_each_player_copy_chosen, try_parse_exile_top_each_library_with_collection_counter,
-    try_parse_grant_graveyard_keyword_to_target,
+    try_parse_grant_graveyard_keyword_to_target, try_parse_reanimator_aura_etb_effect,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
@@ -38,7 +38,7 @@ use super::oracle_util::{
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction, AttachmentKind,
     AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageKindFilter,
     DestinationConstraint, DieResultFilter, Effect, FilterProp, ObjectScope, OriginConstraint,
@@ -1171,6 +1171,17 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 // `parse_effect_chain_ir` fallthrough so an unparsed shape stays an
                 // honest Unimplemented rather than misparsing.
                 try_parse_each_player_copy_chosen(&effect_for_parse, AbilityKind::Spell)
+                    .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
+            })
+            .or_else(|| {
+                // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.17a: whole-body
+                // reanimator-Aura ETB effect (Animate Dead / Dance of the Dead) —
+                // "it loses ... and gains ...", return/put the enchanted creature
+                // card to the battlefield under your control, attach the Aura to
+                // it, and register the leaves-battlefield sacrifice. Fail-closed:
+                // declines unless the entire body matches, so a deviating card
+                // stays an honest Unimplemented rather than misparsing.
+                try_parse_reanimator_aura_etb_effect(&effect_for_parse, AbilityKind::Spell)
                     .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
             })
             .or_else(|| {
@@ -4186,6 +4197,50 @@ fn extract_if_condition_with_card_name(
         );
     }
 
+    // CR 603.4 + CR 702.105a: "if it's/is attacking the player with the most
+    // life or tied for most life" — the same defending-player-life-total
+    // predicate Dethrone's own synthesized trigger uses (`build_dethrone_trigger`,
+    // database/synthesis.rs), reused here so a card phrasing the identical CR
+    // 702.105a idiom as a plain intervening-if (Scourge of the Throne: "if
+    // it's attacking the player with the most life or tied for most life,
+    // untap all attacking creatures") gets the SAME typed condition instead of
+    // either the wrong bare `SourceIsAttacking` (dropping the life-total
+    // qualifier entirely — the phase-rs/phase#5449 review's second finding) or
+    // an unconditional `None` (which would make the ability fire regardless of
+    // who's being attacked — strictly worse than the original bug). Ordered
+    // before the plain "if it's attacking" simple-table entry so the longer,
+    // more specific phrase is never partially shadowed by the shorter one.
+    if let Some((before, _, rest)) = scan_preceded(&lower, |i| {
+        (
+            tag::<_, _, OracleError<'_>>("if it"),
+            alt((tag("'s"), tag(" is"))),
+            tag(" attacking the player with the most life or tied for most life"),
+        )
+            .parse(i)
+    }) {
+        let pat_start = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, pat_start, clause_len),
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::DefendingPlayer,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Max,
+                            exclude: None,
+                        },
+                    },
+                },
+            }),
+        );
+    }
+
     // CR 603.4 + CR 702.138b: "unless it escaped" — the trigger fires unless
     // the source permanent was cast from a graveyard with its escape ability.
     // Phlage, Titan of Fire's Fury: "sacrifice it unless it escaped." The
@@ -4214,6 +4269,21 @@ fn extract_if_condition_with_card_name(
             // CR 508.1 / CR 603.4: attacking state.
             ("if it's attacking", TriggerCondition::SourceIsAttacking),
             ("if it is attacking", TriggerCondition::SourceIsAttacking),
+            // CR 113.6b: source-scoped "if it's on the battlefield" — the ETB
+            // trigger's own source (a reanimator Aura: Animate Dead / Dance of
+            // the Dead) resolves only while it is still on the battlefield.
+            (
+                "if it's on the battlefield",
+                TriggerCondition::SourceInZone {
+                    zone: Zone::Battlefield,
+                },
+            ),
+            (
+                "if it is on the battlefield",
+                TriggerCondition::SourceInZone {
+                    zone: Zone::Battlefield,
+                },
+            ),
             // CR 508.1 + CR 603.4: source-scoped "if ~ attacked this turn" —
             // the trigger resolves only if the ability's own source creature
             // declared as an attacker this turn (Riders of the Mark, Taigam,
@@ -5552,13 +5622,32 @@ fn try_extract_cast_variant_paid_condition(
 ///
 /// For source-referential conditions that cannot be `StaticCondition`s and don't need
 /// dynamic parsing — just a fixed pattern mapping to a fixed `TriggerCondition`.
+///
+/// CR 603.4 + CR 608.2c: a pattern here must match the WHOLE condition clause,
+/// not just a prefix of it — a conjunctive condition ("if it's on the
+/// battlefield and you control 9 or fewer creatures, ...", "Name Sticker"
+/// Goblin) has its own composite meaning that this table cannot express.
+/// Matching only the leading half and treating the residual "and ..." text as
+/// part of the effect body silently corrupts the trigger (phase-rs/phase#5449
+/// review). Require the match to be immediately followed by a clause boundary
+/// (`,`/`.`/end of string) so a conjunctive form falls through to the general
+/// condition parser instead.
 fn try_extract_simple_condition(
     tp: &TextPair<'_>,
     text: &str,
     patterns: &[(&str, TriggerCondition)],
 ) -> Option<(String, Option<TriggerCondition>)> {
+    let first_if = tp.find("if "); // allow-noncombinator: structural first-if anchor for trigger-level intervening-if extraction
     for (pattern, condition) in patterns {
         if let Some(pos) = tp.find(pattern) {
+            if Some(pos) != first_if {
+                continue;
+            }
+            let after = &tp.lower[pos + pattern.len()..];
+            let is_whole_clause = after.is_empty() || after.starts_with([',', '.']);
+            if !is_whole_clause {
+                continue;
+            }
             return Some((
                 strip_condition_clause(text, pos, pattern.len()),
                 Some(condition.clone()),

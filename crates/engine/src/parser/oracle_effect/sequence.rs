@@ -1306,6 +1306,21 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     chunks
 }
 
+/// CR 114.1: True when the clause-so-far begins with the emblem-creation head
+/// (`you get an emblem with "…"` or the subject-stripped `get an emblem with
+/// "…"`). Combinator-only dispatch mirroring `try_parse_emblem_creation`'s prefix
+/// so the clause splitter treats an emblem's granted-ability quote as a
+/// self-contained sentence.
+fn clause_is_emblem_creation_head(current: &str) -> bool {
+    let is_emblem_head = alt((
+        tag_no_case::<_, _, OracleError<'_>>("you get an emblem with \""),
+        tag_no_case("get an emblem with \""),
+    ))
+    .parse(current.trim_start())
+    .is_ok();
+    is_emblem_head
+}
+
 fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool {
     let quoted_text_ends_sentence = current
         .chars()
@@ -1314,6 +1329,19 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
         .is_some_and(|ch| matches!(ch, '.' | '!' | '?'));
     if !quoted_text_ends_sentence {
         return false;
+    }
+
+    // CR 114.1: An emblem is a self-contained command-zone object with no board
+    // presence, so a sentence following its granted-ability quote can never be an
+    // anaphor referring back to it (unlike a token/permanent granted-ability
+    // quote, where a trailing "It becomes …" refers to the created object). When
+    // the clause-so-far is the emblem head (`you get an emblem with "…"`), the
+    // sentence-ending close quote always closes the sentence, so the emblem's
+    // sibling effects split into their own clauses — Nissa, Who Shakes the World's
+    // "… Search your library …" would otherwise be swallowed into the emblem's
+    // static text (issue #5282).
+    if clause_is_emblem_creation_head(current) {
+        return true;
     }
 
     let trimmed = remainder.trim_start();

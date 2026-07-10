@@ -1472,6 +1472,16 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
             })
             .collect()
     } else if let Effect::Attach { attachment, target } = &validated.effect {
+        // CR 608.2b (phase#4767 review): `attachment`/`target` context-refs
+        // (SelfRef, ParentTarget, ...) don't need their own target slot and
+        // are skipped below — but `validated.targets` can carry MORE entries
+        // than this Attach node's own two operands consume, propagated
+        // through for a downstream sibling in the chain (e.g. a
+        // CreateDelayedTrigger sub-ability reading the same ParentTarget).
+        // Only the entries this node's own filters actually claim get
+        // re-validated here; any remaining, un-claimed entries must pass
+        // through UNCHANGED rather than being silently dropped, or a
+        // sibling relying on them downstream loses its target.
         let mut kept = Vec::new();
         let mut target_iter = validated.targets.iter();
         for (is_attachment, filter) in [(true, attachment), (false, target)] {
@@ -1493,6 +1503,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 kept.push(legal);
             }
         }
+        kept.extend(target_iter.cloned());
         kept
     } else if let Effect::Fight { subject, target } = &validated.effect {
         // CR 608.2b + CR 701.14a: Dual-fighter fights validate each chosen
@@ -1652,6 +1663,41 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 .is_some_and(|f| f.is_context_ref()) =>
             {
                 validated.targets.clone()
+            }
+            // CR 303.4a + CR 608.2b: A plain Aura spell has no separate on-cast
+            // effect — its resolving `Effect` is the `Effect::Unimplemented`
+            // placeholder built in `casting.rs`, so `extract_target_filter_from_effect`
+            // returns `None` and lands here. Its legal targets are defined by its
+            // enchant ability (`Keyword::Enchant`), NOT by the placeholder effect,
+            // and that filter may be zone-scoped (e.g. Animate Dead's "creature
+            // card in a graveyard"). Re-validate against the Enchant filter with
+            // the SAME machinery cast-time targeting uses, so a graveyard-zone host
+            // is not fizzle-filtered by the hardcoded battlefield check below.
+            // Gated on `Effect::Unimplemented` specifically (not on Aura-ness): the
+            // `None` arm also legitimately serves `Effect::Sacrifice`/`UnattachAll`/
+            // `Bounce { selection: AtResolution }`, which must keep the plain
+            // battlefield fizzle-check.
+            None if matches!(validated.effect, Effect::Unimplemented { .. }) => {
+                match crate::game::effects::change_targets::aura_enchant_filter(
+                    state,
+                    validated.source_id,
+                ) {
+                    Some(filter) => targeting::validate_targets_for_ability(
+                        state,
+                        &validated.targets,
+                        &filter,
+                        &validated,
+                    ),
+                    None => validated
+                        .targets
+                        .iter()
+                        .filter(|target| match target {
+                            TargetRef::Object(object_id) => state.battlefield.contains(object_id),
+                            TargetRef::Player(_) => true,
+                        })
+                        .cloned()
+                        .collect(),
+                }
             }
             None => validated
                 .targets
@@ -7089,6 +7135,49 @@ mod tests {
             ),
             "a delayed-return ParentTarget ability must not fizzle when its \
              snapshotted object is off the battlefield"
+        );
+    }
+
+    /// CR 608.2b (phase-rs/phase#5449 review): an `Effect::Attach` node whose
+    /// `attachment`/`target` are both context-refs (SelfRef/ParentTarget —
+    /// neither needs its own target slot) must not have its `.targets` wiped
+    /// to `[]` when the node carries MORE entries than its own two operands
+    /// consume — those extra entries are propagated through for a downstream
+    /// sibling (e.g. a chained `CreateDelayedTrigger` reading the same
+    /// `ParentTarget`), not this node's own operands, and must survive
+    /// re-validation unchanged.
+    #[test]
+    fn validate_targets_in_chain_attach_preserves_unclaimed_propagated_targets() {
+        let format = FormatConfig::duel_commander();
+        let mut state = GameState::new(format, 2, 2);
+        let creature = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Attach{SelfRef, ParentTarget} — neither operand needs a slot — but
+        // `.targets` carries the propagated creature id for a downstream
+        // sibling, not for this node's own attachment/target resolution.
+        let ability = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        let validated = validate_targets_in_chain(&state, &ability);
+        assert_eq!(
+            validated.targets,
+            vec![TargetRef::Object(creature)],
+            "an Attach node's un-claimed propagated targets must pass through \
+             re-validation unchanged, not be dropped just because neither of \
+             this node's own operands needed a target slot"
         );
     }
 

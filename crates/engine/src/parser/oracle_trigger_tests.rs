@@ -9,9 +9,9 @@ use crate::types::ability::{
     Comparator, ContinuousModification, ControllerRef, CountScope, DamageChannel,
     DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
     EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ObjectScope,
-    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    SharedQuality, TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
-    ZoneRef,
+    PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, SharedQuality, TapStateChange, TargetFilter, TriggerCondition, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::WaitingFor;
@@ -625,6 +625,177 @@ fn trigger_etb_self_from_anywhere_other_than_graveyard_or_exile() {
     assert_eq!(clause.destination, Some(Zone::Battlefield));
     assert_eq!(clause.valid_card, Some(TargetFilter::SelfRef));
     assert!(def.execute.is_some());
+}
+
+// CR 603.4 (phase-rs/phase#5449 review regression): a conjunctive
+// intervening-if ("if it's on the battlefield AND you control 9 or fewer
+// creatures named ~, roll a 20-sided die.") must not be corrupted by the
+// simple pattern table's "if it's on the battlefield" entry (added for the
+// reanimator-Aura class in the same PR) matching only the leading half and
+// feeding the residual "and you control..." text into effect parsing.
+// `try_extract_simple_condition` now requires the matched phrase to be
+// immediately followed by a clause boundary (`,`/`.`/end), so a compound
+// condition like this one correctly declines the simple-table match and
+// falls through — the RollDie effect must parse fully intact, with no
+// stray fragment leaking from the un-consumed condition tail.
+#[test]
+fn trigger_conjunctive_battlefield_condition_does_not_corrupt_roll_die_effect() {
+    let def = parse_trigger_line(
+        "When this creature enters from anywhere other than a graveyard or exile, \
+             if it's on the battlefield and you control 9 or fewer creatures named \
+             \"Name Sticker\" Goblin, roll a 20-sided die.",
+        "\"Name Sticker\" Goblin",
+    );
+    let Some(execute) = &def.execute else {
+        panic!("expected a RollDie execute ability, got None");
+    };
+    assert_eq!(
+        *execute.effect,
+        Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 20,
+            results: vec![],
+            modifier: None,
+        },
+        "the conjunctive condition's residual \"and you control...\" text must not \
+         leak into the effect body and corrupt the RollDie parse"
+    );
+}
+
+// CR 603.4 + CR 702.105a (phase-rs/phase#5449 review, second finding):
+// Scourge of the Throne's "if it's attacking the player with the most life or
+// tied for most life" must map to the SAME typed QuantityComparison condition
+// Dethrone's own synthesized trigger uses (build_dethrone_trigger,
+// database/synthesis.rs) — not the wrong bare SourceIsAttacking (dropping the
+// life-total qualifier, the original regression) and not an unconditional
+// None (which would make UntapAll + the extra combat phase fire regardless of
+// who's being attacked — strictly worse than the original bug, since the
+// ability would then work "too well" under the wrong conditions).
+#[test]
+fn trigger_attacking_highest_life_player_condition_maps_to_dethrone_shape() {
+    let def = parse_trigger_line(
+        "Whenever this creature attacks for the first time each turn, if it's \
+             attacking the player with the most life or tied for most life, untap \
+             all attacking creatures.",
+        "Scourge of the Throne",
+    );
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::DefendingPlayer,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Max,
+                        exclude: None,
+                    },
+                },
+            },
+        }),
+        "must map to the same typed life-total comparison Dethrone uses, not \
+         a bare SourceIsAttacking and not an unconditional None"
+    );
+    let Some(execute) = &def.execute else {
+        panic!("expected an UntapAll execute ability, got None");
+    };
+    assert_eq!(
+        *execute.effect,
+        Effect::SetTapState {
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![FilterProp::Attacking { defender: None }],
+            }),
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+        },
+        "the effect body must not be corrupted by the intervening-if extraction"
+    );
+}
+
+// Sibling: Animate Dead's own genuine (non-conjunctive) "if it's on the
+// battlefield" condition, immediately followed by a comma, must still match
+// the simple-table entry — the boundary check must not be so strict that it
+// breaks the reanimator-Aura class this entry exists for.
+#[test]
+fn trigger_bare_battlefield_condition_still_matches_simple_table() {
+    let def = parse_trigger_line(
+        "When this Aura enters, if it's on the battlefield, it loses \
+             \"enchant creature card in a graveyard\" and gains \"enchant creature \
+             put onto the battlefield with this Aura.\" Return enchanted creature \
+             card to the battlefield under your control and attach this Aura to it. \
+             When this Aura leaves the battlefield, that creature's controller \
+             sacrifices it.",
+        "Animate Dead",
+    );
+    assert!(
+        def.execute.is_some(),
+        "the reanimator-Aura ETB effect must still parse via the whole-body recognizer"
+    );
+}
+
+// Digital-only Alchemy (no CR entry) + CR 113.6b (phase-rs/phase#5449 review,
+// third finding): Hex's leading source-zone intervening-if is
+// "if ~ is on the battlefield or in exile", and its later "Then if it's on the
+// battlefield" clause is part of the effect body. The simple source-zone table
+// must not scan past the leading condition and hoist the later clause instead,
+// which would narrow the trigger to battlefield-only and turn the perpetual
+// effect into a regular Pump.
+#[test]
+fn trigger_hex_companion_keeps_exile_or_battlefield_perpetual_condition() {
+    let def = parse_trigger_line(
+        "Whenever you cast an Adventure spell, if Hex, Kellan's Companion is on \
+             the battlefield or in exile, it perpetually gets +1/+1. Then if it's \
+             on the battlefield, exile it with a fetch counter on it.",
+        "Hex, Kellan's Companion",
+    );
+
+    let Some(TriggerCondition::Or { conditions }) = &def.condition else {
+        panic!(
+            "expected battlefield-or-exile source-zone condition, got {:?}",
+            def.condition
+        );
+    };
+    assert!(
+        conditions.contains(&TriggerCondition::SourceInZone {
+            zone: Zone::Battlefield
+        }),
+        "Hex trigger must still function from the battlefield, got {conditions:?}"
+    );
+    assert!(
+        conditions.contains(&TriggerCondition::SourceInZone { zone: Zone::Exile }),
+        "Hex trigger must still function from exile, got {conditions:?}"
+    );
+    assert!(
+        def.trigger_zones.contains(&Zone::Battlefield),
+        "trigger scanner must include battlefield, got {:?}",
+        def.trigger_zones
+    );
+    assert!(
+        def.trigger_zones.contains(&Zone::Exile),
+        "trigger scanner must include exile, got {:?}",
+        def.trigger_zones
+    );
+
+    let execute = def.execute.as_deref().expect("Hex trigger execute body");
+    match execute.effect.as_ref() {
+        Effect::ApplyPerpetual {
+            modification:
+                PerpetualModification::ModifyPowerToughness {
+                    power_delta,
+                    toughness_delta,
+                },
+            ..
+        } => {
+            assert_eq!((*power_delta, *toughness_delta), (1, 1));
+        }
+        other => panic!("expected ApplyPerpetual +1/+1, got {other:?}"),
+    }
 }
 
 /// CR 603.10a + CR 603.4 (issue #4521): Kishla Skimmer — "Whenever a card
@@ -22557,4 +22728,224 @@ fn opponent_attacks_you_with_two_or_more_dinosaurs_carries_type_filter() {
             "expected AttackersDeclaredCount {{ AttackTarget {{ You, Player, Some(Dinosaur) }}, GE, 2 }}, got {other:?}"
         ),
     }
+}
+
+// --- phase#4767: reanimator-Aura ETB whole-body recognizer (Animate Dead / Dance of the Dead) ---
+
+/// Verbatim Oracle text (Scryfall, 2026-07). The `enter_tapped` axis is the sole
+/// difference in the trigger sentence: "Return ... to the battlefield" (Animate
+/// Dead) vs. "Put ... onto the battlefield tapped" (Dance of the Dead).
+const ANIMATE_DEAD_ORACLE: &str = "Enchant creature card in a graveyard\nWhen this Aura enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with this Aura.\" Return enchanted creature card to the battlefield under your control and attach this Aura to it. When this Aura leaves the battlefield, that creature's controller sacrifices it.\nEnchanted creature gets -1/-0.";
+
+const DANCE_OF_THE_DEAD_ORACLE: &str = "Enchant creature card in a graveyard\nWhen this Aura enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with this Aura.\" Put enchanted creature card onto the battlefield tapped under your control and attach this Aura to it. When this Aura leaves the battlefield, that creature's controller sacrifices it.\nEnchanted creature gets +1/+1 and doesn't untap during its controller's untap step.\nAt the beginning of the upkeep of enchanted creature's controller, that player may pay {1}{B}. If the player does, untap that creature.";
+
+/// SHAPE test — assert the reanimator-Aura ETB trigger lowers to the exact 4-node
+/// chain (ChangeZone -> GenericEffect -> Attach -> CreateDelayedTrigger) with the
+/// field values the runtime source-rebind mechanism depends on. Runtime behavior
+/// is exercised separately in `casting_tests.rs`; this pins parser structure only.
+fn assert_reanimator_chain(oracle: &str, card_name: &str, expect_tapped: bool) {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::zones::Zone;
+    let parsed = parse_oracle_text(
+        oracle,
+        card_name,
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    let etb = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
+        .unwrap_or_else(|| {
+            panic!(
+                "{card_name}: expected an enters-battlefield trigger, got {:?}",
+                parsed.triggers
+            )
+        });
+    let root = etb
+        .execute
+        .as_deref()
+        .unwrap_or_else(|| panic!("{card_name}: Enters trigger has no execute body"));
+
+    // Zero Unimplemented anywhere in the chain (fail-closed recognizer honesty).
+    fn assert_no_unimplemented(def: &AbilityDefinition, card_name: &str) {
+        assert!(
+            !matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+            "{card_name}: unexpected Effect::Unimplemented in chain: {:?}",
+            def.effect
+        );
+        if let Some(sub) = def.sub_ability.as_deref() {
+            assert_no_unimplemented(sub, card_name);
+        }
+        if let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() {
+            assert_no_unimplemented(effect, card_name);
+        }
+    }
+    assert_no_unimplemented(root, card_name);
+
+    // Node 1: ChangeZone at the root, forward_result set explicitly.
+    assert!(
+        root.forward_result,
+        "{card_name}: root ChangeZone must set forward_result",
+    );
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        enters_under,
+        enter_tapped,
+        ..
+    } = root.effect.as_ref()
+    else {
+        panic!(
+            "{card_name}: expected root Effect::ChangeZone, got {:?}",
+            root.effect
+        );
+    };
+    assert_eq!(*origin, Some(Zone::Graveyard), "{card_name}: origin");
+    assert_eq!(*destination, Zone::Battlefield, "{card_name}: destination");
+    assert_eq!(
+        *target,
+        TargetFilter::AttachedTo,
+        "{card_name}: ChangeZone target"
+    );
+    assert_eq!(
+        *enters_under,
+        Some(ControllerRef::You),
+        "{card_name}: enters_under"
+    );
+    assert_eq!(
+        enter_tapped.is_tapped(),
+        expect_tapped,
+        "{card_name}: enter_tapped state ({enter_tapped:?})",
+    );
+
+    // Node 2: GenericEffect keyword swap referencing OriginalSource, no duration.
+    let generic = root
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("{card_name}: ChangeZone has no GenericEffect sub"));
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = generic.effect.as_ref()
+    else {
+        panic!(
+            "{card_name}: expected GenericEffect, got {:?}",
+            generic.effect
+        );
+    };
+    assert_eq!(
+        *duration, None,
+        "{card_name}: keyword-swap grant has no stated duration"
+    );
+    assert_eq!(
+        static_abilities.len(),
+        1,
+        "{card_name}: one keyword-swap static"
+    );
+    let sd = &static_abilities[0];
+    assert_eq!(
+        sd.affected,
+        Some(TargetFilter::OriginalSource),
+        "{card_name}: keyword swap must target OriginalSource (the Aura), not SelfRef",
+    );
+    assert_eq!(
+        sd.modifications,
+        vec![
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Enchant(TargetFilter::Any),
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Enchant(TargetFilter::ParentTarget),
+            },
+        ],
+        "{card_name}: keyword swap modifications",
+    );
+
+    // Node 3: Attach — SelfRef (the Aura) onto ParentTarget (the reanimated creature).
+    let attach = generic
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("{card_name}: GenericEffect has no Attach sub"));
+    let Effect::Attach { attachment, target } = attach.effect.as_ref() else {
+        panic!("{card_name}: expected Attach, got {:?}", attach.effect);
+    };
+    assert_eq!(
+        *attachment,
+        TargetFilter::SelfRef,
+        "{card_name}: attach attachment"
+    );
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTarget,
+        "{card_name}: attach host"
+    );
+
+    // Node 4: CreateDelayedTrigger — WhenLeavesPlayFiltered{SelfRef} -> Sacrifice{ParentTarget}.
+    let delayed = attach
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("{card_name}: Attach has no CreateDelayedTrigger sub"));
+    let Effect::CreateDelayedTrigger {
+        condition,
+        effect,
+        uses_tracked_set,
+    } = delayed.effect.as_ref()
+    else {
+        panic!(
+            "{card_name}: expected CreateDelayedTrigger, got {:?}",
+            delayed.effect
+        );
+    };
+    assert!(
+        !uses_tracked_set,
+        "{card_name}: delayed trigger uses no tracked set"
+    );
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::WhenLeavesPlayFiltered {
+            filter: TargetFilter::SelfRef,
+        },
+        "{card_name}: delayed leaves-battlefield condition on the Aura (SelfRef)",
+    );
+    let Effect::Sacrifice { target, count, .. } = effect.effect.as_ref() else {
+        panic!("{card_name}: expected Sacrifice, got {:?}", effect.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTarget,
+        "{card_name}: sacrifice targets the creature"
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Fixed { value: 1 },
+        "{card_name}: sacrifice count"
+    );
+    assert!(
+        delayed.sub_ability.is_none(),
+        "{card_name}: chain ends at the delayed trigger"
+    );
+}
+
+#[test]
+fn animate_dead_etb_lowers_to_reanimator_chain_untapped_4767() {
+    assert_reanimator_chain(
+        ANIMATE_DEAD_ORACLE,
+        "Animate Dead",
+        /* expect_tapped */ false,
+    );
+}
+
+#[test]
+fn dance_of_the_dead_etb_lowers_to_reanimator_chain_tapped_4767() {
+    // Dance of the Dead's extra clauses (P/T rider, upkeep untap) must not
+    // prevent the isomorphic tapped chain from lowering.
+    assert_reanimator_chain(
+        DANCE_OF_THE_DEAD_ORACLE,
+        "Dance of the Dead",
+        /* expect_tapped */ true,
+    );
 }

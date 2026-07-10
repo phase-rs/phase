@@ -1268,7 +1268,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
         }
 
-        // CR 303.4f: Aura resolving to battlefield attaches to its target.
+        // CR 608.3c: An Aura spell resolving becomes a permanent put onto the
+        // battlefield attached to the player or object it was targeting.
+        // (NOT CR 303.4f, which explicitly governs Auras entering "by any means
+        // other than by resolving as an Aura spell.")
         if spell_in_zone(state, entry.id, Zone::Battlefield) {
             let is_aura = state
                 .objects
@@ -1277,19 +1280,26 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .unwrap_or(false);
             if is_aura {
                 match spell_targets.first() {
-                    // CR 303.4f + CR 608.2b: Object Aura — verify the target is
-                    // still on the battlefield (last-known-information check); a
-                    // gone target leaves the Aura unattached and SBA
-                    // (CR 704.5m) cleans it up at the next checkpoint.
+                    // CR 608.3c + CR 608.2b: Object Aura — verify the target is
+                    // still a legal host per the Aura's own zone-scoped enchant
+                    // ability (`is_valid_attachment_target`, the single legality
+                    // authority shared with `attach::resolve` and the SBA
+                    // re-check). A battlefield-only Enchant filter still requires
+                    // battlefield presence; a graveyard-scoped filter (Animate
+                    // Dead) legally accepts a graveyard host. A now-illegal target
+                    // leaves the Aura unattached and SBA (CR 704.5m) cleans it up
+                    // at the next checkpoint.
                     Some(crate::types::ability::TargetRef::Object(target_id))
-                        if state.battlefield.contains(target_id) =>
+                        if crate::game::sba::is_valid_attachment_target(
+                            state, entry.id, *target_id,
+                        ) =>
                     {
                         effects::attach::attach_to(state, entry.id, *target_id);
                     }
                     Some(crate::types::ability::TargetRef::Object(_)) => {
-                        // Target left the battlefield — SBA cleanup follows.
+                        // Target is no longer a legal host — SBA cleanup follows.
                     }
-                    // CR 303.4f + CR 702.5d: Player Aura (Curse cycle, Faith's
+                    // CR 608.3c + CR 702.5d: Player Aura (Curse cycle, Faith's
                     // Fetters-class). Validity check is "player still in game"
                     // — `attach_to_player` makes no liveness check itself, but
                     // `check_unattached_auras` (CR 303.4c) will detach + grave

@@ -6,7 +6,9 @@ on:
     paths:
       - 'crates/phase-ai/**'
       - 'data/card-data.json'
+      - 'scripts/lib/mtgjson-fetch.sh'
       - '.cargo/config.toml'
+      - '.github/actions/ai-card-data-cache/**'
       - '.github/workflows/ai-gate.yml'
   schedule:
     - cron: "0 9 * * *"
@@ -29,21 +31,13 @@ jobs:
         with:
           cache-shared-key: rust-ai-gate
 
-      - name: Restore generated card data
-        id: cardgen-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            data/card-data.json
-            data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+      - name: Restore AI card data caches
+        id: card-data-cache
+        uses: ./.github/actions/ai-card-data-cache
 
       - name: Generate card data
-        if: steps.cardgen-cache.outputs.cache-hit != 'true'
+        if: steps.card-data-cache.outputs.cardgen-cache-hit != 'true'
         run: |
-          mkdir -p data/mtgjson
-          source scripts/lib/mtgjson-fetch.sh
-          mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
       - name: Run quick AI gate
@@ -66,21 +60,13 @@ jobs:
         with:
           cache-shared-key: rust-ai-gate
 
-      - name: Restore generated card data
-        id: cardgen-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            data/card-data.json
-            data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+      - name: Restore AI card data caches
+        id: card-data-cache
+        uses: ./.github/actions/ai-card-data-cache
 
       - name: Generate card data
-        if: steps.cardgen-cache.outputs.cache-hit != 'true'
+        if: steps.card-data-cache.outputs.cardgen-cache-hit != 'true'
         run: |
-          mkdir -p data/mtgjson
-          source scripts/lib/mtgjson-fetch.sh
-          mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
       - name: Run full AI gate
@@ -119,21 +105,13 @@ jobs:
         with:
           cache-shared-key: rust-ai-gate
 
-      - name: Restore generated card data
-        id: cardgen-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            data/card-data.json
-            data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+      - name: Restore AI card data caches
+        id: card-data-cache
+        uses: ./.github/actions/ai-card-data-cache
 
       - name: Generate card data
-        if: steps.cardgen-cache.outputs.cache-hit != 'true'
+        if: steps.card-data-cache.outputs.cardgen-cache-hit != 'true'
         run: |
-          mkdir -p data/mtgjson
-          source scripts/lib/mtgjson-fetch.sh
-          mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
       # debug profile (authoritative): counter VALUES are profile-independent and the
@@ -154,21 +132,13 @@ jobs:
         with:
           cache-shared-key: rust-ai-gate
 
-      - name: Restore generated card data
-        id: cardgen-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            data/card-data.json
-            data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+      - name: Restore AI card data caches
+        id: card-data-cache
+        uses: ./.github/actions/ai-card-data-cache
 
       - name: Generate card data
-        if: steps.cardgen-cache.outputs.cache-hit != 'true'
+        if: steps.card-data-cache.outputs.cardgen-cache-hit != 'true'
         run: |
-          mkdir -p data/mtgjson
-          source scripts/lib/mtgjson-fetch.sh
-          mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
       # debug profile (authoritative): counter VALUES are profile-independent and the

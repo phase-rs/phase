@@ -35630,6 +35630,394 @@ fn animate_dead_enchant_filter_enumerates_graveyard_targets() {
     }
 }
 
+/// CR 608.3c + CR 303.4a regression (issue #4767): a zone-scoped-Enchant Aura
+/// (Animate Dead, "enchant creature card in a graveyard") must NOT fizzle when it
+/// resolves, and must attach to its graveyard host. Drives the real pipeline:
+/// `handle_cast_spell` (auto-target onto the stack) → `stack::resolve_top`, which
+/// runs the CR 608.2b fizzle check through `validate_targets_in_chain` (Site A)
+/// and then the Aura-attach block (Site B).
+///
+/// Reverting Site A alone flips assertion (a): the generic `None` fizzle arm's
+/// hardcoded `state.battlefield.contains` drops the graveyard target, the spell
+/// fizzles to the graveyard, and the Aura never reaches the battlefield.
+/// Reverting Site B alone (with Site A in place) flips assertion (b): the spell
+/// now reaches the battlefield but the hardcoded `state.battlefield.contains`
+/// attach guard rejects the graveyard host, so it never attaches.
+#[test]
+fn animate_dead_aura_spell_resolves_and_attaches_to_graveyard_creature() {
+    use std::str::FromStr;
+
+    let mut state = setup_game_at_main_phase();
+
+    let aura_id = create_object(
+        &mut state,
+        CardId(601),
+        PlayerId(0),
+        "Animate Dead".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&aura_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        // Same MTGJSON-parameterized construction path as
+        // `animate_dead_enchant_filter_enumerates_graveyard_targets` — not a
+        // hand-rolled filter.
+        let kw = Keyword::from_str("Enchant:creature card in a graveyard").unwrap();
+        obj.keywords.push(kw);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        };
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
+
+    let creature_id = create_object(
+        &mut state,
+        CardId(602),
+        PlayerId(1),
+        "Grizzly Bears".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&creature_id)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+
+    let mut events = Vec::new();
+    let result =
+        handle_cast_spell(&mut state, PlayerId(0), aura_id, CardId(601), &mut events).unwrap();
+    assert!(
+        matches!(result, WaitingFor::Priority { .. }),
+        "expected auto-target onto the stack; got {result:?}"
+    );
+    assert_eq!(state.stack.len(), 1, "Aura spell must be on the stack");
+
+    // Resolve ONLY the Aura spell itself. Any resulting ETB-trigger stack entry
+    // (the separately-implemented reanimation chain) is left unresolved — this
+    // test isolates the attach prerequisite.
+    stack::resolve_top(&mut state, &mut events);
+
+    // (a) The Aura did NOT fizzle — it reached the battlefield. Fails today at
+    // Site A before the fix.
+    assert!(
+        state.battlefield.contains(&aura_id),
+        "Animate Dead must resolve onto the battlefield, not fizzle to the graveyard"
+    );
+    // (b) Site B accepted the graveyard host and attached the Aura.
+    assert_eq!(
+        state.objects[&aura_id].attached_to,
+        Some(crate::game::game_object::AttachTarget::Object(creature_id)),
+        "Aura must be attached to the graveyard creature it targeted"
+    );
+    // (c) The creature is STILL in the graveyard — this test does NOT exercise
+    // the separate ETB reanimation chain.
+    assert_eq!(
+        state.objects[&creature_id].zone,
+        Zone::Graveyard,
+        "creature must remain in the graveyard (ETB reanimation is out of scope here)"
+    );
+}
+
+/// Verbatim Animate Dead Oracle text (matches `crates/engine/tests/fixtures/
+/// integration_cards.json` — the repo's canonical corpus form, which uses the
+/// self-reference "this Aura"). Reused across the end-to-end reanimation tests.
+const ANIMATE_DEAD_ORACLE_FULL: &str = "Enchant creature card in a graveyard\nWhen this Aura enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with this Aura.\" Return enchanted creature card to the battlefield under your control and attach this Aura to it. When this Aura leaves the battlefield, that creature's controller sacrifices it.\nEnchanted creature gets -1/-0.";
+
+/// Drives Animate Dead's FULL end-to-end reanimation pipeline (issue #4767):
+/// parse the complete Oracle text through the real `parse_oracle_text` pipeline
+/// (so the ETB reanimation trigger is produced by `try_parse_reanimator_aura_etb_effect`
+/// and attached to the object), cast the Aura, resolve the spell (Site A/B —
+/// attach to the graveyard host), fire the resulting ETB trigger via the real
+/// `process_triggers` path, then resolve the 4-node reanimation chain.
+///
+/// Returns `(state, aura_id, creature_id)` for the reanimated board so the
+/// delayed-sacrifice and control-change tests can build on it. `evaluate_layers`
+/// has been run, so the keyword swap and the -1/-0 static are applied.
+fn reanimate_grizzly_via_animate_dead() -> (GameState, ObjectId, ObjectId) {
+    use crate::parser::oracle::parse_oracle_text;
+    use std::str::FromStr;
+
+    let mut state = setup_game_at_main_phase();
+
+    let aura_id = create_object(
+        &mut state,
+        CardId(601),
+        PlayerId(0),
+        "Animate Dead".to_string(),
+        Zone::Hand,
+    );
+    // Real parser output — same construction path a fresh card-data export uses.
+    let parsed = parse_oracle_text(
+        ANIMATE_DEAD_ORACLE_FULL,
+        "Animate Dead",
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    // Reach-guard: the live parser MUST attach the reanimator ETB trigger. If the
+    // recognizer's dispatch is reverted this fails here, so no downstream
+    // assertion can pass vacuously.
+    assert!(
+        !parsed.triggers.is_empty(),
+        "parser must produce the reanimator ETB trigger; got none"
+    );
+    {
+        let obj = state.objects.get_mut(&aura_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        // MTGJSON-parameterized Enchant keyword (mirrors the sibling test).
+        let enchant = Keyword::from_str("Enchant:creature card in a graveyard").unwrap();
+        obj.base_keywords.push(enchant.clone());
+        obj.keywords.push(enchant);
+        // Printed baseline abilities/triggers/statics from the live parser. The
+        // base_* fields are the layer system's single source of truth
+        // (`evaluate_layers` re-derives the live fields from them each pass), so
+        // both must be set for the trigger/static to survive layer evaluation.
+        obj.base_abilities = Arc::new(parsed.abilities.clone());
+        obj.abilities = Arc::new(parsed.abilities.clone());
+        obj.base_trigger_definitions = Arc::new(parsed.triggers.clone());
+        obj.trigger_definitions = parsed.triggers.clone().into();
+        obj.base_static_definitions = Arc::new(parsed.statics.clone());
+        obj.static_definitions = parsed.statics.clone().into();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
+
+    // Grizzly Bears (2/2) in the OPPONENT's graveyard, so reanimation genuinely
+    // moves control to the caster.
+    let creature_id = create_object(
+        &mut state,
+        CardId(602),
+        PlayerId(1),
+        "Grizzly Bears".to_string(),
+        Zone::Graveyard,
+    );
+    {
+        let obj = state.objects.get_mut(&creature_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+    }
+
+    let mut events = Vec::new();
+    let result =
+        handle_cast_spell(&mut state, PlayerId(0), aura_id, CardId(601), &mut events).unwrap();
+    assert!(
+        matches!(result, WaitingFor::Priority { .. }),
+        "expected auto-target onto the stack; got {result:?}"
+    );
+    assert_eq!(state.stack.len(), 1, "Aura spell must be on the stack");
+
+    // (1) Resolve the Aura spell → Site A/B: it resolves onto the battlefield and
+    // attaches to the graveyard host.
+    stack::resolve_top(&mut state, &mut events);
+    assert!(
+        state.battlefield.contains(&aura_id),
+        "Aura must resolve onto the battlefield (Site A)"
+    );
+
+    // (2) Fire the ETB reanimation trigger through the real trigger pipeline.
+    crate::game::triggers::process_triggers(&mut state, &events);
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the reanimator ETB trigger must be on the stack after process_triggers"
+    );
+
+    // (3) Resolve the 4-node reanimation chain
+    // (ChangeZone -> GenericEffect keyword-swap -> Attach -> CreateDelayedTrigger).
+    let mut etb_events = Vec::new();
+    stack::resolve_top(&mut state, &mut etb_events);
+    crate::game::layers::evaluate_layers(&mut state);
+
+    (state, aura_id, creature_id)
+}
+
+/// CR 608.2c + CR 613.1f + CR 701.3a regression (issue #4767, "Animate Dead don't
+/// bring back the creature to the battlefield"): the ETB reanimation chain must
+/// move the enchanted creature card out of the graveyard onto the battlefield
+/// under the caster's control, re-attach the Aura to it, swap the Aura's Enchant
+/// restriction so the Aura is not immediately re-graveyarded by SBAs (CR 704.5m),
+/// and apply the -1/-0 static.
+///
+/// LIVE-REVERT EVIDENCE: commenting out the `try_parse_reanimator_aura_etb_effect`
+/// dispatch in `dispatch_reanimator_aura_etb` (parser) leaves the ETB body as an
+/// `Effect::Unimplemented`, so the reanimation ChangeZone never runs and assertion
+/// (a) fails (creature stays in the graveyard).
+#[test]
+fn animate_dead_full_pipeline_reanimates_and_reattaches() {
+    use crate::game::game_object::AttachTarget;
+
+    let (mut state, aura_id, creature_id) = reanimate_grizzly_via_animate_dead();
+
+    // (a) The creature was reanimated: it left the graveyard for the battlefield.
+    assert_eq!(
+        state.objects[&creature_id].zone,
+        Zone::Battlefield,
+        "reanimated creature must be on the battlefield, not the graveyard"
+    );
+    assert!(
+        state.battlefield.contains(&creature_id),
+        "battlefield must contain the reanimated creature"
+    );
+    assert!(
+        !state.players[1].graveyard.contains(&creature_id),
+        "reanimated creature must no longer be in its owner's graveyard"
+    );
+
+    // (b) Under the CASTER's control (CR: return ... under your control), not the
+    // owner's.
+    assert_eq!(
+        state.objects[&creature_id].controller,
+        PlayerId(0),
+        "reanimated creature must be controlled by the caster"
+    );
+
+    // (c) The Aura is attached to the SPECIFIC reanimated creature (direction
+    // matters — not the creature attached to the Aura).
+    assert_eq!(
+        state.objects[&aura_id].attached_to,
+        Some(AttachTarget::Object(creature_id)),
+        "Aura must be attached to the reanimated creature"
+    );
+
+    // (d) The keyword swap re-targeted the Aura's Enchant restriction, so an
+    // explicit SBA pass does NOT re-graveyard the Aura (CR 704.5m).
+    let mut sba_events = Vec::new();
+    crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+    assert!(
+        state.battlefield.contains(&aura_id),
+        "Aura must survive SBAs (keyword swap re-targeted its Enchant restriction)"
+    );
+    assert_eq!(
+        state.objects[&aura_id].attached_to,
+        Some(AttachTarget::Object(creature_id)),
+        "Aura must stay attached to the reanimated creature after SBAs"
+    );
+    assert_eq!(
+        state.objects[&creature_id].zone,
+        Zone::Battlefield,
+        "reanimated creature must remain on the battlefield after SBAs"
+    );
+
+    // (e) The -1/-0 static is applied (base 2/2 -> 1/2).
+    assert_eq!(
+        state.objects[&creature_id].power,
+        Some(1),
+        "reanimated creature must have -1/-0 applied (2 -> 1 power)"
+    );
+    assert_eq!(
+        state.objects[&creature_id].toughness,
+        Some(2),
+        "reanimated creature toughness unchanged by -1/-0"
+    );
+}
+
+/// CR 701.17a + CR 603.7c regression (issue #4767): the delayed "When ~ leaves the
+/// battlefield, that creature's controller sacrifices it" trigger must sacrifice
+/// the reanimated creature when the Aura leaves the battlefield.
+///
+/// LIVE-REVERT EVIDENCE: removing the `CreateDelayedTrigger` node from
+/// `build_reanimator_aura_etb_chain` leaves no delayed trigger, so destroying the
+/// Aura no longer puts a sacrifice ability on the stack and the final assertion
+/// fails (creature stays on the battlefield).
+#[test]
+fn animate_dead_delayed_sacrifice_when_aura_leaves() {
+    let (mut state, aura_id, creature_id) = reanimate_grizzly_via_animate_dead();
+    // Baseline reach-guard: the creature is on the battlefield before we remove
+    // the Aura, so the sacrifice assertion below is not vacuous.
+    assert_eq!(state.objects[&creature_id].zone, Zone::Battlefield);
+
+    // Remove the Aura from the battlefield → fires the delayed leaves-play trigger.
+    let mut events = Vec::new();
+    zones::move_to_zone(&mut state, aura_id, Zone::Graveyard, &mut events);
+    crate::game::triggers::check_delayed_triggers(&mut state, &events);
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the delayed leaves-battlefield sacrifice must be on the stack"
+    );
+
+    // Resolve the sacrifice.
+    let mut sac_events = Vec::new();
+    stack::resolve_top(&mut state, &mut sac_events);
+
+    assert!(
+        !state.battlefield.contains(&creature_id),
+        "reanimated creature must be sacrificed when the Aura leaves the battlefield"
+    );
+    assert_eq!(
+        state.objects[&creature_id].zone,
+        Zone::Graveyard,
+        "sacrificed creature must go to its owner's graveyard"
+    );
+}
+
+/// CR 701.17a regression (issue #4767, `sacrifice.rs` controller-scope relaxation):
+/// "that creature's controller sacrifices it" must be performed by the creature's
+/// CURRENT controller even if control changed after Animate Dead reanimated it and
+/// before the delayed leaves-battlefield trigger fires.
+///
+/// LIVE-REVERT EVIDENCE: restoring the unconditional `if obj.controller !=
+/// ability.controller { continue; }` guard in `sacrifice.rs` makes this fail —
+/// the delayed trigger's controller (the Aura's controller, P0) no longer matches
+/// the creature's new controller (P1), so the `continue` skips the sacrifice and
+/// the creature stays on the battlefield.
+#[test]
+fn animate_dead_delayed_sacrifice_follows_new_controller() {
+    let (mut state, aura_id, creature_id) = reanimate_grizzly_via_animate_dead();
+
+    // Reanimated under the caster (P0). Transfer control to the OTHER player (P1)
+    // AFTER reanimation but BEFORE the Aura leaves — the delayed trigger was
+    // created while P0 controlled the creature.
+    assert_eq!(
+        state.objects[&creature_id].controller,
+        PlayerId(0),
+        "precondition: creature reanimated under the caster"
+    );
+    {
+        let obj = state.objects.get_mut(&creature_id).unwrap();
+        obj.controller = PlayerId(1);
+        obj.base_controller = Some(PlayerId(1));
+    }
+
+    // Remove the Aura → fire + resolve the delayed sacrifice.
+    let mut events = Vec::new();
+    zones::move_to_zone(&mut state, aura_id, Zone::Graveyard, &mut events);
+    crate::game::triggers::check_delayed_triggers(&mut state, &events);
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the delayed leaves-battlefield sacrifice must be on the stack"
+    );
+    let mut sac_events = Vec::new();
+    stack::resolve_top(&mut state, &mut sac_events);
+
+    // Sacrificed by its NEW/current controller (P1), even though the delayed
+    // trigger's controller is P0.
+    assert!(
+        !state.battlefield.contains(&creature_id),
+        "creature must be sacrificed by its current controller after control change"
+    );
+    assert_eq!(
+        state.objects[&creature_id].zone,
+        Zone::Graveyard,
+        "sacrificed creature must go to its owner's graveyard"
+    );
+}
+
 /// CR 702.103b regression: drives the full cast pipeline end-to-end —
 /// `handle_cast_spell` → `AlternativeCastChoice(Bestow)` →
 /// `handle_bestow_cost_choice` (Alternative) — and asserts the spell on the stack still has the

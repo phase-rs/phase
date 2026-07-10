@@ -38413,6 +38413,66 @@ fn attach_just_moved_armored_skyhunter_dig_with_zone_changed_this_way() {
     }
 }
 
+/// The Invincible Iron Man (issue #4796): "you may put an artifact card from
+/// your hand onto the battlefield. If it's an Equipment, attach it to ~." The
+/// put is a hand->battlefield ChangeZone; the follow-up must attach the moved
+/// Equipment (`SelfRef`, rebound to the forwarded object via `forward_result`)
+/// to the source (`ParentTarget`), gated by `ZoneChangedThisWay{Equipment}` —
+/// NOT the pre-fix self-attach (`ParentTarget`/`ParentTarget`, illegal per CR
+/// 301.5c) with a wrong-subject `TargetMatchesFilter`.
+#[test]
+fn attach_just_moved_iron_man_put_from_hand_attach_equipment_to_source() {
+    use crate::types::ability::TypeFilter;
+    let def = parse_effect_chain(
+        "You may put an artifact card from your hand onto the battlefield. If it's an Equipment, attach it to ~.",
+        AbilityKind::Spell,
+    );
+    // Parent: hand->battlefield ChangeZone with forward_result.
+    match &*def.effect {
+        Effect::ChangeZone { destination, .. } => {
+            assert_eq!(*destination, Zone::Battlefield);
+        }
+        other => panic!("expected outer hand->battlefield ChangeZone, got {other:?}"),
+    }
+    assert!(
+        def.forward_result,
+        "the put parent must forward the moved card to the Attach sub_ability"
+    );
+    // Sub: Attach{attachment: SelfRef (moved card), target: ParentTarget (source)}.
+    let attach = def
+        .sub_ability
+        .as_ref()
+        .expect("expected Attach sub_ability for the Equipment follow-up");
+    match &*attach.effect {
+        Effect::Attach { attachment, target } => {
+            assert!(
+                matches!(attachment, TargetFilter::SelfRef),
+                "attachment must be the moved card (SelfRef), got {attachment:?}"
+            );
+            assert!(
+                matches!(target, TargetFilter::ParentTarget),
+                "host must be the source (ParentTarget), not a self-attach, got {target:?}"
+            );
+        }
+        other => panic!("expected Attach sub_ability, got {other:?}"),
+    }
+    // Condition gates on the MOVED card's type (ZoneChangedThisWay), not the
+    // ability's first target slot (the pre-fix TargetMatchesFilter bug).
+    match &attach.condition {
+        Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+            TargetFilter::Typed(t) => assert!(
+                t.type_filters.iter().any(
+                    |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
+                ),
+                "expected Equipment subtype on ZoneChangedThisWay, got {:?}",
+                t.type_filters
+            ),
+            other => panic!("expected Typed Equipment filter, got {other:?}"),
+        },
+        other => panic!("expected ZoneChangedThisWay condition on Attach, got {other:?}"),
+    }
+}
+
 /// Gilgamesh, Master-at-Arms (issue #3286): any-number Equipment dig-from-among
 /// plus CR 603.12 active-voice reflexive attach to Samurai.
 #[test]

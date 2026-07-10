@@ -7737,6 +7737,26 @@ fn resolve_chain_body(
                             .insert(0, TargetRef::Object(forwarded_objects[0]));
                     }
                 }
+                // CR 608.2c: OriginalSource names the ability's TRUE pre-rebind source — the
+                // reanimator-Aura's own identity — surviving the forward_result rebind above
+                // that would otherwise point source_id at the just-reanimated creature
+                // instead of the Aura whose own keyword text this static is rewriting
+                // (Animate Dead / Dance of the Dead class: "it loses ... and gains ...").
+                // Concretized here, eagerly, in-place — never persisted as a ResolvedAbility
+                // field — because this is the ONE point in the whole chain where the
+                // pre-rebind `ability.source_id` and the about-to-be-mutated clone coexist.
+                if let Effect::GenericEffect {
+                    static_abilities, ..
+                } = &mut sub_with_context.effect
+                {
+                    for sd in static_abilities.iter_mut() {
+                        if sd.affected == Some(TargetFilter::OriginalSource) {
+                            sd.affected = Some(TargetFilter::SpecificObject {
+                                id: ability.source_id,
+                            });
+                        }
+                    }
+                }
             }
             apply_parent_chain_context(
                 &mut sub_with_context,

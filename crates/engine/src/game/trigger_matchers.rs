@@ -797,6 +797,7 @@ pub(super) fn target_filter_matches_object(
         // CR 201.5a: a source-relative object ref, concretized to SpecificObject
         // before any trigger evaluates; delegates like the other object refs.
         | TargetFilter::GrantingObject
+        | TargetFilter::OriginalSource
         | TargetFilter::SourceOrPaired
         | TargetFilter::Typed(_)
         | TargetFilter::Not { .. }

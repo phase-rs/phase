@@ -59,6 +59,10 @@ PRIVATE_OVERRIDES = "private-overrides.json"
 SUCCESS_STATES = {"accepted", "merged"}
 BLOCK_STATES = {"blocked", "changes_requested"}
 HOLD_STATES = {"held", "held_ci"}
+# Local events that mean "this head is blocked". Single authority for both the
+# routing decision and the requested-changes expiry anchor — two copies would drift.
+LOCAL_BLOCK_EVENT_TYPES = {"review_blocked", "changes_requested", "blocked"}
+LOCAL_BLOCK_OUTCOMES = {"changes_requested", "reviewed_request_changes", "blocked"}
 TERMINAL_STATES = SUCCESS_STATES | BLOCK_STATES | {"closed"}
 PR_ATTRIBUTED_EVENTS = {
     "approval_enqueue",
@@ -529,6 +533,35 @@ def latest_events_by_pr_head(events: list[dict[str, Any]]) -> dict[tuple[int, st
             continue
         latest[(int(pr), str(head_sha))] = event
     return latest
+
+
+def is_block_event(event: dict[str, Any] | None) -> bool:
+    """True when a local event means the current head is blocked."""
+    event = event or {}
+    outcome = event.get("outcome")
+    if outcome == "ci_failed":
+        return False
+    return event.get("event_type") in LOCAL_BLOCK_EVENT_TYPES or outcome in LOCAL_BLOCK_OUTCOMES
+
+
+def first_block_events_by_pr_head(
+    events: list[dict[str, Any]],
+) -> dict[tuple[int, str], dict[str, Any]]:
+    """Earliest blocking event per (pr, head) — the requested-changes expiry anchor.
+
+    Deliberately the earliest, never the latest: every sweep re-records a `blocked`
+    event for a PR that is still blocked, and `event_id` hashes the timestamp, so
+    each pass appends a distinct row. Anchoring the expiry clock on the newest event
+    would let the loop reset its own timer, and `warning_due` could never fire.
+    """
+    first: dict[tuple[int, str], dict[str, Any]] = {}
+    for event in events:  # append-only log; file order is chronological
+        pr = event.get("pr")
+        head_sha = event.get("head_sha")
+        if pr is None or not head_sha or not is_block_event(event):
+            continue
+        first.setdefault((int(pr), str(head_sha)), event)
+    return first
 
 
 def event_sort_key(event: dict[str, Any]) -> tuple[str, str]:
@@ -1953,15 +1986,29 @@ def requested_changes_expiry_state(
     current_head_changes_requested = review_decision == "CHANGES_REQUESTED" and (
         latest_commit is None or latest_commit == head
     )
-    active = local_block or current_head_changes_requested
+    # "Has this head ever been blocked?" is a property of the log's history, not of its
+    # last row. `local_block` only inspects the newest event, so once we post the stale
+    # warning that warning becomes the newest event and erases the block — `active` would
+    # drop to False and the warning could never mature into a close. Consult the first
+    # block recorded for this head instead.
+    first_block_event = packet.get("local_first_block_event")
+    head_ever_blocked = local_block or bool(first_block_event)
+    active = head_ever_blocked or current_head_changes_requested
     warning = latest_requested_changes_warning(packet)
     warning_timestamp = (warning or {}).get("timestamp")
     author_followup_after_warning = author_activity_after(pr, warning_timestamp)
+    # Anchor the expiry clock on the blocker itself, never on our observation of it.
+    # GitHub is authoritative, so a formal CHANGES_REQUESTED on the current head wins
+    # (a newer one correctly restarts the window). Only when no formal review exists
+    # do we fall back to the local log — and then to the FIRST block recorded for this
+    # head, because the sweep re-records `blocked` every pass and the newest event
+    # would pin blocker_age at ~0 forever, silently disabling warn/close entirely.
     blocker_timestamp = None
-    if local_block:
-        blocker_timestamp = (packet.get("local_current_event") or {}).get("timestamp")
-    if blocker_timestamp is None and current_head_changes_requested:
+    if current_head_changes_requested:
         blocker_timestamp = latest_requested_changes_review_timestamp(packet)
+    if blocker_timestamp is None and head_ever_blocked:
+        anchor = first_block_event or (packet.get("local_current_event") if local_block else None)
+        blocker_timestamp = (anchor or {}).get("timestamp")
     blocker_age = age_in_days(blocker_timestamp)
     warning_age = age_in_days(warning_timestamp)
     warning_due = (
@@ -2010,18 +2057,8 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         parse_diff.get("updated_at"), local_event_timestamp
     )
     author_policy = packet.get("author_policy", {})
-    local_block_event = local_outcome != "ci_failed" and local_event_type in {
-        "review_blocked",
-        "changes_requested",
-        "blocked",
-    }
-    local_block_outcome = local_outcome in {
-        "changes_requested",
-        "reviewed_request_changes",
-        "blocked",
-    }
     local_hold = local_event_type == "held" or local_outcome in HOLD_STATES
-    local_block = local_block_event or local_block_outcome
+    local_block = is_block_event(local_event)
     conflicts_with_base = (
         pr.get("mergeStateStatus") == "DIRTY" or pr.get("mergeable") == "CONFLICTING"
     )
@@ -2225,6 +2262,7 @@ def make_packet(
     local_event: dict[str, Any] | None = None,
     contributor_summary: dict[str, Any] | None = None,
     gittensor: dict[str, Any] | None = None,
+    first_block_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     files = pr_files_from_view(pr)
     classification = classify_files(files, policy)
@@ -2299,6 +2337,7 @@ def make_packet(
             classification, (contributor_summary or {}).get("standing")
         ),
         "local_current_event": local_event,
+        "local_first_block_event": first_block_event,
     }
     packet["recommendation"] = recommend_from_packet(packet)
     return packet
@@ -2612,6 +2651,7 @@ class ReviewContext:
     private_overrides: dict[str, Any]
     acting_login: str
     local_events: dict[tuple[int, str], dict[str, Any]]
+    first_block_events: dict[tuple[int, str], dict[str, Any]]
     analytics_model: dict[str, Any]
     signal_occurrences: dict[str, list[dict[str, Any]]]
     gittensor_index: dict[str, dict[str, Any]]
@@ -2628,6 +2668,7 @@ def load_review_context(args: argparse.Namespace) -> ReviewContext:
         private_overrides=load_private_overrides(args.state_dir),
         acting_login=args.acting_login or gh_user(),
         local_events=latest_events_by_pr_head(events),
+        first_block_events=first_block_events_by_pr_head(events),
         analytics_model=build_analytics_model(
             events,
             days=None,
@@ -2644,7 +2685,9 @@ def load_review_context(args: argparse.Namespace) -> ReviewContext:
 def packet_for_pr(context: ReviewContext, pr: dict[str, Any], mode: str) -> dict[str, Any]:
     """Assemble the full packet for one normalized PR view."""
     pr_number = int(pr.get("number") or 0)
-    local_event = context.local_events.get((pr_number, pr.get("headRefOid") or ""))
+    head_key = (pr_number, pr.get("headRefOid") or "")
+    local_event = context.local_events.get(head_key)
+    first_block_event = context.first_block_events.get(head_key)
     contributor_summary = build_contributor_summary(
         (pr.get("author") or {}).get("login"),
         pr_number,
@@ -2666,6 +2709,7 @@ def packet_for_pr(context: ReviewContext, pr: dict[str, Any], mode: str) -> dict
         local_event,
         contributor_summary,
         gittensor,
+        first_block_event,
     )
 
 

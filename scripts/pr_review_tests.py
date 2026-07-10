@@ -185,6 +185,243 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(recommendation["advisory_action"], "blocked")
         self.assertEqual(recommendation["reason"], "changes_requested_current_head")
 
+    def test_expiry_clock_survives_repeated_blocked_recordings(self) -> None:
+        """A re-recorded `blocked` event must not reset the requested-changes clock.
+
+        Every sweep appends a fresh `blocked` event for a still-blocked PR, and
+        `event_id` hashes the timestamp, so each pass is a distinct row. Anchoring
+        the expiry clock on the newest local event pinned `blocker_age` at ~0 and
+        silently disabled warn/close for every PR the loop had ever blocked.
+        """
+        packet = {
+            "pr": {
+                "number": 4132,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [],
+                "reviews": [
+                    {
+                        "author": "maintainer",
+                        "state": "CHANGES_REQUESTED",
+                        "submittedAt": self._days_ago(8),
+                        "commit": "head",
+                    }
+                ],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            # The sweep re-blocked this head one minute ago. Under the old anchor
+            # this made blocker_age ~0 and the PR stayed `blocked` forever.
+            "local_current_event": {
+                "event_type": "blocked",
+                "outcome": "blocked",
+                "head_sha": "head",
+                "timestamp": self._minutes_ago(1),
+            },
+            "local_first_block_event": {
+                "event_type": "blocked",
+                "outcome": "blocked",
+                "head_sha": "head",
+                "timestamp": self._days_ago(8),
+            },
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "warn_stale_changes_for_handler")
+        self.assertEqual(recommendation["reason"], "requested_changes_warning_due")
+
+    def test_expiry_clock_falls_back_to_first_local_block_without_formal_review(self) -> None:
+        """No formal CHANGES_REQUESTED: age from the FIRST local block, not the latest."""
+        packet = {
+            "pr": {
+                "number": 4589,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": None,
+                "isInMergeQueue": False,
+                "comments": [],
+                "reviews": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "local_current_event": {
+                "event_type": "blocked",
+                "outcome": "blocked",
+                "head_sha": "head",
+                "timestamp": self._minutes_ago(1),
+            },
+            "local_first_block_event": {
+                "event_type": "blocked",
+                "outcome": "blocked",
+                "head_sha": "head",
+                "timestamp": self._days_ago(9),
+            },
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "warn_stale_changes_for_handler")
+        self.assertEqual(recommendation["reason"], "requested_changes_warning_due")
+
+    def test_posted_warning_does_not_orphan_a_local_only_block(self) -> None:
+        """The warning event must not erase the block it was posted about.
+
+        `local_block` reads only the newest event. Once the stale-changes warning is
+        recorded it becomes the newest event, so a head blocked only in the local log
+        (no formal CHANGES_REQUESTED) would flip `active` to False and its warning
+        could never mature into a close.
+        """
+        packet = {
+            "acting_login": "maintainer",
+            "pr": {
+                "number": 4805,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": None,
+                "isInMergeQueue": False,
+                "comments": [],
+                "reviews": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            # Newest event is the warning we posted 8 days ago — NOT a block.
+            "local_current_event": {
+                "event_type": "requested_changes_warning",
+                "outcome": "requested_changes_warning",
+                "head_sha": "head",
+                "timestamp": self._days_ago(8),
+            },
+            "local_first_block_event": {
+                "event_type": "blocked",
+                "outcome": "blocked",
+                "head_sha": "head",
+                "timestamp": self._days_ago(16),
+            },
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        state = pr_review.requested_changes_expiry_state(packet, local_block=False, author_followup_after_local_event=False)
+
+        self.assertTrue(state["active"], "a local-only block must survive its own warning")
+        self.assertEqual(state["blocker_timestamp"], packet["local_first_block_event"]["timestamp"])
+        self.assertTrue(state["close_due"], "warning older than close_after_warning_days must close")
+
+        recommendation = pr_review.recommend_from_packet(packet)
+        self.assertEqual(recommendation["advisory_action"], "close_stale_changes_for_handler")
+
+    def test_fresh_formal_review_restarts_expiry_clock(self) -> None:
+        """A NEW CHANGES_REQUESTED on the same head restarts the window (GitHub wins)."""
+        packet = {
+            "pr": {
+                "number": 4133,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [],
+                "reviews": [
+                    {
+                        "author": "maintainer",
+                        "state": "CHANGES_REQUESTED",
+                        "submittedAt": self._days_ago(1),
+                        "commit": "head",
+                    }
+                ],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "local_first_block_event": {
+                "event_type": "blocked",
+                "outcome": "blocked",
+                "head_sha": "head",
+                "timestamp": self._days_ago(30),
+            },
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "blocked")
+
+    def test_first_block_events_by_pr_head_keeps_earliest_and_ignores_non_blocks(self) -> None:
+        events = [
+            {"pr": 1, "head_sha": "h", "outcome": "review", "timestamp": "2026-07-01T00:00:00Z"},
+            {"pr": 1, "head_sha": "h", "outcome": "blocked", "timestamp": "2026-07-02T00:00:00Z"},
+            {"pr": 1, "head_sha": "h", "outcome": "blocked", "timestamp": "2026-07-09T00:00:00Z"},
+            {"pr": 1, "head_sha": "other", "outcome": "blocked", "timestamp": "2026-07-05T00:00:00Z"},
+        ]
+
+        first = pr_review.first_block_events_by_pr_head(events)
+
+        self.assertEqual(first[(1, "h")]["timestamp"], "2026-07-02T00:00:00Z")
+        self.assertEqual(first[(1, "other")]["timestamp"], "2026-07-05T00:00:00Z")
+
+    def test_is_block_event_covers_every_routing_block_shape(self) -> None:
+        """The expiry anchor must recognize exactly the events routing calls blocking."""
+        for event_type in pr_review.LOCAL_BLOCK_EVENT_TYPES:
+            self.assertTrue(pr_review.is_block_event({"event_type": event_type}), event_type)
+        for outcome in pr_review.LOCAL_BLOCK_OUTCOMES:
+            self.assertTrue(pr_review.is_block_event({"outcome": outcome}), outcome)
+
+        self.assertFalse(pr_review.is_block_event({"event_type": "blocked", "outcome": "ci_failed"}))
+        self.assertFalse(pr_review.is_block_event({"event_type": "review"}))
+        self.assertFalse(pr_review.is_block_event({"outcome": "approved_enqueued"}))
+        self.assertFalse(pr_review.is_block_event(None))
+
+    def test_review_blocked_event_anchors_expiry(self) -> None:
+        """`review_blocked` routes as a block, so it must also anchor the expiry clock."""
+        events = [
+            {
+                "pr": 7,
+                "head_sha": "h",
+                "event_type": "review_blocked",
+                "timestamp": "2026-07-01T00:00:00Z",
+            },
+        ]
+
+        self.assertIn((7, "h"), pr_review.first_block_events_by_pr_head(events))
+
     def test_requested_changes_warns_after_configured_age(self) -> None:
         packet = {
             "pr": {
@@ -1507,6 +1744,11 @@ class PrReviewTests(unittest.TestCase):
     @staticmethod
     def _days_ago(days: int) -> str:
         stamp = datetime.now(UTC).replace(microsecond=0) - timedelta(days=days)
+        return stamp.isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _minutes_ago(minutes: int) -> str:
+        stamp = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=minutes)
         return stamp.isoformat().replace("+00:00", "Z")
 
     @staticmethod

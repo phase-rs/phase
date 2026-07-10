@@ -1998,6 +1998,18 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 611.3 + CR 613.4b + CR 205.1b: compound-subject animation whose
+    // subject is a heterogeneous union of negated-type legs ("each non-X Y
+    // and non-Z W ... is a [P/T] [type] creature in addition to its other
+    // types and has [keywords/granted ability]" — Bello, Bard of the
+    // Brambles). Delegates the subject to the general target-phrase grammar
+    // (see the function doc comment), so it does not need to precede any
+    // sibling here — a single-subject line simply fails its 2+-leg `Or` guard
+    // and falls through unchanged.
+    if let Some(def) = parse_each_compound_subject_type_change(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "~ can't be blocked [by filter] [as long as condition]" ---
     // CR 509.1b: Handles unconditional, conditional, and filter-based "can't be blocked".
     // "except by" patterns are handled separately by CantBeBlockedExceptBy.

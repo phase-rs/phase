@@ -545,6 +545,8 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::SelfRef => "self".into(),
         // CR 201.5a: a granted body's by-name reference to its granting object.
         TargetFilter::GrantingObject => "granting object".into(),
+        // CR 608.2c: the ability's pre-rebind source (reanimator-Aura keyword swap).
+        TargetFilter::OriginalSource => "original source".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
         TargetFilter::ExiledCardByIndex { index } => format!("exiled card {index}"),
         TargetFilter::StackAbility { tag: Some(tag), .. } => format!("{tag:?} ability on stack"),
@@ -9316,8 +9318,12 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // "if it doesn't have" / "if it had no" — state check on result object
             || lower.contains("if it doesn't have")
             || lower.contains("if it had no")
-            // "if it's on the battlefield" — zone check at resolution
-            || lower.contains("if it's on the battlefield")
+            // NOTE (phase#4767): "if it's on the battlefield" was previously listed
+            // here as an unparsed gap. It is now parsed as a source-scoped
+            // `TriggerCondition::SourceInZone { Battlefield }` (see
+            // `oracle_trigger.rs::extract_if_condition_with_card_name`), so it must
+            // NOT be flagged as an unsupported gap any longer (Animate Dead /
+            // Dance of the Dead reanimator-Aura ETB trigger).
             // "this way" — resolve-time checks on what happened during resolution
             // "if you reveal a creature card this way" / "if a card is put into a graveyard this way"
             || lower.contains("this way")

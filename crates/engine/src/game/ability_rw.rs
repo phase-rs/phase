@@ -1325,7 +1325,11 @@ enum WriteScope {
 /// Exhaustive & wildcard-free: a future `TargetFilter` variant must be classified.
 fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope {
     match target {
-        TargetFilter::SelfRef | TargetFilter::SourceOrPaired => WriteScope::SelfSource,
+        // CR 608.2c: `OriginalSource` denotes the ability's own (pre-rebind) source
+        // object — a write to it lands on the source, exactly like `SelfRef`.
+        TargetFilter::SelfRef | TargetFilter::SourceOrPaired | TargetFilter::OriginalSource => {
+            WriteScope::SelfSource
+        }
         TargetFilter::TriggeringSource => WriteScope::EventObject,
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
             chain_root.unwrap_or(WriteScope::EventObject)
@@ -2234,6 +2238,10 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
+        // CR 201.5a: `OriginalSource` is not one of the 12 frozen event-context
+        // tags — it is concretized to `SpecificObject` at resolution (mirrors
+        // `SpecificObject`, its concretized form).
+        | TargetFilter::OriginalSource
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -2434,6 +2442,9 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         // legacy-12 tags (`legacy_batch_prompt`), resolution-local refs, and
         // uniformity-/owner-partition-invariant refs — all documented above.
         TargetFilter::SelfRef
+        // CR 608.2c: source carrier (writes_self/reads_src) — source-invariant,
+        // not per-member-bound; concretized to SpecificObject before this walk.
+        | TargetFilter::OriginalSource
         | TargetFilter::SourceOrPaired
         | TargetFilter::TriggeringSource
         | TargetFilter::ParentTarget
@@ -6116,6 +6127,9 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
+        // CR 201.5a: `OriginalSource` is a read-free object selector (concretized
+        // to `SpecificObject` at resolution).
+        | TargetFilter::OriginalSource
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
