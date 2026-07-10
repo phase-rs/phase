@@ -237,10 +237,11 @@ impl TacticalPolicy for RedundancyAvoidancePolicy {
                 .with_fact("effect_kind", kind_tag)
                 .with_fact("redundant_value", extra);
         }
-        PolicyVerdict::Score {
-            delta: total,
-            reason,
-        }
+        // `total` accumulates per-effect redundancy penalties over an effect
+        // chain and can exceed the critical band on wide chains. Band-dispatch
+        // through PolicyVerdict::score so the delta stays clamped to CRITICAL_MAX
+        // (issue #5473 — a raw Score literal bypassed the band contract).
+        PolicyVerdict::score(total, reason)
     }
 }
 

@@ -206,10 +206,13 @@ impl TacticalPolicy for CopyValuePolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        PolicyVerdict::Score {
-            delta: self.score(ctx),
-            reason: PolicyReason::new("copy_value_score"),
-        }
+        // `score()` returns a raw analog scale (the +100 "preferred X" anchor and
+        // copy-target penalty sums reach ~±125) that is also consumed raw by
+        // other policies. As a *verdict* it must obey the score contract, so
+        // band-dispatch it through PolicyVerdict::score, which clamps to the
+        // critical band (issue #5473 — the raw literal bypassed the band and
+        // tripped the registry's critical-band assert once scaled).
+        PolicyVerdict::score(self.score(ctx), PolicyReason::new("copy_value_score"))
     }
 }
 

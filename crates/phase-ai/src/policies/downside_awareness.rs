@@ -74,10 +74,14 @@ impl TacticalPolicy for DownsideAwarenessPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        PolicyVerdict::Score {
-            delta: self.score(ctx),
-            reason: PolicyReason::new("downside_awareness_score"),
-        }
+        // `score()` accumulates and doubles per-effect gift penalties, which can
+        // run past the critical band. Band-dispatch through PolicyVerdict::score
+        // so the verdict delta stays clamped to CRITICAL_MAX (issue #5473 — the
+        // raw Score literal bypassed the band contract).
+        PolicyVerdict::score(
+            self.score(ctx),
+            PolicyReason::new("downside_awareness_score"),
+        )
     }
 }
 

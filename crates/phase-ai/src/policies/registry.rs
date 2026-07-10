@@ -403,27 +403,43 @@ impl PolicyRegistry {
             let scaled = match verdict {
                 PolicyVerdict::Reject { reason } => PolicyVerdict::Reject { reason },
                 PolicyVerdict::Score { delta, reason } => {
-                    let scaled_delta = delta * activation as f64;
+                    // Scaling invariant (issue #5473). A policy's RAW verdict is
+                    // bounded to the critical band (|delta| <= CRITICAL_MAX) by
+                    // the band helpers (`score`/`nudge`/`preference`/`strong`/
+                    // `critical`). The `activation` knob then amplifies it, and
+                    // activation LEGITIMATELY exceeds 1.0 — `arch_times_turn`
+                    // reaches ~2.6 (archetype_scale 2.0 x late_game_mult 1.3) —
+                    // so the *product* is not obligated to stay within the band
+                    // on its own. The debug_assert therefore guards the invariant
+                    // the policy actually controls: the PRE-scale delta. That
+                    // turns it into a true "routed through the band helpers?"
+                    // tripwire — a policy that hand-builds an out-of-band `Score`
+                    // literal (the old LandAnimation / ControlChangeAwareness /
+                    // CopyValue -100/+100 sentinels) trips it, while a legitimate
+                    // critical delta amplified past 15 by activation does not.
                     debug_assert!(
-                        scaled_delta.abs() <= CRITICAL_MAX,
-                        "policy {:?} scaled delta {} exceeds critical band ceiling {}",
+                        delta.abs() <= CRITICAL_MAX,
+                        "policy {:?} raw delta {} exceeds critical band ceiling {} — route through PolicyVerdict band helpers",
                         policy_id,
-                        scaled_delta,
+                        delta,
                         CRITICAL_MAX
                     );
-                    if scaled_delta.abs() > CRITICAL_MAX {
+                    if delta.abs() > CRITICAL_MAX {
                         tracing::warn!(
                             target: "phase_ai::decision_trace",
                             ?policy_id,
-                            scaled_delta,
-                            activation,
-                            "policy scaled delta exceeds critical band ceiling"
+                            delta,
+                            "policy raw delta exceeds critical band ceiling — route through band helpers"
                         );
                     }
-                    PolicyVerdict::Score {
-                        delta: scaled_delta,
-                        reason,
-                    }
+                    // Single authority for the POST-scale magnitude: re-band the
+                    // amplified product through `PolicyVerdict::score`, which
+                    // dispatches and clamps to CRITICAL_MAX using the exact helper
+                    // every policy already uses (no second clamp constant to
+                    // drift). This is identity for in-band contributions and
+                    // stops any out-of-band value from leaking into the softmax
+                    // priors in release builds, where the debug_assert is absent.
+                    PolicyVerdict::score(delta * activation as f64, reason)
                 }
             };
             out.push((policy_id, scaled));
@@ -685,5 +701,80 @@ mod shared_invariant_tests {
         assert!(priors
             .iter()
             .all(|prior| (prior.prior - 0.5).abs() < f64::EPSILON));
+    }
+
+    /// Emits a critical-band verdict (`-CRITICAL_MAX`) with an activation knob
+    /// above 1.0 — mirroring `arch_times_turn`'s ~2.6 worst case (archetype_scale
+    /// 2.0 x late_game_mult 1.3). The seam must clamp the scaled product back to
+    /// the critical band rather than leak the amplified value.
+    struct HighActivationCriticalPolicy;
+
+    impl TacticalPolicy for HighActivationCriticalPolicy {
+        fn id(&self) -> PolicyId {
+            PolicyId::CopyValue
+        }
+
+        fn decision_kinds(&self) -> &'static [DecisionKind] {
+            &[DecisionKind::ActivateAbility]
+        }
+
+        fn activation(
+            &self,
+            _features: &DeckFeatures,
+            _state: &GameState,
+            _player: PlayerId,
+        ) -> Option<f32> {
+            Some(2.6)
+        }
+
+        fn verdict(&self, _ctx: &PolicyContext<'_>) -> PolicyVerdict {
+            PolicyVerdict::critical(-CRITICAL_MAX, PolicyReason::new("scaled_clamp"))
+        }
+    }
+
+    fn scaled_clamp_registry() -> PolicyRegistry {
+        let policies: Vec<Box<dyn TacticalPolicy>> = vec![Box::new(HighActivationCriticalPolicy)];
+        let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
+        by_kind.insert(DecisionKind::ActivateAbility, vec![0]);
+        PolicyRegistry { policies, by_kind }
+    }
+
+    /// Regression for issue #5473: a band-compliant critical verdict scaled by an
+    /// activation > 1.0 must clamp to `CRITICAL_MAX` at the seam — never leak the
+    /// amplified `-CRITICAL_MAX * 2.6 = -39` into the softmax priors (nor trip the
+    /// registry's critical-band `debug_assert`, which now guards the pre-scale
+    /// delta rather than the amplified product).
+    #[test]
+    fn scaled_delta_is_clamped_to_critical_band_when_activation_exceeds_one() {
+        let action = GameAction::ActivateAbility {
+            source_id: ObjectId(1),
+            ability_index: 0,
+        };
+        let cand = candidate(action, TacticalClass::Ability);
+        let decision = priority_decision(vec![cand.clone()]);
+        let state = GameState::new_two_player(7);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &cand,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: SearchDepth::Root,
+        };
+
+        let verdicts = scaled_clamp_registry().verdicts(&ctx);
+        assert_eq!(verdicts.len(), 1, "the single activated policy must fire");
+        let PolicyVerdict::Score { delta, .. } = &verdicts[0].1 else {
+            panic!("expected a Score verdict, got {:?}", verdicts[0].1);
+        };
+        assert!(
+            (delta + CRITICAL_MAX).abs() < 1e-9,
+            "critical delta x activation 2.6 must clamp to -CRITICAL_MAX ({}), got {delta}",
+            -CRITICAL_MAX
+        );
     }
 }
