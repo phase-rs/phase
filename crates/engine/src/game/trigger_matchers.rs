@@ -813,7 +813,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. } => super::filter::matches_target_filter(
             state,
             object_id,
@@ -1808,11 +1808,20 @@ pub(super) fn match_attacks_or_blocks(
 
 pub(super) fn match_attackers_declared(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
-    matches!(event, GameEvent::AttackersDeclared { .. })
+    // CR 508.3d + CR 508.5a: "Whenever an opponent attacks you …"
+    // (`AttackersDeclared` mode — Cunning Rhetoric, Lulu Stern Guardian) must
+    // honor the attacking-player scope (`valid_source`) AND the defending-player
+    // scope (`valid_target`): the trigger fires only when a scoped opponent
+    // declares an attack against the trigger's controller. Delegate to the shared
+    // `matching_attack_events`, which applies both scopes and the once-per-attack
+    // -declaration dedup — the same authority `match_attacks` uses. Previously
+    // this returned `true` for any `AttackersDeclared` event, so an opponent
+    // attacking a *different* player (3+ player games) wrongly triggered it (#4736).
+    !matching_attack_events(event, trigger, source_id, state).is_empty()
 }
 
 /// CR 509.3d: A genuine CR 509 blocker/attacker filter is always an *object*

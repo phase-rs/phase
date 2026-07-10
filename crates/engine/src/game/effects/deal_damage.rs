@@ -2533,6 +2533,66 @@ mod tests {
         assert_eq!(outcome.damage_marked(src_b), 0);
     }
 
+    /// Issue #5244 — Radiance color fan-out (Cleansing Beam): "deals 2 damage to
+    /// target creature and each other creature that shares a color with it." The
+    /// chosen target and every OTHER creature sharing a color with it take 2; a
+    /// creature sharing no color takes 0. Proves the parser fan-out
+    /// (DealDamage{target} + DamageAll{SharesQuality Color, ParentTarget +
+    /// DistinctFrom ParentTarget}) resolves end-to-end and does NOT double-damage
+    /// the target (CR 120.3).
+    #[test]
+    fn radiance_cleansing_beam_color_fanout() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::{ManaColor, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        const CLEANSING_BEAM: &str = "Cleansing Beam deals 2 damage to target creature and each other creature that shares a color with it.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // Big toughness so 2 marked damage is observable without dying.
+        let red_target = scenario.add_creature(P1, "Red Target", 0, 9).id();
+        let red_other = scenario.add_creature(P1, "Red Other", 0, 9).id();
+        let blue_other = scenario.add_creature(P1, "Blue Other", 0, 9).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Cleansing Beam", true, CLEANSING_BEAM)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 4],
+        );
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P0;
+            state.priority_player = P0;
+            state.objects.get_mut(&red_target).unwrap().color = vec![ManaColor::Red];
+            state.objects.get_mut(&red_other).unwrap().color = vec![ManaColor::Red];
+            state.objects.get_mut(&blue_other).unwrap().color = vec![ManaColor::Blue];
+        }
+
+        let outcome = runner.cast(spell).target_objects(&[red_target]).resolve();
+
+        // Target takes 2 exactly ONCE (not doubled by the fan-out).
+        assert_eq!(
+            outcome.damage_marked(red_target),
+            2,
+            "chosen target takes 2 once (not doubled by the color fan-out)"
+        );
+        // Other red creature shares a color → takes 2.
+        assert_eq!(
+            outcome.damage_marked(red_other),
+            2,
+            "the other red creature shares a color with the target and takes 2"
+        );
+        // Blue creature shares no color → takes 0.
+        assert_eq!(
+            outcome.damage_marked(blue_other),
+            0,
+            "the blue creature shares no color with the (red) target and takes 0"
+        );
+    }
+
     /// CR 120.1 + CR 120.6: `EachSourceDealsDamage` with a `Shared` recipient — two
     /// creatures the controller controls each deal the fixed amount to one shared
     /// recipient, whose marked total accumulates across both sources (Case of the

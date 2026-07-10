@@ -820,6 +820,55 @@ fn bomat_courier() {
 }
 
 // ---------------------------------------------------------------------------
+// Parity-oracle coverage for otherwise-unsnapshotted document item variants
+// (Plan 01, assertion 6).
+//
+// `CastingRestriction`, `SolveCondition`, and `StriveCost` are producible
+// `OracleItemIr` variants that no lowered snapshot in this crate populated:
+// across every `*_lowered.snap` here and every `ParsedAbilities` snapshot in
+// `parser/snapshots/`, `casting_restrictions` was always empty and
+// `solve_condition`/`strive_cost` were always null. The source-order builder
+// and the assembly traversal both rewrite the item -> `ParsedAbilities` fold,
+// so without these three the fold could drop any of them silently.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn champions_victory() {
+    let (ir, lowered) = parse_two_layer(
+        "Cast this spell only during the declare attackers step and only if you've been attacked this step.\nReturn target attacking creature to its owner's hand.",
+        "Champion's Victory",
+        &["Instant"],
+        &[],
+    );
+    insta::assert_json_snapshot!("champions_victory_ir", &ir);
+    insta::assert_json_snapshot!("champions_victory_lowered", &lowered);
+}
+
+#[test]
+fn case_of_the_crimson_pulse() {
+    let (ir, lowered) = parse_two_layer(
+        "When this Case enters, discard a card, then draw two cards.\nTo solve — You have no cards in hand. (If unsolved, solve at the beginning of your end step.)\nSolved — At the beginning of your upkeep, discard your hand, then draw two cards.",
+        "Case of the Crimson Pulse",
+        &["Enchantment"],
+        &["Case"],
+    );
+    insta::assert_json_snapshot!("case_of_the_crimson_pulse_ir", &ir);
+    insta::assert_json_snapshot!("case_of_the_crimson_pulse_lowered", &lowered);
+}
+
+#[test]
+fn aerial_formation() {
+    let (ir, lowered) = parse_two_layer(
+        "Strive — This spell costs {2}{U} more to cast for each target beyond the first.\nAny number of target creatures each get +1/+1 and gain flying until end of turn.",
+        "Aerial Formation",
+        &["Instant"],
+        &[],
+    );
+    insta::assert_json_snapshot!("aerial_formation_ir", &ir);
+    insta::assert_json_snapshot!("aerial_formation_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
 // Diagnostic snapshot tests (Phase 51, D-10)
 // ---------------------------------------------------------------------------
 

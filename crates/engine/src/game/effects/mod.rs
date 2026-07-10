@@ -1838,8 +1838,10 @@ fn is_each_target_damage_sub(effect: &Effect) -> bool {
 }
 
 /// The first `TargetRef::Object` in a target list (the chain head's chosen
-/// creature for the one-sided-fight prepend).
-fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
+/// creature for the one-sided-fight prepend). Also reused by
+/// `prevent_damage.rs` to resolve a bare `ParentTarget` damage-source filter
+/// (issue #1094, the "dealt by" half of a bidirectional Maze-of-Ith shield).
+pub(crate) fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
     targets.iter().find_map(|t| match t {
         TargetRef::Object(id) => Some(*id),
         TargetRef::Player(_) => None,
@@ -3212,7 +3214,46 @@ pub fn resolve_effect(
         Effect::Reveal { .. } => reveal::resolve(state, ability, events),
         Effect::RevealTop { .. } => reveal_top::resolve(state, ability, events),
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
-        Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
+        // CR 608.2c: `TargetOnly` is the "choose <filter>" step — targeting is
+        // established at selection time, so there is nothing to mutate here. But
+        // inside a `player_scope` fan-out iteration ("starting with you, each
+        // player may choose …" — `scoped_player` is bound by the fan-out driver
+        // on BOTH the synchronous and continuation-resumed paths), the chosen
+        // object(s) must be PUBLISHED into the chain tracked set so the
+        // once-after tail's "chosen this way" consumer (the `TrackedSet(0)`
+        // sentinel — "Destroy each permanent chosen this way", Druid of
+        // Purification #4780) reads the UNION of every player's choice via the
+        // chain-extending publish.
+        //
+        // The `scoped_player` gate is load-bearing: an unconditional publish
+        // allocates a fresh `TrackedSetId` on every plain `TargetOnly`
+        // activation (Sword of the Paruns' modal untap picker), monotonically
+        // growing `tracked_object_sets` each loop iteration — which breaks the
+        // combo detector's state-cover check (`loop_states_cover_modulo_growth`
+        // gate 1) and falsely rejects real loop certificates (Marwyn + Sword).
+        // Outside a fan-out there is no multi-player union to accumulate and no
+        // "chosen this way" tail split off by the driver, so nothing reads the
+        // set — single-player chosen-this-way cards route through
+        // `Effect::ChooseObjectsIntoTrackedSet` instead.
+        Effect::TargetOnly { .. } => {
+            let chosen: Vec<crate::types::identifiers::ObjectId> = ability
+                .targets
+                .iter()
+                .filter_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect();
+            if ability.scoped_player.is_some() && !chosen.is_empty() {
+                // Load-bearing: `publish_tracked_set` EXTENDS the active chain
+                // set rather than minting a new id, which is what accumulates
+                // successive per-player picks into one union for the tail to
+                // read. (A declining player has no object targets — `chosen` is
+                // empty — so "may choose" declines are a no-op here.)
+                publish_tracked_set(state, chosen);
+            }
+            Ok(())
+        }
         Effect::Choose { .. } => choose::resolve(state, ability, events),
         Effect::OpponentGuess { .. } => opponent_guess::resolve(state, ability, events),
         Effect::SwapChosenLabels { .. } => swap_chosen_labels::resolve(state, ability, events),
@@ -4270,6 +4311,16 @@ fn effect_refs_parent_target(effect: &Effect) -> bool {
     effect_parent_ref_slots(effect)
         .iter()
         .any(|filter| filter_refs_parent_target(filter))
+}
+
+/// CR 115.6: True when the resolving ability head permits zero targets and the
+/// controller chose none (no `TargetRef::Object` in `ability.targets`).
+fn optional_head_declined_all_object_targets(ability: &ResolvedAbility) -> bool {
+    ability.targeting_is_optional()
+        && !ability
+            .targets
+            .iter()
+            .any(|t| matches!(t, TargetRef::Object(_)))
 }
 
 /// Every object-target filter slot of an effect that may carry a parent-ref,
@@ -7898,6 +7949,26 @@ fn resolve_chain_body(
                 state,
             );
             resolve_ability_chain(state, &sub_with_referent, events, depth + 1)?;
+        } else if sub.targets.is_empty()
+            && ability.targets.is_empty()
+            && effect_refs_parent_target(&sub.effect)
+            && optional_head_declined_all_object_targets(ability)
+        {
+            // CR 115.6 + CR 608.2c (issue #5287): Optional multi-target / up-to-one
+            // head legally chose zero object targets — a ParentTarget consumer
+            // ("Return it", "that creature", …) has no antecedent. Skip the
+            // consumer but keep resolving trailing sequential siblings (Samwise
+            // the Stouthearted → Ring tempts you).
+            if let Some(trailing) = sub.sub_ability.as_ref() {
+                let mut trailing_resolved = trailing.as_ref().clone();
+                apply_parent_chain_context(
+                    &mut trailing_resolved,
+                    ability,
+                    effect_context_object.as_ref(),
+                    state,
+                );
+                resolve_ability_chain(state, &trailing_resolved, events, depth + 1)?;
+            }
         } else {
             // Propagate SpellContext so additional_cost_paid and other flags
             // survive through the chain (e.g., Gift delivery → spell effects

@@ -30,6 +30,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // handle for good measure) closes the wire leak without affecting
     // server-side randomness or session restore.
     filtered.rng_seed = 0;
+    // Also drop the serialized stream position (issue #5466 sibling): a leaked
+    // word offset would give an attacker the keystream alignment for free. Zero
+    // it so no viewer snapshot carries either the seed or its stream position.
+    filtered.rng_word_pos = 0;
     filtered.rng = <rand_chacha::ChaCha20Rng as rand::SeedableRng>::seed_from_u64(0);
     filtered.liminal_entries.clear();
     filtered.pending_liminal_entry_resume = None;
@@ -1238,6 +1242,7 @@ mod tests {
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
     use crate::types::zones::{ExileCostSourceZone, Zone};
+    use rand::RngCore;
 
     fn dummy_pending_cast(
         object_id: ObjectId,
@@ -1313,20 +1318,40 @@ mod tests {
     #[test]
     fn redacts_rng_seed_from_every_viewer() {
         // A distinctive non-zero seed so a leak is unmistakable.
-        let state = GameState::new_two_player(0x1234_5678_9abc_def0);
+        let mut state = GameState::new_two_player(0x1234_5678_9abc_def0);
         assert_eq!(state.rng_seed, 0x1234_5678_9abc_def0);
 
-        // Seat viewers and the non-seat spectator must never see the real seed.
+        // Advance the ChaCha20 stream as gameplay would and snapshot the offset,
+        // so `rng_word_pos` is non-zero. Issue #5466 sibling: a leaked word
+        // offset hands an attacker the keystream alignment for free, so the
+        // filter must redact the stream position as well as the seed.
+        for _ in 0..5 {
+            state.rng.next_u32();
+        }
+        state.capture_rng_word_pos();
+        let source_word_pos = state.rng_word_pos;
+        assert_ne!(
+            source_word_pos, 0,
+            "test precondition: stream position must be non-zero to prove redaction"
+        );
+
+        // Seat viewers and the non-seat spectator must never see the real seed
+        // or the serialized stream position.
         for viewer in [PlayerId(0), PlayerId(1), PlayerId(u8::MAX)] {
             let filtered = filter_state_for_viewer(&state, viewer);
             assert_eq!(
                 filtered.rng_seed, 0,
                 "rng_seed must be redacted for viewer {viewer:?}"
             );
+            assert_eq!(
+                filtered.rng_word_pos, 0,
+                "rng_word_pos must be redacted for viewer {viewer:?}"
+            );
         }
 
         // The authoritative source state is untouched by filtering.
         assert_eq!(state.rng_seed, 0x1234_5678_9abc_def0);
+        assert_eq!(state.rng_word_pos, source_word_pos);
     }
 
     #[test]

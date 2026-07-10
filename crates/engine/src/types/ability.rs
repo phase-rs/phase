@@ -3682,6 +3682,21 @@ pub enum FilterProp {
     DifferentNameFrom {
         filter: Box<TargetFilter>,
     },
+    /// CR 109.1 + CR 120.3: Matches objects that are NOT the same object as any
+    /// object the `reference` filter resolves to — the object-identity dual of
+    /// [`FilterProp::SharesQuality`] (which carries a `reference` and tests a
+    /// shared *quality*; this tests object *identity*). Used for the "each OTHER
+    /// <X> that ..." exclusion where "other" is relative to the ability's chosen
+    /// target rather than the source: Radiance's "target creature and each other
+    /// creature that shares a color with it" (Cleansing Beam) pairs
+    /// `DistinctFrom { reference: ParentTarget }` with
+    /// `SharesQuality { Color, reference: ParentTarget }` so the fan-out damages
+    /// every color-sharer EXCEPT the already-damaged target. Distinct from
+    /// [`FilterProp::Another`] (excludes the ability *source*) and
+    /// [`FilterProp::OtherThanTriggerObject`] (excludes the *triggering* object).
+    DistinctFrom {
+        reference: Box<TargetFilter>,
+    },
     /// CR 604.3: Matches objects whose current zone is any of the listed zones (OR semantics).
     /// Used for zone-based restrictions like "cards in graveyards and libraries".
     InAnyZone {
@@ -4539,7 +4554,15 @@ pub enum TargetFilter {
     /// CR 609.7a: Matches the object stored as the source's chosen damage source.
     /// Resolution-time prevention effects should resolve this to `SpecificObject`
     /// when the shield is created so global shields do not depend on a live source.
-    ChosenDamageSource,
+    /// CR 609.7 + CR 609.7b: `filter` optionally constrains which sources are LEGAL
+    /// to choose — e.g. "a blue source of your choice" (Circle/Rune of Protection)
+    /// restricts the choice to blue sources and is rechecked against the chosen
+    /// object's live properties when damage would be dealt; `None` is the bare "a
+    /// source of your choice" / "that source" form (any source is a legal choice).
+    ChosenDamageSource {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<Box<TargetFilter>>,
+    },
     /// Matches objects with a specific hardcoded name.
     /// Used for "card named [literal]" patterns.
     Named {
@@ -12603,6 +12626,9 @@ fn normalized_filter_prop(prop: FilterProp) -> FilterProp {
     match prop {
         FilterProp::DifferentNameFrom { filter } => FilterProp::DifferentNameFrom {
             filter: Box::new(filter.normalized()),
+        },
+        FilterProp::DistinctFrom { reference } => FilterProp::DistinctFrom {
+            reference: Box::new(reference.normalized()),
         },
         FilterProp::SharesQuality {
             quality,

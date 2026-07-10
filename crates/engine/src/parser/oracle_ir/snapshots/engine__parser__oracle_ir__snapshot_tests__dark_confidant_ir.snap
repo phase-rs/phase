@@ -5,60 +5,84 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredTrigger": {
-        "mode": "Phase",
-        "execute": {
-          "kind": "Spell",
-          "effect": {
-            "type": "RevealTop",
-            "player": {
-              "type": "Controller"
-            },
-            "count": 1
-          },
-          "cost": null,
-          "sub_ability": {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 141,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "Phase",
+          "execute": {
             "kind": "Spell",
             "effect": {
-              "type": "ChangeZone",
-              "origin": null,
-              "destination": "Hand",
-              "target": {
-                "type": "ParentTarget"
+              "type": "RevealTop",
+              "player": {
+                "type": "Controller"
               },
-              "owner_library": false,
-              "enter_transformed": false,
-              "enter_tapped": false,
-              "enters_attacking": false
+              "count": 1
             },
             "cost": null,
             "sub_ability": {
               "kind": "Spell",
               "effect": {
-                "type": "LoseLife",
-                "amount": {
-                  "type": "Ref",
-                  "qty": {
-                    "type": "ObjectManaValue",
-                    "scope": {
-                      "type": "Anaphoric"
-                    }
-                  }
-                },
+                "type": "ChangeZone",
+                "origin": null,
+                "destination": "Hand",
                 "target": {
-                  "type": "Controller"
-                }
+                  "type": "ParentTarget"
+                },
+                "owner_library": false,
+                "enter_transformed": false,
+                "enter_tapped": false,
+                "enters_attacking": false
               },
               "cost": null,
-              "sub_ability": null,
+              "sub_ability": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "LoseLife",
+                  "amount": {
+                    "type": "Ref",
+                    "qty": {
+                      "type": "ObjectManaValue",
+                      "scope": {
+                        "type": "Anaphoric"
+                      }
+                    }
+                  },
+                  "target": {
+                    "type": "Controller"
+                  }
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false,
+                "sub_link": "SequentialSibling"
+              },
               "duration": null,
               "description": null,
               "target_prompt": null,
               "condition": null,
               "optional_targeting": false,
               "optional": false,
-              "forward_result": false,
-              "sub_link": "SequentialSibling"
+              "forward_result": false
             },
             "duration": null,
             "description": null,
@@ -68,32 +92,25 @@ expression: "&ir"
             "optional": false,
             "forward_result": false
           },
-          "duration": null,
-          "description": null,
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
+          "valid_card": null,
+          "origin": null,
+          "destination": null,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "phase": "Upkeep",
           "optional": false,
-          "forward_result": false
-        },
-        "valid_card": null,
-        "origin": null,
-        "destination": null,
-        "trigger_zones": [
-          "Battlefield"
-        ],
-        "phase": "Upkeep",
-        "optional": false,
-        "damage_kind": "Any",
-        "secondary": false,
-        "valid_target": null,
-        "valid_source": null,
-        "description": "At the beginning of your upkeep, reveal the top card of your library and put that card into your hand. You lose life equal to its mana value.",
-        "constraint": {
-          "type": "OnlyDuringYourTurn"
-        },
-        "condition": null,
-        "batched": false
+          "damage_kind": "Any",
+          "secondary": false,
+          "valid_target": null,
+          "valid_source": null,
+          "description": "At the beginning of your upkeep, reveal the top card of your library and put that card into your hand. You lose life equal to its mana value.",
+          "constraint": {
+            "type": "OnlyDuringYourTurn"
+          },
+          "condition": null,
+          "batched": false
+        }
       }
     }
   ],

@@ -3430,3 +3430,59 @@ fn parse_enters_with_additional_counters(
         .description(text.to_string()),
     )
 }
+
+/// Parses the Odyssey Burst-cycle graveyard name-aliasing static:
+/// "If ~ is in a graveyard, effects from spells named X count it as
+/// a card named X." — Odyssey Burst cycle (Diligent Farmhand, Pardic Firecat,
+/// Nantuko Blightcutter, etc.).
+///
+/// Accepts both `"if ~ is in a graveyard, ..."` (test fixtures) and
+/// `"if this card is in a graveyard, ..."` (production pipeline — `"this card"`
+/// is in `SELF_REF_PARSE_ONLY_PHRASES` and is NOT normalized to `~`).
+///
+/// No general CR governs this Odyssey-specific templating; the name-matching
+/// semantics rely on CR 201.2a ("two or more objects have the same name if
+/// they have at least one name in common").
+///
+/// Returns a `StaticDefinition` with `StaticMode::CountsAsNamed { name }` and
+/// `active_zones = [Graveyard]`.
+pub(crate) fn try_parse_counts_as_named_static(text: &str) -> Option<StaticDefinition> {
+    use super::prelude::*;
+    // allow-noncombinator: punctuation cleanup on pre-tokenized input (char arg)
+    let stripped = text.trim_end_matches('.').trim();
+    let lower = stripped.to_lowercase();
+    // Parse the self-reference prefix — accept both "~" (test fixtures) and
+    // "this card" (production pipeline, not normalized by `normalize_card_name_refs`).
+    let (prefix_rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("if ~ is in a graveyard, "),
+        tag::<_, _, OracleError<'_>>("if this card is in a graveyard, "),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let prefix_consumed = lower.len() - prefix_rest.len();
+    let (rest_lower, _) = tag::<_, _, OracleError<'_>>("effects from spells named ")
+        .parse(prefix_rest)
+        .ok()?;
+    let effects_consumed = prefix_rest.len() - rest_lower.len();
+    // Split on " count it as a card named " to extract the spell name and alias.
+    let (alias_lower, spell_lower) = terminated(
+        take_until::<_, _, OracleError<'_>>(" count it as a card named "),
+        tag(" count it as a card named "),
+    )
+    .parse(rest_lower)
+    .ok()?;
+    // Both names should match (the card counts as the spell that references it).
+    if !spell_lower.eq_ignore_ascii_case(alias_lower) {
+        return None;
+    }
+    // Slice the name from the original-case input to preserve correct casing
+    // (avoids title-case reconstruction issues with hyphens, articles, accents).
+    let name_start = prefix_consumed + effects_consumed;
+    let name_end = name_start + spell_lower.len();
+    let name = stripped[name_start..name_end].to_string();
+    Some(
+        StaticDefinition::new(StaticMode::CountsAsNamed { name })
+            .active_zones(vec![Zone::Graveyard])
+            .description(text.to_string()),
+    )
+}

@@ -5753,10 +5753,43 @@ fn parse_oneshot_source_filter(body: &str) -> Option<TargetFilter> {
     .parse(subject)
     {
         if rest.trim().is_empty() {
-            return Some(TargetFilter::ChosenDamageSource);
+            return Some(TargetFilter::ChosenDamageSource { filter: None });
         }
     }
+    // CR 609.7 + CR 609.7b: qualified form — "a red source of your choice",
+    // "a land source of your choice" (Circle/Rune of Protection cycles).
+    if let Some(filter) = parse_qualified_chosen_damage_source(subject) {
+        return Some(filter);
+    }
     parse_damage_source_filter(body)
+}
+
+/// CR 609.7 + CR 609.7b: "a <color/type> source of your choice" (Circle of
+/// Protection cycle, Rune of Protection cycle) — the qualifier restricts which
+/// source may be chosen and is retained on the variant so the resolver can (a)
+/// offer only matching candidates when prompting the choice and (b) recheck
+/// source qualities at damage time. Parses the qualifier with `parse_type_phrase`
+/// directly (the shared color/type/supertype phrase combinator used throughout
+/// this file), which resolves a bare core type word like "land" to the correct
+/// `TypeFilter::Land` — so any future color/type/supertype word `parse_type_phrase`
+/// recognizes is covered for free, not just the 13 Circle/Rune of Protection cards.
+fn parse_qualified_chosen_damage_source(subject: &str) -> Option<TargetFilter> {
+    let (rest, _) = nom_primitives::parse_article.parse(subject).ok()?;
+    let (filter, rest) = parse_type_phrase(rest.trim_start());
+    if matches!(filter, TargetFilter::Any) {
+        // Bare "source" — not a qualifier; the caller's bare-anaphor branch
+        // handles "a source of your choice" directly.
+        return None;
+    }
+    let (rest, _) = tag::<_, _, OracleError<'_>>("source of your choice")
+        .parse(rest.trim_start())
+        .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(TargetFilter::ChosenDamageSource {
+        filter: Some(Box::new(filter)),
+    })
 }
 
 /// CR 614.9: Parse the redirection recipient from the result clause by scanning
@@ -17543,7 +17576,7 @@ mod snapshot_tests {
             Effect::CreateDamageReplacement {
                 modification: Some(DamageModification::Double),
                 redirect_to: None,
-                source_filter: Some(TargetFilter::ChosenDamageSource),
+                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 combat_scope: None,
                 ..
             } => {}
@@ -17616,7 +17649,7 @@ mod snapshot_tests {
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::SourceObject),
                 redirect_amount: None,
-                source_filter: Some(TargetFilter::ChosenDamageSource),
+                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 ..
             } => {}
             other => panic!("expected redirect-to-source, got {other:?}"),
@@ -17635,7 +17668,7 @@ mod snapshot_tests {
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::Controller),
                 redirect_amount: None,
-                source_filter: Some(TargetFilter::ChosenDamageSource),
+                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 // CR 614.9: "would deal damage to target creature" — the
                 // protected creature is a chosen original-recipient target, not
                 // a broad scope (Defect 3). `target_filter` must stay None.
@@ -17686,6 +17719,78 @@ mod snapshot_tests {
                     Some(TargetFilter::SelfRef),
                     "isolated one-shot keeps SelfRef until chain threading"
                 );
+            }
+            other => panic!("expected PreventDamage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_prevention_qualified_color_source_of_your_choice() {
+        // Circle of Protection: Red (verbatim Scryfall Oracle text) — "{1}: The
+        // next time a red source of your choice would deal damage to you this
+        // turn, prevent that damage." The qualifier must be RETAINED on the
+        // variant (CR 609.7/609.7b) so the resolver prompts only red sources and
+        // rechecks color at damage time — NOT dropped to an unconstrained shield.
+        let effect = parse_oneshot_damage_replacement(
+            "the next time a red source of your choice would deal damage to you this turn, prevent that damage",
+        )
+        .expect("Circle of Protection: Red must parse");
+        match effect {
+            Effect::PreventDamage {
+                damage_source_filter,
+                ..
+            } => {
+                let Some(TargetFilter::ChosenDamageSource {
+                    filter: Some(inner),
+                }) = damage_source_filter
+                else {
+                    panic!("expected qualified ChosenDamageSource, got {damage_source_filter:?}");
+                };
+                match *inner {
+                    TargetFilter::Typed(tf) => assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::HasColor {
+                                color: ManaColor::Red
+                            }
+                        )),
+                        "inner qualifier must constrain to red sources, got {tf:?}"
+                    ),
+                    other => panic!("expected Typed color qualifier, got {other:?}"),
+                }
+            }
+            other => panic!("expected PreventDamage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_prevention_qualified_land_source_of_your_choice() {
+        // Rune of Protection: Lands (verbatim Scryfall Oracle text) — "{W}: The
+        // next time a land source of your choice would deal damage to you this
+        // turn, prevent that damage." Exercises the TYPE-qualifier branch
+        // (distinct from the color-qualified Circles/Runes).
+        let effect = parse_oneshot_damage_replacement(
+            "the next time a land source of your choice would deal damage to you this turn, prevent that damage",
+        )
+        .expect("Rune of Protection: Lands must parse");
+        match effect {
+            Effect::PreventDamage {
+                damage_source_filter,
+                ..
+            } => {
+                let Some(TargetFilter::ChosenDamageSource {
+                    filter: Some(inner),
+                }) = damage_source_filter
+                else {
+                    panic!("expected qualified ChosenDamageSource, got {damage_source_filter:?}");
+                };
+                match *inner {
+                    TargetFilter::Typed(tf) => assert!(
+                        tf.type_filters.contains(&TypeFilter::Land),
+                        "inner qualifier must constrain to Land sources, got {tf:?}"
+                    ),
+                    other => panic!("expected Typed Land qualifier, got {other:?}"),
+                }
             }
             other => panic!("expected PreventDamage, got {other:?}"),
         }

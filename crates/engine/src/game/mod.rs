@@ -124,6 +124,7 @@ pub mod planechase;
 mod planechase_tests;
 pub mod planeswalker;
 pub mod players;
+pub mod preview;
 pub mod printed_cards;
 pub mod priority;
 pub mod public_state;

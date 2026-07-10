@@ -5,29 +5,46 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "Mana",
-          "produced": {
-            "type": "Fixed",
-            "colors": [
-              "Green"
-            ]
-          }
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "cost": {
-          "type": "Tap"
-        },
-        "sub_ability": null,
-        "duration": null,
-        "description": "{T}: Add {G}.",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false,
-        "is_mana_ability": true
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 13,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": {
+              "type": "Fixed",
+              "colors": [
+                "Green"
+              ]
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "{T}: Add {G}.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false,
+          "is_mana_ability": true
+        }
       }
     }
   ],

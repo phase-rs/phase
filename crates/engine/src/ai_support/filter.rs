@@ -795,6 +795,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::SameNameAsParentTarget
         | FilterProp::NameMatchesAnyPermanent { .. }
         | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
         | FilterProp::SharesQuality { .. }
         | FilterProp::CanEnchant { .. }
         | FilterProp::IsChosenCreatureType

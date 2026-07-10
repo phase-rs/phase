@@ -5,36 +5,53 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Spell",
-        "effect": {
-          "type": "Pump",
-          "power": {
-            "type": "Fixed",
-            "value": -5
-          },
-          "toughness": {
-            "type": "Fixed",
-            "value": -5
-          },
-          "target": {
-            "type": "Typed",
-            "type_filters": [
-              "Creature"
-            ],
-            "controller": null,
-            "properties": []
-          }
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "cost": null,
-        "sub_ability": null,
-        "duration": "UntilEndOfTurn",
-        "description": "Target creature gets -5/-5 until end of turn.",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 92,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Pump",
+            "power": {
+              "type": "Fixed",
+              "value": -5
+            },
+            "toughness": {
+              "type": "Fixed",
+              "value": -5
+            },
+            "target": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": []
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": "UntilEndOfTurn",
+          "description": "Target creature gets -5/-5 until end of turn.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     }
   ],

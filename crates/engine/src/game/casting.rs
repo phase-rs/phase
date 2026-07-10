@@ -13,7 +13,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActivationResidual, CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption,
     ConvokeMode, CostResume, GameState, NextSpellModifier, PayCostKind, PendingCast,
-    SneakPlacement, SpellCastRecord, SpellCostSource, StackEntry, StackEntryKind, WaitingFor,
+    SneakPlacement, SpellCastRecord, SpellCostSource, StackEntry, StackEntryKind,
+    TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -28,7 +29,7 @@ use crate::types::statics::{
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_targets_in_chain, auto_select_targets,
@@ -11202,6 +11203,223 @@ pub fn spell_has_legal_targets_with_probe(
     spell_has_legal_targets_in_flushed_state(&simulated, object_id, player)
 }
 
+/// CR 601.2c: Read-only preview of the target slots a currently castable spell
+/// would ask the caster to choose. Returns an empty list for uncastable spells,
+/// untargeted spells, and casts that must first choose a face, variant, mode, or X.
+pub fn legal_target_slots_for_castable_spell(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Vec<TargetSelectionSlot> {
+    let WaitingFor::Priority { player } = &state.waiting_for else {
+        return Vec::new();
+    };
+    legal_target_slots_for_castable_spell_with_probe(state, *player, object_id, None)
+}
+
+pub fn legal_target_slots_for_castable_spell_with_probe(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    probe: Option<&PriorityCastProbe>,
+) -> Vec<TargetSelectionSlot> {
+    if let Some(probe) = probe.filter(|probe| probe.player() == player && probe.is_for_state(state))
+    {
+        return legal_target_slots_for_castable_spell_in_flushed_state(
+            probe.state(),
+            player,
+            object_id,
+        )
+        .unwrap_or_default();
+    }
+    let mut simulated = state.clone();
+    super::layers::flush_layers(&mut simulated);
+    legal_target_slots_for_castable_spell_in_flushed_state(&simulated, player, object_id)
+        .unwrap_or_default()
+}
+
+pub fn legal_target_slots_for_castable_spells(
+    state: &GameState,
+    object_ids: impl IntoIterator<Item = ObjectId>,
+) -> HashMap<ObjectId, Vec<TargetSelectionSlot>> {
+    let WaitingFor::Priority { player } = &state.waiting_for else {
+        return HashMap::new();
+    };
+    let player = *player;
+    let probe = PriorityCastProbe::new(state, player);
+    object_ids
+        .into_iter()
+        .map(|object_id| {
+            (
+                object_id,
+                legal_target_slots_for_castable_spell_with_probe(
+                    probe.state(),
+                    player,
+                    object_id,
+                    Some(&probe),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn legal_target_slots_for_castable_spell_in_flushed_state(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Result<Vec<TargetSelectionSlot>, EngineError> {
+    if let Some(obj) = state.objects.get(&object_id) {
+        // CR 715.3 / CR 720.3 / CR 712.11b: Adventure, Omen, and modal DFC
+        // face choices happen before target selection, so no single target-slot
+        // preview exists until the face is chosen.
+        if (cast_face_choice_offered_from_zone(state, obj)
+            && alternative_spell_layout(obj).is_some())
+            || cast_spell_face_choice_offered_from_zone(state, obj)
+        {
+            return Ok(Vec::new());
+        }
+    }
+
+    // CR 601.2b: Alternative/additional cost choices are announced before
+    // targets, so casts with multiple viable variants are target-ambiguous.
+    let choices = casting_variant_choice_set(state, player, object_id);
+    if choices.options.len() > 1 {
+        return Ok(Vec::new());
+    }
+    if !can_cast_object_now(state, player, object_id) {
+        return Ok(Vec::new());
+    }
+
+    let prepared = prepare_spell_cast(state, player, object_id)?;
+    // CR 601.2b: Modal choices are announced before targets, so a modal spell
+    // has no single target-slot preview until modes are chosen.
+    if prepared.modal.is_some() {
+        return Ok(Vec::new());
+    }
+
+    let resolved = if let Some(ref ability_def) = prepared.ability_def {
+        build_resolved_from_def(ability_def, prepared.object_id, player)
+    } else {
+        ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            Vec::new(),
+            prepared.object_id,
+            player,
+        )
+    };
+
+    // CR 702.47a + CR 601.2b: Splice is announced before targets and can add
+    // spell text, including additional targets, so preview waits for that choice.
+    if !splice::eligible_splice_cards(state, player, prepared.object_id).is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // CR 702.119a + CR 702.119b + CR 702.119c + CR 601.2b + CR 601.2h:
+    // Emerge chooses a sacrifice before target selection, so target legality
+    // may change before targets are chosen.
+    if prepared.casting_variant == CastingVariant::Emerge {
+        return Ok(Vec::new());
+    }
+
+    let Some(obj) = state.objects.get(&prepared.object_id) else {
+        return Ok(Vec::new());
+    };
+
+    // CR 303.4a: An Aura spell requires a target defined by its enchant ability.
+    if obj.card_types.subtypes.iter().any(|s| s == "Aura") {
+        return Ok(obj
+            .keywords
+            .iter()
+            .find_map(|keyword| {
+                if let Keyword::Enchant(filter) = keyword {
+                    Some(TargetSelectionSlot {
+                        legal_targets: targeting::find_legal_targets(
+                            state,
+                            filter,
+                            player,
+                            prepared.object_id,
+                        ),
+                        optional: false,
+                    })
+                } else {
+                    None
+                }
+            })
+            .filter(|slot| !slot.legal_targets.is_empty())
+            .into_iter()
+            .collect());
+    }
+
+    // CR 702.140a: A mutating creature spell targets a non-Human creature with
+    // the same owner as the spell.
+    if obj.mutate_form.is_some() {
+        let legal = targeting::find_legal_targets(
+            state,
+            &mutate_target_filter(),
+            player,
+            prepared.object_id,
+        );
+        return Ok(if legal.is_empty() {
+            Vec::new()
+        } else {
+            vec![TargetSelectionSlot {
+                legal_targets: legal,
+                optional: false,
+            }]
+        });
+    }
+
+    let distribute = prepared
+        .ability_def
+        .as_ref()
+        .and_then(|ability| ability.distribute.clone());
+    if ability_target_legality_needs_chosen_x(&resolved, distribute.as_ref()) {
+        return Ok(Vec::new());
+    }
+    // CR 601.2b: Target-dependent kicker/additional-cost declarations happen
+    // before target selection, so defer the preview until the cost is chosen.
+    let has_kicker_cost = state
+        .objects
+        .get(&prepared.object_id)
+        .and_then(|obj| obj.additional_cost.as_ref())
+        .is_some_and(|additional| matches!(additional, AdditionalCost::Kicker { .. }));
+    if has_kicker_cost && requires_additional_cost_declaration_before_targets(&resolved) {
+        return Ok(Vec::new());
+    }
+
+    // CR 601.2c: Once all earlier casting choices are known, enumerate the
+    // targets the spell requires.
+    let mut target_slots = build_target_slots(state, &resolved)?;
+    if !target_slots.is_empty() {
+        // CR 601.2b: Casualty is an optional sacrifice declared before targets.
+        if casting_costs::effective_casualty_additional_cost(state, player, prepared.object_id)
+            .is_some()
+        {
+            return Ok(Vec::new());
+        }
+        // CR 702.56a: Replicate is a repeatable optional additional cost
+        // declared before targets, just like Casualty.
+        if casting_costs::effective_replicate_additional_cost(state, player, prepared.object_id)
+            .is_some()
+        {
+            return Ok(Vec::new());
+        }
+        // CR 702.48a + CR 702.48b: Offering sacrifice is declared before targets.
+        if casting_costs::effective_offering_quality(state, player, prepared.object_id).is_some() {
+            return Ok(Vec::new());
+        }
+    }
+    super::ability_utils::cap_distribution_target_slots(
+        state,
+        &resolved,
+        distribute.as_ref(),
+        &mut target_slots,
+    );
+    Ok(target_slots)
+}
+
 fn spell_has_legal_targets_in_flushed_state(
     state: &GameState,
     object_id: ObjectId,
@@ -13173,11 +13391,12 @@ fn apply_mana_spell_grants(
         return;
     };
     let spell_meta = build_spell_meta(state, caster, spell_id);
-    let mut keyword_grants = Vec::new();
+    let mut keyword_grants: Vec<(crate::types::keywords::Keyword, Duration)> = Vec::new();
     for grant in spent_units.iter().flat_map(|unit| unit.grants.iter()) {
         let ManaSpellGrant::AddKeywordUntilEndOfTurn {
             keyword,
             restriction,
+            duration,
         } = grant
         else {
             continue;
@@ -13189,16 +13408,19 @@ fn apply_mana_spell_grants(
         }) {
             continue;
         }
-        if !keyword_grants.contains(keyword) {
-            keyword_grants.push(keyword.clone());
+        if !keyword_grants
+            .iter()
+            .any(|(k, d)| k == keyword && d == duration.as_ref())
+        {
+            keyword_grants.push((keyword.clone(), duration.as_ref().clone()));
         }
     }
 
-    for keyword in keyword_grants {
+    for (keyword, duration) in keyword_grants {
         state.add_transient_continuous_effect(
             spell_id,
             caster,
-            Duration::UntilEndOfTurn,
+            duration,
             TargetFilter::SpecificObject { id: spell_id },
             vec![ContinuousModification::AddKeyword { keyword }],
             None,

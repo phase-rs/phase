@@ -7964,7 +7964,7 @@ pub mod tests {
         ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
         DamageChannel, DamageKindFilter, DelayedTriggerCondition, DiscardSelfScope, Duration,
         EachDamageRecipient, Effect, FilterProp, KickerVariant, MultiTargetSpec, PlayerFilter,
-        PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
         SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticCondition,
         StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerConstraint,
         TriggerDefinition, TypeFilter, TypedFilter,
@@ -10210,6 +10210,109 @@ pub mod tests {
             StackEntryKind::TriggeredAbility { ability, .. }
                 if matches!(&ability.effect, Effect::Draw { .. })
         )));
+    }
+
+    /// CR 608.2c: Off-battlefield attack triggers whose body refers to the
+    /// attacking creatures ("that creature gets +1/+1") must still receive
+    /// batched-attack parent targets — zone is not the right discriminator.
+    #[test]
+    fn seed_batched_attack_parent_targets_seeds_off_battlefield_parent_target_pump() {
+        use crate::types::ability::ResolvedAbility;
+
+        let attacker = ObjectId(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Quantity(QuantityExpr::Fixed { value: 1 }),
+                toughness: PtValue::Quantity(QuantityExpr::Fixed { value: 1 }),
+                target: TargetFilter::ParentTarget,
+            },
+            vec![],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        };
+        super::seed_batched_attack_parent_targets(&mut ability, Some(&event));
+        assert_eq!(ability.targets, vec![TargetRef::Object(attacker)]);
+    }
+
+    /// CR 508.4 + CR 608.2c + CR 113.6k: Senu, Keen-Eyed Protector — exile-zone
+    /// `YouAttackUnblocked` trigger returns the source attacking, not the
+    /// legendary attacker that satisfied `valid_card`.
+    #[test]
+    fn senu_exile_you_attack_unblocked_returns_source_attacking() {
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::types::card_type::Supertype;
+
+        let parsed = crate::parser::oracle_trigger::parse_trigger_line(
+            "When a legendary creature you control attacks and isn't blocked, if this card is exiled, put it onto the battlefield attacking.",
+            "Senu, Keen-Eyed Protector",
+        );
+        assert_eq!(parsed.mode, TriggerMode::YouAttackUnblocked);
+        assert_eq!(parsed.trigger_zones, vec![Zone::Exile]);
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.phase = Phase::DeclareBlockers;
+
+        let senu = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Senu, Keen-Eyed Protector".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&senu)
+            .unwrap()
+            .trigger_definitions
+            .push(parsed.clone());
+        state
+            .objects
+            .get_mut(&senu)
+            .unwrap()
+            .base_trigger_definitions = std::sync::Arc::new(vec![parsed]);
+
+        let legendary = make_creature(&mut state, PlayerId(0), "Legend Attacker", 3, 3);
+        {
+            let obj = state.objects.get_mut(&legendary).unwrap();
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            obj.base_card_types.supertypes.push(Supertype::Legendary);
+        }
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(legendary, PlayerId(1))],
+            ..Default::default()
+        });
+
+        let events = vec![GameEvent::BlockersDeclared {
+            assignments: vec![],
+        }];
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "exiled Senu must trigger on an unblocked legendary attack"
+        );
+
+        let mut resolve_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+
+        assert_eq!(
+            state.objects[&senu].zone,
+            Zone::Battlefield,
+            "trigger must return Senu from exile"
+        );
+        let combat = state.combat.as_ref().expect("combat active");
+        assert!(
+            combat.attackers.iter().any(|a| a.object_id == senu),
+            "Senu must enter the battlefield attacking (CR 508.4)"
+        );
     }
 
     #[test]

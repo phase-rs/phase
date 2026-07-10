@@ -1376,7 +1376,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         | TargetFilter::AllPlayers => WriteScope::External,
@@ -2213,7 +2213,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
@@ -2262,6 +2262,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
         | FilterProp::Targets { filter } => legacy_target_filter(filter),
+        FilterProp::DistinctFrom { reference } => legacy_target_filter(reference),
         FilterProp::SharesQuality { reference, .. } => {
             reference.as_deref().is_some_and(legacy_target_filter)
         }
@@ -2407,7 +2408,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::ChosenCard
         | TargetFilter::HasChosenName
         | TargetFilter::SourceChosenPlayer
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::Neighbor { .. }
         | TargetFilter::OriginalController
@@ -2510,6 +2511,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
         | FilterProp::Targets { filter } => member_bound_target_filter(filter),
+        FilterProp::DistinctFrom { reference } => member_bound_target_filter(reference),
         FilterProp::SharesQuality { reference, .. } => {
             reference.as_deref().is_some_and(member_bound_target_filter)
         }
@@ -6079,7 +6081,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::ChosenDamageSource => reads_event_live(),
+        | TargetFilter::ChosenDamageSource { .. } => reads_event_live(),
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
             rw_target_filter(filter)
         }

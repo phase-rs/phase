@@ -18,7 +18,8 @@ use super::super::oracle_quantity::{
     parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_with_ctx,
+    parse_anaphoric_target_ref, parse_target, parse_target_with_ctx, parse_that_clause_suffix,
+    parse_type_phrase_with_ctx,
 };
 use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
 use crate::parser::oracle_ir::ast::*;
@@ -231,6 +232,59 @@ fn patch_self_ref_head_tap_anaphor(def: &mut AbilityDefinition) {
                 }
             }
             walk(sub, active_self_ref);
+        }
+    }
+    walk(def, false);
+}
+
+/// CR 608.2c + CR 122.1: After a mass counter placement (`PutCounterAll`), a
+/// chained "then untap them" continuation refers to the set of objects that
+/// received counters (Lulu, Loyal Hollyphant). Phase-trigger bodies carry
+/// `ctx.subject = Any`, so `resolve_it_pronoun` wrongly binds "them" to
+/// `SelfRef` (the trigger source). Rewrite to `TrackedSet(0)` so the runtime
+/// binds the published counter set via `affected_objects_from_events`. Sibling
+/// of [`patch_self_ref_head_tap_anaphor`] for the population-head / plural-
+/// anaphor polarity.
+fn patch_population_head_tap_anaphor(def: &mut AbilityDefinition) {
+    fn is_population_counter_publisher(effect: &Effect) -> bool {
+        matches!(
+            effect,
+            Effect::PutCounterAll { target, .. }
+                if !matches!(
+                    target,
+                    TargetFilter::SelfRef
+                        | TargetFilter::ParentTarget
+                        | TargetFilter::TriggeringSource
+                        | TargetFilter::CostPaidObject
+                )
+        )
+    }
+
+    fn walk(def: &mut AbilityDefinition, carried_population: bool) {
+        let active_population = if is_population_counter_publisher(&def.effect) {
+            true
+        } else {
+            match def.effect.target_filter() {
+                Some(filter) if !target_filter_is_player_scoped(filter) => false,
+                _ => carried_population,
+            }
+        };
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            if active_population {
+                if let Effect::SetTapState {
+                    target,
+                    scope: EffectScope::Single,
+                    ..
+                } = sub.effect.as_mut()
+                {
+                    if matches!(target, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
+                        *target = TargetFilter::TrackedSet {
+                            id: crate::types::identifiers::TrackedSetId(0),
+                        };
+                    }
+                }
+            }
+            walk(sub, active_population);
         }
     }
     walk(def, false);
@@ -575,6 +629,26 @@ mod self_ref_tap_anaphor_tests {
     /// Builds a `PutCounter{head_target}` head with a chained
     /// `SetTapState{ParentTarget, scope}` untap sub — the shape every chained
     /// tap/untap anaphor lowers to.
+    fn put_counter_all_then_untap_chain(head_target: TargetFilter) -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounterAll {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: head_target,
+            },
+        );
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+        )));
+        def
+    }
+
     fn put_counter_then_untap_chain(
         head_target: TargetFilter,
         sub_scope: EffectScope,
@@ -642,6 +716,32 @@ mod self_ref_tap_anaphor_tests {
                 }
             ),
             "Typed-head anaphor must stay ParentTarget (CR 608.2b), got {:?}",
+            sub.effect
+        );
+    }
+
+    // CR 608.2c + CR 122.1: a chained "untap them" after `PutCounterAll` binds
+    // to the countered set, not the trigger source (Lulu, Loyal Hollyphant).
+    #[test]
+    fn put_counter_all_head_plural_untap_rewrites_to_tracked_set() {
+        let mut def = put_counter_all_then_untap_chain(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Tapped]),
+        ));
+        patch_population_head_tap_anaphor(&mut def);
+        let sub = def.sub_ability.expect("sub-ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::SetTapState {
+                    target: TargetFilter::TrackedSet {
+                        id: crate::types::identifiers::TrackedSetId(0)
+                    },
+                    ..
+                }
+            ),
+            "PutCounterAll-head plural untap must bind TrackedSet(0), got {:?}",
             sub.effect
         );
     }
@@ -2223,6 +2323,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // ParentTarget to SelfRef so it binds the source, while a real/optional
     // target head (Tyvar Kell) keeps ParentTarget and no-ops when declined.
     patch_self_ref_head_tap_anaphor(&mut result);
+    // CR 608.2c + CR 122.1: bind a mass `PutCounterAll` head's chained "untap
+    // them" to the countered set (Lulu, Loyal Hollyphant).
+    patch_population_head_tap_anaphor(&mut result);
     // CR 608.2c: bind a "choose a card …, then {put|remove} counters {on|from} it"
     // continuation's "it" anaphor to the chosen card (Amy Pond). The standalone
     // counter clause lowers "it" to SelfRef; under an `Effect::ChooseFromZone`
@@ -3495,12 +3598,12 @@ fn rewrite_oneshot_selfref_to_chosen_in_effect(effect: &mut Effect) {
             damage_source_filter,
             ..
         } if matches!(damage_source_filter, Some(TargetFilter::SelfRef)) => {
-            *damage_source_filter = Some(TargetFilter::ChosenDamageSource);
+            *damage_source_filter = Some(TargetFilter::ChosenDamageSource { filter: None });
         }
         Effect::CreateDamageReplacement { source_filter, .. }
             if matches!(source_filter, Some(TargetFilter::SelfRef)) =>
         {
-            *source_filter = Some(TargetFilter::ChosenDamageSource);
+            *source_filter = Some(TargetFilter::ChosenDamageSource { filter: None });
         }
         Effect::FlipCoin {
             win_effect,
@@ -6070,6 +6173,23 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             true,
             true,
         ),
+        // CR 508.4: bare "attacking" without tapped (Senu, Keen-Eyed Protector).
+        (
+            " onto the battlefield attacking",
+            Zone::Battlefield,
+            false,
+            false,
+            false,
+            true,
+        ),
+        (
+            " to the battlefield attacking",
+            Zone::Battlefield,
+            false,
+            false,
+            false,
+            true,
+        ),
         // Tapped + control variants (must precede shorter "tapped" and "under X control")
         (
             " to the battlefield tapped under their owners' control",
@@ -6743,6 +6863,97 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
         sub_ability: None,
         distribute: Some(DistributionUnit::Damage),
         multi_target,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// CR 615.1a + CR 608.2c: Parse "prevent [amount] [combat] damage
+/// that would be dealt to and dealt by <anaphor> this turn" — the
+/// bidirectional shield CR 615's AND-only shield semantics cannot express as
+/// one node (`Effect::PreventDamage`'s `target` + `damage_source_filter`
+/// combine with AND semantics: recipient==X AND source==Y, never recipient==X
+/// OR source==X). Splits into two independent `PreventDamage` nodes chained via
+/// `SequentialSibling` — a recipient-scoped ("to") shield and a
+/// source-scoped-only ("by") shield with no recipient restriction. Called from
+/// the Prevent intercept arm in `lower_imperative_family_ast` BEFORE
+/// `try_parse_prevent_distribute` — mutually exclusive markers in the corpus
+/// (no card combines "distributed among" with "dealt to and dealt by").
+/// Issue #1094 (Maze of Ith).
+pub(super) fn try_parse_bidirectional_prevent(
+    text: &str,
+    parent_target_available: bool,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    // Quick-reject via the bidirectional marker before spending parse effort.
+    if !scan_contains_phrase(&lower, "dealt to and dealt by") {
+        return None;
+    }
+    // Parse "prevent " prefix and position `rest` just past it.
+    let (rest, _) = tag::<_, _, OracleError<'_>>("prevent ")
+        .parse(lower.as_str())
+        .ok()?;
+
+    // CR 615: scope — combat damage only vs all damage (mirrors
+    // `parse_prevent_effect`'s own scope detection exactly).
+    let scope = if nom_primitives::scan_contains(rest, "combat damage") {
+        PreventionScope::CombatDamage
+    } else {
+        PreventionScope::AllDamage
+    };
+
+    // CR 615.1a: shared amount detection (issue #1094 factored this out of
+    // `parse_prevent_effect` so both paths agree).
+    let amount = super::imperative::parse_prevention_amount(rest);
+
+    // CR 511.2 + CR 615: trailing duration window ("this turn" -> end of turn).
+    let prevention_duration =
+        nom_primitives::scan_preceded(rest, parse_duration).map(|(_, d, _)| d);
+
+    // CR 608.2c: isolate the anaphor phrase following the bidirectional marker
+    // and bind it to the parent's chosen target. `parse_anaphoric_target_ref`
+    // returns `None` when `parent_target_available` is false — the load-bearing
+    // gate (a standalone "dealt to and dealt by that creature" with no prior
+    // target-selecting clause must NOT split into ParentTarget shields).
+    let anaphor_tp = TextPair::new(text, &lower).strip_after("dealt to and dealt by ")?;
+    let (anaphor_filter, _) =
+        parse_anaphoric_target_ref(anaphor_tp.original, parent_target_available)?;
+
+    // CR 615: the recipient ("to") shield — scoped to the chosen creature as
+    // the damage RECIPIENT (target: ParentTarget, no source restriction).
+    let to_effect = Effect::PreventDamage {
+        amount,
+        amount_dynamic: None,
+        target: anaphor_filter.clone(),
+        scope,
+        damage_source_filter: None,
+        prevention_duration: prevention_duration.clone(),
+    };
+
+    // CR 615: the source-only ("by") shield — scoped to the chosen creature as
+    // the damage SOURCE (target: Any, damage_source_filter: ParentTarget). A
+    // SequentialSibling: an independent following instruction in the same
+    // resolution, not a per-event rider.
+    let mut by_ability = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic: None,
+            target: TargetFilter::Any,
+            scope,
+            damage_source_filter: Some(anaphor_filter),
+            prevention_duration,
+        },
+    );
+    by_ability.sub_link = SubAbilityLink::SequentialSibling;
+
+    Some(ParsedEffectClause {
+        effect: to_effect,
+        duration: None,
+        sub_ability: Some(Box::new(by_ability)),
+        distribute: None,
+        multi_target: None,
         condition: None,
         optional: false,
         unless_pay: None,
@@ -9648,6 +9859,71 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 615 (issue #1094): the bidirectional interceptor must NOT claim a
+    /// "distributed among" clause — it lacks the "dealt to and dealt by"
+    /// marker, so `try_parse_bidirectional_prevent` returns `None` and the
+    /// distribute path (tried next in the family arm) still owns it. Regression
+    /// guard on the step-9 ordering.
+    #[test]
+    fn bidirectional_prevent_ignores_distribute_clause() {
+        let text =
+            "prevent the next 5 damage divided as you choose among any number of target creatures";
+        assert!(
+            super::try_parse_bidirectional_prevent(text, true).is_none(),
+            "distribute clause must not be claimed by the bidirectional interceptor"
+        );
+        // And the distribute path still parses it (ordering safety).
+        assert!(super::try_parse_prevent_distribute(text).is_some());
+    }
+
+    /// CR 615 + CR 608.2c (issue #1094): the bidirectional split with the gate
+    /// enabled produces a recipient ("to") node bound to `ParentTarget` and a
+    /// source-only ("by") SequentialSibling with `damage_source_filter ==
+    /// Some(ParentTarget)`. Driven at the interceptor level so the two-node
+    /// structure is asserted directly.
+    #[test]
+    fn bidirectional_prevent_splits_into_to_and_by_nodes() {
+        use crate::types::ability::{PreventionScope, SubAbilityLink, TargetFilter};
+        let text =
+            "prevent all combat damage that would be dealt to and dealt by that creature this turn";
+        let clause = super::try_parse_bidirectional_prevent(text, true)
+            .expect("bidirectional split with gate enabled");
+        match &clause.effect {
+            Effect::PreventDamage {
+                target,
+                damage_source_filter,
+                scope,
+                ..
+            } => {
+                assert_eq!(*target, TargetFilter::ParentTarget);
+                assert!(damage_source_filter.is_none());
+                assert_eq!(*scope, PreventionScope::CombatDamage);
+            }
+            other => panic!("expected 'to' PreventDamage, got {other:?}"),
+        }
+        let by = clause.sub_ability.as_deref().expect("'by' sub_ability");
+        assert_eq!(by.sub_link, SubAbilityLink::SequentialSibling);
+        match &*by.effect {
+            Effect::PreventDamage {
+                target,
+                damage_source_filter,
+                ..
+            } => {
+                assert_eq!(*target, TargetFilter::Any);
+                assert_eq!(
+                    damage_source_filter.as_ref(),
+                    Some(&TargetFilter::ParentTarget)
+                );
+            }
+            other => panic!("expected 'by' PreventDamage, got {other:?}"),
+        }
+        // Gate off ⇒ no split.
+        assert!(
+            super::try_parse_bidirectional_prevent(text, false).is_none(),
+            "gate false ⇒ interceptor is a no-op"
+        );
     }
 
     /// CR 400.7 + CR 700.4: A per-turn VALUE quantity's " this turn" suffix must

@@ -53,7 +53,8 @@ use super::oracle_ir::context::ParseContext;
 ///    of their piles. Each opponent sacrifices the creatures in their chosen pile."
 /// 2. **Reveal-from-library** (Fact or Fiction): "Reveal the top N cards of your
 ///    library. An opponent separates those cards into two piles. Put one pile
-///    into your hand and the rest into your graveyard."
+///    into your hand and the other into your graveyard." The disposition seam
+///    also accepts the sibling wording "the rest".
 pub(crate) fn parse_separate_into_piles(
     text: &str,
     kind: AbilityKind,
@@ -184,15 +185,18 @@ fn rewrite_sub_effect_target_to_parent(effect: &mut Effect) {
 }
 
 /// CR 700.3 + CR 701.20a: Parse the "Reveal the top N cards ... An opponent
-/// separates ... Put one pile into [zone] and the rest into [zone]" shape.
+/// separates ... Put one pile into [zone] and the other into [zone]" shape.
 /// Builds for the class: any reveal-top-N → opponent-separates → zone-routing
-/// card (Fact or Fiction, Steam Augury, Epiphany at the Drownyard, etc.).
+/// card with a FIXED reveal count (Fact or Fiction, Steam Augury, etc.).
+/// `PileSource::RevealedFromLibraryTop { count: u32 }` holds a fixed count, so
+/// variable-count members like Epiphany at the Drownyard ("top X cards") are
+/// not representable here yet.
 fn try_parse_reveal_separate(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
     // Sentence 1: "Reveal the top N cards of your library."
     let (rest, count) = parse_reveal_top_sentence(text)?;
     // Sentence 2: "An opponent separates those cards into two piles."
     let (rest, partition_subject) = parse_opponent_separates_sentence(rest)?;
-    // Sentence 3: "Put one pile into your hand and the rest into your graveyard."
+    // Sentence 3: "Put one pile into your hand and the other into your graveyard."
     let rest = rest.trim_start();
     let (chosen_zone, unchosen_zone) = parse_pile_disposition_sentence(rest)?;
 
@@ -274,17 +278,24 @@ fn parse_opponent_separates_sentence(input: &str) -> Option<(&str, VoterScope)> 
     Some((rest, scope))
 }
 
-/// Parse "Put one pile into your hand and the rest into your graveyard." —
-/// returns (chosen_zone, unchosen_zone). Handles both orderings.
+/// Parse "Put one pile into your hand and the other into your graveyard." —
+/// returns (chosen_zone, unchosen_zone). Also accepts "the rest" and handles
+/// both zone orderings.
 fn parse_pile_disposition_sentence(input: &str) -> Option<(Zone, Zone)> {
-    // CR 700.3c: The controller chooses which pile to put where.
+    // CR 700.3 + card text: the pile the controller selects is put into their
+    // chosen zone (hand), the unchosen pile into the other named zone.
     let res: nom::IResult<&str, (), OracleError<'_>> =
         value((), tag_no_case("put one pile into your ")).parse(input);
     let (rest, ()) = res.ok()?;
     let (rest, chosen_zone) = parse_zone_name(rest)?;
-    // Consume " and the rest into your ".
+    // Consume the independently varying unchosen-pile reference and prefix.
+    let res: nom::IResult<&str, (), OracleError<'_>> = value((), tag_no_case(" and ")).parse(rest);
+    let (rest, ()) = res.ok()?;
     let res: nom::IResult<&str, (), OracleError<'_>> =
-        value((), tag_no_case(" and the rest into your ")).parse(rest);
+        value((), alt((tag_no_case("the other"), tag_no_case("the rest")))).parse(rest);
+    let (rest, ()) = res.ok()?;
+    let res: nom::IResult<&str, (), OracleError<'_>> =
+        value((), tag_no_case(" into your ")).parse(rest);
     let (rest, ()) = res.ok()?;
     let (rest, unchosen_zone) = parse_zone_name(rest)?;
     // Only allow optional trailing period/whitespace then EOF; reject any
@@ -370,7 +381,7 @@ mod tests {
     fn parses_fact_or_fiction_body() {
         let text = "Reveal the top five cards of your library. \
                     An opponent separates those cards into two piles. \
-                    Put one pile into your hand and the rest into your graveyard.";
+                    Put one pile into your hand and the other into your graveyard.";
         let def = parse_separate_into_piles(text, AbilityKind::Spell)
             .expect("Fact or Fiction body parses");
         match &*def.effect {
@@ -421,6 +432,27 @@ mod tests {
             }
             other => panic!("expected SeparateIntoPiles, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_the_rest_pile_disposition_sibling() {
+        let result = parse_pile_disposition_sentence(
+            "Put one pile into your hand and the rest into your graveyard.",
+        );
+        assert_eq!(result, Some((Zone::Hand, Zone::Graveyard)));
+    }
+
+    #[test]
+    fn rejects_trailing_pile_disposition_rider() {
+        let rider_free = "Put one pile into your hand and the other into your graveyard.";
+        assert_eq!(
+            parse_pile_disposition_sentence(rider_free),
+            Some((Zone::Hand, Zone::Graveyard))
+        );
+
+        let with_rider = "Put one pile into your hand and the other into your graveyard. \
+                          Then shuffle your graveyard into your library.";
+        assert!(parse_pile_disposition_sentence(with_rider).is_none());
     }
 
     /// Non-matching body returns None — the dispatcher must fall back to

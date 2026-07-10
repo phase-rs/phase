@@ -14710,6 +14710,103 @@ fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectCl
 /// compounds like "deals 3 damage to any target and you gain 3 life" fall
 /// through to the caller's compound splitter unharmed. Returns `None` (and
 /// does not mutate `ctx`) if the text is not a multi-segment damage line.
+/// CR 120.3 + CR 207.2c: Radiance color fan-out damage — "deals N damage to
+/// target `<X>` and each other `<X>` that shares a color with it" (Cleansing
+/// Beam, Wojek Embermage). The chosen target takes the damage (a `DealDamage`
+/// that also supplies the required target slot), and a `DamageAll` sub-ability
+/// fans the same damage out to every OTHER object sharing a color with the
+/// target: `SharesQuality { Color, reference: ParentTarget }` selects the
+/// color-sharers (the target itself trivially shares its own color, so it is
+/// included by that predicate and must be removed) and
+/// `DistinctFrom { reference: ParentTarget }` excludes the already-damaged
+/// target so it is not dealt damage twice. Radiance is an ability word (CR
+/// 207.2c) with no independent rules meaning.
+///
+/// The fan-out noun's type is taken from the parsed primary target (creature
+/// here; the same shape generalizes to other permanent types), so the recognizer
+/// is not hard-coded to Creature.
+fn try_parse_radiance_color_fanout_damage(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let (primary_effect, remainder) = try_parse_damage_with_remainder(text, lower, ctx)?;
+
+    // Primary must be a single-target DealDamage at a typed object.
+    let Effect::DealDamage {
+        amount,
+        target: TargetFilter::Typed(target_typed),
+        damage_source: None,
+        excess: None,
+    } = &primary_effect
+    else {
+        return None;
+    };
+
+    // Scope: only fixed-amount Radiance damage (Cleansing Beam = 2, Wojek
+    // Embermage = 1). Brightflame deals *X* and carries a following "You gain
+    // life equal to the damage dealt this way" rider whose amount would need to
+    // bind to the fan-out's `DamageAll` total, not a preceding `DealDamage` —
+    // real engine work deferred to its own PR. Declining an X-amount fan-out
+    // keeps Brightflame honestly unsupported (its lifegain sentence is not
+    // silently dropped) rather than lowering it wrong. CR 120.3.
+    if !matches!(amount, QuantityExpr::Fixed { .. }) {
+        return None;
+    }
+
+    // The remainder must be exactly the color fan-out suffix.
+    let rem_lower = remainder.trim().trim_end_matches('.').trim().to_lowercase();
+    let matched = nom_on_lower(remainder.trim(), &rem_lower, |i| {
+        let (i, _) = opt(tag::<_, _, OracleError<'_>>(",")).parse(i)?;
+        let (i, _) = tag("and each other ").parse(i.trim_start())?;
+        // Consume the fan-out noun (must be a type word — creature/enchantment/…)
+        // then the fixed "that shares a color with it" tail. The noun value is not
+        // needed: the fan-out reuses the primary target's typed filter.
+        let (i, _) =
+            take_until::<_, _, OracleError<'_>>(" that shares a color with it").parse(i)?;
+        let (i, _) = tag(" that shares a color with it").parse(i)?;
+        Ok((i, ()))
+    })
+    .map(|(_, rest)| rest.trim().is_empty())
+    .unwrap_or(false);
+    if !matched {
+        return None;
+    }
+
+    // Build the fan-out filter: same object type as the target, restricted to
+    // color-sharers of the target, excluding the target itself.
+    let mut fanout = target_typed.clone();
+    fanout.properties.push(FilterProp::SharesQuality {
+        quality: SharedQuality::Color,
+        reference: Some(Box::new(TargetFilter::ParentTarget)),
+        relation: SharedQualityRelation::Shares,
+    });
+    fanout.properties.push(FilterProp::DistinctFrom {
+        reference: Box::new(TargetFilter::ParentTarget),
+    });
+
+    let fanout_effect = Effect::DamageAll {
+        amount: amount.clone(),
+        target: TargetFilter::Typed(fanout),
+        player_filter: None,
+        damage_source: None,
+    };
+
+    Some(ParsedEffectClause {
+        effect: primary_effect.clone(),
+        duration: None,
+        sub_ability: Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            fanout_effect,
+        ))),
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 fn try_parse_multi_target_damage_chain(
     text: &str,
     ctx: &mut ParseContext,
@@ -15108,6 +15205,16 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
     // [with X | without X] and each player" (Pyrohemia / Earthquake / Hurricane
     // class). Must run before the general split so the player half isn't dropped.
     if let Some(clause) = try_parse_compound_object_player_damage(&lower) {
+        return Some(clause);
+    }
+
+    // CR 120.3 + CR 207.2c: Radiance color fan-out — "deals N damage to target
+    // <X> and each other <X> that shares a color with it" (Cleansing Beam, Wojek
+    // Embermage). The target <X> takes the damage AND every OTHER <X> sharing a
+    // color with it. Must run before the multi-target chain (which only handles
+    // "and M damage to T2" segments) so the fan-out isn't dropped as an ignored
+    // remainder. Radiance is an ability word (CR 207.2c) with no rules meaning.
+    if let Some(clause) = try_parse_radiance_color_fanout_damage(text, &lower, ctx) {
         return Some(clause);
     }
 
@@ -27539,6 +27646,14 @@ fn parse_battlefield_entry_qualifiers(tail_lower: &str) -> (bool, bool) {
     if scan_at_boundaries(tapped_and_attacking_clause) {
         return (true, true);
     }
+    // CR 508.4: bare "attacking" without tapped ("put it onto the battlefield
+    // attacking" — Senu, Keen-Eyed Protector).
+    fn attacking_clause(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+        preceded(tag(" attacking"), qualifier_boundary).parse(input)
+    }
+    if scan_at_boundaries(attacking_clause) {
+        return (false, true);
+    }
     if scan_at_boundaries(tapped_clause) {
         return (true, false);
     }
@@ -28286,6 +28401,13 @@ fn infer_origin_zone(lower: &str) -> Option<Zone> {
         || contains_possessive(lower, "from", "library")
     {
         Some(Zone::Library)
+    } else if scan_contains_phrase(lower, "from the command zone") {
+        // CR 408.1 + CR 903.6: The command zone holds a player's commander(s)
+        // until moved. "put a commander you own from the command zone onto the
+        // battlefield" (Hellkite Courser, #5256) reanimates from the command
+        // zone; without this the origin was inferred as None and the commander
+        // was never found.
+        Some(Zone::Command)
     } else if scan_contains_phrase(lower, "graveyard") && !scan_contains_phrase(lower, "from") {
         // CR 404.1: Possessive graveyard references without "from" — e.g.,
         // "exile each opponent's graveyard", "exile target player's graveyard"

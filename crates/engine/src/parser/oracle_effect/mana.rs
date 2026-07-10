@@ -10,7 +10,7 @@ use nom::Parser;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
-    AbilityKind, AbilityTag, Comparator, Effect, LinkedExileScope, ManaContribution,
+    AbilityKind, AbilityTag, Comparator, Duration, Effect, LinkedExileScope, ManaContribution,
     ManaProduction, ManaSpendRestriction, ObjectScope, QuantityExpr, QuantityRef,
 };
 use crate::types::keywords::KeywordKind;
@@ -2364,36 +2364,61 @@ pub(super) fn parse_mana_spell_grant(lower: &str) -> Option<Vec<ManaSpellGrant>>
     None
 }
 
-/// CR 106.6 + CR 702: Parse mana-rider keyword grants:
-/// "If that mana is spent on a Dragon creature spell, it gains haste until end of turn."
+/// CR 106.6 + CR 702.10: Parse mana-rider keyword grants:
+/// - "If that mana is spent on a Dragon creature spell, it gains haste until end of turn."
+/// - "If that mana is spent on a creature spell, it gains haste." (Hall of the Bandit Lord)
 fn parse_conditional_keyword_grant(lower: &str) -> Option<ManaSpellGrant> {
+    let trimmed = lower.trim().trim_end_matches('.');
     let (rest, _) = tag::<_, _, OracleError<'_>>("if that mana is spent on ")
-        .parse(lower)
+        .parse(trimmed)
         .ok()?;
     let (rest, _) = opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))))
         .parse(rest)
         .ok()?;
-    let (rest, subtype) = terminated(
-        take_until::<_, _, OracleError<'_>>(" creature spell, it gains "),
-        tag(" creature spell, it gains "),
-    )
-    .parse(rest)
-    .ok()?;
-    let (rest, keyword_text) = terminated(
+
+    // Filter axis: bare "creature spell" vs "[subtype] creature spell".
+    let (rest, restriction) = if let Ok((remainder, _)) =
+        tag::<_, _, OracleError<'_>>("creature spell, it gains ").parse(rest)
+    {
+        (
+            remainder,
+            Some(ManaRestriction::OnlyForSpellType("Creature".to_string())),
+        )
+    } else {
+        let (remainder, subtype) = terminated(
+            take_until::<_, _, OracleError<'_>>(" creature spell, it gains "),
+            tag(" creature spell, it gains "),
+        )
+        .parse(rest)
+        .ok()?;
+        (
+            remainder,
+            Some(ManaRestriction::OnlyForCreatureType(super::capitalize(
+                subtype.trim(),
+            ))),
+        )
+    };
+
+    let (keyword, duration) = if let Ok((remainder, keyword_text)) = terminated(
         take_until::<_, _, OracleError<'_>>(" until end of turn"),
         tag(" until end of turn"),
     )
     .parse(rest)
-    .ok()?;
-    if !rest.trim().is_empty() {
-        return None;
-    }
-    let keyword = parse_keyword_from_oracle(keyword_text.trim())?;
+    {
+        if !remainder.trim().is_empty() {
+            return None;
+        }
+        let keyword = parse_keyword_from_oracle(keyword_text.trim())?;
+        (keyword, Duration::UntilEndOfTurn)
+    } else {
+        let keyword = parse_keyword_from_oracle(rest.trim())?;
+        (keyword, Duration::Permanent)
+    };
+
     Some(ManaSpellGrant::AddKeywordUntilEndOfTurn {
         keyword,
-        restriction: Some(ManaRestriction::OnlyForCreatureType(super::capitalize(
-            subtype.trim(),
-        ))),
+        restriction,
+        duration: Box::new(duration),
     })
 }
 
@@ -3645,6 +3670,24 @@ mod tests {
             vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
                 keyword: crate::types::keywords::Keyword::Haste,
                 restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
+                duration: Box::new(Duration::UntilEndOfTurn),
+            }]
+        );
+    }
+
+    /// CR 106.6 + CR 702.10a: Hall of the Bandit Lord — any creature spell,
+    /// permanent haste (no "until end of turn" rider).
+    #[test]
+    fn parses_hall_of_bandit_lord_creature_spell_haste_grant() {
+        let grants =
+            parse_mana_spell_grant("if that mana is spent on a creature spell, it gains haste.")
+                .expect("Hall of the Bandit Lord mana rider must parse");
+        assert_eq!(
+            grants,
+            vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                keyword: crate::types::keywords::Keyword::Haste,
+                restriction: Some(ManaRestriction::OnlyForSpellType("Creature".to_string())),
+                duration: Box::new(Duration::Permanent),
             }]
         );
     }

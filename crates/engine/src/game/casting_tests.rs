@@ -2425,6 +2425,7 @@ fn conditional_mana_keyword_grant_applies_to_matching_spell() {
         grants: vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
             keyword: Keyword::Haste,
             restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
+            duration: Box::new(crate::types::ability::Duration::UntilEndOfTurn),
         }],
         expiry: None,
     };
@@ -2443,6 +2444,78 @@ fn conditional_mana_keyword_grant_applies_to_matching_spell() {
         vec![ContinuousModification::AddKeyword {
             keyword: Keyword::Haste
         }]
+    );
+}
+
+/// CR 106.6 + CR 702.10: Temporary and permanent keyword grants from different
+/// mana sources must both apply — dedup by `(keyword, duration)`, not keyword alone.
+#[test]
+fn mana_keyword_grants_apply_both_temporary_and_permanent_durations() {
+    let mut state = setup_game_at_main_phase();
+    let dragon_id = create_object(
+        &mut state,
+        CardId(103),
+        PlayerId(0),
+        "Dragon Whelp".to_string(),
+        Zone::Stack,
+    );
+    let dragon = state.objects.get_mut(&dragon_id).unwrap();
+    dragon.card_types.core_types.push(CoreType::Creature);
+    dragon.card_types.subtypes.push("Dragon".to_string());
+
+    let creature_restriction = ManaRestriction::OnlyForSpellType("Creature".to_string());
+    let eot_unit = ManaUnit {
+        color: ManaType::Red,
+        source_id: ObjectId(1),
+        pip_id: crate::types::mana::ManaPipId(0),
+        supertype: None,
+        source_could_produce_two_or_more_colors: false,
+        restrictions: vec![],
+        grants: vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+            keyword: Keyword::Haste,
+            restriction: Some(creature_restriction.clone()),
+            duration: Box::new(crate::types::ability::Duration::UntilEndOfTurn),
+        }],
+        expiry: None,
+    };
+    let permanent_unit = ManaUnit {
+        color: ManaType::Colorless,
+        source_id: ObjectId(2),
+        pip_id: crate::types::mana::ManaPipId(0),
+        supertype: None,
+        source_could_produce_two_or_more_colors: false,
+        restrictions: vec![],
+        grants: vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+            keyword: Keyword::Haste,
+            restriction: Some(creature_restriction),
+            duration: Box::new(crate::types::ability::Duration::Permanent),
+        }],
+        expiry: None,
+    };
+
+    apply_mana_spell_grants(&mut state, dragon_id, &[eot_unit, permanent_unit]);
+
+    assert_eq!(
+        state.transient_continuous_effects.len(),
+        2,
+        "both UntilEndOfTurn and Permanent haste grants must apply"
+    );
+    let durations: Vec<_> = state
+        .transient_continuous_effects
+        .iter()
+        .map(|effect| effect.duration.clone())
+        .collect();
+    assert!(
+        durations
+            .iter()
+            .any(|d| matches!(d, crate::types::ability::Duration::UntilEndOfTurn)),
+        "expected UntilEndOfTurn haste layer"
+    );
+    assert!(
+        durations
+            .iter()
+            .any(|d| matches!(d, crate::types::ability::Duration::Permanent)),
+        "expected Permanent haste layer"
     );
 }
 
@@ -2877,6 +2950,124 @@ fn create_instant_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
         };
     }
     obj_id
+}
+
+#[test]
+fn legal_target_slots_for_castable_spell_returns_cast_time_slot_shape() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_instant_in_hand(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    let slots = legal_target_slots_for_castable_spell(&state, spell);
+
+    assert_eq!(slots.len(), 1);
+    assert!(!slots[0].optional);
+    assert!(
+        slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(1))),
+        "Lightning Bolt-style any-target spell should expose opponent as a legal target"
+    );
+}
+
+#[test]
+fn legal_target_slots_for_castable_spell_is_read_only_and_empty_when_uncastable() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_instant_in_hand(&mut state, PlayerId(0));
+    let before = serde_json::to_value(&state).unwrap();
+
+    let slots = legal_target_slots_for_castable_spell(&state, spell);
+
+    assert!(slots.is_empty());
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+}
+
+#[test]
+fn legal_target_slots_for_castable_spells_batches_previews() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_instant_in_hand(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    let batched = legal_target_slots_for_castable_spells(&state, [spell]);
+    let slots = batched.get(&spell).expect("batch includes requested spell");
+
+    assert_eq!(slots.len(), 1);
+    assert!(
+        slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(1))),
+        "batched preview should match the single-card target slot"
+    );
+}
+
+#[test]
+fn legal_target_slots_for_castable_spell_empty_before_splice_choice() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_instant_in_hand(&mut state, PlayerId(0));
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .card_types
+        .subtypes
+        .push("Arcane".to_string());
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    let splicer = create_object(
+        &mut state,
+        CardId(9_970),
+        PlayerId(0),
+        "Splice Preview".to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&splicer)
+        .unwrap()
+        .keywords
+        .push(Keyword::Splice {
+            subtype: "Arcane".to_string(),
+            cost: ManaCost::NoCost,
+        });
+
+    let slots = legal_target_slots_for_castable_spell(&state, spell);
+
+    assert!(
+        slots.is_empty(),
+        "splice can add targets before CR 601.2c target selection, so preview waits for the splice choice"
+    );
+}
+
+#[test]
+fn legal_target_slots_for_castable_spell_empty_before_casualty_choice() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_instant_in_hand(&mut state, PlayerId(0));
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .keywords
+        .push(Keyword::Casualty(1));
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    let creature = create_object(
+        &mut state,
+        CardId(9_971),
+        PlayerId(0),
+        "Casualty Fodder".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&creature).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.power = Some(1);
+    obj.toughness = Some(1);
+
+    let slots = legal_target_slots_for_castable_spell(&state, spell);
+
+    assert!(
+        slots.is_empty(),
+        "casualty sacrifice is declared before targets, so preview waits for that choice"
+    );
 }
 
 #[test]

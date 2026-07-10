@@ -5,48 +5,82 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Spell",
-        "effect": {
-          "type": "Unimplemented",
-          "name": "unknown",
-          "description": "Soulbond"
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "cost": null,
-        "sub_ability": null,
-        "duration": null,
-        "description": "Soulbond",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 242,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Unimplemented",
+            "name": "unknown",
+            "description": "Soulbond"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": "Soulbond",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     },
     {
-      "PreLoweredStatic": {
-        "mode": "Continuous",
-        "affected": {
-          "type": "SourceOrPaired"
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
         },
-        "modifications": [
-          {
-            "type": "AddPower",
-            "value": 4
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 242,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 1
+        }
+      },
+      "node": {
+        "PreLoweredStatic": {
+          "mode": "Continuous",
+          "affected": {
+            "type": "SourceOrPaired"
           },
-          {
-            "type": "AddToughness",
-            "value": 4
-          }
-        ],
-        "condition": {
-          "type": "SourceIsPaired"
-        },
-        "affected_zone": null,
-        "effect_zone": null,
-        "active_zones": [],
-        "characteristic_defining": false,
-        "description": "As long as ~ is paired with another creature, each of those creatures gets +4/+4."
+          "modifications": [
+            {
+              "type": "AddPower",
+              "value": 4
+            },
+            {
+              "type": "AddToughness",
+              "value": 4
+            }
+          ],
+          "condition": {
+            "type": "SourceIsPaired"
+          },
+          "affected_zone": null,
+          "effect_zone": null,
+          "active_zones": [],
+          "characteristic_defining": false,
+          "description": "As long as ~ is paired with another creature, each of those creatures gets +4/+4."
+        }
       }
     }
   ],

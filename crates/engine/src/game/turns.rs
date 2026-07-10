@@ -207,6 +207,7 @@ pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<Ga
     // effects, replacement definitions, and pending damage replacements alike,
     // matching the normal end-of-combat prune.
     super::layers::prune_end_of_combat_effects(state);
+    super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.replacement_definitions
             .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
@@ -2564,6 +2565,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 state.current_combat_attacker_restriction = None;
                 state.current_combat_attacker_restriction_source = None;
                 super::layers::prune_end_of_combat_effects(state);
+                super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
                 for obj in state.objects.iter_mut().map(|(_, v)| v) {
                     obj.replacement_definitions
                         .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));

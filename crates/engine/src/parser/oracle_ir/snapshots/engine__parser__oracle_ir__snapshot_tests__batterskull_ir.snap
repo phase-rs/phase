@@ -5,116 +5,184 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "Bounce",
-          "target": {
-            "type": "SelfRef"
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 3,
+          "start_byte": 0,
+          "end_byte": 236,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Bounce",
+            "target": {
+              "type": "SelfRef"
+            },
+            "destination": null
           },
-          "destination": null
-        },
-        "cost": {
-          "type": "Mana",
           "cost": {
-            "type": "Cost",
-            "shards": [],
-            "generic": 3
-          }
-        },
-        "sub_ability": null,
-        "duration": null,
-        "description": "{3}: Return ~ to its owner's hand.",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [],
+              "generic": 3
+            }
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "{3}: Return ~ to its owner's hand.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     },
     {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "Attach",
-          "target": {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 3,
+          "start_byte": 0,
+          "end_byte": 236,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 1
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Attach",
+            "target": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": "You",
+              "properties": []
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [],
+              "generic": 5
+            }
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "Equip {5}",
+          "target_prompt": null,
+          "activation_restrictions": [
+            {
+              "type": "AsSorcery"
+            }
+          ],
+          "ability_tag": {
+            "type": "Equip"
+          },
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 3,
+          "start_byte": 0,
+          "end_byte": 236,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 2
+        }
+      },
+      "node": {
+        "PreLoweredStatic": {
+          "mode": "Continuous",
+          "affected": {
             "type": "Typed",
             "type_filters": [
               "Creature"
             ],
-            "controller": "You",
-            "properties": []
-          }
-        },
-        "cost": {
-          "type": "Mana",
-          "cost": {
-            "type": "Cost",
-            "shards": [],
-            "generic": 5
-          }
-        },
-        "sub_ability": null,
-        "duration": null,
-        "description": "Equip {5}",
-        "target_prompt": null,
-        "activation_restrictions": [
-          {
-            "type": "AsSorcery"
-          }
-        ],
-        "ability_tag": {
-          "type": "Equip"
-        },
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
-      }
-    },
-    {
-      "PreLoweredStatic": {
-        "mode": "Continuous",
-        "affected": {
-          "type": "Typed",
-          "type_filters": [
-            "Creature"
-          ],
-          "controller": null,
-          "properties": [
+            "controller": null,
+            "properties": [
+              {
+                "type": "EquippedBy"
+              }
+            ]
+          },
+          "modifications": [
             {
-              "type": "EquippedBy"
+              "type": "AddPower",
+              "value": 4
+            },
+            {
+              "type": "AddToughness",
+              "value": 4
+            },
+            {
+              "type": "AddKeyword",
+              "keyword": "Vigilance"
+            },
+            {
+              "type": "AddKeyword",
+              "keyword": "Lifelink"
             }
-          ]
-        },
-        "modifications": [
-          {
-            "type": "AddPower",
-            "value": 4
-          },
-          {
-            "type": "AddToughness",
-            "value": 4
-          },
-          {
-            "type": "AddKeyword",
-            "keyword": "Vigilance"
-          },
-          {
-            "type": "AddKeyword",
-            "keyword": "Lifelink"
-          }
-        ],
-        "condition": null,
-        "affected_zone": null,
-        "effect_zone": null,
-        "active_zones": [],
-        "characteristic_defining": false,
-        "description": "Equipped creature gets +4/+4 and has vigilance and lifelink."
+          ],
+          "condition": null,
+          "affected_zone": null,
+          "effect_zone": null,
+          "active_zones": [],
+          "characteristic_defining": false,
+          "description": "Equipped creature gets +4/+4 and has vigilance and lifelink."
+        }
       }
     },
     {
-      "Keyword": "LivingWeapon"
+      "id": 3,
+      "source": {
+        "id": {
+          "item": 3,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 3,
+          "start_byte": 0,
+          "end_byte": 236,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 3
+        }
+      },
+      "node": {
+        "Keyword": "LivingWeapon"
+      }
     }
   ],
   "source_text": "Living weapon (When this Equipment enters, create a 0/0 black Phyrexian Germ creature token, then attach this to it.)\nEquipped creature gets +4/+4 and has vigilance and lifelink.\n{3}: Return this Equipment to its owner's hand.\nEquip {5}",

@@ -1871,6 +1871,13 @@ pub enum StaticMode {
         counter_type: super::counter::CounterType,
         count: u32,
     },
+    /// Odyssey Burst-cycle graveyard name-aliasing (no general CR governs this
+    /// templating; name-matching semantics per CR 201.2a). While this card is in
+    /// a graveyard, effects that count "cards named X" treat it as having the
+    /// given name.
+    CountsAsNamed {
+        name: String,
+    },
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -2000,6 +2007,7 @@ pub enum StaticModeKind {
     UntapsDuringEachOtherPlayersUntapStep,
     MaxUntapPerType,
     EntersWithAdditionalCounters,
+    CountsAsNamed,
     Other,
 }
 
@@ -2144,6 +2152,7 @@ impl StaticMode {
             StaticMode::EntersWithAdditionalCounters { .. } => {
                 StaticModeKind::EntersWithAdditionalCounters
             }
+            StaticMode::CountsAsNamed { .. } => StaticModeKind::CountsAsNamed,
             StaticMode::Other(..) => StaticModeKind::Other,
         }
     }
@@ -2343,6 +2352,9 @@ impl Hash for StaticMode {
             // CR 614.1c: data-carrying (CounterType + count); consumed by direct
             // match in change_zone.rs, never used as a HashMap key.
             | StaticMode::EntersWithAdditionalCounters { .. }
+            // Odyssey Burst-cycle (CR 201.2a): data-carrying (name alias);
+            // consumed by direct match in filter.rs, never used as a HashMap key.
+            | StaticMode::CountsAsNamed { .. }
             // CR 116.2 + CR 118.7a: data-carrying (SpecialAction is not Hash);
             // consumed by direct match in the special-action cost-reduction
             // resolver, never used as a HashMap key.
@@ -2471,6 +2483,7 @@ impl StaticMode {
             | StaticMode::UntapsDuringEachOtherPlayersUntapStep
             | StaticMode::MaxUntapPerType { .. }
             | StaticMode::EntersWithAdditionalCounters { .. }
+            | StaticMode::CountsAsNamed { .. }
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::DamageNotRemovedDuringCleanup
             | StaticMode::Other(_) => None,
@@ -2875,6 +2888,10 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::LinkedCollectionCounterPlayPermission => {
                 write!(f, "LinkedCollectionCounterPlayPermission")
+            }
+            // Odyssey Burst-cycle graveyard name alias (CR 201.2a).
+            StaticMode::CountsAsNamed { ref name } => {
+                write!(f, "CountsAsNamed({name})")
             }
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
@@ -3383,6 +3400,14 @@ impl FromStr for StaticMode {
                     // CR 603.2g: Data-carrying — round-trip preserves discriminant only.
                     // Callers that need the full filter/events read from the typed field.
                     return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("CountsAsNamed(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // Odyssey Burst-cycle graveyard name alias (CR 201.2a).
+                    return Ok(StaticMode::CountsAsNamed {
+                        name: inner.to_string(),
+                    });
                 } else if other.starts_with("EntersWithAdditionalCounters(") {
                     // CR 614.1c: Data-carrying (CounterType + count). The Display
                     // form uses the Debug rendering of `CounterType`, which has no

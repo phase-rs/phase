@@ -90,6 +90,7 @@ pub(crate) use shared::parse_commander_subject_filter_prefix;
 
 pub(crate) use dispatch::is_speed_unlock_sentence;
 pub(crate) use dispatch::parse_may_look_at_face_down_filter;
+pub(crate) use dispatch::try_parse_counts_as_named_static;
 use dispatch::{parse_static_line_inner, InvertedAsLongAs};
 use prelude::StaticIr;
 

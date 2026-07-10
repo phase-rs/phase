@@ -13,6 +13,7 @@ use super::oracle_effect::{
     try_parse_grant_graveyard_keyword_to_target, try_parse_reanimator_aura_etb_effect,
 };
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_modal::try_parse_inline_modal;
 use super::oracle_nom::condition::parse_inner_condition;
@@ -597,7 +598,7 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
 pub(crate) fn parse_trigger_lines_at_index(
     text: &str,
     card_name: &str,
-    base_trigger_index: Option<usize>,
+    base_trigger_index: Option<PrintedTriggerIndex>,
     ctx: &mut ParseContext,
 ) -> Vec<TriggerDefinition> {
     parse_trigger_lines_at_index_ir(text, card_name, base_trigger_index, ctx)
@@ -611,7 +612,7 @@ pub(crate) fn parse_trigger_lines_at_index(
 pub(crate) fn parse_trigger_lines_at_index_ir(
     text: &str,
     card_name: &str,
-    base_trigger_index: Option<usize>,
+    base_trigger_index: Option<PrintedTriggerIndex>,
     ctx: &mut ParseContext,
 ) -> Vec<TriggerIr> {
     let stripped = strip_reminder_text(text);
@@ -636,7 +637,7 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
             results.push(parse_trigger_line_with_index_ir(
                 &trigger_text,
                 card_name,
-                base_trigger_index.map(|b| b + i),
+                base_trigger_index.map(|b| b.offset(i)),
                 ctx,
             ));
         }
@@ -673,7 +674,7 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
             results.push(parse_trigger_line_with_index_ir(
                 &trigger_text,
                 card_name,
-                base_trigger_index.map(|b| b + i),
+                base_trigger_index.map(|b| b.offset(i)),
                 ctx,
             ));
         }
@@ -995,7 +996,7 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
 pub(crate) fn parse_trigger_line_with_index_ir(
     text: &str,
     card_name: &str,
-    current_trigger_index: Option<usize>,
+    current_trigger_index: Option<PrintedTriggerIndex>,
     ctx: &mut ParseContext,
 ) -> TriggerIr {
     let text = strip_reminder_text(text);
@@ -1082,7 +1083,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     let mut effect_ctx = ParseContext {
         subject: Some(trigger_subject.clone()),
         card_name: Some(card_name.to_string()),
-        current_trigger_index,
+        // `ParseContext` still stores a raw `usize`; unwrap the printed-slot
+        // newtype at this boundary. Unit 3b may lift the newtype into `ctx`.
+        current_trigger_index: current_trigger_index.map(PrintedTriggerIndex::get),
         // CR 303.4 + CR 702.103: Propagate the enclosing card's typed host
         // self-reference (set by `parse_oracle_ir` for Aura/bestow cards) into
         // the per-trigger effect context. The trigger body's effect parser
@@ -1094,7 +1097,8 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // source name; the gate carried the partner name).
         pending_meld_partner: meld_partner,
         pending_mana_symbol_count_color,
-        object_pronoun_ref: trigger_object_pronoun_ref_for_condition(condition_text),
+        object_pronoun_ref: trigger_object_pronoun_ref_for_condition(condition_text)
+            .or_else(|| trigger_object_pronoun_ref_for_intervening_if(&if_condition)),
         in_trigger: true,
         ..Default::default()
     };
@@ -1148,6 +1152,20 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 ability.optional = true;
             }
             Some(TriggerBody::PreLowered(Box::new(ability)))
+        // CR 700.3 + CR 701.20a: Pile-separation (Fact or Fiction / Sphinx of
+        // Uthuun family). The multi-sentence block must be consumed as a single
+        // unit — chain parsing would fragment it into Unimplemented chunks.
+        } else if let Some(pile_def) =
+            crate::parser::oracle_separate_piles::parse_separate_into_piles(
+                &effect_for_parse,
+                AbilityKind::Spell,
+            )
+        {
+            let mut ability = pile_def;
+            if optional {
+                ability.optional = true;
+            }
+            Some(TriggerBody::PreLowered(Box::new(ability)))
         } else {
             try_parse_exile_top_each_library_with_collection_counter(
                 &effect_for_parse,
@@ -1186,12 +1204,15 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             })
             .or_else(|| {
                 // CR 700.2 + CR 608.2d: Inline modal trigger body — "choose one —
-                // mode1; or mode2" on a single line (no bullet-line modes). Grenzo,
-                // Havoc Raiser is the canonical case. Route through the modal parser
-                // so each mode body is independently parsed with the trigger's
-                // established relative_player_scope (e.g. TriggeringPlayer for
-                // DamageDone triggers) so "that player" in mode bodies resolves to
-                // the damaged player (CR 603.7c).
+                // mode1; or mode2" on a single line (no bullet-line modes). No
+                // printed card currently reaches this branch: it needs an em-dash
+                // *and* "; or " inside one trigger effect body. (Grenzo, Havoc
+                // Raiser — long named here as the canonical case — uses bullet-line
+                // modes, so `raw_modes.len() == 1` and it never arrives.) Route
+                // through the modal parser so each mode body is independently
+                // parsed with the trigger's established relative_player_scope (e.g.
+                // TriggeringPlayer for DamageDone triggers) so "that player" in mode
+                // bodies resolves to the damaged player (CR 603.7c).
                 if let Some(modal_ability) = try_parse_inline_modal(
                     &effect_for_parse,
                     effect_ctx.relative_player_scope.clone(),
@@ -1286,7 +1307,9 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             {
                 ability.optional_targeting = true;
             }
-            // CR 609.3: Propagate optional to execute ability.
+            // CR 603.5: A triggered ability whose effect is optional ("may") goes
+            // on the stack regardless; the choice is made when it resolves. Carry
+            // that optionality onto the execute ability, which is what resolves.
             if modifiers.optional {
                 ability.optional = true;
             }
@@ -1485,7 +1508,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         .map(trigger_condition_source_zones)
         .unwrap_or_default();
     if !condition_zones.is_empty() {
-        def.trigger_zones = condition_zones;
+        def.trigger_zones = condition_zones.clone();
     } else if matches!(def.valid_card, Some(TargetFilter::SelfRef))
         && def.destination == Some(Zone::Graveyard)
     {
@@ -1496,6 +1519,18 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         .and_then(|execute| self_recursion_trigger_zone(execute, modifiers.effect_lower.as_str()))
     {
         def.trigger_zones = vec![zone];
+    }
+
+    // CR 608.2c: Off-battlefield source-return triggers (Senu, Keen-Eyed
+    // Protector) bind "it" to the ability source, not the event referent that
+    // satisfied `valid_card`.
+    if condition_zones
+        .iter()
+        .any(|zone| *zone != Zone::Battlefield)
+    {
+        if let Some(execute) = def.execute.as_deref_mut() {
+            rewrite_off_battlefield_source_self_target(execute);
+        }
     }
 
     stamp_self_return_origin_from_trigger_condition(&mut def);
@@ -1805,7 +1840,7 @@ fn introduces_chosen_object_target(effect: &Effect) -> bool {
 pub(crate) fn parse_trigger_line_with_index(
     text: &str,
     card_name: &str,
-    current_trigger_index: Option<usize>,
+    current_trigger_index: Option<PrintedTriggerIndex>,
     ctx: &mut ParseContext,
 ) -> TriggerDefinition {
     let ir = parse_trigger_line_with_index_ir(text, card_name, current_trigger_index, ctx);
@@ -7256,7 +7291,67 @@ fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<Targ
     ))
     .parse(after_keyword)
     .is_ok();
-    is_spell_cast_trigger.then_some(TargetFilter::TriggeringSource)
+    if is_spell_cast_trigger {
+        return Some(TargetFilter::TriggeringSource);
+    }
+
+    None
+}
+
+/// CR 608.2k: When an intervening-if pins the trigger source off the
+/// battlefield (`SourceInZone` not Battlefield), object anaphors in the effect
+/// body refer to the source card, not the event's `valid_card`.
+fn trigger_object_pronoun_ref_for_intervening_if(
+    if_condition: &Option<TriggerCondition>,
+) -> Option<TargetFilter> {
+    fn pins_source_off_battlefield(condition: &TriggerCondition) -> bool {
+        match condition {
+            TriggerCondition::SourceInZone { zone } => *zone != Zone::Battlefield,
+            TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+                conditions.iter().any(pins_source_off_battlefield)
+            }
+            TriggerCondition::Not { condition } => pins_source_off_battlefield(condition),
+            _ => false,
+        }
+    }
+
+    if_condition
+        .as_ref()
+        .filter(|condition| pins_source_off_battlefield(condition))
+        .map(|_| TargetFilter::SelfRef)
+}
+
+/// CR 608.2c: Rewrite a trigger body's self-return anaphor from `ParentTarget`
+/// to `SelfRef` when the source is registered off the battlefield. Only
+/// `ParentTarget` is rewritten — `TriggeringSource` ("that creature" referring
+/// to the event object) is left intact.
+fn rewrite_off_battlefield_source_self_target(ability: &mut AbilityDefinition) {
+    fn rewrite_parent_target(target: &mut TargetFilter) {
+        if matches!(target, TargetFilter::ParentTarget) {
+            *target = TargetFilter::SelfRef;
+        }
+    }
+
+    fn walk(ability: &mut AbilityDefinition) {
+        match ability.effect.as_mut() {
+            Effect::ChangeZone { target, .. } => rewrite_parent_target(target),
+            Effect::Pump { target, .. } | Effect::PumpAll { target, .. } => {
+                rewrite_parent_target(target);
+            }
+            Effect::ApplyPerpetual { target, .. } => rewrite_parent_target(target),
+            Effect::GenericEffect {
+                target: Some(t), ..
+            } => rewrite_parent_target(t),
+            _ => {}
+        }
+        if let Some(sub) = ability.sub_ability.as_deref_mut() {
+            walk(sub);
+        }
+        if let Some(els) = ability.else_ability.as_deref_mut() {
+            walk(els);
+        }
+    }
+    walk(ability);
 }
 
 // ---------------------------------------------------------------------------
@@ -8708,6 +8803,13 @@ fn try_parse_event(
                 value(AttackTargetFilter::Player, tag(" one of your opponents")),
                 value(AttackTargetFilter::Player, tag(" a player")),
                 value(AttackTargetFilter::Player, tag(" you")),
+                // CR 303.4e: "attacks enchanted player" — a Curse Aura trigger
+                // scoped to the player this permanent is attached to (whose
+                // controller is separate from the Aura's controller). The type axis
+                // is Player; the player-identity scope is set below via
+                // `valid_target = AttachedTo` (Curse of Predation, Curse of Chaos,
+                // Curse of Inertia).
+                value(AttackTargetFilter::Player, tag(" enchanted player")),
                 value(AttackTargetFilter::Battle, tag(" a battle")),
             ))
             .parse(input)
@@ -8753,6 +8855,19 @@ fn try_parse_event(
             def.valid_target = Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::Opponent),
             ));
+        } else if tag::<_, _, OracleError<'_>>(" enchanted player")
+            .parse(after)
+            .is_ok()
+        {
+            // CR 303.4e: "attacks enchanted player" scopes the trigger to the
+            // player this Curse Aura is attached to (whose controller is distinct
+            // from the Aura's controller). `AttachedTo` resolves to
+            // `source.attached_to.as_player()` in `player_matches_filter`
+            // (`game/trigger_matchers.rs`), so the trigger fires only when the
+            // enchanted player is the defender (Curse of Predation, Curse of Chaos,
+            // Curse of Inertia). Without this the trigger has no defender scope and
+            // fires on every attack, anywhere.
+            def.valid_target = Some(TargetFilter::AttachedTo);
         } else if matches!(
             def.attack_target_filter,
             Some(AttackTargetFilter::PlayerOrPlaneswalker) | Some(AttackTargetFilter::Player)

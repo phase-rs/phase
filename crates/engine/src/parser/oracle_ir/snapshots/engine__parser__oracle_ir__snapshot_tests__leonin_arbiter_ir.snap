@@ -5,22 +5,39 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Spell",
-        "effect": {
-          "type": "Unimplemented",
-          "name": "static_structure",
-          "description": "Static pattern matched but line failed static parser: Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn."
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "cost": null,
-        "sub_ability": null,
-        "duration": null,
-        "description": "Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn.",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 111,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Unimplemented",
+            "name": "static_structure",
+            "description": "Static pattern matched but line failed static parser: Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn."
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": "Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     }
   ],

@@ -1,3 +1,4 @@
+use super::oracle_ir::doc::PrintedTriggerIndex;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::bytes::complete::tag;
 use nom::Parser;
@@ -153,7 +154,9 @@ pub(crate) fn parse_class_oracle_text(
                 let mut triggers = parse_trigger_lines_at_index(
                     line,
                     card_name,
-                    Some(result.triggers.len()),
+                    Some(PrintedTriggerIndex::from_category_vector_len(
+                        result.triggers.len(),
+                    )),
                     &mut ParseContext::default(),
                 );
                 // CR 716.2a: Gate continuous triggers at levels > 1.
@@ -220,7 +223,9 @@ pub(crate) fn parse_class_oracle_text(
                     let mut triggers = parse_trigger_lines_at_index(
                         &effect_text,
                         card_name,
-                        Some(result.triggers.len()),
+                        Some(PrintedTriggerIndex::from_category_vector_len(
+                            result.triggers.len(),
+                        )),
                         &mut ParseContext::default(),
                     );
                     if section.level > 1 {

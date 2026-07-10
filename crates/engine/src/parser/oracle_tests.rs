@@ -11345,6 +11345,269 @@ fn spell_prevention_keeps_preceding_dynamic_gain_life() {
     );
 }
 
+// ── Maze of Ith family: bidirectional combat-damage prevention (issue #1094) ──
+
+/// Recursively collect `PreventDamage` ability nodes in pre-order (self, then
+/// sub_ability, then else_ability) across the whole ability/sub-ability tree.
+fn collect_prevent_nodes(
+    abilities: &[crate::types::ability::AbilityDefinition],
+) -> Vec<crate::types::ability::AbilityDefinition> {
+    fn walk(
+        def: &crate::types::ability::AbilityDefinition,
+        out: &mut Vec<crate::types::ability::AbilityDefinition>,
+    ) {
+        if matches!(&*def.effect, Effect::PreventDamage { .. }) {
+            out.push(def.clone());
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            walk(sub, out);
+        }
+        if let Some(el) = def.else_ability.as_deref() {
+            walk(el, out);
+        }
+    }
+    let mut out = Vec::new();
+    for a in abilities {
+        walk(a, &mut out);
+    }
+    out
+}
+
+/// Pre-order (self, then sub_ability, then else_ability) flat list of every
+/// effect in the ability/sub-ability tree. Used to assert that non-PreventDamage
+/// sibling clauses on the same card survive the bidirectional split intact and
+/// in the correct chain position — the family assertion only inspects the two
+/// PreventDamage nodes in isolation and cannot detect a dropped/overwritten
+/// sibling rider.
+fn collect_all_effects(abilities: &[crate::types::ability::AbilityDefinition]) -> Vec<Effect> {
+    fn walk(def: &crate::types::ability::AbilityDefinition, out: &mut Vec<Effect>) {
+        out.push((*def.effect).clone());
+        if let Some(sub) = def.sub_ability.as_deref() {
+            walk(sub, out);
+        }
+        if let Some(el) = def.else_ability.as_deref() {
+            walk(el, out);
+        }
+    }
+    let mut out = Vec::new();
+    for a in abilities {
+        walk(a, &mut out);
+    }
+    out
+}
+
+/// CR 615 + CR 608.2c (issue #1094): a "... dealt to and dealt by <anaphor>
+/// this turn" clause must lower to two PreventDamage nodes:
+/// - the recipient ("to") node: `target == ParentTarget`, no source filter;
+/// - the source-only ("by") node: `target == Any`,
+///   `damage_source_filter == Some(ParentTarget)`, chained SequentialSibling.
+fn assert_bidirectional_prevent_family(oracle: &str, name: &str, types: &[&str]) {
+    use crate::types::ability::{PreventionScope, SubAbilityLink, TargetFilter};
+    let parsed = parse(oracle, name, &[], types, &[]);
+    let nodes = collect_prevent_nodes(&parsed.abilities);
+    assert_eq!(
+        nodes.len(),
+        2,
+        "{name}: expected exactly 2 PreventDamage nodes (to + by), got {:#?}",
+        nodes.iter().map(|n| &n.effect).collect::<Vec<_>>()
+    );
+    match &*nodes[0].effect {
+        Effect::PreventDamage {
+            target,
+            damage_source_filter,
+            scope,
+            ..
+        } => {
+            assert_eq!(
+                *target,
+                TargetFilter::ParentTarget,
+                "{name}: 'to' recipient must bind ParentTarget"
+            );
+            assert!(
+                damage_source_filter.is_none(),
+                "{name}: 'to' node must have no source filter, got {damage_source_filter:?}"
+            );
+            assert_eq!(
+                *scope,
+                PreventionScope::CombatDamage,
+                "{name}: prevention scope must be combat-only"
+            );
+        }
+        other => panic!("{name}: node0 not PreventDamage: {other:?}"),
+    }
+    match &*nodes[1].effect {
+        Effect::PreventDamage {
+            target,
+            damage_source_filter,
+            ..
+        } => {
+            assert_eq!(
+                *target,
+                TargetFilter::Any,
+                "{name}: 'by' recipient must be Any (source-scoped only)"
+            );
+            assert_eq!(
+                damage_source_filter.as_ref(),
+                Some(&TargetFilter::ParentTarget),
+                "{name}: 'by' source filter must bind ParentTarget"
+            );
+        }
+        other => panic!("{name}: node1 not PreventDamage: {other:?}"),
+    }
+    assert_eq!(
+        nodes[1].sub_link,
+        SubAbilityLink::SequentialSibling,
+        "{name}: 'by' node must chain as SequentialSibling"
+    );
+}
+
+#[test]
+fn maze_of_ith_bidirectional_prevent() {
+    assert_bidirectional_prevent_family(
+        "{T}: Untap target attacking creature. Prevent all combat damage that would be dealt to and dealt by that creature this turn.",
+        "Maze of Ith",
+        &["Land"],
+    );
+}
+
+#[test]
+fn ebony_horse_bidirectional_prevent() {
+    assert_bidirectional_prevent_family(
+        "{2}, {T}: Untap target attacking creature you control. Prevent all combat damage that would be dealt to and dealt by that creature this turn.",
+        "Ebony Horse",
+        &["Artifact"],
+    );
+}
+
+#[test]
+fn elvish_scout_bidirectional_prevent_bare_it() {
+    // Bare-pronoun anaphor ("it") instead of "that creature".
+    assert_bidirectional_prevent_family(
+        "{G}, {T}: Untap target attacking creature you control. Prevent all combat damage that would be dealt to and dealt by it this turn.",
+        "Elvish Scout",
+        &["Creature"],
+    );
+}
+
+#[test]
+fn ith_high_arcanist_bidirectional_prevent() {
+    assert_bidirectional_prevent_family(
+        "Vigilance\n{T}: Untap target attacking creature. Prevent all combat damage that would be dealt to and dealt by that creature this turn.\nSuspend 4—{W}{U}",
+        "Ith, High Arcanist",
+        &["Legendary", "Creature"],
+    );
+}
+
+#[test]
+fn maze_of_shadows_bidirectional_prevent() {
+    // Second activated ability; anaphor after a subtype-restricted target
+    // ("attacking creature with shadow").
+    assert_bidirectional_prevent_family(
+        "{T}: Add {C}.\n{T}: Untap target attacking creature with shadow. Prevent all combat damage that would be dealt to and dealt by that creature this turn.",
+        "Maze of Shadows",
+        &["Land"],
+    );
+}
+
+#[test]
+fn foxfire_bidirectional_prevent_the_creature() {
+    // Instant; "that creature" anaphor + trailing draw rider. Full real Oracle
+    // text, both lines (verified against Scryfall).
+    const FOXFIRE: &str = "Untap target attacking creature. Prevent all combat damage that would be dealt to and dealt by that creature this turn.\nDraw a card at the beginning of the next turn's upkeep.";
+    assert_bidirectional_prevent_family(FOXFIRE, "Foxfire", &["Instant"]);
+
+    // Coverage-gap guard (issue #1094 fix round): the bidirectional split fills the
+    // Prevent clause's `sub_ability` slot with the "by" shield (a SequentialSibling).
+    // The THIRD clause — the "Draw a card at the beginning of the next turn's
+    // upkeep" delayed trigger — must still chain onto the TAIL of the whole tree
+    // (Untap -> to-Prevent -> by-Prevent -> Draw-delayed-trigger), never
+    // overwriting/displacing the "by" shield or being dropped.
+    let parsed = parse(FOXFIRE, "Foxfire", &[], &["Instant"], &[]);
+    let effects = collect_all_effects(&parsed.abilities);
+    let prevent_positions: Vec<usize> = effects
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, Effect::PreventDamage { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        prevent_positions.len(),
+        2,
+        "Foxfire: expected 2 PreventDamage nodes in the full tree, got {:#?}",
+        effects
+    );
+    let draw_pos = effects.iter().position(|e| {
+        matches!(
+            e,
+            Effect::CreateDelayedTrigger { effect, .. }
+                if matches!(&*effect.effect, Effect::Draw { .. })
+        )
+    });
+    let draw_pos = draw_pos.expect(
+        "Foxfire: the 'Draw a card at the beginning of the next turn's upkeep' delayed trigger must survive the bidirectional split, not be dropped",
+    );
+    assert!(
+        draw_pos > prevent_positions[1],
+        "Foxfire: the draw delayed trigger must chain AFTER the 'by' shield (at the tail), not overwrite it; prevent positions={prevent_positions:?}, draw position={draw_pos}"
+    );
+}
+
+#[test]
+fn delirium_bidirectional_prevent_the_creature() {
+    // Instant; definite-article anaphor ("the creature") binding a target
+    // chosen two clauses earlier ("Tap target creature that player controls").
+    // Full real Oracle text, all sentences (verified against Scryfall).
+    const DELIRIUM: &str = "Cast this spell only during an opponent's turn.\nTap target creature that player controls. That creature deals damage equal to its power to the player. Prevent all combat damage that would be dealt to and dealt by the creature this turn.";
+    assert_bidirectional_prevent_family(DELIRIUM, "Delirium", &["Instant"]);
+
+    // Coverage-gap guard (issue #1094 fix round): the two clauses that PRECEDE
+    // the Prevent sentence ("Tap target creature ..." and "That creature deals
+    // damage equal to its power to the player") must still parse and chain ahead
+    // of the now-2-node Prevent split, not be dropped or reordered by it.
+    let parsed = parse(DELIRIUM, "Delirium", &[], &["Instant"], &[]);
+    let effects = collect_all_effects(&parsed.abilities);
+    let tap_pos = effects
+        .iter()
+        .position(|e| matches!(e, Effect::SetTapState { .. }))
+        .expect("Delirium: the 'Tap target creature ...' clause must survive the split");
+    let deal_pos = effects
+        .iter()
+        .position(|e| matches!(e, Effect::DealDamage { .. }))
+        .expect("Delirium: the 'That creature deals damage ...' clause must survive the split");
+    let first_prevent = effects
+        .iter()
+        .position(|e| matches!(e, Effect::PreventDamage { .. }))
+        .expect("Delirium: the Prevent split must exist");
+    assert!(
+        tap_pos < deal_pos,
+        "Delirium: the Tap clause must precede the damage clause; tap={tap_pos}, deal={deal_pos}"
+    );
+    assert!(
+        deal_pos < first_prevent,
+        "Delirium: both preceding clauses must chain ahead of the Prevent split; tap={tap_pos}, deal={deal_pos}, first_prevent={first_prevent}"
+    );
+}
+
+/// CR 608.2c (issue #1094): the `parent_target_available` gate is load-bearing.
+/// A standalone "prevent ... dealt to that creature this turn" with NO prior
+/// target-selecting clause (so `parent_target_available == false`) must fall
+/// back to `TargetFilter::Any` on the recipient — the anaphor recognizer is a
+/// no-op without a bound antecedent.
+#[test]
+fn prevent_anaphor_without_parent_target_falls_back_to_any() {
+    use crate::parser::oracle_effect::parse_effect;
+    use crate::types::ability::TargetFilter;
+    let effect = parse_effect("prevent all damage that would be dealt to that creature this turn");
+    match effect {
+        Effect::PreventDamage { target, .. } => assert_eq!(
+            target,
+            TargetFilter::Any,
+            "no prior target ⇒ anaphor must NOT bind ParentTarget"
+        ),
+        other => panic!("expected PreventDamage, got {other:?}"),
+    }
+}
+
 // ── Coverage batch: play from exile ────────────────────────────────
 
 #[test]

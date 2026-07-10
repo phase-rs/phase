@@ -5,55 +5,72 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredTrigger": {
-        "mode": "SpellCast",
-        "execute": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Draw",
-            "count": {
-              "type": "Fixed",
-              "value": 1
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 125,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "SpellCast",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "Draw",
+              "count": {
+                "type": "Fixed",
+                "value": 1
+              },
+              "target": {
+                "type": "Controller"
+              }
             },
-            "target": {
-              "type": "Controller"
-            }
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": null,
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
-        },
-        "valid_card": {
-          "type": "Typed",
-          "type_filters": [
-            "Creature"
+          "valid_card": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": null,
+            "properties": []
+          },
+          "origin": null,
+          "destination": null,
+          "trigger_zones": [
+            "Battlefield"
           ],
-          "controller": null,
-          "properties": []
-        },
-        "origin": null,
-        "destination": null,
-        "trigger_zones": [
-          "Battlefield"
-        ],
-        "phase": null,
-        "optional": false,
-        "damage_kind": "Any",
-        "secondary": false,
-        "valid_target": {
-          "type": "Controller"
-        },
-        "valid_source": null,
-        "description": "Whenever you cast a creature spell that has an Adventure, draw a card.",
-        "constraint": null,
-        "condition": null,
-        "batched": false
+          "phase": null,
+          "optional": false,
+          "damage_kind": "Any",
+          "secondary": false,
+          "valid_target": {
+            "type": "Controller"
+          },
+          "valid_source": null,
+          "description": "Whenever you cast a creature spell that has an Adventure, draw a card.",
+          "constraint": null,
+          "condition": null,
+          "batched": false
+        }
       }
     }
   ],

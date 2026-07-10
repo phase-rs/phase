@@ -5,56 +5,73 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredStatic": {
-        "mode": "CantAttack",
-        "affected": {
-          "type": "SelfRef"
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "modifications": [],
-        "condition": {
-          "type": "Not",
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 61,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredStatic": {
+          "mode": "CantAttack",
+          "affected": {
+            "type": "SelfRef"
+          },
+          "modifications": [],
           "condition": {
-            "type": "IsPresent",
-            "filter": {
-              "type": "Typed",
-              "type_filters": [
-                "Creature"
-              ],
-              "controller": "You",
-              "properties": [
-                {
-                  "type": "PtComparison",
-                  "stat": "Power",
-                  "scope": "Current",
-                  "comparator": "EQ",
-                  "value": {
-                    "type": "Fixed",
-                    "value": 1
+            "type": "Not",
+            "condition": {
+              "type": "IsPresent",
+              "filter": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": [
+                  {
+                    "type": "PtComparison",
+                    "stat": "Power",
+                    "scope": "Current",
+                    "comparator": "EQ",
+                    "value": {
+                      "type": "Fixed",
+                      "value": 1
+                    }
+                  },
+                  {
+                    "type": "PtComparison",
+                    "stat": "Toughness",
+                    "scope": "Current",
+                    "comparator": "EQ",
+                    "value": {
+                      "type": "Fixed",
+                      "value": 1
+                    }
+                  },
+                  {
+                    "type": "InZone",
+                    "zone": "Battlefield"
                   }
-                },
-                {
-                  "type": "PtComparison",
-                  "stat": "Toughness",
-                  "scope": "Current",
-                  "comparator": "EQ",
-                  "value": {
-                    "type": "Fixed",
-                    "value": 1
-                  }
-                },
-                {
-                  "type": "InZone",
-                  "zone": "Battlefield"
-                }
-              ]
+                ]
+              }
             }
-          }
-        },
-        "affected_zone": null,
-        "effect_zone": null,
-        "active_zones": [],
-        "characteristic_defining": false,
-        "description": "~ can't attack unless you control a 1/1 creature."
+          },
+          "affected_zone": null,
+          "effect_zone": null,
+          "active_zones": [],
+          "characteristic_defining": false,
+          "description": "~ can't attack unless you control a 1/1 creature."
+        }
       }
     }
   ],

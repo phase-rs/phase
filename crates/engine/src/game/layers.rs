@@ -132,6 +132,43 @@ pub fn prune_end_of_combat_effects(state: &mut GameState) {
     }
 }
 
+/// CR 508.1d + CR 511.3: Remove transient continuous effects whose
+/// `Duration::UntilNextStepOf { step: Phase::EndCombat, player: Controller }` expires
+/// when the affected object's controller reaches their end-of-combat step.
+/// Called alongside `prune_end_of_combat_effects` at the EndCombat phase.
+/// This handles "attacks during its controller's next combat phase if able"
+/// (Trench Behemoth cycle) — the MustAttack static expires once that combat ends.
+pub fn prune_controller_end_combat_step_effects(state: &mut GameState, active_player: PlayerId) {
+    let before = state.transient_continuous_effects.len();
+    state.transient_continuous_effects.retain(|e| {
+        if !matches!(
+            e.duration,
+            Duration::UntilNextStepOf {
+                step: Phase::EndCombat,
+                player: PlayerScope::Controller
+            }
+        ) {
+            return true;
+        }
+        // The effect applies to specific objects — check if the affected object
+        // is controlled by the active player (whose combat phase is ending).
+        match &e.affected {
+            TargetFilter::SpecificObject { id } => {
+                let is_active_controlled = state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.controller == active_player);
+                // Keep the effect if NOT controlled by active player (not their combat yet)
+                !is_active_controlled
+            }
+            _ => true,
+        }
+    });
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty.mark_full();
+    }
+}
+
 /// CR 513.1 + CR 611.2a: Remove transient continuous effects whose
 /// `Duration::UntilNextStepOf { step: Phase::End, player: Controller }` expires at the start of
 /// `active_player`'s end step. Called from `turns.rs::auto_advance` at the

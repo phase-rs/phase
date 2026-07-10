@@ -2139,6 +2139,23 @@ pub(crate) fn latest_tracked_set_id(state: &GameState) -> Option<TrackedSetId> {
         .map(|(&id, _)| id)
 }
 
+/// CR 608.2c: Single authority for resolving the parser's `TrackedSetId(0)`
+/// sentinel to a concrete set id: the active resolution-chain set first
+/// (`chain_tracked_set_id`), else the latest non-empty published set. `None`
+/// when no set is available — sentinel consumers stay fail-closed (match
+/// nothing).
+///
+/// [`resolve_tracked_set_sentinel`] inserts one extra rung BETWEEN these two —
+/// `current_combat_damage_source_filter`, for "those creatures" anaphors on a
+/// simultaneous combat-damage trigger (CR 510.2). That rung yields a
+/// `TargetFilter`, not a `TrackedSetId`, which is why it cannot fold into this
+/// id-level helper and why that function keeps its own ladder.
+pub(crate) fn resolve_tracked_set_id(state: &GameState) -> Option<TrackedSetId> {
+    state
+        .chain_tracked_set_id
+        .or_else(|| latest_tracked_set_id(state))
+}
+
 /// CR 510.2 + CR 608.2c: In a simultaneous combat-damage event, "those
 /// creatures" on the resolving trigger can refer to the filtered source set
 /// carried by `CombatDamageDealtToPlayer`.

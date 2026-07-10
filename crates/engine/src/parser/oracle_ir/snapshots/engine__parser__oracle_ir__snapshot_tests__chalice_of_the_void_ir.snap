@@ -5,103 +5,137 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredTrigger": {
-        "mode": "SpellCast",
-        "execute": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Counter",
-            "target": {
-              "type": "TriggeringSource"
-            }
-          },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": null,
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "valid_card": {
-          "type": "Typed",
-          "type_filters": [
-            "Card"
-          ],
-          "controller": null,
-          "properties": [
-            {
-              "type": "Cmc",
-              "comparator": "EQ",
-              "value": {
-                "type": "Ref",
-                "qty": {
-                  "type": "CountersOn",
-                  "scope": {
-                    "type": "Source"
-                  },
-                  "counter_type": "charge"
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 175,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "SpellCast",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "Counter",
+              "target": {
+                "type": "TriggeringSource"
+              }
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "valid_card": {
+            "type": "Typed",
+            "type_filters": [
+              "Card"
+            ],
+            "controller": null,
+            "properties": [
+              {
+                "type": "Cmc",
+                "comparator": "EQ",
+                "value": {
+                  "type": "Ref",
+                  "qty": {
+                    "type": "CountersOn",
+                    "scope": {
+                      "type": "Source"
+                    },
+                    "counter_type": "charge"
+                  }
                 }
               }
-            }
-          ]
-        },
-        "origin": null,
-        "destination": null,
-        "trigger_zones": [
-          "Battlefield"
-        ],
-        "phase": null,
-        "optional": false,
-        "damage_kind": "Any",
-        "secondary": false,
-        "valid_target": null,
-        "valid_source": null,
-        "description": "Whenever a player casts a spell with mana value equal to the number of charge counters on ~, counter that spell.",
-        "constraint": null,
-        "condition": null,
-        "batched": false
+            ]
+          },
+          "origin": null,
+          "destination": null,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "phase": null,
+          "optional": false,
+          "damage_kind": "Any",
+          "secondary": false,
+          "valid_target": null,
+          "valid_source": null,
+          "description": "Whenever a player casts a spell with mana value equal to the number of charge counters on ~, counter that spell.",
+          "constraint": null,
+          "condition": null,
+          "batched": false
+        }
       }
     },
     {
-      "PreLoweredReplacement": {
-        "event": "Moved",
-        "execute": {
-          "kind": "Spell",
-          "effect": {
-            "type": "PutCounter",
-            "counter_type": "charge",
-            "count": {
-              "type": "Ref",
-              "qty": {
-                "type": "CostXPaid"
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 175,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 1
+        }
+      },
+      "node": {
+        "PreLoweredReplacement": {
+          "event": "Moved",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "PutCounter",
+              "counter_type": "charge",
+              "count": {
+                "type": "Ref",
+                "qty": {
+                  "type": "CostXPaid"
+                }
+              },
+              "target": {
+                "type": "SelfRef"
               }
             },
-            "target": {
-              "type": "SelfRef"
-            }
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": null,
-          "target_prompt": null,
+          "mode": {
+            "type": "Mandatory"
+          },
+          "valid_card": {
+            "type": "SelfRef"
+          },
+          "description": "~ enters with X charge counters on it.",
           "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
-        },
-        "mode": {
-          "type": "Mandatory"
-        },
-        "valid_card": {
-          "type": "SelfRef"
-        },
-        "description": "~ enters with X charge counters on it.",
-        "condition": null,
-        "destination_zone": "Battlefield"
+          "destination_zone": "Battlefield"
+        }
       }
     }
   ],

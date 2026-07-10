@@ -6474,6 +6474,16 @@ pub struct GameState {
 
     // RNG
     pub rng_seed: u64,
+    /// ChaCha20 stream position (word offset) captured at serialize time.
+    /// `rng` is `#[serde(skip)]`, so without persisting the position a restored
+    /// snapshot reseeds to offset 0 and replays the random sequence the game
+    /// already consumed (issue #5466). Synced from `rng.get_word_pos()` before
+    /// export and re-applied via `set_word_pos` on restore. Like `rng` itself it
+    /// is excluded from `PartialEq` (mutable stream position, not identity);
+    /// `#[serde(default)]` = 0 keeps pre-#5466 saves on today's from-origin
+    /// (rewind) behavior.
+    #[serde(default)]
+    pub rng_word_pos: u128,
     #[serde(skip, default = "default_rng")]
     pub rng: ChaCha20Rng,
 
@@ -8492,6 +8502,25 @@ const _: fn() = || {
 };
 
 impl GameState {
+    /// Capture the live ChaCha20 stream offset into `rng_word_pos` so it
+    /// survives serialization — `rng` is `#[serde(skip)]`, so this field is the
+    /// only carrier of the position across a snapshot (issue #5466). Callers
+    /// serializing a faithfully-restorable snapshot invoke this first; the
+    /// randomness logic lives here in the engine, not in transport layers.
+    pub fn capture_rng_word_pos(&mut self) {
+        self.rng_word_pos = self.rng.get_word_pos();
+    }
+
+    /// Reconstruct `rng` from the serialized `rng_seed` and fast-forward it to
+    /// the saved `rng_word_pos`, so a restored snapshot resumes the random
+    /// stream where it left off instead of rewinding to origin and replaying
+    /// already-consumed values (issue #5466). Pre-#5466 snapshots carry
+    /// `rng_word_pos == 0`, which reproduces the previous from-origin behavior.
+    pub fn rehydrate_rng(&mut self) {
+        self.rng = ChaCha20Rng::seed_from_u64(self.rng_seed);
+        self.rng.set_word_pos(self.rng_word_pos);
+    }
+
     /// CR 118.3a: Mint the next stable `ManaPipId` for a pool unit. Monotonic,
     /// never returns the `ManaPipId(0)` unstamped sentinel (counter starts at 1).
     fn next_pip_id(&mut self) -> ManaPipId {
@@ -8728,6 +8757,7 @@ impl GameState {
             exile: im::Vector::new(),
             command_zone: im::Vector::new(),
             rng_seed: seed,
+            rng_word_pos: 0,
             rng: ChaCha20Rng::seed_from_u64(seed),
             combat: None,
             waiting_for: WaitingFor::Priority {
@@ -10239,6 +10269,52 @@ mod tests {
         // Reconstruct RNG from seed since it's skipped in serde
         deserialized.rng = ChaCha20Rng::seed_from_u64(deserialized.rng_seed);
         assert_eq!(state, deserialized);
+    }
+
+    #[test]
+    fn rng_word_pos_survives_serde_and_rehydrate_resumes_stream() {
+        // Issue #5466: a restored snapshot must resume the ChaCha20 stream at the
+        // offset it held when exported — not rewind to origin and replay the
+        // values the game already consumed. Exercises the ENGINE seam that the
+        // WASM bridge delegates to (`capture_rng_word_pos` on export /
+        // `rehydrate_rng` on restore); reverting either method breaks this test.
+        use rand::RngCore;
+        let mut state = GameState::new_two_player(0xABCD_1234);
+        for _ in 0..7 {
+            state.rng.next_u32(); // consume randomness as gameplay would
+        }
+        state.capture_rng_word_pos(); // production export-time capture
+        let mut expected = state.rng.clone(); // the values that come next
+        let json = serde_json::to_string(&state).unwrap();
+
+        let mut restored: GameState = serde_json::from_str(&json).unwrap();
+        restored.rehydrate_rng(); // production restore-time reseed + fast-forward
+
+        assert_ne!(
+            restored.rng_word_pos, 0,
+            "stream position must survive serde"
+        );
+        for i in 0..5 {
+            assert_eq!(
+                restored.rng.next_u32(),
+                expected.next_u32(),
+                "restored stream diverged at draw {i}",
+            );
+        }
+    }
+
+    #[test]
+    fn rng_word_pos_defaults_to_zero_when_absent() {
+        // Backward compat (#5466): a snapshot serialized before the field
+        // existed omits `rng_word_pos` and must deserialize to 0 — today's
+        // rewind-to-origin behavior — via `#[serde(default)]`.
+        let mut value = serde_json::to_value(GameState::default()).unwrap();
+        value
+            .as_object_mut()
+            .expect("GameState serializes as a JSON object")
+            .remove("rng_word_pos");
+        let restored: GameState = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.rng_word_pos, 0);
     }
 
     /// Test E — deserialize-before-flush. `static_mode_presence` is `#[serde(skip)]` with an

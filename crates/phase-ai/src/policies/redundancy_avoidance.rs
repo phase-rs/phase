@@ -237,10 +237,15 @@ impl TacticalPolicy for RedundancyAvoidancePolicy {
                 .with_fact("effect_kind", kind_tag)
                 .with_fact("redundant_value", extra);
         }
-        PolicyVerdict::Score {
-            delta: total,
-            reason,
-        }
+        // Range check (issue #5473): per-effect penalties are small (-3.0 tap /
+        // untap / no-op, -2.0 keyword, -1.5 pump, -0.5 lifegain). Real cards
+        // carry 1-3 such redundant effects, so `total` stays within the critical
+        // band; only a pathological 5+ redundant-effect chain (no printed card)
+        // could approach 15, and there every candidate is already "strongly
+        // disprefer", so ceiling saturation is harmless — ordering that matters
+        // is preserved. PolicyVerdict::score is therefore identity in practice
+        // and upholds the band contract (no raw Score literal).
+        PolicyVerdict::score(total, reason)
     }
 }
 

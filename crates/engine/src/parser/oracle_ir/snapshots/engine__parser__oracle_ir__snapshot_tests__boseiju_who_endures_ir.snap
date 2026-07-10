@@ -5,163 +5,204 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "Mana",
-          "produced": {
-            "type": "Fixed",
-            "colors": [
-              "Green"
-            ]
-          }
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "cost": {
-          "type": "Tap"
-        },
-        "sub_ability": null,
-        "duration": null,
-        "description": "{T}: Add {G}.",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false,
-        "is_mana_ability": true
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 330,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Mana",
+            "produced": {
+              "type": "Fixed",
+              "colors": [
+                "Green"
+              ]
+            }
+          },
+          "cost": {
+            "type": "Tap"
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "{T}: Add {G}.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false,
+          "is_mana_ability": true
+        }
       }
     },
     {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "Destroy",
-          "target": {
-            "type": "Or",
-            "filters": [
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 1,
+          "start_byte": 0,
+          "end_byte": 330,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 1
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Destroy",
+            "target": {
+              "type": "Or",
+              "filters": [
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Artifact"
+                  ],
+                  "controller": "Opponent",
+                  "properties": []
+                },
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Enchantment"
+                  ],
+                  "controller": "Opponent",
+                  "properties": []
+                },
+                {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Land"
+                  ],
+                  "controller": "Opponent",
+                  "properties": [
+                    {
+                      "type": "NotSupertype",
+                      "value": "Basic"
+                    }
+                  ]
+                }
+              ]
+            },
+            "cant_regenerate": false
+          },
+          "cost": {
+            "type": "Composite",
+            "costs": [
               {
-                "type": "Typed",
-                "type_filters": [
-                  "Artifact"
-                ],
-                "controller": "Opponent",
-                "properties": []
+                "type": "Mana",
+                "cost": {
+                  "type": "Cost",
+                  "shards": [
+                    "Green"
+                  ],
+                  "generic": 1
+                }
               },
               {
-                "type": "Typed",
-                "type_filters": [
-                  "Enchantment"
-                ],
-                "controller": "Opponent",
-                "properties": []
-              },
-              {
-                "type": "Typed",
-                "type_filters": [
-                  "Land"
-                ],
-                "controller": "Opponent",
-                "properties": [
-                  {
-                    "type": "NotSupertype",
-                    "value": "Basic"
-                  }
-                ]
+                "type": "Discard",
+                "count": {
+                  "type": "Fixed",
+                  "value": 1
+                },
+                "filter": null,
+                "random": false,
+                "self_ref": true
               }
             ]
           },
-          "cant_regenerate": false
-        },
-        "cost": {
-          "type": "Composite",
-          "costs": [
-            {
-              "type": "Mana",
-              "cost": {
-                "type": "Cost",
-                "shards": [
-                  "Green"
+          "sub_ability": {
+            "kind": "Spell",
+            "effect": {
+              "type": "SearchLibrary",
+              "filter": {
+                "type": "Typed",
+                "type_filters": [
+                  "Land",
+                  {
+                    "AnyOf": [
+                      {
+                        "Subtype": "Plains"
+                      },
+                      {
+                        "Subtype": "Island"
+                      },
+                      {
+                        "Subtype": "Swamp"
+                      },
+                      {
+                        "Subtype": "Mountain"
+                      },
+                      {
+                        "Subtype": "Forest"
+                      }
+                    ]
+                  }
                 ],
-                "generic": 1
-              }
-            },
-            {
-              "type": "Discard",
+                "controller": null,
+                "properties": []
+              },
               "count": {
                 "type": "Fixed",
                 "value": 1
               },
-              "filter": null,
-              "random": false,
-              "self_ref": true
-            }
-          ]
-        },
-        "sub_ability": {
-          "kind": "Spell",
-          "effect": {
-            "type": "SearchLibrary",
-            "filter": {
-              "type": "Typed",
-              "type_filters": [
-                "Land",
-                {
-                  "AnyOf": [
-                    {
-                      "Subtype": "Plains"
-                    },
-                    {
-                      "Subtype": "Island"
-                    },
-                    {
-                      "Subtype": "Swamp"
-                    },
-                    {
-                      "Subtype": "Mountain"
-                    },
-                    {
-                      "Subtype": "Forest"
-                    }
-                  ]
-                }
-              ],
-              "controller": null,
-              "properties": []
-            },
-            "count": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "reveal": false,
-            "target_player": {
-              "type": "ParentTargetController"
-            }
-          },
-          "cost": null,
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "ChangeZone",
-              "origin": "Library",
-              "destination": "Battlefield",
-              "target": {
-                "type": "Any"
-              },
-              "owner_library": false,
-              "enter_transformed": false,
-              "enter_tapped": false,
-              "enters_attacking": false
+              "reveal": false,
+              "target_player": {
+                "type": "ParentTargetController"
+              }
             },
             "cost": null,
             "sub_ability": {
               "kind": "Spell",
               "effect": {
-                "type": "Shuffle",
+                "type": "ChangeZone",
+                "origin": "Library",
+                "destination": "Battlefield",
                 "target": {
-                  "type": "ParentTargetController"
-                }
+                  "type": "Any"
+                },
+                "owner_library": false,
+                "enter_transformed": false,
+                "enter_tapped": false,
+                "enters_attacking": false
               },
               "cost": null,
-              "sub_ability": null,
+              "sub_ability": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "Shuffle",
+                  "target": {
+                    "type": "ParentTargetController"
+                  }
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
               "duration": null,
               "description": null,
               "target_prompt": null,
@@ -175,49 +216,42 @@ expression: "&ir"
             "target_prompt": null,
             "condition": null,
             "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
+            "optional": true,
+            "forward_result": false,
+            "sub_link": "SequentialSibling"
           },
           "duration": null,
-          "description": null,
+          "description": "Channel — {1}{G}, Discard this card: Destroy target artifact, enchantment, or nonbasic land an opponent controls. That player may search their library for a land card with a basic land type, put it onto the battlefield, then shuffle. This ability costs {1} less to activate for each legendary creature you control.",
           "target_prompt": null,
+          "activation_zone": "Hand",
           "condition": null,
           "optional_targeting": false,
-          "optional": true,
-          "forward_result": false,
-          "sub_link": "SequentialSibling"
-        },
-        "duration": null,
-        "description": "Channel — {1}{G}, Discard this card: Destroy target artifact, enchantment, or nonbasic land an opponent controls. That player may search their library for a land card with a basic land type, put it onto the battlefield, then shuffle. This ability costs {1} less to activate for each legendary creature you control.",
-        "target_prompt": null,
-        "activation_zone": "Hand",
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "cost_reduction": {
-          "amount_per": 1,
-          "count": {
-            "type": "Ref",
-            "qty": {
-              "type": "ObjectCount",
-              "filter": {
-                "type": "Typed",
-                "type_filters": [
-                  "Creature"
-                ],
-                "controller": "You",
-                "properties": [
-                  {
-                    "type": "HasSupertype",
-                    "value": "Legendary"
-                  }
-                ]
+          "optional": false,
+          "cost_reduction": {
+            "amount_per": 1,
+            "count": {
+              "type": "Ref",
+              "qty": {
+                "type": "ObjectCount",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "HasSupertype",
+                      "value": "Legendary"
+                    }
+                  ]
+                }
               }
             }
-          }
-        },
-        "forward_result": false,
-        "consumes_source": true
+          },
+          "forward_result": false,
+          "consumes_source": true
+        }
       }
     }
   ],

@@ -5,84 +5,135 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredStatic": {
-        "mode": "Continuous",
-        "affected": {
-          "type": "SelfRef"
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "modifications": [
-          {
-            "type": "SetPower",
-            "value": 3
+        "span": {
+          "first_line": 0,
+          "last_line": 6,
+          "start_byte": 0,
+          "end_byte": 130,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredStatic": {
+          "mode": "Continuous",
+          "affected": {
+            "type": "SelfRef"
           },
-          {
-            "type": "SetToughness",
-            "value": 3
-          },
-          {
-            "type": "AddKeyword",
-            "keyword": "FirstStrike"
-          }
-        ],
-        "condition": {
-          "type": "HasCounters",
-          "counters": {
-            "type": "OfType",
-            "data": "level"
-          },
-          "minimum": 2,
-          "maximum": 6
-        },
-        "affected_zone": null,
-        "effect_zone": null,
-        "active_zones": [],
-        "characteristic_defining": false,
-        "description": "LEVEL 2-6 / 3/3 / First strike"
-      }
-    },
-    {
-      "PreLoweredStatic": {
-        "mode": "Continuous",
-        "affected": {
-          "type": "SelfRef"
-        },
-        "modifications": [
-          {
-            "type": "SetPower",
-            "value": 4
-          },
-          {
-            "type": "SetToughness",
-            "value": 4
-          },
-          {
-            "type": "AddKeyword",
-            "keyword": "DoubleStrike"
-          }
-        ],
-        "condition": {
-          "type": "HasCounters",
-          "counters": {
-            "type": "OfType",
-            "data": "level"
-          },
-          "minimum": 7
-        },
-        "affected_zone": null,
-        "effect_zone": null,
-        "active_zones": [],
-        "characteristic_defining": false,
-        "description": "LEVEL 7+ / 4/4 / Double strike"
-      }
-    },
-    {
-      "Keyword": {
-        "LevelUp": {
-          "type": "Cost",
-          "shards": [
-            "White"
+          "modifications": [
+            {
+              "type": "SetPower",
+              "value": 3
+            },
+            {
+              "type": "SetToughness",
+              "value": 3
+            },
+            {
+              "type": "AddKeyword",
+              "keyword": "FirstStrike"
+            }
           ],
-          "generic": 0
+          "condition": {
+            "type": "HasCounters",
+            "counters": {
+              "type": "OfType",
+              "data": "level"
+            },
+            "minimum": 2,
+            "maximum": 6
+          },
+          "affected_zone": null,
+          "effect_zone": null,
+          "active_zones": [],
+          "characteristic_defining": false,
+          "description": "LEVEL 2-6 / 3/3 / First strike"
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 6,
+          "start_byte": 0,
+          "end_byte": 130,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 1
+        }
+      },
+      "node": {
+        "PreLoweredStatic": {
+          "mode": "Continuous",
+          "affected": {
+            "type": "SelfRef"
+          },
+          "modifications": [
+            {
+              "type": "SetPower",
+              "value": 4
+            },
+            {
+              "type": "SetToughness",
+              "value": 4
+            },
+            {
+              "type": "AddKeyword",
+              "keyword": "DoubleStrike"
+            }
+          ],
+          "condition": {
+            "type": "HasCounters",
+            "counters": {
+              "type": "OfType",
+              "data": "level"
+            },
+            "minimum": 7
+          },
+          "affected_zone": null,
+          "effect_zone": null,
+          "active_zones": [],
+          "characteristic_defining": false,
+          "description": "LEVEL 7+ / 4/4 / Double strike"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 6,
+          "start_byte": 0,
+          "end_byte": 130,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 2
+        }
+      },
+      "node": {
+        "Keyword": {
+          "LevelUp": {
+            "type": "Cost",
+            "shards": [
+              "White"
+            ],
+            "generic": 0
+          }
         }
       }
     }

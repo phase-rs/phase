@@ -19,11 +19,19 @@ use crate::features::DeckFeatures;
 
 use super::activation::turn_only;
 use super::context::PolicyContext;
-use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+use super::registry::{
+    rescale_into_critical_band, DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy,
+};
 
 pub struct CopyValuePolicy;
 
 const COPY_SPELL_LOOP_PENALTY_SCALE: f64 = 0.004;
+
+/// Max expected magnitude of `CopyValuePolicy::score()` — the `+100` preferred-X
+/// anchor plus a copy-target evaluation/penalty tail (~±30, `score_target_choice`
+/// / `score_legend_rule_keep`). Sets where `rescale_into_critical_band` starts to
+/// saturate; below it, ordering is preserved.
+const COPY_VALUE_RAW_CEILING: f64 = 130.0;
 
 impl CopyValuePolicy {
     pub fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
@@ -206,10 +214,17 @@ impl TacticalPolicy for CopyValuePolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        PolicyVerdict::Score {
-            delta: self.score(ctx),
-            reason: PolicyReason::new("copy_value_score"),
-        }
+        // `score()` is a wide analog signal (the +100 "preferred X" anchor plus
+        // copy-target penalty sums reach ~±125) also consumed raw by other
+        // policies. As a *verdict* it must obey the score contract — but routing
+        // ±125 straight through PolicyVerdict::score would SATURATE, collapsing
+        // every large candidate to the same ±CRITICAL_MAX and flattening the
+        // copy/ChooseX/legend move-ordering prior. Rescale the range into the
+        // band first so ordering survives, then band-dispatch (issue #5473).
+        PolicyVerdict::score(
+            rescale_into_critical_band(self.score(ctx), COPY_VALUE_RAW_CEILING),
+            PolicyReason::new("copy_value_score"),
+        )
     }
 }
 

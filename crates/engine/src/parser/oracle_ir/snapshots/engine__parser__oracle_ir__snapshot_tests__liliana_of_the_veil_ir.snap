@@ -5,139 +5,190 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "Discard",
-          "count": {
-            "type": "Fixed",
-            "value": 1
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 2,
+          "start_byte": 0,
+          "end_byte": 217,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Discard",
+            "count": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "target": {
+              "type": "Controller"
+            }
           },
-          "target": {
-            "type": "Controller"
+          "cost": {
+            "type": "Loyalty",
+            "amount": 1
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "[+1]: Each player discards a card.",
+          "target_prompt": null,
+          "activation_restrictions": [
+            {
+              "type": "AsSorcery"
+            }
+          ],
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false,
+          "player_scope": {
+            "type": "All"
           }
-        },
-        "cost": {
-          "type": "Loyalty",
-          "amount": 1
-        },
-        "sub_ability": null,
-        "duration": null,
-        "description": "[+1]: Each player discards a card.",
-        "target_prompt": null,
-        "activation_restrictions": [
-          {
-            "type": "AsSorcery"
-          }
-        ],
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false,
-        "player_scope": {
-          "type": "All"
         }
       }
     },
     {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "Sacrifice",
-          "target": {
-            "type": "Typed",
-            "type_filters": [
-              "Creature"
-            ],
-            "controller": "TargetPlayer",
-            "properties": []
-          },
-          "count": {
-            "type": "Fixed",
-            "value": 1
-          }
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
         },
-        "cost": {
-          "type": "Loyalty",
-          "amount": -2
-        },
-        "sub_ability": null,
-        "duration": null,
-        "description": "[−2]: Target player sacrifices a creature.",
-        "target_prompt": null,
-        "activation_restrictions": [
-          {
-            "type": "AsSorcery"
-          }
-        ],
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
-      }
-    },
-    {
-      "PreLoweredSpell": {
-        "kind": "Activated",
-        "effect": {
-          "type": "Unimplemented",
-          "name": "separate",
-          "description": "Separate all permanents target player controls into two piles"
-        },
-        "cost": {
-          "type": "Loyalty",
-          "amount": -6
-        },
-        "sub_ability": {
-          "kind": "Spell",
+        "span": {
+          "first_line": 0,
+          "last_line": 2,
+          "start_byte": 0,
+          "end_byte": 217,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 1
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
           "effect": {
             "type": "Sacrifice",
             "target": {
               "type": "Typed",
               "type_filters": [
-                "Permanent"
+                "Creature"
               ],
-              "controller": "ParentTargetController",
+              "controller": "TargetPlayer",
               "properties": []
             },
             "count": {
-              "type": "Ref",
-              "qty": {
-                "type": "ObjectCount",
-                "filter": {
-                  "type": "Typed",
-                  "type_filters": [
-                    "Permanent"
-                  ],
-                  "controller": null,
-                  "properties": []
-                }
-              }
+              "type": "Fixed",
+              "value": 1
             }
           },
-          "cost": null,
+          "cost": {
+            "type": "Loyalty",
+            "amount": -2
+          },
           "sub_ability": null,
           "duration": null,
-          "description": null,
+          "description": "[−2]: Target player sacrifices a creature.",
           "target_prompt": null,
+          "activation_restrictions": [
+            {
+              "type": "AsSorcery"
+            }
+          ],
           "condition": null,
           "optional_targeting": false,
           "optional": false,
-          "forward_result": false,
-          "sub_link": "SequentialSibling"
+          "forward_result": false
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
         },
-        "duration": null,
-        "description": "[−6]: Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice.",
-        "target_prompt": null,
-        "activation_restrictions": [
-          {
-            "type": "AsSorcery"
-          }
-        ],
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+        "span": {
+          "first_line": 0,
+          "last_line": 2,
+          "start_byte": 0,
+          "end_byte": 217,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 2
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Unimplemented",
+            "name": "separate",
+            "description": "Separate all permanents target player controls into two piles"
+          },
+          "cost": {
+            "type": "Loyalty",
+            "amount": -6
+          },
+          "sub_ability": {
+            "kind": "Spell",
+            "effect": {
+              "type": "Sacrifice",
+              "target": {
+                "type": "Typed",
+                "type_filters": [
+                  "Permanent"
+                ],
+                "controller": "ParentTargetController",
+                "properties": []
+              },
+              "count": {
+                "type": "Ref",
+                "qty": {
+                  "type": "ObjectCount",
+                  "filter": {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Permanent"
+                    ],
+                    "controller": null,
+                    "properties": []
+                  }
+                }
+              }
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false,
+            "sub_link": "SequentialSibling"
+          },
+          "duration": null,
+          "description": "[−6]: Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice.",
+          "target_prompt": null,
+          "activation_restrictions": [
+            {
+              "type": "AsSorcery"
+            }
+          ],
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     }
   ],

@@ -21,11 +21,12 @@ use crate::types::ability::{
     Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
     DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect,
     EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction, LibraryPosition, ManaProduction,
-    ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
-    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    ObjectProperty, ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition,
+    StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -36,7 +37,7 @@ use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::triggers::TriggerMode;
-use crate::types::zones::Zone;
+use crate::types::zones::{EtbTapState, Zone};
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::space1;
@@ -624,7 +625,10 @@ fn fmt_target(filter: &TargetFilter) -> String {
         }
         TargetFilter::ExiledBySource => "cards exiled by source".into(),
         TargetFilter::HasChosenName => "card with the chosen name".into(),
-        TargetFilter::ChosenDamageSource => "chosen damage source".into(),
+        TargetFilter::ChosenDamageSource { filter: Some(f) } => {
+            format!("chosen damage source matching {}", fmt_target(f))
+        }
+        TargetFilter::ChosenDamageSource { filter: None } => "chosen damage source".into(),
         TargetFilter::Named { name } => format!("card named {name}"),
         TargetFilter::Not { filter } => format!("not {}", fmt_target(filter)),
         TargetFilter::Or { filters } => filters
@@ -892,6 +896,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::ToughnessGTPower => parts.push("toughness > power".into()),
             FilterProp::PowerExceedsBase => parts.push("power > base power".into()),
             FilterProp::DifferentNameFrom { .. } => parts.push("different name".into()),
+            FilterProp::DistinctFrom { .. } => parts.push("other than target".into()),
             FilterProp::Other { value } => parts.push(value.clone()),
             FilterProp::InAnyZone { zones } => {
                 let zone_strs: Vec<_> = zones.iter().map(fmt_zone).collect();
@@ -2553,13 +2558,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             origin,
             destination,
             target,
-            ..
-        }
-        | Effect::ChangeZoneAll {
-            origin,
-            destination,
-            target,
-            ..
+            owner_library,
+            enter_transformed,
+            enters_under,
+            enter_tapped,
+            enters_attacking,
+            up_to,
+            enter_with_counters,
+            conditional_enter_with_counters,
+            face_down_profile,
+            enters_modified_if,
         } => {
             if let Some(o) = origin {
                 d.push(("from".into(), fmt_zone(o)));
@@ -2567,6 +2575,88 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("to".into(), fmt_zone(destination)));
             if !matches!(target, TargetFilter::None) {
                 d.push(("target".into(), fmt_target(target)));
+            }
+            // #5495 (follow-up to #5492): battlefield-entry qualifiers a parser
+            // change can flip, previously swallowed by `..` and thus invisible to
+            // the coverage-parse-diff sticky (e.g. `enters_attacking` for
+            // "put it onto the battlefield attacking", CR 508.4 — Senu). Emitted
+            // only when active, so a plain ChangeZone's signature is unchanged.
+            if *owner_library {
+                d.push(("owner_library".into(), "true".into()));
+            }
+            if *enter_transformed {
+                d.push(("enter_transformed".into(), "true".into()));
+            }
+            if let Some(u) = enters_under {
+                d.push(("enters_under".into(), format!("{u:?}")));
+            }
+            if !matches!(enter_tapped, EtbTapState::Unspecified) {
+                d.push(("enter_tapped".into(), format!("{enter_tapped:?}")));
+            }
+            if *enters_attacking {
+                d.push(("enters_attacking".into(), "true".into()));
+            }
+            if *up_to {
+                d.push(("up_to".into(), "true".into()));
+            }
+            if !enter_with_counters.is_empty() {
+                d.push((
+                    "enter_with_counters".into(),
+                    format!("{enter_with_counters:?}"),
+                ));
+            }
+            if !conditional_enter_with_counters.is_empty() {
+                d.push((
+                    "conditional_enter_with_counters".into(),
+                    format!("{conditional_enter_with_counters:?}"),
+                ));
+            }
+            if let Some(fd) = face_down_profile {
+                d.push(("face_down_profile".into(), format!("{fd:?}")));
+            }
+            if let Some(f) = enters_modified_if {
+                d.push(("enters_modified_if".into(), fmt_target(f)));
+            }
+        }
+        Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            enters_under,
+            enter_tapped,
+            enter_with_counters,
+            face_down_profile,
+            library_position,
+            random_order,
+        } => {
+            if let Some(o) = origin {
+                d.push(("from".into(), fmt_zone(o)));
+            }
+            d.push(("to".into(), fmt_zone(destination)));
+            if !matches!(target, TargetFilter::None) {
+                d.push(("target".into(), fmt_target(target)));
+            }
+            // #5495: same entry-qualifier audit for the `All` variant.
+            if let Some(u) = enters_under {
+                d.push(("enters_under".into(), format!("{u:?}")));
+            }
+            if !matches!(enter_tapped, EtbTapState::Unspecified) {
+                d.push(("enter_tapped".into(), format!("{enter_tapped:?}")));
+            }
+            if !enter_with_counters.is_empty() {
+                d.push((
+                    "enter_with_counters".into(),
+                    format!("{enter_with_counters:?}"),
+                ));
+            }
+            if let Some(fd) = face_down_profile {
+                d.push(("face_down_profile".into(), format!("{fd:?}")));
+            }
+            if let Some(lp) = library_position {
+                d.push(("library_position".into(), format!("{lp:?}")));
+            }
+            if *random_order {
+                d.push(("random_order".into(), "true".into()));
             }
         }
         Effect::Dig {
@@ -2678,8 +2768,35 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ChooseDamageSource { source_filter } => {
             d.push(("source".into(), fmt_target(source_filter)));
         }
-        Effect::Mana { produced, .. } => {
+        Effect::Mana {
+            produced,
+            restrictions,
+            grants,
+            expiry,
+            target,
+        } => {
+            // #5507 (third instance after #5492/#5495): the mana effect rendered
+            // only `produced`, swallowing `restrictions`/`grants`/`expiry`/`target`
+            // with `..`. So a parser change that attaches a `ManaSpellGrant` to the
+            // produced mana (e.g. Hall of the Bandit Lord's creature-spell haste
+            // rider, #5502) never showed a compensating addition in the sticky —
+            // removals-with-no-addition, the signature of a regression, when it was
+            // really a half-rendered effect. Fully destructure (no `..`) so a new
+            // Mana field is a compile error, not another silent omission, and emit
+            // each field only when set so unqualified signatures stay byte-identical.
             d.push(("mana".into(), fmt_mana_production(produced)));
+            if !restrictions.is_empty() {
+                d.push(("restrictions".into(), format!("{restrictions:?}")));
+            }
+            if !grants.is_empty() {
+                d.push(("grants".into(), format!("{grants:?}")));
+            }
+            if let Some(e) = expiry {
+                d.push(("expiry".into(), format!("{e:?}")));
+            }
+            if let Some(t) = target {
+                d.push(("target".into(), fmt_target(t)));
+            }
         }
         Effect::RevealHand {
             target,
@@ -2940,17 +3057,28 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             amount,
             target,
             scope,
+            damage_source_filter,
             ..
         } => {
             d.push(("amount".into(), format!("{amount:?}")));
             d.push(("target".into(), fmt_target(target)));
             d.push(("scope".into(), format!("{scope:?}")));
+            // CR 615 + CR 614.1a: the source-restriction qualifier (#5492). Omitting
+            // it made a change from unqualified `ChosenDamageSource` to
+            // `ChosenDamageSource { filter: Some(..) }` (the Circle/Rune of
+            // Protection cycles) invisible to the parse-diff sticky — a real parser
+            // change reading as "No card-parse changes".
+            if let Some(f) = damage_source_filter {
+                d.push(("damage_source_filter".into(), fmt_target(f)));
+            }
         }
         Effect::CreateDamageReplacement {
             modification,
             redirect_to,
             redirect_amount,
             combat_scope,
+            source_filter,
+            target_filter,
             redirect_object_filter,
             recipient_object_filter,
             ..
@@ -2966,6 +3094,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(cs) = combat_scope {
                 d.push(("combat_scope".into(), format!("{cs:?}")));
+            }
+            // #5492: `source_filter` shares `PreventDamage`'s
+            // `parse_oneshot_source_filter` binding and had the same blind spot;
+            // `target_filter` is likewise parser-alterable. Emit both so any change
+            // to which sources/targets a replacement covers is diff-visible.
+            if let Some(f) = source_filter {
+                d.push(("source_filter".into(), fmt_target(f)));
+            }
+            if let Some(f) = target_filter {
+                d.push(("target_filter".into(), format!("{f:?}")));
             }
             if let Some(f) = redirect_object_filter {
                 d.push(("redirect_object_filter".into(), fmt_target(f)));
@@ -7511,10 +7649,37 @@ pub fn audit_semantic(card_db: &CardDatabase) -> SemanticAuditSummary {
 /// Check if an ability definition has a pump effect matching the given P/T values.
 /// Checks `Effect::Pump`, `Effect::PumpAll`, and `Effect::GenericEffect` with
 /// `AddPower`/`AddToughness` continuous modifications.
+/// Whether the current Oracle line permits a *perpetual* power/toughness
+/// modification to satisfy its "+N/+M" text. "[object] perpetually gets +N/+M"
+/// lowers to `Effect::ApplyPerpetual { ModifyPowerToughness }`; a temporary
+/// "gets +N/+M until end of turn" must NOT be satisfied by a perpetual
+/// (permanent) modification — admitting it would silence the semantic audit for
+/// a real duration-mislowering bug (an until-end-of-turn line that wrongly
+/// lowered to a permanent effect). Derived once from the line at the call site.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PerpetualPump {
+    /// The line says "perpetual(ly)" — an `ApplyPerpetual` P/T delta is expected.
+    Allowed,
+    /// No "perpetual" in the line — only `Pump` / static modifications satisfy it.
+    Disallowed,
+}
+
+impl PerpetualPump {
+    /// Classify an already-lowercased Oracle line.
+    fn from_lower_line(lower_line: &str) -> Self {
+        if lower_line.contains("perpetual") {
+            Self::Allowed
+        } else {
+            Self::Disallowed
+        }
+    }
+}
+
 fn pump_matches_oracle(
     def: &AbilityDefinition,
     expected_power: i32,
     expected_toughness: i32,
+    perpetual: PerpetualPump,
 ) -> bool {
     fn pt_matches(power: &PtValue, toughness: &PtValue, ep: i32, et: i32) -> bool {
         let p_match = match power {
@@ -7540,6 +7705,28 @@ fn pump_matches_oracle(
         Effect::GenericEffect {
             static_abilities, ..
         } if static_has_pump_modification(static_abilities, expected_power, expected_toughness) => {
+            return true;
+        }
+        // Digital-only Alchemy "[object] perpetually gets +N/+M" (no CR entry for
+        // "perpetually"; the delta applies as a CR 613.4c layer-7c power/toughness
+        // modification) lowers to `Effect::ApplyPerpetual` carrying a
+        // `ModifyPowerToughness` delta rather than a top-level `Effect::Pump`.
+        // Without this arm every perpetual-pump card (Heir to Dragonfire, Perennial
+        // Gravewarden, Tomakul Phoenix, …) is a spurious `WrongParameter: no matching
+        // pump effect` finding. Gated on `PerpetualPump::Allowed` so a *temporary*
+        // "+N/+M until end of turn" line that mis-lowered to a permanent
+        // `ApplyPerpetual` is still flagged rather than silently accepted.
+        Effect::ApplyPerpetual {
+            modification:
+                PerpetualModification::ModifyPowerToughness {
+                    power_delta,
+                    toughness_delta,
+                },
+            ..
+        } if perpetual == PerpetualPump::Allowed
+            && *power_delta == expected_power
+            && *toughness_delta == expected_toughness =>
+        {
             return true;
         }
         _ => {}
@@ -7892,19 +8079,19 @@ impl<'a> ParsedElement<'a> {
     }
 
     /// Check if this element has a pump effect matching the given P/T.
-    fn has_pump(&self, power: i32, toughness: i32) -> bool {
+    fn has_pump(&self, power: i32, toughness: i32, perpetual: PerpetualPump) -> bool {
         match self {
             ParsedElement::Ability(a) => {
-                ability_tree_any(a, &|d| pump_matches_oracle(d, power, toughness))
+                ability_tree_any(a, &|d| pump_matches_oracle(d, power, toughness, perpetual))
             }
             ParsedElement::Trigger(t) => t.execute.as_ref().is_some_and(|e| {
-                ability_tree_any(e, &|d| pump_matches_oracle(d, power, toughness))
+                ability_tree_any(e, &|d| pump_matches_oracle(d, power, toughness, perpetual))
             }),
             ParsedElement::Static(s) => {
                 static_has_pump_modification(std::slice::from_ref(s), power, toughness)
             }
             ParsedElement::Replacement(r) => r.execute.as_ref().is_some_and(|e| {
-                ability_tree_any(e, &|d| pump_matches_oracle(d, power, toughness))
+                ability_tree_any(e, &|d| pump_matches_oracle(d, power, toughness, perpetual))
             }),
         }
     }
@@ -9018,15 +9205,23 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     }
                 }
             } else {
+                // Admit a perpetual P/T modification only when this line actually
+                // says "perpetually" — a temporary "+N/+M until end of turn" that
+                // mis-lowered to a permanent `ApplyPerpetual` must still be flagged.
+                let perpetual = PerpetualPump::from_lower_line(&lower_for_pt);
                 let any_has_pump = if matched_via_split {
-                    matched.iter().all(|e| e.has_pump(power, toughness))
+                    matched
+                        .iter()
+                        .all(|e| e.has_pump(power, toughness, perpetual))
                 } else {
-                    matched.iter().any(|e| e.has_pump(power, toughness))
+                    matched
+                        .iter()
+                        .any(|e| e.has_pump(power, toughness, perpetual))
                         || modal_any(&|d: &AbilityDefinition| {
-                            pump_matches_oracle(d, power, toughness)
+                            pump_matches_oracle(d, power, toughness, perpetual)
                         })
                         || covered_ability_effect_type_any(&|d: &AbilityDefinition| {
-                            pump_matches_oracle(d, power, toughness)
+                            pump_matches_oracle(d, power, toughness, perpetual)
                         })
                 };
                 if !any_has_pump {
@@ -10192,7 +10387,121 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{BlockExceptionKind, ProhibitionScope};
-    use crate::types::zones::Zone;
+    use crate::types::zones::{EtbTapState, Zone};
+
+    #[test]
+    fn change_zone_signature_exposes_enters_attacking() {
+        // #5495: a parser change flipping `enters_attacking` (e.g. teaching
+        // `parse_battlefield_entry_qualifiers` to recognize "... onto the
+        // battlefield attacking", CR 508.4 — Senu) must be visible in the
+        // parse-diff signature; a plain ChangeZone has no such row.
+        let signature_keys = |attacking: bool| -> Vec<String> {
+            effect_details(&Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::None,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: attacking,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            })
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+        };
+        assert!(
+            signature_keys(true).iter().any(|k| k == "enters_attacking"),
+            "enters_attacking=true must appear in the parse-diff signature",
+        );
+        assert!(
+            !signature_keys(false)
+                .iter()
+                .any(|k| k == "enters_attacking"),
+            "a plain (non-attacking) ChangeZone must not add the row",
+        );
+    }
+
+    #[test]
+    fn prevent_damage_signature_exposes_damage_source_filter() {
+        // #5492: a change to `damage_source_filter` (e.g. unqualified
+        // `ChosenDamageSource` → `ChosenDamageSource { filter: Some(..) }`, the
+        // Circle/Rune of Protection cycles) must be visible to the
+        // coverage-parse-diff signature. When set, the field appears; when None
+        // it is omitted so unqualified prevention's signature is unchanged.
+        let signature_keys = |dsf: Option<TargetFilter>| -> Vec<String> {
+            effect_details(&Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: dsf,
+                prevention_duration: None,
+            })
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+        };
+        assert!(
+            signature_keys(Some(TargetFilter::Any))
+                .iter()
+                .any(|k| k == "damage_source_filter"),
+            "a set damage_source_filter must appear in the parse-diff signature",
+        );
+        assert!(
+            !signature_keys(None)
+                .iter()
+                .any(|k| k == "damage_source_filter"),
+            "an absent damage_source_filter must not appear",
+        );
+    }
+
+    #[test]
+    fn mana_signature_exposes_grants() {
+        use crate::types::ability::ManaContribution;
+        use crate::types::mana::ManaSpellGrant;
+
+        // #5507: a `ManaSpellGrant` attached to produced mana (e.g. Hall of the
+        // Bandit Lord's creature-spell haste rider, #5502) is parser-alterable but
+        // was swallowed by `..`. It must appear in the mana signature when set and
+        // be absent when the grants list is empty, so unqualified mana signatures
+        // stay byte-identical. (Mirrors #5493/#5501.)
+        let signature_keys = |grants: Vec<ManaSpellGrant>| -> Vec<String> {
+            effect_details(&Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::White, ManaColor::Blue],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants,
+                expiry: None,
+                target: None,
+            })
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+        };
+        assert!(
+            signature_keys(vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                keyword: Keyword::Haste,
+                restriction: None,
+                duration: Box::new(Duration::UntilEndOfTurn),
+            }])
+            .iter()
+            .any(|k| k == "grants"),
+            "a set ManaSpellGrant must appear in the mana parse-diff signature",
+        );
+        assert!(
+            !signature_keys(vec![]).iter().any(|k| k == "grants"),
+            "an empty grants list must not appear (unqualified mana signature unchanged)",
+        );
+    }
 
     fn make_obj() -> GameObject {
         GameObject::new(
@@ -11688,6 +11997,90 @@ mod tests {
                 |f| matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "counter")
             ),
             "ChooseOneOf counter branches should satisfy counter parameter audit: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_pump_parameter_perpetual_gated_by_oracle_line() {
+        use crate::types::ability::PerpetualModification;
+
+        // "[object] perpetually gets +N/+M" lowers to
+        // `Effect::ApplyPerpetual{ModifyPowerToughness}`, not a top-level
+        // `Effect::Pump`. The pump-parameter audit must accept that delta — but
+        // ONLY when the line says "perpetually". A temporary "+N/+M until end of
+        // turn" that mis-lowered to a permanent `ApplyPerpetual` (a real duration
+        // bug) must still be flagged, so the audit stays discriminating.
+        let perpetual_pump = |power_delta: i32, toughness_delta: i32| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ApplyPerpetual {
+                    target: TargetFilter::Any,
+                    modification: PerpetualModification::ModifyPowerToughness {
+                        power_delta,
+                        toughness_delta,
+                    },
+                },
+            )
+        };
+        let pump_findings = |findings: &[SemanticFinding]| {
+            findings
+                .iter()
+                .filter(|f| {
+                    matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "pump")
+                })
+                .count()
+        };
+
+        // Discrimination, at the gating authority itself: the same
+        // `ApplyPerpetual{+1/+1}` satisfies a "+1/+1" line ONLY when the line is
+        // perpetual. This is the arm the review asked to be gated — proving the
+        // Disallowed branch rejects it is the whole point of the fix.
+        assert!(
+            pump_matches_oracle(&perpetual_pump(1, 1), 1, 1, PerpetualPump::Allowed),
+            "a perpetual line must accept ApplyPerpetual{{ModifyPowerToughness}}"
+        );
+        assert!(
+            !pump_matches_oracle(&perpetual_pump(1, 1), 1, 1, PerpetualPump::Disallowed),
+            "a temporary (non-perpetual) line must NOT be satisfied by a permanent ApplyPerpetual"
+        );
+
+        // End-to-end accept: a perpetual line whose only effect is the perpetual
+        // pump produces no spurious pump WrongParameter.
+        let perpetual_line = "This creature perpetually gets +1/+1.";
+        let mut perpetual_face = make_face();
+        perpetual_face.oracle_text = Some(perpetual_line.to_string());
+        perpetual_face.abilities.push(perpetual_pump(1, 1));
+        assert_eq!(
+            pump_findings(&audit_card_lines(perpetual_line, &perpetual_face)),
+            0,
+            "perpetual line + ApplyPerpetual must satisfy the pump audit"
+        );
+
+        // Delta discrimination (at the gating authority): even on a perpetual
+        // line, an ApplyPerpetual whose delta does not match the "+N/+M" text is
+        // rejected — the arm compares the deltas, it does not blanket-accept
+        // ApplyPerpetual. Together with the accept above this proves the +1/+1
+        // acceptance passes for the right reason, not vacuously.
+        assert!(
+            !pump_matches_oracle(&perpetual_pump(2, 2), 1, 1, PerpetualPump::Allowed),
+            "a perpetual ApplyPerpetual delta that does not match the +N/+M text must be rejected"
+        );
+
+        // End-to-end discrimination: a temporary "+N/+M until end of turn" line
+        // whose effect mis-lowered to a PERMANENT ApplyPerpetual is still flagged.
+        // The permanent effect no longer matches the temporary pump line, so it
+        // surfaces as a SilentDrop rather than being silently accepted as a valid
+        // pump — exactly the mislowering the review wanted the audit to keep
+        // catching, and proof that audit_card_lines does emit findings here (so
+        // the perpetual accept above is meaningful).
+        let temporary_line = "Target creature gets +1/+1 until end of turn.";
+        let mut temporary_face = make_face();
+        temporary_face.oracle_text = Some(temporary_line.to_string());
+        temporary_face.abilities.push(perpetual_pump(1, 1));
+        let temporary_findings = audit_card_lines(temporary_line, &temporary_face);
+        assert!(
+            !temporary_findings.is_empty(),
+            "a temporary +N/+M line mislowered to a permanent ApplyPerpetual must still be flagged: {temporary_findings:?}"
         );
     }
 

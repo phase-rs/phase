@@ -339,6 +339,7 @@ pub(super) fn finish_declare_attackers(
         });
         state.combat = None;
         super::layers::prune_end_of_combat_effects(state);
+        super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
         turns::advance_phase(state, events);
         Ok(turns::auto_advance(state, events))
     } else {
@@ -860,6 +861,7 @@ pub(super) fn handle_empty_attackers(
     });
     state.combat = None;
     super::layers::prune_end_of_combat_effects(state);
+    super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
     turns::advance_phase(state, events);
     Ok(turns::auto_advance(state, events))
 }

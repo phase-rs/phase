@@ -5,112 +5,163 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Spell",
-        "effect": {
-          "type": "Unimplemented",
-          "name": "unknown",
-          "description": "Haste"
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "cost": null,
-        "sub_ability": null,
-        "duration": null,
-        "description": "Haste",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
-      }
-    },
-    {
-      "PreLoweredTrigger": {
-        "mode": "ChangesZone",
-        "execute": {
+        "span": {
+          "first_line": 0,
+          "last_line": 2,
+          "start_byte": 0,
+          "end_byte": 245,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 0
+        }
+      },
+      "node": {
+        "PreLoweredSpell": {
           "kind": "Spell",
           "effect": {
-            "type": "GenericEffect",
-            "static_abilities": [
-              {
-                "mode": "Continuous",
-                "affected": {
-                  "type": "Typed",
-                  "type_filters": [
-                    "Creature"
-                  ],
-                  "controller": "You",
-                  "properties": [
-                    {
-                      "type": "Another"
-                    }
-                  ]
-                },
-                "modifications": [
-                  {
-                    "type": "AddPower",
-                    "value": 1
-                  },
-                  {
-                    "type": "AddToughness",
-                    "value": 0
-                  },
-                  {
-                    "type": "AddKeyword",
-                    "keyword": "Haste"
-                  }
-                ],
-                "condition": null,
-                "affected_zone": null,
-                "effect_zone": null,
-                "active_zones": [],
-                "characteristic_defining": false,
-                "description": "get +1/+0 and gain haste"
-              }
-            ],
-            "duration": "UntilEndOfTurn",
-            "target": null
+            "type": "Unimplemented",
+            "name": "unknown",
+            "description": "Haste"
           },
           "cost": null,
           "sub_ability": null,
-          "duration": "UntilEndOfTurn",
-          "description": null,
+          "duration": null,
+          "description": "Haste",
           "target_prompt": null,
           "condition": null,
           "optional_targeting": false,
           "optional": false,
           "forward_result": false
-        },
-        "valid_card": {
-          "type": "SelfRef"
-        },
-        "origin": null,
-        "destination": "Battlefield",
-        "trigger_zones": [
-          "Battlefield"
-        ],
-        "phase": null,
-        "optional": false,
-        "damage_kind": "Any",
-        "secondary": false,
-        "valid_target": null,
-        "valid_source": null,
-        "description": "When ~ enters, if its surge cost was paid, other creatures you control get +1/+0 and gain haste until end of turn.",
-        "constraint": null,
-        "condition": {
-          "type": "CastVariantPaid",
-          "variant": "Surge"
-        },
-        "batched": false
+        }
       }
     },
     {
-      "Keyword": {
-        "Surge": {
-          "type": "Cost",
-          "shards": [
-            "Red"
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 2,
+          "start_byte": 0,
+          "end_byte": 245,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 1
+        }
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "ChangesZone",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "GenericEffect",
+              "static_abilities": [
+                {
+                  "mode": "Continuous",
+                  "affected": {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Creature"
+                    ],
+                    "controller": "You",
+                    "properties": [
+                      {
+                        "type": "Another"
+                      }
+                    ]
+                  },
+                  "modifications": [
+                    {
+                      "type": "AddPower",
+                      "value": 1
+                    },
+                    {
+                      "type": "AddToughness",
+                      "value": 0
+                    },
+                    {
+                      "type": "AddKeyword",
+                      "keyword": "Haste"
+                    }
+                  ],
+                  "condition": null,
+                  "affected_zone": null,
+                  "effect_zone": null,
+                  "active_zones": [],
+                  "characteristic_defining": false,
+                  "description": "get +1/+0 and gain haste"
+                }
+              ],
+              "duration": "UntilEndOfTurn",
+              "target": null
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": "UntilEndOfTurn",
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "valid_card": {
+            "type": "SelfRef"
+          },
+          "origin": null,
+          "destination": "Battlefield",
+          "trigger_zones": [
+            "Battlefield"
           ],
-          "generic": 1
+          "phase": null,
+          "optional": false,
+          "damage_kind": "Any",
+          "secondary": false,
+          "valid_target": null,
+          "valid_source": null,
+          "description": "When ~ enters, if its surge cost was paid, other creatures you control get +1/+0 and gain haste until end of turn.",
+          "constraint": null,
+          "condition": {
+            "type": "CastVariantPaid",
+            "variant": "Surge"
+          },
+          "batched": false
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 2,
+          "start_byte": 0,
+          "end_byte": 245,
+          "precision": "WholeDocument",
+          "ordinal_within_span": 2
+        }
+      },
+      "node": {
+        "Keyword": {
+          "Surge": {
+            "type": "Cost",
+            "shards": [
+              "Red"
+            ],
+            "generic": 1
+          }
         }
       }
     }

@@ -1129,6 +1129,11 @@ pub(crate) enum MultiZoneExileQuantifier {
 pub(crate) enum UtilityImperativeAst {
     Prevent {
         text: String,
+        /// CR 608.2c: true when an earlier clause in the same effect chain
+        /// selected a target this clause's anaphor can bind to. Captured from
+        /// `ctx.parent_target_available` at the one construction site where
+        /// `ParseContext` is live (issue #1094).
+        parent_target_available: bool,
     },
     Regenerate {
         text: String,

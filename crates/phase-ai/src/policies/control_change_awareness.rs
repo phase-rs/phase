@@ -23,9 +23,18 @@ use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::features::DeckFeatures;
 
-/// Severe penalty for activating an ability that gives away the AI's own permanents.
-/// This should be enough to make PassPriority win over such activations.
-const CONTROL_CHANGE_PENALTY: f64 = -100.0;
+/// Severe penalty for activating an ability that gives away the AI's own
+/// permanents. Sits at the bottom of the critical band (`-CRITICAL_MAX`) — the
+/// strongest finite discouragement the score contract allows, enough for
+/// PassPriority (0) to win, without a hard `Reject` (giving away a permanent is
+/// contextually not always wrong, e.g. Donate combos / liability permanents, so
+/// this stays an overridable penalty rather than a veto). Issue #5473: this was
+/// a raw -100.0 sentinel that bypassed the band helpers and tripped the
+/// registry's critical-band assert once scaled.
+///
+/// Note: pinned at the critical ceiling, this branch is inert to `activation()`
+/// tuning — `-CRITICAL_MAX × any activation` re-bands back to `-CRITICAL_MAX`.
+const CONTROL_CHANGE_PENALTY: f64 = -super::registry::CRITICAL_MAX;
 
 pub struct ControlChangeAwarenessPolicy;
 
@@ -166,11 +175,13 @@ fn control_change_verdict(
     }
 
     if gives_away_permanent {
-        // Apply severe penalty for giving away own permanents
-        PolicyVerdict::Score {
-            delta: CONTROL_CHANGE_PENALTY,
-            reason: PolicyReason::new("control_change_gives_away_permanent"),
-        }
+        // Apply severe penalty for giving away own permanents. Route through the
+        // critical() band helper (CR-equivalent score contract) rather than a
+        // raw Score literal so the delta stays clamped to the critical band.
+        PolicyVerdict::critical(
+            CONTROL_CHANGE_PENALTY,
+            PolicyReason::new("control_change_gives_away_permanent"),
+        )
     } else {
         PolicyVerdict::Score {
             delta: 0.0,
