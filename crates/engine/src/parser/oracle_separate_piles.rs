@@ -187,7 +187,10 @@ fn rewrite_sub_effect_target_to_parent(effect: &mut Effect) {
 /// CR 700.3 + CR 701.20a: Parse the "Reveal the top N cards ... An opponent
 /// separates ... Put one pile into [zone] and the other into [zone]" shape.
 /// Builds for the class: any reveal-top-N → opponent-separates → zone-routing
-/// card (Fact or Fiction, Steam Augury, Epiphany at the Drownyard, etc.).
+/// card with a FIXED reveal count (Fact or Fiction, Steam Augury, etc.).
+/// `PileSource::RevealedFromLibraryTop { count: u32 }` holds a fixed count, so
+/// variable-count members like Epiphany at the Drownyard ("top X cards") are
+/// not representable here yet.
 fn try_parse_reveal_separate(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
     // Sentence 1: "Reveal the top N cards of your library."
     let (rest, count) = parse_reveal_top_sentence(text)?;
@@ -279,7 +282,8 @@ fn parse_opponent_separates_sentence(input: &str) -> Option<(&str, VoterScope)> 
 /// returns (chosen_zone, unchosen_zone). Also accepts "the rest" and handles
 /// both zone orderings.
 fn parse_pile_disposition_sentence(input: &str) -> Option<(Zone, Zone)> {
-    // CR 700.3c: The controller chooses which pile to put where.
+    // CR 700.3 + card text: the pile the controller selects is put into their
+    // chosen zone (hand), the unchosen pile into the other named zone.
     let res: nom::IResult<&str, (), OracleError<'_>> =
         value((), tag_no_case("put one pile into your ")).parse(input);
     let (rest, ()) = res.ok()?;
