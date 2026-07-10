@@ -1986,7 +1986,14 @@ def requested_changes_expiry_state(
     current_head_changes_requested = review_decision == "CHANGES_REQUESTED" and (
         latest_commit is None or latest_commit == head
     )
-    active = local_block or current_head_changes_requested
+    # "Has this head ever been blocked?" is a property of the log's history, not of its
+    # last row. `local_block` only inspects the newest event, so once we post the stale
+    # warning that warning becomes the newest event and erases the block — `active` would
+    # drop to False and the warning could never mature into a close. Consult the first
+    # block recorded for this head instead.
+    first_block_event = packet.get("local_first_block_event")
+    head_ever_blocked = local_block or bool(first_block_event)
+    active = head_ever_blocked or current_head_changes_requested
     warning = latest_requested_changes_warning(packet)
     warning_timestamp = (warning or {}).get("timestamp")
     author_followup_after_warning = author_activity_after(pr, warning_timestamp)
@@ -1999,10 +2006,9 @@ def requested_changes_expiry_state(
     blocker_timestamp = None
     if current_head_changes_requested:
         blocker_timestamp = latest_requested_changes_review_timestamp(packet)
-    if blocker_timestamp is None and local_block:
-        blocker_timestamp = (
-            packet.get("local_first_block_event") or packet.get("local_current_event") or {}
-        ).get("timestamp")
+    if blocker_timestamp is None and head_ever_blocked:
+        anchor = first_block_event or (packet.get("local_current_event") if local_block else None)
+        blocker_timestamp = (anchor or {}).get("timestamp")
     blocker_age = age_in_days(blocker_timestamp)
     warning_age = age_in_days(warning_timestamp)
     warning_due = (

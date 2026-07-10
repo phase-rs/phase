@@ -286,6 +286,61 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(recommendation["advisory_action"], "warn_stale_changes_for_handler")
         self.assertEqual(recommendation["reason"], "requested_changes_warning_due")
 
+    def test_posted_warning_does_not_orphan_a_local_only_block(self) -> None:
+        """The warning event must not erase the block it was posted about.
+
+        `local_block` reads only the newest event. Once the stale-changes warning is
+        recorded it becomes the newest event, so a head blocked only in the local log
+        (no formal CHANGES_REQUESTED) would flip `active` to False and its warning
+        could never mature into a close.
+        """
+        packet = {
+            "acting_login": "maintainer",
+            "pr": {
+                "number": 4805,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": None,
+                "isInMergeQueue": False,
+                "comments": [],
+                "reviews": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            # Newest event is the warning we posted 8 days ago — NOT a block.
+            "local_current_event": {
+                "event_type": "requested_changes_warning",
+                "outcome": "requested_changes_warning",
+                "head_sha": "head",
+                "timestamp": self._days_ago(8),
+            },
+            "local_first_block_event": {
+                "event_type": "blocked",
+                "outcome": "blocked",
+                "head_sha": "head",
+                "timestamp": self._days_ago(16),
+            },
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        state = pr_review.requested_changes_expiry_state(packet, local_block=False, author_followup_after_local_event=False)
+
+        self.assertTrue(state["active"], "a local-only block must survive its own warning")
+        self.assertEqual(state["blocker_timestamp"], packet["local_first_block_event"]["timestamp"])
+        self.assertTrue(state["close_due"], "warning older than close_after_warning_days must close")
+
+        recommendation = pr_review.recommend_from_packet(packet)
+        self.assertEqual(recommendation["advisory_action"], "close_stale_changes_for_handler")
+
     def test_fresh_formal_review_restarts_expiry_clock(self) -> None:
         """A NEW CHANGES_REQUESTED on the same head restarts the window (GitHub wins)."""
         packet = {
