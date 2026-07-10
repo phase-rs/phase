@@ -10,9 +10,10 @@ use engine::ai_support::{auto_pass_recommended, legal_actions_for_viewer, legal_
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::{
-    apply, resolve_all_fast_forward, ResolveAllCallbackDecision,
+    apply, apply_for_simulation, resolve_all_fast_forward, ResolveAllCallbackDecision,
     ResolveAllFastForwardResult as BatchResolveResult,
 };
+use engine::game::preview::compute_preview_diff;
 use engine::game::{
     can_pair_commanders, deck_copy_limit_for, estimate_bracket, evaluate_deck_compatibility,
     filter_state_for_viewer, finalize_public_state, is_brawl_commander_eligible,
@@ -1210,6 +1211,46 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
     }) {
         Ok(val) => val,
         Err(_) => JsValue::NULL,
+    }
+}
+
+/// Issue #5468: non-mutating dry-run of `action` for `actor`. Runs the action on
+/// a throwaway clone (the live `GAME_STATE` is never touched) and returns the
+/// PUBLIC deltas — life-total changes and public-zone object transitions — a
+/// viewer could observe, for hover-preview UX ("this kills that", "you take 4").
+///
+/// Hidden-zone movements never leak: the diff is taken over
+/// `filter_state_for_viewer` snapshots AND restricted to public zones (see
+/// `engine::game::preview`), so draws, random discards from hand, and library
+/// shuffles are elided even for the acting player's opponents. Returns an error
+/// string when `action` is malformed or illegal in the current state.
+#[wasm_bindgen]
+pub fn preview_action_js(actor: u8, action: JsValue) -> JsValue {
+    let action: GameAction = match serde_wasm_bindgen::from_value(action) {
+        Ok(a) => a,
+        Err(e) => {
+            return JsValue::from_str(&format!("Engine error: failed to deserialize action: {e}"));
+        }
+    };
+    let actor = PlayerId(actor);
+    match with_state(|state| {
+        // Simulate on a throwaway clone. `apply_for_simulation` is the same rules
+        // resolution the AI look-ahead uses; it mutates only `sim`, never the
+        // live `GAME_STATE` this closure borrows immutably.
+        let mut sim = state.clone();
+        engine::game::layers::flush_layers(&mut sim);
+        let before = filter_state_for_viewer(&sim, actor);
+        match apply_for_simulation(&mut sim, actor, action) {
+            Ok(_) => {
+                let after = filter_state_for_viewer(&sim, actor);
+                Ok(compute_preview_diff(&before, &after))
+            }
+            Err(e) => Err(format!("Engine error: {e}")),
+        }
+    }) {
+        Ok(Ok(diff)) => to_js(&diff),
+        Ok(Err(msg)) => JsValue::from_str(&msg),
+        Err(e) => e,
     }
 }
 
