@@ -2457,26 +2457,48 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // "sorcery spell", "creature card". When the core type is already Instant/Sorcery/etc.,
     // the word is informational — consuming it allows suffix parsers (e.g., "that targets only")
     // and event verb parsers to see what follows.
+    // Tracks whether the left leg ended in a "card"/"cards" noun — the discriminator
+    // that a following article-led "or a <type> card" is a card-type disjunction
+    // (Overlord of the Balemurk, #5331) rather than an elided-verb "you control X
+    // or a Y" clause the condition layer folds one level up (which must stay as
+    // `parse_type_phrase` remainder — `parse_type_phrase_leaves_article_led_or_rhs_as_remainder`).
+    let mut left_card_suffix = false;
     if card_type.is_some() && !matches!(card_type, Some(TypeFilter::Card) | Some(TypeFilter::Any)) {
         let rest_trimmed = lower[pos..].trim_start();
         let ws_len = lower[pos..].len() - rest_trimmed.len();
         // CR 108.1: "spell" and "card" are informational suffixes after a typed qualifier.
-        // Longest-match-first ordering (plurals before singular).
-        static REDUNDANT_SUFFIXES: &[&str] = &["spells ", "spell ", "cards ", "card "];
+        // Longest-match-first ordering (plurals before singular). The paired flag
+        // records whether the consumed noun was "card"/"cards" (vs "spell") — a
+        // card-type disjunction whose article-led RHS is a sibling type, not an
+        // elided-verb clause. Data-driven so the discriminator comes from the
+        // matched tag, not from string inspection of the suffix.
+        static REDUNDANT_SUFFIXES: &[(&str, bool)] = &[
+            ("spells ", false),
+            ("spell ", false),
+            ("cards ", true),
+            ("card ", true),
+        ];
         let mut consumed_suffix = false;
-        for suffix in REDUNDANT_SUFFIXES {
+        for (suffix, is_card) in REDUNDANT_SUFFIXES {
             if let Ok((after, _)) = tag::<_, _, OracleError<'_>>(*suffix).parse(rest_trimmed) {
                 let suffix_len = rest_trimmed.len() - after.len();
                 pos += ws_len + suffix_len;
                 consumed_suffix = true;
+                left_card_suffix = *is_card;
                 break;
             }
         }
         if !consumed_suffix {
             // Check end-of-input variants (no trailing space)
-            for suffix in &["spells", "spell", "cards", "card"] {
+            for (suffix, is_card) in &[
+                ("spells", false),
+                ("spell", false),
+                ("cards", true),
+                ("card", true),
+            ] {
                 if rest_trimmed == *suffix {
                     pos += ws_len + suffix.len();
+                    left_card_suffix = *is_card;
                     break;
                 }
             }
@@ -2515,7 +2537,28 @@ pub fn parse_type_phrase_with_ctx<'a>(
             let can_recurse = if separator.starts_with(',') {
                 starts_with_or_article_type_segment(after_trimmed)
             } else {
+                // CR 205.3a: a bare "and"/"or" disjunct may lead with an article
+                // ("non-Avatar creature card or *a* planeswalker card" — Overlord
+                // of the Balemurk, #5331). The comma path already accepts that via
+                // `starts_with_or_article_type_segment`; without it here the
+                // second disjunct is silently dropped and the card can only return
+                // creatures, never planeswalkers. `starts_with_type_word` still
+                // covers the article-less form ("creature or planeswalker card").
+                //
+                // The article-led form is gated on `left_card_suffix`: only a
+                // "<type> card or a <type> card" disjunction folds here. Without
+                // the "card" noun, an article-led "or a <type>" is an elided-verb
+                // clause ("you control an artifact creature or a Plan") that the
+                // condition layer (`parse_you_control_a`) folds one level up, so it
+                // must remain as remainder (asserted by
+                // `parse_type_phrase_leaves_article_led_or_rhs_as_remainder`).
+                // A BARE-card RHS ("or a card with disturb" — Shipwreck Sifters)
+                // is a keyword-membership branch folded at the trigger layer, not a
+                // type union, so it is excluded even though the left carried "card".
                 starts_with_type_word(after_trimmed)
+                    || (left_card_suffix
+                        && !is_article_led_bare_card(after_trimmed)
+                        && starts_with_or_article_type_segment(after_trimmed))
             };
             if can_recurse {
                 let sep_text = &text[pos + rest_offset + separator.len()..];
@@ -2549,7 +2592,29 @@ pub fn parse_type_phrase_with_ctx<'a>(
                     left_extras,
                 );
                 let combined = merge_or_filters(left, other_filter);
-                let combined = distribute_shared_properties(combined, &properties);
+                // CR 105.1 + CR 205.2: an article-led disjunct ("… or *an*
+                // artifact creature card") is a syntactically self-contained noun
+                // phrase, so the left leg's leading adjective properties
+                // (color/supertype/tapped — the leg-local set in
+                // `is_adjective_prefix_prop`) bind only to the left noun and must
+                // NOT distribute onto it. "red creature card or an artifact
+                // creature card" (Purphoros, Bronze-Blooded) does not require the
+                // artifact creature to be red — distributing `HasColor(Red)` would
+                // wrongly reject a colorless artifact creature. A bare disjunct
+                // ("… or creature") shares the left adjectives, unchanged.
+                let right_is_article_led = alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))
+                    .parse(after_trimmed)
+                    .is_ok();
+                let shared_props: Vec<FilterProp> = if right_is_article_led {
+                    properties
+                        .iter()
+                        .filter(|prop| !is_adjective_prefix_prop(prop))
+                        .cloned()
+                        .collect()
+                } else {
+                    properties.clone()
+                };
+                let combined = distribute_shared_properties(combined, &shared_props);
                 let combined = distribute_controller_to_or(combined);
                 let combined = distribute_core_type_to_or(combined);
                 let combined = distribute_neg_type_filters_to_or(combined);
@@ -3478,6 +3543,19 @@ fn starts_with_or_article_type_segment(text: &str) -> bool {
         return starts_with_article_core_type_segment(rest);
     }
     starts_with_type_phrase_lead(text)
+}
+
+/// True when `text` is an article-led BARE-card segment: "a/an card(s) …" with
+/// no type word before the "card" noun (e.g. "a card with disturb", Shipwreck
+/// Sifters). Such a disjunct is a keyword/predicate-membership branch folded at
+/// the trigger layer, NOT a card-*type* union like Overlord of the Balemurk's
+/// "a planeswalker card" (#5331) — so the type-disjunction splitter must not
+/// swallow it. `parse_card_or_cards_word` word-bounds "card"/"cards", so a typed
+/// lead ("a planeswalker card") returns false here.
+fn is_article_led_bare_card(text: &str) -> bool {
+    alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))
+        .parse(text.trim_start())
+        .is_ok_and(|(rest, _)| parse_card_or_cards_word(rest).is_ok())
 }
 
 fn starts_with_article_core_type_segment(text: &str) -> bool {
@@ -11253,6 +11331,77 @@ mod tests {
             other => panic!("expected Or filter, got {other:?}"),
         }
         assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn creature_card_or_a_planeswalker_card_keeps_both_disjuncts() {
+        // #5331 (Overlord of the Balemurk): "non-Avatar creature card or a
+        // planeswalker card" — the second disjunct leads with an article ("or *a*
+        // planeswalker card"), which the bare "or"/"and" separator previously
+        // rejected, silently dropping the planeswalker leg so the card could only
+        // return creatures. Both legs must survive.
+        let (f, _rest) = parse_type_phrase("non-Avatar creature card or a planeswalker card");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2, "both disjuncts kept: {filters:?}");
+                let has = |t: TypeFilter| {
+                    filters.iter().any(|leg| {
+                        matches!(leg, TargetFilter::Typed(tf) if tf.type_filters.contains(&t))
+                    })
+                };
+                assert!(
+                    has(TypeFilter::Creature),
+                    "creature leg present: {filters:?}"
+                );
+                assert!(
+                    has(TypeFilter::Planeswalker),
+                    "planeswalker leg present: {filters:?}"
+                );
+            }
+            other => panic!("expected Or with both disjuncts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn article_led_card_disjunct_does_not_inherit_left_leg_color() {
+        // Purphoros, Bronze-Blooded: "a red creature card or an artifact creature
+        // card". CR 105.1 + CR 205.2: the leading "red" binds only to the creature
+        // leg; the article-led "an artifact creature card" is an independent noun
+        // phrase and must NOT inherit `HasColor(Red)` — otherwise a colorless
+        // artifact creature (e.g. Ornithopter) would be wrongly rejected.
+        let (f, _rest) = parse_type_phrase("red creature card or an artifact creature card");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2, "both disjuncts kept: {filters:?}");
+        let has_red = |tf: &TypedFilter| {
+            tf.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    FilterProp::HasColor {
+                        color: ManaColor::Red
+                    }
+                )
+            })
+        };
+        for leg in &filters {
+            let TargetFilter::Typed(tf) = leg else {
+                panic!("expected Typed legs, got {leg:?}");
+            };
+            if tf.type_filters.contains(&TypeFilter::Artifact) {
+                assert!(
+                    !has_red(tf),
+                    "artifact-creature leg must NOT require red: {:?}",
+                    tf.properties
+                );
+            } else {
+                assert!(
+                    has_red(tf),
+                    "creature leg must keep its red requirement: {:?}",
+                    tf.properties
+                );
+            }
+        }
     }
 
     #[test]
