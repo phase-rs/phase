@@ -24,11 +24,12 @@ mod prelude {
     };
     pub(super) use super::super::oracle_ir::context::ParseContext;
     pub(super) use super::super::oracle_ir::static_ir::StaticIr;
-    pub(super) use super::super::oracle_nom::bridge::nom_on_lower;
+    pub(super) use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
     pub(super) use super::super::oracle_nom::condition as nom_condition;
     pub(super) use super::super::oracle_nom::error::OracleResult;
     pub(super) use super::super::oracle_nom::filter as nom_filter;
     pub(super) use super::super::oracle_nom::primitives as nom_primitives;
+    pub(super) use super::super::oracle_nom::quantity as nom_quantity;
     pub(super) use super::super::oracle_nom::target as nom_target;
     pub(super) use super::super::oracle_quantity::{
         parse_cda_quantity, parse_event_context_quantity, parse_for_each_clause, parse_quantity_ref,

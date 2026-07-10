@@ -2137,7 +2137,7 @@ fn parse_scoped_zone_ref(input: &str) -> OracleResult<'_, (ZoneRef, CountScope)>
 /// templating used "its" exclusively, so admitting the gendered forms here
 /// keeps the whole "his/her/their <characteristic>" class on one path rather
 /// than special-casing one card.
-fn parse_self_possessive(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_self_possessive(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((

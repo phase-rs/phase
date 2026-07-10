@@ -1140,7 +1140,9 @@ pub(crate) fn parse_dynamic_pt_in_text(
     // Run whose effect text has no binding clause — the X is bound to the
     // cost, not to a derived quantity.
     let quantity = match where_x_expression {
-        Some(wx) => parse_cda_quantity(wx).or_else(|| parse_event_context_quantity(wx))?,
+        Some(wx) => parse_cda_quantity(wx)
+            .or_else(|| parse_event_context_quantity(wx))
+            .or_else(|| parse_source_intensity_where_x(wx))?,
         None => QuantityExpr::Ref {
             qty: QuantityRef::CostXPaid,
         },
@@ -1182,6 +1184,30 @@ pub(crate) fn parse_dynamic_pt_in_text(
     }
 
     Some(mods)
+}
+
+/// Digital-only Alchemy (Arena): "where X is <source>'s intensity" — a dynamic
+/// P/T pump that scales by the STATIC's own source object's intensity (Minthara
+/// of the Absolute, Teysa of the Ghost Council, Quickbeast Amulet). The
+/// self-possessive axis reuses [`nom_quantity::parse_self_possessive`]
+/// (its / ~'s / this creature's / …) rather than enumerating verbatim strings;
+/// `normalize_card_name_refs` funnels every card-name and permanent-type
+/// self-reference to `~` upstream, so `~'s intensity` is the form the static
+/// parser actually receives. `QuantityRef::Intensity { scope: Source }` is fully
+/// evaluated at runtime by `game::quantity`, so this is a grammar-only seam that
+/// reuses existing modeling.
+fn parse_source_intensity_where_x(wx: &str) -> Option<QuantityExpr> {
+    nom_parse_lower(wx.trim().trim_end_matches('.').trim(), |i| {
+        value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::Intensity {
+                    scope: ObjectScope::Source,
+                },
+            },
+            terminated(nom_quantity::parse_self_possessive, tag(" intensity")),
+        )
+        .parse(i)
+    })
 }
 
 pub(crate) fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
