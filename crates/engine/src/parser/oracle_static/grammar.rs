@@ -1580,6 +1580,13 @@ pub(crate) fn parse_pt_mod_with_remainder(input: &str) -> OracleResult<'_, (i32,
 /// nom combinator doesn't handle (it requires explicit +/- signs).
 pub(crate) fn parse_pt_mod(text: &str) -> Option<(i32, i32)> {
     let text = text.trim();
+    // CR 613.4c: consume an optional "an additional " qualifier ("gets an
+    // additional +N/+M" — Taste for Mayhem, Divine Sacrament, Patriarch's Desire,
+    // Strange Augmentation). It marks a second Layer 7c grant stacked on the base
+    // modification but carries no P/T semantics of its own, so the underlying
+    // +N/+M is parsed identically (the enclosing gate is attached separately).
+    let lower = text.to_lowercase();
+    let text = nom_tag_lower(text, &lower, "an additional ").unwrap_or(text);
     // Try the nom combinator first — handles +N/+M, -N/-M, +N/-M patterns.
     if let Ok((_, (p, t))) = nom_primitives::parse_pt_modifier.parse(text) {
         return Some((p, t));

@@ -27302,3 +27302,55 @@ fn subgoyf_cda_power_is_bare_count_toughness_is_count_plus_one() {
         def.modifications
     );
 }
+
+/// CR 613.4c: "gets/get an additional +N/+M" is a second Layer 7c additive P/T
+/// grant. The "an additional " qualifier is consumed by `parse_pt_mod`; the
+/// underlying +N/+M and the enclosing "as long as <cond>" gate parse as usual.
+#[test]
+fn an_additional_pt_grant_parses_with_gate() {
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "Hellbent — Enchanted creature gets an additional +2/+0 as long as you have no cards in hand.",
+            "Taste for Mayhem",
+            "AddPower { value: 2 }",
+        ),
+        (
+            "Threshold — White creatures get an additional +1/+1 as long as there are seven or more cards in your graveyard.",
+            "Divine Sacrament",
+            "AddPower { value: 1 }",
+        ),
+        (
+            "Delirium — Enchanted creature gets an additional +2/+2 as long as there are four or more card types among cards in your graveyard.",
+            "Strange Augmentation",
+            "AddToughness { value: 2 }",
+        ),
+    ];
+    for (line, name, needle) in cases {
+        let statics = super::shared::parse_static_line_multi(line);
+        assert!(
+            !statics.is_empty(),
+            "{name}: expected a static, got none for {line:?}"
+        );
+        let dump = format!("{statics:?}");
+        assert!(dump.contains(needle), "{name}: expected {needle} in {dump}");
+        assert!(
+            dump.contains("condition: Some"),
+            "{name}: expected an attached 'as long as' condition, got {dump}"
+        );
+        assert!(
+            !dump.contains("Unrecognized"),
+            "{name}: condition must be a recognized StaticCondition, got {dump}"
+        );
+    }
+}
+
+/// The bare (ungated) "an additional +N/+M" grant also parses — the qualifier is
+/// consumed regardless of an enclosing condition.
+#[test]
+fn an_additional_pt_grant_bare_parses() {
+    let statics =
+        super::shared::parse_static_line_multi("Enchanted creature gets an additional +2/+0.");
+    assert_eq!(statics.len(), 1, "expected exactly one static: {statics:?}");
+    let dump = format!("{statics:?}");
+    assert!(dump.contains("AddPower { value: 2 }"), "got {dump}");
+}
