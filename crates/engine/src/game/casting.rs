@@ -13695,6 +13695,20 @@ pub(super) fn find_non_self_exile(
     }
 }
 
+/// CR 701.3d + CR 608.2k: Detect a non-self `UnattachFrom` activation cost
+/// (Captain America's Throw) requiring an interactive "unattach a matching
+/// attachment from the source" selection. Returns `(count, filter)`. The
+/// source-self `Unattach` unit variant returns `None` — it detaches the source
+/// Equipment itself and is auto-paid, never surfaced interactively. Recurses
+/// into `Composite`, mirroring `find_non_self_exile`.
+pub(super) fn find_unattach_from_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+    match cost {
+        AbilityCost::UnattachFrom { filter, count } => Some((*count, filter)),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_unattach_from_cost),
+        _ => None,
+    }
+}
+
 /// CR 117.1 + CR 601.2b: Detect an `ExileWithAggregate` activation cost (Baron
 /// Helmut Zemo's Boast) requiring an interactive "exile any number reaching the
 /// aggregate threshold" selection. Returns a borrowed view of its parameters.
@@ -13868,6 +13882,38 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
                 .unwrap_or_default()
         }
     }
+}
+
+/// CR 701.3d + CR 601.2b + CR 202.3: Battlefield attachments controlled by
+/// `player`, currently attached to `source`, matching `filter`, whose mana value
+/// is at least `n`. Mirrors `find_eligible_exile_for_cost_targets`. The `n`
+/// mana-value floor implements the divided-damage legality gate (CR 601.2c/M1):
+/// the chosen Equipment's mana value is the total damage divided among the
+/// announced targets, so it must be >= the target count. Pass `n = 0` for the
+/// generic eligibility count (no floor).
+pub(crate) fn find_eligible_unattach_for_cost_targets(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    filter: &TargetFilter,
+    n: u32,
+) -> Vec<ObjectId> {
+    let ctx = super::filter::FilterContext::from_source(state, source);
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            let Some(obj) = state.objects.get(&id) else {
+                return false;
+            };
+            // CR 701.3d: only attachments currently attached to the source host.
+            obj.controller == player
+                && obj.attached_to.and_then(|t| t.as_object()) == Some(source)
+                && obj.effective_mana_value() >= n
+                && super::filter::matches_target_filter(state, id, filter, &ctx)
+        })
+        .collect()
 }
 
 fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
@@ -15464,6 +15510,11 @@ pub fn handle_activate_ability(
         pending_target.activation_cost = ability_def.cost.clone();
         pending_target.activation_ability_index = Some(ability_index);
         pending_target.target_constraints = target_constraints;
+        // CR 601.2d: propagate the divided-effect flag so a targeted activated
+        // ability that divides damage/counters among its targets (Captain
+        // America's Throw) reaches the `DistributeAmong` step after its costs are
+        // paid. Mirrors the spell target-selection path (`pending_targets.distribute`).
+        pending_target.distribute = ability_def.distribute.clone();
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending_target),

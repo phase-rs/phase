@@ -1795,6 +1795,117 @@ pub(crate) fn handle_sacrifice_for_cost(
     Ok(waiting_for)
 }
 
+/// CR 701.3d + CR 608.2k + CR 601.2d: Complete a non-self `UnattachFrom` cost
+/// (Captain America's Throw) after the player selects which attachment(s) to
+/// unattach. Validates each chosen object is still a controlled battlefield
+/// attachment on the source matching `filter`, snapshots the first as the
+/// cost-referent BEFORE detaching (CR 608.2k — "that Equipment's mana value"),
+/// detaches them (CR 701.3d — the Equipment stays on the battlefield), then
+/// re-surfaces the deferred damage division now that the divided total is known
+/// (CR 601.2d). Mirrors `handle_sacrifice_for_cost`, but the object is detached
+/// rather than destroyed and stays on the battlefield.
+pub(crate) fn handle_unattach_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    filter: &TargetFilter,
+    mut pending: PendingCast,
+    choices: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 601.2h: at least one attachment must be chosen (the detour sets
+    // min_count == count, so an empty selection is an illegal partial payment).
+    if chosen.is_empty() {
+        return Err(EngineError::InvalidAction(
+            "Must unattach at least one attachment to pay the cost".to_string(),
+        ));
+    }
+    let ctx = super::filter::FilterContext::from_source(state, pending.object_id);
+    for &id in chosen {
+        if !choices.contains(&id) {
+            return Err(EngineError::InvalidAction(
+                "Selected attachment not eligible to unattach".to_string(),
+            ));
+        }
+        let Some(obj) = state.objects.get(&id) else {
+            return Err(EngineError::InvalidAction(
+                "Attachment not found for unattach cost".to_string(),
+            ));
+        };
+        // CR 701.3d: must still be a controlled battlefield attachment on the
+        // source that matches the cost's filter.
+        if obj.zone != Zone::Battlefield
+            || obj.controller != player
+            || obj.attached_to.and_then(|t| t.as_object()) != Some(pending.object_id)
+            || !super::filter::matches_target_filter(state, id, filter, &ctx)
+        {
+            return Err(EngineError::InvalidAction(
+                "Attachment no longer eligible to unattach".to_string(),
+            ));
+        }
+    }
+
+    // CR 608.2k + CR 400.7j: capture the detached object's public characteristics
+    // BEFORE it leaves the source, stamping it onto the resolving ability as the
+    // cost-paid-object referent for "that Equipment's mana value".
+    if let Some(&first) = chosen.first() {
+        if let Some(snapshot) = state.objects.get(&first).map(|obj| CostPaidObjectSnapshot {
+            object_id: first,
+            lki: obj.snapshot_for_mana_spent(),
+        }) {
+            pending
+                .ability
+                .set_cost_paid_object_recursive(snapshot.clone());
+            // Gated to spell casts only (same guard as `handle_sacrifice_for_cost`):
+            // an activation's `object_id` is the source permanent, whose own cast
+            // provenance must not be overwritten. Captain America's Throw is an
+            // activation, so this stamp is skipped.
+            if pending.activation_ability_index.is_none() {
+                if let Some(spell_obj) = state.objects.get_mut(&pending.object_id) {
+                    spell_obj.cast_cost_paid_object = Some(snapshot);
+                }
+            }
+        }
+    }
+
+    // CR 701.3d: detach each chosen attachment; the Equipment stays on the
+    // battlefield (only the attachment link is cleared).
+    for &id in chosen {
+        if let Some(old_target) = super::effects::attach::unattach(state, id) {
+            events.push(GameEvent::Unattached {
+                attachment_id: id,
+                old_target,
+            });
+        }
+    }
+
+    // CR 601.2d + CR 608.2k: if this ability divides an effect among targets
+    // (Captain America's Throw), the divided total (the unattached Equipment's
+    // mana value) is only knowable now, after the cost is paid. Re-surface the
+    // division with the resolved total; the pending cast — with its activation
+    // index intact — resumes via the DistributeAmong handler, which pays the
+    // residual mana leg. Mirrors `maybe_pause_for_cast_distribution`.
+    if let Some(unit) = pending.distribute.clone() {
+        if let Some(total) = super::casting_targets::extract_distribution_total(
+            state,
+            &pending.ability,
+            &pending.ability.effect,
+        ) {
+            let targets = super::ability_utils::distribution_targets(&pending.ability);
+            state.pending_cast = Some(Box::new(pending));
+            return Ok(WaitingFor::DistributeAmong {
+                player,
+                total,
+                targets,
+                unit,
+            });
+        }
+    }
+
+    // Generic `UnattachFrom` with no division: finish the cost/cast normally.
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
 /// CR 118.3 + CR 601.2b: Complete return-to-hand-as-cost after player selection.
 pub(crate) fn handle_return_to_hand_for_cost(
     state: &mut GameState,
@@ -2971,7 +3082,15 @@ pub(super) fn push_activated_ability_to_stack(
     // before target selection in handle_activate_ability.
     let target_slots = build_target_slots(state, &resolved)?;
     let assigned_targets = flatten_targets_in_chain(&resolved);
-    if !target_slots.is_empty() && assigned_targets.len() >= target_slots.len() {
+    // CR 601.2d: A divided-effect ability whose `distribution` is already
+    // announced has finalized its targets (a legal "up to N" division may fill
+    // fewer target slots than exist — Captain America's Throw picks 1 of 3), so
+    // it is ready to go on the stack even though `assigned_targets.len()` is below
+    // `target_slots.len()`. Without this the re-check would wrongly re-open target
+    // selection and drop the announced division.
+    if !target_slots.is_empty()
+        && (assigned_targets.len() >= target_slots.len() || resolved.distribution.is_some())
+    {
         emit_targeting_events(state, &assigned_targets, source_id, player, events);
         return push_ability_entry(state, player, source_id, ability_index, resolved, events);
     }

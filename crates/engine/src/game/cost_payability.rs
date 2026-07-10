@@ -530,6 +530,18 @@ impl AbilityCost {
                         .any(|subtype| subtype == "Equipment")
                     && obj.attached_to.is_some()
             }),
+            // CR 701.3d + CR 601.2b: An unattach-from cost is payable iff the
+            // source controls >= `count` battlefield attachments matching `filter`
+            // currently attached to it. The generic eligibility count uses `n = 0`
+            // (no mana-value floor); the divided-damage MV>=N narrowing lives in
+            // the interactive detour (`find_eligible_unattach_for_cost_targets`).
+            AbilityCost::UnattachFrom { filter, count } => {
+                super::casting::find_eligible_unattach_for_cost_targets(
+                    state, player, source, filter, 0,
+                )
+                .len()
+                    >= *count as usize
+            }
             // CR 701.13b: A player can mill fewer than N cards if their library
             // has fewer than N; the cost is always payable.
             AbilityCost::Mill { .. } => true,

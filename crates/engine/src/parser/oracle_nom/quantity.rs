@@ -669,6 +669,9 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_cost_paid_object_ref,
             parse_cost_paid_object_prepositional_ref,
             parse_cost_paid_object_chosen_revealed_ref,
+            // CR 608.2k + CR 202.3: "that Equipment's mana value" (Captain
+            // America's Throw) — demonstrative back-reference to the paid attachment.
+            parse_cost_paid_object_demonstrative_ref,
         )),
         parse_event_context_refs,
     ))
@@ -2644,6 +2647,34 @@ fn parse_cost_paid_object_chosen_revealed_ref(input: &str) -> OracleResult<'_, Q
         ObjectProperty::ManaValue | ObjectProperty::ManaSymbolCount(_) => {
             return Err(oracle_err(input))
         }
+    };
+    Ok((rest, qty))
+}
+
+/// CR 608.2k + CR 202.3: Demonstrative back-reference to the attachment paid as
+/// this ability's cost. "that Equipment's mana value" / "that Aura's power" —
+/// "that <attachment-type>" points at the object unattached (or otherwise paid)
+/// as the cost (Captain America's Throw: "Unattach an Equipment from ~ … that
+/// Equipment's mana value"). Restricted to attachment subtypes (Equipment / Aura
+/// / Fortification) so it never collides with target demonstratives like "that
+/// creature". Resolves against the same `ObjectScope::CostPaidObject` referent as
+/// the participle possessive form above.
+fn parse_cost_paid_object_demonstrative_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("that ").parse(input)?;
+    let (rest, _) = alt((tag("equipment"), tag("aura"), tag("fortification"))).parse(rest)?;
+    let (rest, property) = parse_object_property_possessive_suffix(rest)?;
+    let qty = match property {
+        ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
+            scope: ObjectScope::CostPaidObject,
+        },
+        ObjectProperty::Power => QuantityRef::Power {
+            scope: ObjectScope::CostPaidObject,
+        },
+        ObjectProperty::Toughness => QuantityRef::Toughness {
+            scope: ObjectScope::CostPaidObject,
+        },
+        // `parse_object_property_possessive_suffix` never emits ManaSymbolCount.
+        ObjectProperty::ManaSymbolCount(_) => return Err(oracle_err(input)),
     };
     Ok((rest, qty))
 }
@@ -9515,5 +9546,40 @@ mod tests {
             panic!("expected typed filter");
         };
         assert!(tf.properties.contains(&FilterProp::NonToken));
+    }
+
+    #[test]
+    fn parse_that_equipments_mana_value_is_cost_paid_object() {
+        // CR 608.2k + CR 202.3: Captain America's Throw — "that Equipment's mana
+        // value" back-references the unattached (cost-paid) Equipment.
+        let (rest, q) = parse_quantity_ref("that equipment's mana value").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_that_creature_is_not_cost_paid_demonstrative() {
+        // Negative: the demonstrative cost-paid ref is restricted to attachment
+        // subtypes, so "that creature's mana value" must NOT resolve to a
+        // CostPaidObject demonstrative (it would otherwise shadow target refs).
+        let parsed = parse_quantity_ref("that creature's mana value");
+        assert!(
+            parsed.is_err()
+                || !matches!(
+                    parsed,
+                    Ok((
+                        _,
+                        QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::CostPaidObject
+                        }
+                    ))
+                ),
+            "\"that creature\" must not become a cost-paid demonstrative: {parsed:?}"
+        );
     }
 }

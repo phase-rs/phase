@@ -3033,6 +3033,16 @@ pub enum PayCostKind {
     ExileFromManaZone {
         zone: Zone,
     },
+    /// CR 701.3d + CR 601.2h: Unattach a matching attachment from the source
+    /// host as an activation cost (Captain America's Throw). `filter` is the
+    /// attachment-implying `TargetFilter` the choices were drawn from; the
+    /// handler re-validates that each chosen object is still on the battlefield,
+    /// controlled by the player, and attached to the source before detaching it.
+    /// The Equipment stays on the battlefield (CR 701.3d) and its snapshot
+    /// becomes the resolving ability's cost-referent (CR 608.2k).
+    UnattachFrom {
+        filter: TargetFilter,
+    },
     RemoveCounter {
         counter_type: CounterMatch,
         /// CR 118.3 + CR 122.1: number of counters to remove from the one
