@@ -109,6 +109,44 @@ pub(crate) fn resolve_pronoun_target(ctx: &mut ParseContext, pronoun: &str) -> T
     }
 }
 
+/// CR 608.2c: Recognize a demonstrative ("that creature"), definite-article
+/// ("the creature"), or bare-pronoun ("it") back-reference to a parent
+/// instruction's chosen target, in contexts where `resolve_pronoun_target`'s
+/// trigger-subject branch cannot apply (no live `ParseContext` at this call
+/// site — only the precomputed `parent_target_available` flag). Every
+/// verified card using this recognizer is a non-trigger activated ability or
+/// instant, so `ParentTarget` is the uniform correct answer; a future
+/// trigger-context card needing `TriggeringSource` should extend via
+/// `resolve_pronoun_target`'s ctx-threading instead of this function.
+/// Distinct from `parse_event_context_ref`'s "that creature" arm (which
+/// resolves to `TriggeringSource` for triggered-ability event context — the
+/// wrong filter for this non-trigger context).
+///
+/// Returns the bound filter and the remainder of the ORIGINAL-case `text`
+/// following the matched anaphor phrase.
+pub(crate) fn parse_anaphoric_target_ref(
+    text: &str,
+    parent_target_available: bool,
+) -> Option<(TargetFilter, &str)> {
+    if !parent_target_available {
+        return None;
+    }
+    // CR 608.2c: the anaphor grammar itself ("that <type>" / "the <type>" →
+    // `ParentTarget`, and bare word-bounded "it" → `ParentTarget` via
+    // `resolve_pronoun_target`'s default-context fallthrough) is authoritatively
+    // implemented by `parse_target` — reuse that single implementation rather
+    // than re-deriving the same rule here. `parse_target` is the ctx-free
+    // wrapper (default `ParseContext`), so no live trigger subject exists and
+    // the bare-pronoun/demonstrative back-reference uniformly resolves to
+    // `ParentTarget` — exactly the non-trigger semantics this call site needs.
+    // Accept only when the leading phrase actually resolved to the parent
+    // target; a fresh typed filter or the `Any` fallback means the text was not
+    // an anaphor, and this recognizer must decline (preserving the old
+    // combinator's None-on-no-match contract).
+    let (filter, rest) = parse_target(text);
+    matches!(filter, TargetFilter::ParentTarget).then_some((filter, rest))
+}
+
 /// Parse a word with a word boundary check: the next char after the word must be
 /// non-alphanumeric (whitespace, comma, period, etc.) or end-of-input.
 /// Prevents "it" from matching "item", "you" from matching "your", etc.

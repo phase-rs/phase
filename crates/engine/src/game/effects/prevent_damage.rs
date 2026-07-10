@@ -127,6 +127,13 @@ pub(crate) fn resolve_source_filter(
             }
             TargetFilter::Typed(resolved)
         }
+        // CR 608.2c + CR 615: a bare ParentTarget damage-source filter (the "by"
+        // half of a bidirectional Maze-of-Ith-class shield) captures the same
+        // object the parent's own instruction selected, exactly like
+        // ParentTargetSlot but without an explicit index. Issue #1094.
+        TargetFilter::ParentTarget => crate::game::effects::first_object_target(ability_targets)
+            .map(|id| TargetFilter::SpecificObject { id })
+            .unwrap_or(TargetFilter::None),
         _ => filter.clone(),
     }
 }
@@ -233,13 +240,20 @@ pub fn resolve(
     // source filter. Those targets are the damage SOURCE, not a recipient — so
     // the shield must NOT be hosted on them as a recipient object. It routes to
     // the untargeted branch (pending registry) scoped via `damage_source_filter`.
-    let source_scoped_prevent = matches!(
-        &effect_source_filter,
-        Some(TargetFilter::And { filters })
-            if filters
-                .iter()
-                .any(|f| matches!(f, TargetFilter::ParentTargetSlot { .. }))
-    );
+    //
+    // CR 615 + CR 608.2c (issue #1094): the "by"-only half of a bidirectional
+    // Maze-of-Ith-class shield carries a bare `ParentTarget` source filter (the
+    // chosen creature IS the damage source, not a recipient). Same routing: the
+    // shield is source-scoped, so it must NOT be hosted on the creature as a
+    // recipient object (which would wrongly re-impose "recipient == creature").
+    let source_scoped_prevent =
+        matches!(
+            &effect_source_filter,
+            Some(TargetFilter::And { filters })
+                if filters
+                    .iter()
+                    .any(|f| matches!(f, TargetFilter::ParentTargetSlot { .. }))
+        ) || matches!(&effect_source_filter, Some(TargetFilter::ParentTarget));
 
     // CR 615.11: A dynamic prevention amount is resolved to a concrete depletion
     // count at effect-resolution time; the Next(n) shield itself is always static.

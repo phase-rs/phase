@@ -46,9 +46,9 @@ use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
-    parse_event_context_ref, parse_fight_target, parse_mass_type_union, parse_target,
-    parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase, parse_word_bounded,
-    resolve_pronoun_target, TargetSyntax,
+    parse_anaphoric_target_ref, parse_event_context_ref, parse_fight_target, parse_mass_type_union,
+    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase,
+    parse_word_bounded, resolve_pronoun_target, TargetSyntax,
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
@@ -4796,6 +4796,11 @@ pub(super) fn parse_utility_imperative_ast(
         return match verb {
             "prevent" => Some(UtilityImperativeAst::Prevent {
                 text: text.to_string(),
+                // CR 608.2c: capture whether an earlier chain clause selected a
+                // target for a trailing anaphor ("that creature"/"it") to bind
+                // to. This is the one construction site where `ParseContext` is
+                // live; downstream lowering has only the captured flag.
+                parent_target_available: ctx.parent_target_available,
             }),
             "regenerate" => Some(UtilityImperativeAst::Regenerate {
                 text: text.to_string(),
@@ -5322,7 +5327,10 @@ fn parse_attach_anaphor_to_token(
 
 pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect {
     match ast {
-        UtilityImperativeAst::Prevent { text } => parse_prevent_effect(&text),
+        UtilityImperativeAst::Prevent {
+            text,
+            parent_target_available,
+        } => parse_prevent_effect(&text, parent_target_available),
         UtilityImperativeAst::Regenerate { text } => {
             let lower = text.to_lowercase();
             let rest = tag::<_, _, OracleError<'_>>("regenerate ")
@@ -5351,6 +5359,36 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
     }
 }
 
+/// CR 615.1a: decompose the prevention amount from the LOCAL parser stream
+/// (`rest`, positioned just past "prevent ") with nom combinators. "all but "
+/// must be tried before the bare "all " arm because it shares that prefix.
+/// Shared by `parse_prevent_effect` and `try_parse_bidirectional_prevent`
+/// (issue #1094) so amount detection lives in one authority.
+pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
+    if let Ok((after_all_but, _)) = tag::<_, _, OracleError<'_>>("all but ").parse(rest) {
+        let n = nom_primitives::parse_number
+            .parse(after_all_but)
+            .map(|(_, n)| n)
+            .unwrap_or(1);
+        PreventionAmount::AllBut(n)
+    } else if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
+        PreventionAmount::All
+    } else if let Ok((after_next, _)) = tag::<_, _, OracleError<'_>>("the next ").parse(rest) {
+        let n = nom_primitives::parse_number
+            .parse(after_next)
+            .map(|(_, n)| n)
+            .unwrap_or(1);
+        PreventionAmount::Next(n)
+    } else {
+        // Fallback: try to extract a number.
+        let n = nom_primitives::parse_number
+            .parse(rest)
+            .map(|(_, n)| n)
+            .unwrap_or(1);
+        PreventionAmount::Next(n)
+    }
+}
+
 /// CR 615: Parse "prevent" damage effects into `Effect::PreventDamage`.
 ///
 /// Handles patterns like:
@@ -5358,7 +5396,12 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
 /// - "prevent all damage that would be dealt this turn"
 /// - "prevent all combat damage that would be dealt this turn"
 /// - "prevent the next N damage that would be dealt to target creature"
-fn parse_prevent_effect(text: &str) -> Effect {
+///
+/// CR 608.2c: `parent_target_available` reflects whether an earlier clause in
+/// the same effect chain selected a target that a trailing anaphor ("that
+/// creature" / "the creature" / "it") can bind to via `ParentTarget`. When
+/// false the anaphor recognizer is a no-op and the target falls back to `Any`.
+fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
     let lower = text.to_lowercase();
     let rest = tag::<_, _, OracleError<'_>>("prevent ")
         .parse(&*lower)
@@ -5383,32 +5426,7 @@ fn parse_prevent_effect(text: &str) -> Effect {
             .map(|(_, d, _)| d);
 
     // Determine amount: "all damage" vs "all but N" vs "the next N damage".
-    // CR 615.1a: decompose the prevention amount from the LOCAL parser stream
-    // (`rest`, positioned just past "prevent ") with nom combinators. "all but "
-    // must be tried before the bare "all " arm because it shares that prefix.
-    let amount =
-        if let Ok((after_all_but, _)) = tag::<_, _, OracleError<'_>>("all but ").parse(rest) {
-            let n = nom_primitives::parse_number
-                .parse(after_all_but)
-                .map(|(_, n)| n)
-                .unwrap_or(1);
-            PreventionAmount::AllBut(n)
-        } else if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
-            PreventionAmount::All
-        } else if let Ok((after_next, _)) = tag::<_, _, OracleError<'_>>("the next ").parse(rest) {
-            let n = nom_primitives::parse_number
-                .parse(after_next)
-                .map(|(_, n)| n)
-                .unwrap_or(1);
-            PreventionAmount::Next(n)
-        } else {
-            // Fallback: try to extract a number
-            let n = nom_primitives::parse_number
-                .parse(rest)
-                .map(|(_, n)| n)
-                .unwrap_or(1);
-            PreventionAmount::Next(n)
-        };
+    let amount = parse_prevention_amount(rest);
 
     // CR 609.7 + CR 615.2: prevention scoped to a chosen source (a targeted
     // spell). "Prevent all damage target instant or sorcery spell would deal
@@ -5452,6 +5470,16 @@ fn parse_prevent_effect(text: &str) -> Effect {
         || nom_primitives::scan_contains(rest, "to its controller")
     {
         TargetFilter::Controller
+    } else if let Some(anaphor_filter) = TextPair::new(text, &lower)
+        .strip_after("dealt to ")
+        .and_then(|tp| parse_anaphoric_target_ref(tp.original, parent_target_available))
+        .map(|(filter, _)| filter)
+    {
+        // CR 608.2c: "prevent [amount] damage that would be dealt to that
+        // creature/it/the creature this turn" — a single-direction anaphor
+        // bound to a target an earlier clause selected. Strict superset of the
+        // prior `Any` fallback (only reached when `parent_target_available`).
+        anaphor_filter
     } else {
         // Default: "that would be dealt" with no specific target → Any
         TargetFilter::Any
@@ -10875,8 +10903,21 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause
         }
         ImperativeFamilyAst::Structured(ImperativeAst::Utility(
-            UtilityImperativeAst::Prevent { ref text },
+            UtilityImperativeAst::Prevent {
+                ref text,
+                parent_target_available,
+            },
         )) => {
+            // CR 615 + CR 608.2c (issue #1094): a bidirectional "dealt to and
+            // dealt by <anaphor>" shield must split into two independent
+            // PreventDamage nodes — tried FIRST, before the distribute path
+            // (mutually exclusive markers: no card combines "distributed among"
+            // with "dealt to and dealt by").
+            if let Some(clause) =
+                super::lower::try_parse_bidirectional_prevent(text, parent_target_available)
+            {
+                return clause;
+            }
             if let Some(clause) = super::lower::try_parse_prevent_distribute(text) {
                 return clause;
             }
@@ -10884,7 +10925,10 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             // lower_utility_imperative_ast is defined in THIS file (imperative.rs),
             // called unqualified — NOT super::lower::lower_utility_imperative_ast.
             parsed_clause(lower_utility_imperative_ast(
-                UtilityImperativeAst::Prevent { text: text.clone() },
+                UtilityImperativeAst::Prevent {
+                    text: text.clone(),
+                    parent_target_available,
+                },
             ))
         }
         // CR 701.58a: "cloak a card from your hand" (Vannifar). The controller
@@ -18470,6 +18514,7 @@ mod tests {
     fn prevent_source_scoped_spell_yields_parent_target_slot_filter() {
         let effect = parse_prevent_effect(
             "Prevent all damage target instant or sorcery spell would deal this turn.",
+            false,
         );
         let Effect::PreventDamage {
             amount,
@@ -18514,6 +18559,7 @@ mod tests {
     fn prevent_recipient_scoped_creature_not_diverted_to_source() {
         let effect = parse_prevent_effect(
             "Prevent the next 3 damage that would be dealt to target creature this turn.",
+            false,
         );
         let Effect::PreventDamage {
             amount,
@@ -18542,6 +18588,7 @@ mod tests {
     fn prevent_that_other_creatures_would_deal_scopes_source_filter() {
         let effect = parse_prevent_effect(
             "Prevent all combat damage that other creatures would deal this turn.",
+            false,
         );
         let Effect::PreventDamage {
             amount,
@@ -18593,7 +18640,7 @@ mod tests {
             ),
         ];
         for (text, expected) in cases {
-            let effect = parse_prevent_effect(text);
+            let effect = parse_prevent_effect(text, false);
             let Effect::PreventDamage {
                 prevention_duration,
                 ..

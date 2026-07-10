@@ -18,7 +18,8 @@ use super::super::oracle_quantity::{
     parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_with_ctx,
+    parse_anaphoric_target_ref, parse_target, parse_target_with_ctx, parse_that_clause_suffix,
+    parse_type_phrase_with_ctx,
 };
 use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
 use crate::parser::oracle_ir::ast::*;
@@ -6749,6 +6750,97 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
     })
 }
 
+/// CR 615.1a + CR 608.2c: Parse "prevent [amount] [combat] damage
+/// that would be dealt to and dealt by <anaphor> this turn" — the
+/// bidirectional shield CR 615's AND-only shield semantics cannot express as
+/// one node (`Effect::PreventDamage`'s `target` + `damage_source_filter`
+/// combine with AND semantics: recipient==X AND source==Y, never recipient==X
+/// OR source==X). Splits into two independent `PreventDamage` nodes chained via
+/// `SequentialSibling` — a recipient-scoped ("to") shield and a
+/// source-scoped-only ("by") shield with no recipient restriction. Called from
+/// the Prevent intercept arm in `lower_imperative_family_ast` BEFORE
+/// `try_parse_prevent_distribute` — mutually exclusive markers in the corpus
+/// (no card combines "distributed among" with "dealt to and dealt by").
+/// Issue #1094 (Maze of Ith).
+pub(super) fn try_parse_bidirectional_prevent(
+    text: &str,
+    parent_target_available: bool,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    // Quick-reject via the bidirectional marker before spending parse effort.
+    if !scan_contains_phrase(&lower, "dealt to and dealt by") {
+        return None;
+    }
+    // Parse "prevent " prefix and position `rest` just past it.
+    let (rest, _) = tag::<_, _, OracleError<'_>>("prevent ")
+        .parse(lower.as_str())
+        .ok()?;
+
+    // CR 615: scope — combat damage only vs all damage (mirrors
+    // `parse_prevent_effect`'s own scope detection exactly).
+    let scope = if nom_primitives::scan_contains(rest, "combat damage") {
+        PreventionScope::CombatDamage
+    } else {
+        PreventionScope::AllDamage
+    };
+
+    // CR 615.1a: shared amount detection (issue #1094 factored this out of
+    // `parse_prevent_effect` so both paths agree).
+    let amount = super::imperative::parse_prevention_amount(rest);
+
+    // CR 511.2 + CR 615: trailing duration window ("this turn" -> end of turn).
+    let prevention_duration =
+        nom_primitives::scan_preceded(rest, parse_duration).map(|(_, d, _)| d);
+
+    // CR 608.2c: isolate the anaphor phrase following the bidirectional marker
+    // and bind it to the parent's chosen target. `parse_anaphoric_target_ref`
+    // returns `None` when `parent_target_available` is false — the load-bearing
+    // gate (a standalone "dealt to and dealt by that creature" with no prior
+    // target-selecting clause must NOT split into ParentTarget shields).
+    let anaphor_tp = TextPair::new(text, &lower).strip_after("dealt to and dealt by ")?;
+    let (anaphor_filter, _) =
+        parse_anaphoric_target_ref(anaphor_tp.original, parent_target_available)?;
+
+    // CR 615: the recipient ("to") shield — scoped to the chosen creature as
+    // the damage RECIPIENT (target: ParentTarget, no source restriction).
+    let to_effect = Effect::PreventDamage {
+        amount,
+        amount_dynamic: None,
+        target: anaphor_filter.clone(),
+        scope,
+        damage_source_filter: None,
+        prevention_duration: prevention_duration.clone(),
+    };
+
+    // CR 615: the source-only ("by") shield — scoped to the chosen creature as
+    // the damage SOURCE (target: Any, damage_source_filter: ParentTarget). A
+    // SequentialSibling: an independent following instruction in the same
+    // resolution, not a per-event rider.
+    let mut by_ability = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic: None,
+            target: TargetFilter::Any,
+            scope,
+            damage_source_filter: Some(anaphor_filter),
+            prevention_duration,
+        },
+    );
+    by_ability.sub_link = SubAbilityLink::SequentialSibling;
+
+    Some(ParsedEffectClause {
+        effect: to_effect,
+        duration: None,
+        sub_ability: Some(Box::new(by_ability)),
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 /// Thin wrapper around `try_parse_damage_with_remainder` for callers that don't
 /// need the remainder (e.g., `parse_cost_resource_ast`). The remainder is only
 /// safely discardable when `try_split_damage_compound` has already run and found
@@ -9648,6 +9740,71 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 615 (issue #1094): the bidirectional interceptor must NOT claim a
+    /// "distributed among" clause — it lacks the "dealt to and dealt by"
+    /// marker, so `try_parse_bidirectional_prevent` returns `None` and the
+    /// distribute path (tried next in the family arm) still owns it. Regression
+    /// guard on the step-9 ordering.
+    #[test]
+    fn bidirectional_prevent_ignores_distribute_clause() {
+        let text =
+            "prevent the next 5 damage divided as you choose among any number of target creatures";
+        assert!(
+            super::try_parse_bidirectional_prevent(text, true).is_none(),
+            "distribute clause must not be claimed by the bidirectional interceptor"
+        );
+        // And the distribute path still parses it (ordering safety).
+        assert!(super::try_parse_prevent_distribute(text).is_some());
+    }
+
+    /// CR 615 + CR 608.2c (issue #1094): the bidirectional split with the gate
+    /// enabled produces a recipient ("to") node bound to `ParentTarget` and a
+    /// source-only ("by") SequentialSibling with `damage_source_filter ==
+    /// Some(ParentTarget)`. Driven at the interceptor level so the two-node
+    /// structure is asserted directly.
+    #[test]
+    fn bidirectional_prevent_splits_into_to_and_by_nodes() {
+        use crate::types::ability::{PreventionScope, SubAbilityLink, TargetFilter};
+        let text =
+            "prevent all combat damage that would be dealt to and dealt by that creature this turn";
+        let clause = super::try_parse_bidirectional_prevent(text, true)
+            .expect("bidirectional split with gate enabled");
+        match &clause.effect {
+            Effect::PreventDamage {
+                target,
+                damage_source_filter,
+                scope,
+                ..
+            } => {
+                assert_eq!(*target, TargetFilter::ParentTarget);
+                assert!(damage_source_filter.is_none());
+                assert_eq!(*scope, PreventionScope::CombatDamage);
+            }
+            other => panic!("expected 'to' PreventDamage, got {other:?}"),
+        }
+        let by = clause.sub_ability.as_deref().expect("'by' sub_ability");
+        assert_eq!(by.sub_link, SubAbilityLink::SequentialSibling);
+        match &*by.effect {
+            Effect::PreventDamage {
+                target,
+                damage_source_filter,
+                ..
+            } => {
+                assert_eq!(*target, TargetFilter::Any);
+                assert_eq!(
+                    damage_source_filter.as_ref(),
+                    Some(&TargetFilter::ParentTarget)
+                );
+            }
+            other => panic!("expected 'by' PreventDamage, got {other:?}"),
+        }
+        // Gate off ⇒ no split.
+        assert!(
+            super::try_parse_bidirectional_prevent(text, false).is_none(),
+            "gate false ⇒ interceptor is a no-op"
+        );
     }
 
     /// CR 400.7 + CR 700.4: A per-turn VALUE quantity's " this turn" suffix must
