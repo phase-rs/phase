@@ -2017,14 +2017,20 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let offset = lower.len() - lower_trimmed.len();
     pos += offset;
 
-    // Strip leading article ("a "/"an ") when followed by a recognized type word.
-    // Guard: "an opponent" → "opponent" fails type word check → no stripping.
+    // Strip leading article ("a "/"an ") when followed by a recognized type word
+    // or the "commander" class. Guard: "an opponent" → "opponent" fails type word
+    // check → no stripping. CR 903.3: "commander" is recognized by the commander
+    // atom below (it pushes `IsCommander`), not by `starts_with_type_phrase_lead`,
+    // so the article guard must also accept it — otherwise "a commander you own"
+    // (Hellkite Courser, #5256) keeps its article and never reaches the atom,
+    // collapsing to a match-anything filter. "commander you own" / "target
+    // commander" already work; this makes the indefinite article compose too.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a ").parse(&lower[pos..]) {
-        if starts_with_type_phrase_lead(rest) {
+        if starts_with_type_phrase_lead(rest) || starts_with_commander_word(rest) {
             pos += "a ".len();
         }
     } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("an ").parse(&lower[pos..]) {
-        if starts_with_type_phrase_lead(rest) {
+        if starts_with_type_phrase_lead(rest) || starts_with_commander_word(rest) {
             pos += "an ".len();
         }
     }
@@ -3455,6 +3461,18 @@ fn classify_negation(negated: &str) -> NegationResult {
             NegationResult::Type(TypeFilter::Non(Box::new(inner)))
         }
     }
+}
+
+/// CR 903.3 + CR 108.3: does `text` start with the "commander"/"commanders"
+/// class word (word-bounded)? Commander is not a card type or subtype — it is a
+/// per-object `IsCommander` flag recognized by the commander atom in
+/// `parse_type_phrase_with_ctx` — so `starts_with_type_phrase_lead` deliberately
+/// does not report it. The indefinite-article guard uses this to strip "a "/"an "
+/// before a commander subject ("a commander you own", Hellkite Courser).
+fn starts_with_commander_word(text: &str) -> bool {
+    alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander")))
+        .parse(text)
+        .is_ok_and(|(after, _)| after.is_empty() || after.starts_with([' ', ',', '.', ';']))
 }
 
 /// Guard: does text start with something `parse_type_phrase` would recognize?
@@ -8162,6 +8180,46 @@ mod tests {
             }
             other => panic!("expected Typed filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn indefinite_article_commander_lowers_with_is_commander() {
+        // CR 903.3: Hellkite Courser (#5256) — "put a commander you own from the
+        // command zone onto the battlefield". The indefinite article "a" must be
+        // stripped so the commander atom fires; before this it fell through to a
+        // match-anything `Any` filter (the reanimation put-path lost the subject).
+        let (f, rest) = parse_target("a commander you own from the command zone");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: None,
+                properties: vec![
+                    FilterProp::IsCommander,
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Command,
+                    },
+                ],
+                ..Default::default()
+            }),
+            "'a commander you own from the command zone' must lower to \
+             Typed{{IsCommander, Owned{{You}}, InZone{{Command}}}}, not Any"
+        );
+        assert_eq!(rest, "");
+
+        // Bare "a commander" (no suffix) still carries IsCommander, mirroring the
+        // "a creature card" indefinite form — not the empty match-anything filter.
+        let (bare, _) = parse_target("a commander");
+        assert_eq!(
+            bare,
+            TargetFilter::Typed(TypedFilter {
+                controller: None,
+                properties: vec![FilterProp::IsCommander],
+                ..Default::default()
+            }),
+        );
     }
 
     #[test]
