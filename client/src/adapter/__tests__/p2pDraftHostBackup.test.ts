@@ -17,7 +17,7 @@ import { saveDraftHostSession } from "../../services/draftPersistence";
 
 describe("P2PDraftHost server backup", () => {
   const BACKUP_URL = "https://backup.example";
-  const draftingView: DraftPlayerView = {
+  const draftingView = {
     status: "Drafting",
     pick_number: 1,
     seats: [
@@ -27,7 +27,7 @@ describe("P2PDraftHost server backup", () => {
     current_pack: [],
     pairings: [],
     current_round: 1,
-  } as DraftPlayerView;
+  } as unknown as DraftPlayerView;
 
   let fetchMock: ReturnType<typeof vi.fn>;
 
