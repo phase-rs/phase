@@ -7866,6 +7866,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only Alchemy: "conjure a card of your choice from [X]'s spellbook
+    // [+ destination]" — the "conjure ... of your choice" wording of the same
+    // draft-from-spellbook operation.
+    if let Some(effect) = try_parse_conjure_from_spellbook(tp) {
+        return parsed_clause(effect);
+    }
+
     // Digital-only: "conjure a duplicate of <reference> into/onto zone" — copies a
     // referenced card. Tried before the named form (disjoint: this requires
     // "a duplicate of", the other "named ").
@@ -8734,6 +8741,51 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
     // Unmodeled tail ("twice, then …", a trailing chained clause, …) — leave it
     // to `Unimplemented` rather than dropping the rider.
     None
+}
+
+/// Digital-only Alchemy keyword action: parse "conjure a card of your choice from
+/// [X]'s spellbook [+ destination]". This is the "conjure ... of your choice" wording of
+/// the same operation as `draft a card from [X]'s spellbook`: reveal the source card's
+/// spellbook, the controller chooses one card, and it is created in the destination zone.
+/// Both map to `Effect::DraftFromSpellbook` — the resolver reads the spellbook list from the
+/// source object, so the printed source name in the text is irrelevant. The clause tail must
+/// be fully consumed (mirroring `try_parse_spellbook_draft`) so an unmodeled rider falls
+/// through to `Unimplemented` rather than parsing to a subtly wrong effect.
+///
+/// Coupling note: this mapping is correct while `Effect::DraftFromSpellbook` offers the
+/// controller the *entire* spellbook to choose from, which is exactly what "a card of your
+/// choice" means. (In Arena, `draft a card from ... spellbook` presents three random cards,
+/// whereas "conjure a card of your choice" reveals the whole book.) If `DraftFromSpellbook`
+/// is ever narrowed to model the real three-card draft, these conjure-of-your-choice cards
+/// must retain the whole-book choice rather than following it.
+fn try_parse_conjure_from_spellbook(tp: TextPair) -> Option<Effect> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("conjure a card of your choice from ")
+        .parse(tp.lower)
+        .ok()?;
+    // Consume the (irrelevant) source-card name up to "spellbook".
+    let (after_book, _src) = take_until::<_, _, OracleError<'_>>("spellbook")
+        .parse(rest)
+        .ok()?;
+    let (after_book, _) = tag::<_, _, OracleError<'_>>("spellbook")
+        .parse(after_book)
+        .ok()?;
+
+    // Destination via the shared conjure-zone parser; " tapped" only after the battlefield.
+    let (destination, zone_rest) = parse_conjure_zone(after_book)?;
+    let (tail, tapped) = if destination == Zone::Battlefield {
+        match tag::<_, _, OracleError<'_>>(" tapped").parse(zone_rest) {
+            Ok((tail, _)) => (tail, true),
+            Err(_) => (zone_rest, false),
+        }
+    } else {
+        (zone_rest, false)
+    };
+    // Fully consume the tail (nothing or a trailing period) so an unmodeled rider falls
+    // through to `Unimplemented` rather than being silently dropped.
+    (tail.is_empty() || tail == ".").then_some(Effect::DraftFromSpellbook {
+        destination,
+        tapped,
+    })
 }
 
 /// Digital-only keyword action: Parse "conjure [quantity] card(s) named {Name} into/onto {zone}"

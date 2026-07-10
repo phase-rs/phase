@@ -32456,6 +32456,63 @@ fn conjure_quantity_graveyard() {
 }
 
 #[test]
+fn conjure_of_your_choice_from_spellbook_onto_battlefield() {
+    // "conjure a card of your choice from [X] spellbook onto the battlefield" is the
+    // "conjure ... of your choice" wording of draft-from-spellbook (digital-only Alchemy);
+    // it maps to the same Effect::DraftFromSpellbook as "draft a card from ~'s spellbook".
+    let e = parse_effect(
+        "conjure a card of your choice from the Planets Spellbook onto the battlefield",
+    );
+    match e {
+        Effect::DraftFromSpellbook {
+            destination,
+            tapped,
+        } => {
+            assert_eq!(destination, Zone::Battlefield);
+            assert!(!tapped);
+        }
+        other => panic!("expected DraftFromSpellbook, got: {other:?}"),
+    }
+}
+
+#[test]
+fn conjure_of_your_choice_from_spellbook_apostrophe_source() {
+    // The printed source name ("Follow the Tracks's spellbook") is irrelevant -- the
+    // resolver reads the spellbook list from the source object, not the text.
+    let e = parse_effect(
+        "conjure a card of your choice from Follow the Tracks's spellbook onto the battlefield",
+    );
+    assert!(matches!(
+        e,
+        Effect::DraftFromSpellbook {
+            destination: Zone::Battlefield,
+            tapped: false
+        }
+    ));
+}
+
+#[test]
+fn conjure_of_your_choice_from_spellbook_into_library() {
+    let e =
+        parse_effect("conjure a card of your choice from the Paradigm Spellbook into your library");
+    assert!(matches!(
+        e,
+        Effect::DraftFromSpellbook {
+            destination: Zone::Library,
+            tapped: false
+        }
+    ));
+}
+
+#[test]
+fn conjure_of_your_choice_from_spellbook_bare_form_is_not_parsed() {
+    // Every printed card states a destination; a bare form (no zone) is left to fall
+    // through rather than defaulting to a zone the text did not name.
+    let e = parse_effect("conjure a card of your choice from the Planets Spellbook");
+    assert!(!matches!(e, Effect::DraftFromSpellbook { .. }));
+}
+
+#[test]
 fn conjure_battlefield_tapped() {
     let e = parse_effect("conjure a card named Forest onto the battlefield tapped");
     match e {
