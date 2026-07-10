@@ -2768,8 +2768,35 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ChooseDamageSource { source_filter } => {
             d.push(("source".into(), fmt_target(source_filter)));
         }
-        Effect::Mana { produced, .. } => {
+        Effect::Mana {
+            produced,
+            restrictions,
+            grants,
+            expiry,
+            target,
+        } => {
+            // #5507 (third instance after #5492/#5495): the mana effect rendered
+            // only `produced`, swallowing `restrictions`/`grants`/`expiry`/`target`
+            // with `..`. So a parser change that attaches a `ManaSpellGrant` to the
+            // produced mana (e.g. Hall of the Bandit Lord's creature-spell haste
+            // rider, #5502) never showed a compensating addition in the sticky —
+            // removals-with-no-addition, the signature of a regression, when it was
+            // really a half-rendered effect. Fully destructure (no `..`) so a new
+            // Mana field is a compile error, not another silent omission, and emit
+            // each field only when set so unqualified signatures stay byte-identical.
             d.push(("mana".into(), fmt_mana_production(produced)));
+            if !restrictions.is_empty() {
+                d.push(("restrictions".into(), format!("{restrictions:?}")));
+            }
+            if !grants.is_empty() {
+                d.push(("grants".into(), format!("{grants:?}")));
+            }
+            if let Some(e) = expiry {
+                d.push(("expiry".into(), format!("{e:?}")));
+            }
+            if let Some(t) = target {
+                d.push(("target".into(), fmt_target(t)));
+            }
         }
         Effect::RevealHand {
             target,
@@ -10431,6 +10458,48 @@ mod tests {
                 .iter()
                 .any(|k| k == "damage_source_filter"),
             "an absent damage_source_filter must not appear",
+        );
+    }
+
+    #[test]
+    fn mana_signature_exposes_grants() {
+        use crate::types::ability::ManaContribution;
+        use crate::types::mana::ManaSpellGrant;
+
+        // #5507: a `ManaSpellGrant` attached to produced mana (e.g. Hall of the
+        // Bandit Lord's creature-spell haste rider, #5502) is parser-alterable but
+        // was swallowed by `..`. It must appear in the mana signature when set and
+        // be absent when the grants list is empty, so unqualified mana signatures
+        // stay byte-identical. (Mirrors #5493/#5501.)
+        let signature_keys = |grants: Vec<ManaSpellGrant>| -> Vec<String> {
+            effect_details(&Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::White, ManaColor::Blue],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants,
+                expiry: None,
+                target: None,
+            })
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+        };
+        assert!(
+            signature_keys(vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                keyword: Keyword::Haste,
+                restriction: None,
+                duration: Box::new(Duration::UntilEndOfTurn),
+            }])
+            .iter()
+            .any(|k| k == "grants"),
+            "a set ManaSpellGrant must appear in the mana parse-diff signature",
+        );
+        assert!(
+            !signature_keys(vec![]).iter().any(|k| k == "grants"),
+            "an empty grants list must not appear (unqualified mana signature unchanged)",
         );
     }
 
