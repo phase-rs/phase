@@ -1,0 +1,56 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 843
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "PreLoweredSpell": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Bounce",
+          "target": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": null,
+            "properties": [
+              {
+                "type": "Attacking"
+              }
+            ]
+          },
+          "destination": null
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": "Return target attacking creature to its owner's hand.",
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      }
+    },
+    {
+      "CastingRestriction": {
+        "type": "DeclareAttackersStep"
+      }
+    },
+    {
+      "CastingRestriction": {
+        "type": "RequiresCondition",
+        "data": {
+          "condition": {
+            "type": "BeenAttackedThisStep"
+          }
+        }
+      }
+    }
+  ],
+  "source_text": "Cast this spell only during the declare attackers step and only if you've been attacked this step.\nReturn target attacking creature to its owner's hand.",
+  "card_name": "Champion's Victory"
+}

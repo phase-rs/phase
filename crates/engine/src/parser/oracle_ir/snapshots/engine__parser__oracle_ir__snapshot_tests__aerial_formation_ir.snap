@@ -1,0 +1,78 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 867
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "PreLoweredSpell": {
+        "kind": "Spell",
+        "effect": {
+          "type": "GenericEffect",
+          "static_abilities": [
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "ParentTarget"
+              },
+              "modifications": [
+                {
+                  "type": "AddPower",
+                  "value": 1
+                },
+                {
+                  "type": "AddToughness",
+                  "value": 1
+                },
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Flying"
+                }
+              ],
+              "condition": null,
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "get +1/+1 and gain flying"
+            }
+          ],
+          "duration": "UntilEndOfTurn",
+          "target": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": null,
+            "properties": []
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": "UntilEndOfTurn",
+        "description": "Any number of target creatures each get +1/+1 and gain flying until end of turn.",
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "multi_target": {
+          "min": 0,
+          "max": null
+        },
+        "forward_result": false
+      }
+    },
+    {
+      "StriveCost": {
+        "type": "Cost",
+        "shards": [
+          "Blue"
+        ],
+        "generic": 2
+      }
+    }
+  ],
+  "source_text": "Strive — This spell costs {2}{U} more to cast for each target beyond the first.\nAny number of target creatures each get +1/+1 and gain flying until end of turn.",
+  "card_name": "Aerial Formation"
+}
