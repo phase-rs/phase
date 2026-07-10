@@ -32545,6 +32545,29 @@ fn conjure_of_your_choice_from_spellbook_bare_form_is_not_parsed() {
 }
 
 #[test]
+fn conjure_named_into_exile() {
+    let e = parse_effect("conjure a card named Black Lotus into exile");
+    match e {
+        Effect::Conjure { destination, .. } => assert_eq!(destination, Zone::Exile),
+        other => panic!("expected Conjure, got: {other:?}"),
+    }
+}
+
+#[test]
+fn conjure_random_from_spellbook_into_exile() {
+    // The exile destination composes with the random draft-from-spellbook wording.
+    let e = parse_effect("conjure a random card from ~'s spellbook into exile");
+    assert!(matches!(
+        e,
+        Effect::DraftFromSpellbook {
+            destination: Zone::Exile,
+            tapped: false,
+            random: true
+        }
+    ));
+}
+
+#[test]
 fn conjure_battlefield_tapped() {
     let e = parse_effect("conjure a card named Forest onto the battlefield tapped");
     match e {

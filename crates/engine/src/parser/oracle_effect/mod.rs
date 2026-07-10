@@ -9027,6 +9027,9 @@ fn parse_conjure_zone(lower: &str) -> Option<(Zone, &str)> {
         value(Zone::Hand, tag(" into their hand")),
         value(Zone::Graveyard, tag(" into their graveyard")),
         value(Zone::Library, tag(" into their library")),
+        // Digital-only Alchemy conjures can also land in exile (e.g. a random card
+        // conjured from a spellbook into exile with a play-permission rider).
+        value(Zone::Exile, tag(" into exile")),
     ))
     .parse(lower)
     .ok()
