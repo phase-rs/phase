@@ -27306,51 +27306,132 @@ fn subgoyf_cda_power_is_bare_count_toughness_is_count_plus_one() {
 /// CR 613.4c: "gets/get an additional +N/+M" is a second Layer 7c additive P/T
 /// grant. The "an additional " qualifier is consumed by `parse_pt_mod`; the
 /// underlying +N/+M and the enclosing "as long as <cond>" gate parse as usual.
+/// Each case asserts the typed P/T modifications AND the specific
+/// `StaticCondition` variant so a wrong-but-present condition can't pass.
 #[test]
 fn an_additional_pt_grant_parses_with_gate() {
-    let cases: &[(&str, &str, &str)] = &[
-        (
-            "Hellbent — Enchanted creature gets an additional +2/+0 as long as you have no cards in hand.",
-            "Taste for Mayhem",
-            "AddPower { value: 2 }",
+    // Taste for Mayhem (Hellbent, +2/+0) — gated on an empty hand.
+    let s = super::shared::parse_static_line_multi(
+        "Hellbent — Enchanted creature gets an additional +2/+0 as long as you have no cards in hand.",
+    );
+    assert_eq!(s.len(), 1, "Taste for Mayhem: {s:?}");
+    assert!(s[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+    assert!(s[0]
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 0 }));
+    assert!(
+        matches!(
+            s[0].condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize { .. }
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            })
         ),
-        (
-            "Threshold — White creatures get an additional +1/+1 as long as there are seven or more cards in your graveyard.",
-            "Divine Sacrament",
-            "AddPower { value: 1 }",
+        "Taste for Mayhem (empty-hand gate): {:?}",
+        s[0].condition
+    );
+
+    // Divine Sacrament (Threshold, +1/+1) — 7+ cards in your graveyard.
+    let s = super::shared::parse_static_line_multi(
+        "Threshold — White creatures get an additional +1/+1 as long as there are seven or more cards in your graveyard.",
+    );
+    assert_eq!(s.len(), 1, "Divine Sacrament: {s:?}");
+    assert!(s[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(s[0]
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    assert!(
+        matches!(
+            s[0].condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::GraveyardSize { .. }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            })
         ),
-        (
-            "Delirium — Enchanted creature gets an additional +2/+2 as long as there are four or more card types among cards in your graveyard.",
-            "Strange Augmentation",
-            "AddToughness { value: 2 }",
+        "Divine Sacrament (Threshold gate): {:?}",
+        s[0].condition
+    );
+
+    // Patriarch's Desire (Threshold, +2/-2) — the ONLY mixed-sign case, which
+    // exercises `parse_pt_modifier`'s +N/-M path after the prefix is stripped.
+    let s = super::shared::parse_static_line_multi(
+        "Threshold — Enchanted creature gets an additional +2/-2 as long as there are seven or more cards in your graveyard.",
+    );
+    assert_eq!(s.len(), 1, "Patriarch's Desire: {s:?}");
+    assert!(s[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+    assert!(s[0]
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: -2 }));
+    assert!(
+        matches!(
+            s[0].condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::GraveyardSize { .. }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            })
         ),
-    ];
-    for (line, name, needle) in cases {
-        let statics = super::shared::parse_static_line_multi(line);
-        assert!(
-            !statics.is_empty(),
-            "{name}: expected a static, got none for {line:?}"
-        );
-        let dump = format!("{statics:?}");
-        assert!(dump.contains(needle), "{name}: expected {needle} in {dump}");
-        assert!(
-            dump.contains("condition: Some"),
-            "{name}: expected an attached 'as long as' condition, got {dump}"
-        );
-        assert!(
-            !dump.contains("Unrecognized"),
-            "{name}: condition must be a recognized StaticCondition, got {dump}"
-        );
-    }
+        "Patriarch's Desire (Threshold gate): {:?}",
+        s[0].condition
+    );
+
+    // Strange Augmentation (Delirium, +2/+2) — 4+ card types in your graveyard.
+    let s = super::shared::parse_static_line_multi(
+        "Delirium — Enchanted creature gets an additional +2/+2 as long as there are four or more card types among cards in your graveyard.",
+    );
+    assert_eq!(s.len(), 1, "Strange Augmentation: {s:?}");
+    assert!(s[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+    assert!(s[0]
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 2 }));
+    assert!(
+        matches!(
+            s[0].condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctCardTypes { .. }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            })
+        ),
+        "Strange Augmentation (Delirium gate): {:?}",
+        s[0].condition
+    );
 }
 
 /// The bare (ungated) "an additional +N/+M" grant also parses — the qualifier is
-/// consumed regardless of an enclosing condition.
+/// consumed regardless of an enclosing condition, and no gate is attached.
 #[test]
 fn an_additional_pt_grant_bare_parses() {
     let statics =
         super::shared::parse_static_line_multi("Enchanted creature gets an additional +2/+0.");
     assert_eq!(statics.len(), 1, "expected exactly one static: {statics:?}");
-    let dump = format!("{statics:?}");
-    assert!(dump.contains("AddPower { value: 2 }"), "got {dump}");
+    assert!(statics[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+    assert!(statics[0]
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 0 }));
+    assert!(
+        statics[0].condition.is_none(),
+        "bare grant carries no gate: {:?}",
+        statics[0].condition
+    );
 }
