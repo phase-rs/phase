@@ -2388,3 +2388,65 @@ mod replay_bridge_tests {
         clear_game_state();
     }
 }
+
+/// Native coverage for the RNG-restore bridge wiring (issue #5466). The
+/// `export`/`restore` entry points are plain Rust functions, so these run in
+/// the standard `cargo test`/`nextest` shards — unlike the `wasm32`-gated
+/// `mod tests`, whose assertions never execute in the native suite.
+#[cfg(test)]
+mod rng_restore_bridge_tests {
+    use super::*;
+    use rand::RngCore;
+
+    #[test]
+    fn export_then_restore_resumes_live_rng_stream_through_wasm_bridge() {
+        // Issue #5466, end-to-end through the WASM boundary: `export_game_state_json`
+        // must capture the live ChaCha20 offset and `restore_game_state` must
+        // fast-forward the reseeded stream to it, so a restored game draws the
+        // values that would have come NEXT — not a replay from origin. This test
+        // drives the real bridge entry points (nothing calls the engine seam
+        // directly): deleting `state.capture_rng_word_pos()` in export or
+        // `state.rehydrate_rng()` in restore turns it red. Asserts on consumed
+        // randomness, not the stored `rng_word_pos` integer.
+        clear_game_state();
+
+        // Seed a live game and consume randomness as gameplay would.
+        let mut state = GameState::new_two_player(0x51A7_C0DE);
+        for _ in 0..9 {
+            state.rng.next_u32();
+        }
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        // The four values the live stream will produce next, captured from a
+        // clone taken at the pre-export offset.
+        let mut expected = with_state(|s| s.rng.clone()).unwrap();
+        let expected_draws: Vec<u32> = (0..4).map(|_| expected.next_u32()).collect();
+
+        // Serialize through the real bridge entry point (captures rng_word_pos).
+        let json = export_game_state_json().unwrap();
+
+        // Advance the LIVE rng further so a rewind-to-origin restore would be
+        // observable: without the offset, restore would replay from the seed's
+        // origin (nine draws back), never matching `expected_draws`.
+        with_state_mut(|s| {
+            for _ in 0..3 {
+                s.rng.next_u32();
+            }
+        })
+        .unwrap();
+
+        // Restore through the real bridge entry point (reseeds + fast-forwards).
+        restore_game_state(&json).unwrap();
+
+        // The restored stream must resume at the exported offset and produce the
+        // continuation captured before export.
+        let restored_draws: Vec<u32> =
+            with_state_mut(|s| (0..4).map(|_| s.rng.next_u32()).collect()).unwrap();
+        assert_eq!(
+            restored_draws, expected_draws,
+            "restored stream must resume where export left off, not rewind to origin"
+        );
+
+        clear_game_state();
+    }
+}
