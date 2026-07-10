@@ -1064,6 +1064,139 @@ fn parse(
     parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
 }
 
+/// Issue #4727 (CR 611.2 + CR 201.2a): "Target creature and all other creatures
+/// with the same name as that creature get -3/-3 until end of turn" (Bile Blight)
+/// must emit BOTH a single-target `Pump` on the announced creature AND a mass
+/// `PumpAll` over the same-name others that EXCLUDES the target (so it isn't
+/// shrunk twice). Pre-fix the mass debuff was silently dropped.
+#[test]
+fn bile_blight_target_and_same_name_creatures_emit_pump_plus_pumpall() {
+    let def = parse_effect_chain(
+        "Target creature and all other creatures with the same name as that creature get -3/-3 until end of turn.",
+        AbilityKind::Spell,
+    );
+
+    // Primary: single-target Pump -3/-3 on the announced creature.
+    match &*def.effect {
+        Effect::Pump {
+            power,
+            toughness,
+            target,
+        } => {
+            assert_eq!(*power, PtValue::Fixed(-3));
+            assert_eq!(*toughness, PtValue::Fixed(-3));
+            assert!(
+                matches!(target, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)),
+                "primary target must be a creature filter, got {target:?}"
+            );
+        }
+        other => panic!("expected primary Pump, got {other:?}"),
+    }
+    assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+
+    // REVERT-GUARD: pre-fix `sub_ability` is None (mass debuff dropped) — fails on old AST.
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("mass PumpAll sub_ability must exist");
+    match &*sub.effect {
+        Effect::PumpAll {
+            power,
+            toughness,
+            target,
+        } => {
+            assert_eq!(*power, PtValue::Fixed(-3));
+            assert_eq!(*toughness, PtValue::Fixed(-3));
+            let TargetFilter::And { filters } = target else {
+                panic!("expected And-filter on PumpAll, got {target:?}");
+            };
+            // Carries SameNameAsParentTarget…
+            assert!(
+                filters.iter().any(|f| matches!(f,
+                    TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::SameNameAsParentTarget))),
+                "mass filter must carry SameNameAsParentTarget, got {filters:?}"
+            );
+            // …AND excludes the parent target (this is what prevents -6/-6).
+            assert!(
+                filters.iter().any(|f| matches!(f,
+                    TargetFilter::Not { filter } if matches!(**filter, TargetFilter::ParentTarget))),
+                "mass filter must exclude the parent target, got {filters:?}"
+            );
+        }
+        other => panic!("expected PumpAll sub_ability, got {other:?}"),
+    }
+    assert_eq!(sub.duration, Some(Duration::UntilEndOfTurn));
+}
+
+/// Class coverage: the +N/+N sibling (Echoing Courage) takes the same recognizer,
+/// proving it is sign-agnostic and not a Bile-Blight one-off.
+#[test]
+fn echoing_courage_plus_variant_same_name_pump_covers_class() {
+    let def = parse_effect_chain(
+        "Target creature and all other creatures with the same name as that creature get +2/+2 until end of turn.",
+        AbilityKind::Spell,
+    );
+    let Effect::Pump {
+        power, toughness, ..
+    } = &*def.effect
+    else {
+        panic!("expected primary Pump, got {:?}", def.effect);
+    };
+    assert_eq!(*power, PtValue::Fixed(2));
+    assert_eq!(*toughness, PtValue::Fixed(2));
+    let sub = def
+        .sub_ability
+        .as_deref()
+        .expect("mass PumpAll sub_ability must exist");
+    assert!(
+        matches!(&*sub.effect, Effect::PumpAll { .. }),
+        "expected PumpAll sub_ability, got {:?}",
+        sub.effect
+    );
+}
+
+/// Negative (reach-guard for the paired positive above): a plain single-target
+/// shrink has no "and … same name" continuation, so it must stay a single
+/// `Pump` with no mass sub_ability — proving the recognizer fails closed.
+#[test]
+fn plain_single_target_pump_stays_single_no_pumpall() {
+    let def = parse_effect_chain(
+        "Target creature gets -3/-3 until end of turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Pump { .. }),
+        "expected a single Pump, got {:?}",
+        def.effect
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "a plain single-target pump must not gain a same-name mass sub_ability"
+    );
+}
+
+/// Negative: a compound subject WITHOUT the same-name gate ("… and each creature
+/// you control …") must NOT be intercepted — the recognizer must not synthesize a
+/// SameNameAsParentTarget mass effect for it.
+#[test]
+fn target_and_non_same_name_compound_not_intercepted() {
+    let def = parse_effect_chain(
+        "Target creature and each creature you control get +1/+1 until end of turn.",
+        AbilityKind::Spell,
+    );
+    let carries_same_name = |e: &Effect| {
+        matches!(e, Effect::PumpAll { target, .. }
+            if format!("{target:?}").contains("SameNameAsParentTarget"))
+    };
+    assert!(
+        !carries_same_name(&def.effect),
+        "must not synthesize a same-name mass effect for a non-same-name compound"
+    );
+    if let Some(sub) = def.sub_ability.as_deref() {
+        assert!(!carries_same_name(&sub.effect));
+    }
+}
+
 /// As Foretold (WHO/AKH): the once-per-turn "pay {0} rather than pay the mana
 /// cost" free-cast line is correctly UNSUPPORTED. As Foretold places no zone
 /// restriction on which spell the cost applies to, but the engine's
