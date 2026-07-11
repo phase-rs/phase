@@ -5761,6 +5761,27 @@ fn multi_target_for_distribute_among(distribution_amount: &QuantityExpr) -> Mult
     MultiTargetSpec::bounded_expr(min, inner.clone())
 }
 
+/// CR 601.2d: The keywords that introduce a divided/distributed *damage* effect.
+/// Single authority for the "is this a distribution clause?" membership test —
+/// extend here, never inline at a call site.
+///
+/// Two callers must agree on this set. `try_parse_distribute_damage` bounds its
+/// Pattern-B quantity slice with it, and `try_parse_choose_one_of_inline` bails out
+/// of the generic binary-choice splitter for any clause containing one, because the
+/// target-count list embeds a bare " or " ("among one, two, or three targets") that
+/// is a cardinality list, not a disjunction of clauses. If the two sets were allowed
+/// to drift, a newly supported distribution phrasing would parse correctly here yet
+/// still be split there — re-entering the clause cascade and overflowing the stack.
+///
+/// SCOPE: damage templating only. CR 601.2d also covers dividing *counters*
+/// ("such as damage or counters"), and the counter templating ("Distribute three
+/// +1/+1 counters among one, two, or three target creatures") carries the same bare
+/// " or " and is NOT guarded here — it is a pre-existing hazard on `main`, tracked
+/// separately. The durable fix keys the bail on the target-cardinality list rather
+/// than on the distribution verb, which covers both halves of the rule at once.
+pub(super) const DISTRIBUTION_KEYWORDS: [&str; 2] =
+    ["divided as you choose among", "divided evenly"];
+
 /// CR 601.2d: Parse "deal N damage divided as you choose among [targets]" and
 /// "deal N damage distributed among [targets]" → Effect::DealDamage with distribute flag.
 ///
@@ -5808,18 +5829,14 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
         // as in Pattern A.
         let after_prefix_offset = after_tp.lower.len() - after_prefix.len();
         let (_, rest) = after_tp.split_at(after_prefix_offset);
-        let qty_end = [
-            "divided as you choose among",
-            "distributed among",
-            "divided evenly",
-        ]
-        .iter()
-        // allow-noncombinator: structural slice bound, not parsing dispatch — locate
-        // the earliest distribution keyword so `parse_cda_quantity` receives only the
-        // quantity phrase. The dispatch on *which* distribution kind applies is done
-        // by the `distribute_kind` combinator block below; this only bounds the slice.
-        .filter_map(|kw| rest.lower.find(kw))
-        .min()?;
+        let qty_end = DISTRIBUTION_KEYWORDS
+            .iter()
+            // allow-noncombinator: structural slice bound, not parsing dispatch — locate
+            // the earliest distribution keyword so `parse_cda_quantity` receives only the
+            // quantity phrase. The dispatch on *which* distribution kind applies is done
+            // by the `distribute_kind` combinator block below; this only bounds the slice.
+            .filter_map(|kw| rest.lower.find(kw))
+            .min()?;
         let qty_text = rest.lower[..qty_end].trim();
         let qty = parse_cda_quantity(qty_text)?;
         (qty, rest)

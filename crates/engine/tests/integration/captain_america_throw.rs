@@ -10,8 +10,9 @@
 //! → interactive `PayCost { UnattachFrom }` → deferred `DistributeAmong` →
 //! `push_activated_ability_to_stack`) so every seam of the `UnattachFrom`
 //! cost, the cost-paid-object mana-value provenance, and the Change B-1
-//! activated-vs-spell resume split is covered. MAR is release-gated and not in
-//! the local fixture, so the tests parse the real Oracle text.
+//! activated-vs-spell resume split is covered. The tests parse the real Oracle
+//! text directly so they are hermetic — independent of the generated card
+//! corpus (the MAR set is released and ungated; see `set_gating.rs`).
 
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -640,24 +641,52 @@ fn catch_setup(active: engine::types::player::PlayerId) -> (GameRunner, ObjectId
     (runner, cap, equip)
 }
 
-/// On your turn, Catch's begin-combat trigger attaches a chosen Equipment you
-/// control to Captain America itself.
+/// On your turn, Catch's begin-combat trigger attaches the single legal
+/// Equipment you control to Captain America itself (its `SelfRef` recipient).
 ///
-/// Revert probe: if the trigger's target were not `SelfRef`, or the trigger did
-/// not fire, the Equipment would remain unattached (attached_to None).
+/// Parse-path regression (this issue): parsing Captain America's Throw line —
+/// "…divided as you choose among one, two, or three targets" — used to route
+/// the count-list " or " through the generic `try_parse_choose_one_of_inline`
+/// binary splitter, whose trial parse of the orphan "three targets" tail
+/// re-entered the clause parser deeply and overflowed the test thread's stack
+/// (nondeterministically, depending on stack headroom). This test drives the
+/// real `add_creature_from_oracle` parse path, so a revert of the
+/// `try_parse_choose_one_of_inline` distribution-clause guard re-introduces the
+/// overflow at setup here.
 #[test]
 fn catch_attaches_equipment_to_self_on_your_turn() {
     let (mut runner, cap, equip) = catch_setup(P0);
-    // With a single legal Equipment, the begin-combat trigger auto-targets and
-    // resolves it during combat advancement.
     runner.advance_to_combat();
+
+    // CR 603.3d + CR 601.2c: Catch targets "up to one target Equipment you
+    // control" (min 0, max 1). Because "target the Equipment" is a legal
+    // completion, the engine either auto-selects the single legal Equipment
+    // during advancement or surfaces the optional target choice — both are
+    // rules-legal, and which one happens can vary with the auto-target policy.
+    // Answer the prompt if it is offered so the controller attaches the
+    // Equipment either way; there is no auto-decline outcome here because
+    // targeting the Equipment is always a valid completion.
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(equip)),
+            })
+            .expect("choose the Equipment as Catch's optional target");
+    }
     runner.advance_until_stack_empty();
 
-    // CR 301.5: the Equipment is now attached to Captain America itself.
+    // CR 701.3a + CR 301.5: the Equipment is attached to Captain America itself.
     assert_eq!(
         runner.state().objects[&equip].attached_to,
         Some(AttachTarget::Object(cap)),
-        "Catch must attach the chosen Equipment to Captain America"
+        "Catch must attach the loose Equipment to Captain America on your turn"
+    );
+    assert!(
+        runner.state().objects[&cap].attachments.contains(&equip),
+        "Captain America must carry the attached Equipment"
     );
 }
 

@@ -4971,6 +4971,38 @@ fn try_parse_choose_one_of_inline(
     {
         return None;
     }
+
+    // CR 601.2d: The divided/distributed-damage target-count quantifier
+    // ("divided as you choose among one, two, or three targets") embeds a bare
+    // " or " inside the cardinality list "one, two, or three", NOT a disjunction
+    // of two imperative clauses. Splitting there hands the orphan tail
+    // ("three targets") back through the full effect→subject→static→imperative
+    // recognizer cascade as a trial parse; because that tail is not a standalone
+    // effect, the cascade re-enters this clause parser several levels deep, and
+    // the parser's large per-frame AST locals overflow small (~1-2 MB) thread
+    // stacks. The dedicated `try_parse_distribute_damage` handler
+    // (`oracle_effect::lower`) owns this whole clause and reads the count list
+    // via `strip_distribute_among_target_quantifier`, so skip the generic binary
+    // splitter for any distribution clause and let that handler claim it.
+    //
+    // The keyword set is owned by `lower::DISTRIBUTION_KEYWORDS` — the same set the
+    // handler bounds its quantity slice with. Both must agree: a phrasing the handler
+    // learned but this guard did not would parse there and still split here.
+    //
+    // KNOWN GAP (pre-existing on `main`, not introduced here): this keys on the
+    // distribution *verb*, but the hazard is the target-cardinality list. CR 601.2d
+    // covers dividing "damage or counters", and the counter templating ("Distribute
+    // three +1/+1 counters among one, two, or three target creatures") carries the
+    // same bare " or " and is still split. The durable fix keys the bail on the
+    // cardinality list (`lower::BOUNDED_TARGET_PHRASES`), covering both halves at
+    // once; and the underlying cause is that a failed trial parse re-enters the
+    // clause cascade with no depth bound. Both are tracked as follow-ups.
+    if lower::DISTRIBUTION_KEYWORDS
+        .iter()
+        .any(|needle| nom_primitives::scan_contains(tp.lower, needle))
+    {
+        return None;
+    }
     let (before_lower, after_lower) =
         split_around(tp.lower, ", or ").or_else(|| split_around(tp.lower, " or "))?;
 
