@@ -15,6 +15,73 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 
+// CR 205.1b + CR 604.1: a dynamic "gets +N/+M for each X" pump may carry a
+// trailing conjunct the for-each path used to drop (it only recovered trailing
+// keywords): "and is a <Subtype> in addition to its other types" (Reaper's
+// Scythe) or "and has \"<quoted ability>\"" (Rakdos Riteknife).
+#[test]
+fn dynamic_for_each_pump_recovers_trailing_subtype_addition() {
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +1/+1 for each soul counter on this Equipment and is an Assassin in addition to its other types.",
+    );
+    assert_eq!(defs.len(), 1);
+    let mods = &defs[0].modifications;
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })),
+        "dynamic pump lost: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Assassin".to_string()
+        }),
+        "trailing 'is an Assassin' dropped: {mods:?}"
+    );
+}
+
+#[test]
+fn dynamic_for_each_pump_recovers_trailing_quoted_ability() {
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +1/+0 for each blood counter on this Equipment and has \"{T}, Sacrifice a creature: Put a blood counter on this permanent.\"",
+    );
+    assert_eq!(defs.len(), 1);
+    let mods = &defs[0].modifications;
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })),
+        "dynamic pump lost: {mods:?}"
+    );
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })),
+        "trailing quoted ability dropped: {mods:?}"
+    );
+}
+
+// Regression: a for-each pump with only a trailing KEYWORD is unchanged and gains
+// no spurious subtype/grant.
+#[test]
+fn dynamic_for_each_pump_trailing_keyword_unchanged() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+0 for each Mountain you control and has first strike.",
+    );
+    assert_eq!(defs.len(), 1);
+    let mods = &defs[0].modifications;
+    assert!(mods
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })));
+    assert!(mods.contains(&ContinuousModification::AddKeyword {
+        keyword: Keyword::FirstStrike
+    }));
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddSubtype { .. } | ContinuousModification::GrantAbility { .. }
+        )),
+        "keyword-only pump must not gain spurious mods: {mods:?}"
+    );
+}
+
 /// CR 207.2c: an ability word is italic flavor with no rules meaning. A leading
 /// ability-word label on a subject-anchored static must be stripped so the static
 /// still parses; a leading label that is NOT a recognized ability word must be
