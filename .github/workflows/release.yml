@@ -925,6 +925,52 @@ jobs:
       - name: Install frontend dependencies
         run: cd client && pnpm install --frozen-lockfile
 
+      # Tauri selects its macOS signing path by the PRESENCE of these vars, not their
+      # value (tauri-bundler macos/sign.rs keys off `var_os("APPLE_CERTIFICATE")`), and a
+      # workflow `env:` key backed by an undefined secret is still DEFINED -- as "". So
+      # listing the Apple secrets directly on the build step made Tauri take the
+      # import-certificate branch and run `security import` on an empty certificate,
+      # failing the whole macOS bundle. $GITHUB_ENV only defines what it is handed, so
+      # export the signing vars only when a certificate actually exists. With no
+      # certificate, ad-hoc self-sign: identity "-" is passed straight to `codesign -s -`
+      # and needs no keychain (tauri-macos-sign Keychain::with_signing_identity).
+      - name: Configure macOS signing
+        if: matrix.os == 'macos'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${APPLE_CERTIFICATE:-}" ]; then
+            echo "No APPLE_CERTIFICATE secret; ad-hoc self-signing the macOS bundle."
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          echo "APPLE_CERTIFICATE found; signing with the Developer ID certificate."
+          {
+            echo "APPLE_CERTIFICATE<<__EOF__"
+            echo "$APPLE_CERTIFICATE"
+            echo "__EOF__"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+          # Each of these is independently optional: an identity is inferred from the
+          # certificate when unset, and notarization is skipped unless all three Apple ID
+          # vars are present. Only forward the ones that actually carry a value, so an
+          # empty secret never reaches Tauri as a defined-but-blank variable.
+          for var in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -n "${!var:-}" ]; then
+              echo "$var=${!var}" >> "$GITHUB_ENV"
+            fi
+          done
+
       - name: Build Tauri
         uses: tauri-apps/tauri-action@v0
         env:
@@ -943,12 +989,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # The APPLE_* signing vars are deliberately absent here -- listing them would
+          # define them as "" whenever the secret is unset, which is the failure the
+          # "Configure macOS signing" step above exists to avoid. That step exports them
+          # through $GITHUB_ENV only when they carry a value.
         with:
           projectPath: client
 
