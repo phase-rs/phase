@@ -628,12 +628,18 @@ pub fn parse_target_with_syntax<'a>(
         }
     }
 
-    for phrase in [
-        "one, two, or three targets",
-        "one or two targets",
-        "any number of targets",
-        "targets",
-    ] {
+    // CR 115.1d: bare bounded-count target arms ("one or two targets", "one,
+    // two, or three targets") share the single `BOUNDED_TARGET_CARDINALITIES`
+    // authority (composing the plural noun off the stem); the unbounded forms
+    // ("any number of targets", bare "targets") stay inline.
+    for &(stem, _, _) in crate::parser::oracle_effect::lower::BOUNDED_TARGET_CARDINALITIES {
+        if let Ok((rest, _)) =
+            (tag::<_, _, OracleError<'_>>(stem), tag(" targets")).parse(lower.as_str())
+        {
+            return (TargetFilter::Any, &text[lower.len() - rest.len()..], syntax);
+        }
+    }
+    for phrase in ["any number of targets", "targets"] {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
             return (TargetFilter::Any, &text[lower.len() - rest.len()..], syntax);
         }

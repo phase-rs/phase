@@ -4959,23 +4959,20 @@ const MULTI_TARGET_VERBS: &[&str] = &[
     "exile", "tap", "untap", "goad", "detain", "return", "destroy", "choose",
 ];
 
-pub(super) const BOUNDED_TARGET_PHRASES: &[(&str, usize, usize)] = &[
-    ("one or two targets", 1, 2),
-    ("one, two, or three targets", 1, 3),
-];
-
-/// CR 601.2d: The bare-`" or "`-bearing target-cardinality lists that appear in
-/// divided/distributed effects — dividing an effect "(such as damage or
-/// counters)" — where the `" or "` enumerates a target COUNT, never a
-/// disjunction of two clauses. This is the complete set measured against the
-/// full pool (`AtomicCards.json`, 34,632 cards); the `target` (no trailing `s`)
-/// matches both the bare `"… targets"` (divided damage) and `"… target
-/// <noun>"` (distributed counters) forms. `BOUNDED_TARGET_PHRASES` /
-/// `strip_bounded_target_prefix` consume the same lists at the target-count
-/// layer; the binary-choice splitter reuses this vocabulary to bail rather than
-/// keying on a distribution verb (which names only one half of the rule).
-pub(super) const BOUNDED_TARGET_CARDINALITY_LISTS: &[&str] =
-    &["one or two target", "one, two, or three target"];
+/// CR 115.1d + CR 601.2d: The bounded target-cardinality lists. The stem carries
+/// the bare `" or "` that enumerates a target COUNT, never a disjunction of two
+/// clauses; each list carries its `(min, max)` count bounds. This is the single
+/// authority for the vocabulary — the complete set measured against the full
+/// pool (`AtomicCards.json`, 34,632 cards). Every consumer composes the trailing
+/// noun it needs off the stem (`" targets"`, `" target "`, `" target"`) rather
+/// than re-spelling the list, so a future cardinality ("one, two, three, or
+/// four …") is added here once. Consumers: `strip_bounded_targets_placeholder`,
+/// `strip_bounded_target_prefix`, `subject::…each-of`, `oracle_target`'s
+/// bare-count target arm, and the binary-choice splitter's divide/distribute
+/// bail (which keys on this cardinality axis — shared by CR 601.2d's "damage or
+/// counters" halves — rather than on a distribution verb).
+pub(crate) const BOUNDED_TARGET_CARDINALITIES: &[(&str, usize, usize)] =
+    &[("one or two", 1, 2), ("one, two, or three", 1, 3)];
 
 /// CR 115.1d + CR 601.2c: Strip exact target-count prefix before a targeted
 /// phrase. "two target creatures" and "X target creatures" both set the exact
@@ -5018,8 +5015,10 @@ fn parse_exact_target_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> 
 /// Returns the unconsumed remainder and a bounded `MultiTargetSpec` with min ≥ 1.
 fn strip_bounded_targets_placeholder(text: &str) -> Option<(&str, MultiTargetSpec)> {
     let lower = text.to_ascii_lowercase();
-    for &(phrase, min, max) in BOUNDED_TARGET_PHRASES {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
+    for &(stem, min, max) in BOUNDED_TARGET_CARDINALITIES {
+        if let Ok((rest, _)) =
+            (tag::<_, _, OracleError<'_>>(stem), tag(" targets")).parse(lower.as_str())
+        {
             let consumed = lower.len() - rest.len();
             return Some((
                 text[consumed..].trim_start(),
@@ -5035,11 +5034,10 @@ fn strip_bounded_targets_placeholder(text: &str) -> Option<(&str, MultiTargetSpe
 /// players").
 fn strip_bounded_target_prefix(text: &str) -> Option<(&str, MultiTargetSpec)> {
     let lower = text.to_ascii_lowercase();
-    for (prefix, min, max) in [
-        ("one or two target ", 1usize, 2usize),
-        ("one, two, or three target ", 1, 3),
-    ] {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(lower.as_str()) {
+    for &(stem, min, max) in BOUNDED_TARGET_CARDINALITIES {
+        if let Ok((rest, _)) =
+            (tag::<_, _, OracleError<'_>>(stem), tag(" target ")).parse(lower.as_str())
+        {
             let consumed = lower.len() - rest.len();
             return Some((
                 text[consumed..].trim_start(),
@@ -5778,20 +5776,15 @@ fn multi_target_for_distribute_among(distribution_amount: &QuantityExpr) -> Mult
 /// Single authority for the "is this a distribution clause?" membership test —
 /// extend here, never inline at a call site.
 ///
-/// Two callers must agree on this set. `try_parse_distribute_damage` bounds its
-/// Pattern-B quantity slice with it, and `try_parse_choose_one_of_inline` bails out
-/// of the generic binary-choice splitter for any clause containing one, because the
-/// target-count list embeds a bare " or " ("among one, two, or three targets") that
-/// is a cardinality list, not a disjunction of clauses. If the two sets were allowed
-/// to drift, a newly supported distribution phrasing would parse correctly here yet
-/// still be split there — re-entering the clause cascade and overflowing the stack.
-///
-/// SCOPE: damage templating only. CR 601.2d also covers dividing *counters*
-/// ("such as damage or counters"), and the counter templating ("Distribute three
-/// +1/+1 counters among one, two, or three target creatures") carries the same bare
-/// " or " and is NOT guarded here — it is a pre-existing hazard on `main`, tracked
-/// separately. The durable fix keys the bail on the target-cardinality list rather
-/// than on the distribution verb, which covers both halves of the rule at once.
+/// One caller: `try_parse_distribute_damage` bounds its Pattern-B quantity slice
+/// with this set. (The binary-choice splitter `try_parse_choose_one_of_inline`
+/// formerly also consulted it to bail, but that coupling — and the set-drift
+/// hazard it warned about — is gone: the splitter now keys its bail on the
+/// target-cardinality list `BOUNDED_TARGET_CARDINALITIES`, the axis CR 601.2d
+/// shares across both its "damage or counters" halves. That axis guards the
+/// counter-distribution templating ("Distribute three +1/+1 counters among one,
+/// two, or three target creatures") this damage-verb set never could, so the two
+/// no longer need to agree.)
 pub(super) const DISTRIBUTION_KEYWORDS: [&str; 2] =
     ["divided as you choose among", "divided evenly"];
 

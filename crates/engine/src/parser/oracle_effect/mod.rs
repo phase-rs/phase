@@ -4988,14 +4988,14 @@ fn try_parse_choose_one_of_inline(
     // keys on the target-CARDINALITY list — the axis shared by both halves —
     // rather than on a distribution verb (which names only the damage half and
     // left the ~32 counter-distribution cards, e.g. Ajani, Mentor of Heroes;
-    // Biogenic Upgrade; Abzan Charm, still splitting). `BOUNDED_TARGET_CARDINALITY_LISTS`
-    // is the same typed vocabulary the target-count layer strips via
-    // `strip_bounded_target_prefix`; it is the complete set of bare-" or "-bearing
-    // cardinality lists in the pool, so the divide/distribute handlers claim these
-    // clauses whole.
-    if lower::BOUNDED_TARGET_CARDINALITY_LISTS
+    // Biogenic Upgrade; Abzan Charm, still splitting). `BOUNDED_TARGET_CARDINALITIES`
+    // is the single authority for the vocabulary (the same lists the target-count
+    // layer strips via `strip_bounded_target_prefix`); compose the `" target"`
+    // stem-suffix it shares with both the "… targets" and "… target <noun>"
+    // forms, so the divide/distribute handlers claim these clauses whole.
+    if lower::BOUNDED_TARGET_CARDINALITIES
         .iter()
-        .any(|needle| nom_primitives::scan_contains(tp.lower, needle))
+        .any(|&(stem, _, _)| nom_primitives::scan_contains(tp.lower, &format!("{stem} target")))
     {
         return None;
     }
