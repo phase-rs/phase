@@ -21434,8 +21434,8 @@ fn is_exile_effect(effect: &Effect) -> bool {
 /// reference — CR 607.1). Exhaustive over every exile-producer effect shape:
 /// `is_exile_effect`'s `ChangeZone`/`ChangeZoneAll`-to-`Exile`/`ExileTop`
 /// shapes, `Dig` with an exile destination (Discover the Impossible),
-/// `ExileFromTopUntil` (Ryan Sinclair), `ForEachCategoryExile` to
-/// `Zone::Exile`, `HeistExile`, `ExileHaunting`,
+/// `ExileFromTopUntil` (Ryan Sinclair), `ForEachCategory` with an
+/// `ExileFromPool` action (Sanar), `HeistExile`, `ExileHaunting`,
 /// `ExileResolvingSpellInsteadOfGraveyard`, and `RevealUntil` whose matched
 /// card is kept in exile (`kept_destination: Zone::Exile`).
 ///
@@ -21458,10 +21458,16 @@ fn chain_clause_is_exile_producer(effect: &Effect) -> bool {
             }
         )
         || matches!(effect, Effect::ExileFromTopUntil { .. })
+        // CR 406.6: `ForEachCategory`'s `ExileFromPool` action exiles by
+        // construction; its `zone` names the SOURCE pool the cards are exiled
+        // FROM (typically `Library`), not the destination. So the exile-producer
+        // test is on the action, not on `zone`. (Pre-rename this arm read
+        // `ForEachCategoryExile { zone: Zone::Exile, .. }`, which tested the
+        // source pool and therefore never matched the ordinary library pool.)
         || matches!(
             effect,
-            Effect::ForEachCategoryExile {
-                zone: Zone::Exile,
+            Effect::ForEachCategory {
+                action: crate::types::ability::ForEachCategoryAction::ExileFromPool { .. },
                 ..
             }
         )
@@ -21477,38 +21483,45 @@ fn chain_clause_is_exile_producer(effect: &Effect) -> bool {
         )
 }
 
+/// CR 406.6 + CR 607.2a: a continuation marker that itself denotes an exile,
+/// whichever channel carries it.
+fn continuation_is_exile_producer(continuation: Option<&ContinuationAst>) -> bool {
+    matches!(
+        continuation,
+        Some(ContinuationAst::ExileOneOfThemFaceDown | ContinuationAst::ExileLookedAtCard { .. })
+    )
+}
+
 /// CR 406.6 + CR 607.2a + CR 702.75a: `ClauseIr`-level wrapper around
-/// `chain_clause_is_exile_producer`. Deliberately does NOT filter on
-/// `!absorbed_by_followup` the way `any_prior_publishes` (the sibling
-/// tracked-set-anaphor gate) does. A Hideaway-shaped "exile one of them face
-/// down" chunk parses to its own standalone exile-shaped raw effect
+/// `chain_clause_is_exile_producer`. Deliberately does NOT skip absorbed
+/// (`ClauseDisposition::Continue`) clauses the way `any_prior_publishes` (the
+/// sibling tracked-set-anaphor gate) does. A Hideaway-shaped "exile one of them
+/// face down" chunk parses to its own standalone exile-shaped raw effect
 /// (`ChangeZone { destination: Exile, target: ParentTarget }`) — CR 406.6's
-/// exile genuinely happened in that clause's text — but it is also marked
-/// `absorbed_by_followup: true` because a `ContinuationAst::ExileOneOfThemFaceDown`
-/// marker on this SAME clause later rewrites the PRECEDING `Dig` into the
-/// exile-producing form and discards this raw `ChangeZone` during the LATER
-/// lowering pass (see "Continuation recognition — store on ClauseIr,
-/// application moves to lowering" above). `chain_has_prior_exile_producer` is
-/// seeded during the earlier per-chunk PARSE pass, so an `!absorbed_by_followup`
-/// filter here would incorrectly discard this clause's still-genuine exile
-/// evidence (Discover the Impossible would otherwise wrongly flip to
-/// `ExiledBySource`). The `followup_continuation`/`intrinsic_continuation`
-/// marker checks are additional defense-in-depth for any future continuation
-/// shape whose OWN raw per-chunk effect is not itself exile-shaped.
+/// exile genuinely happened in that clause's text — but it is ALSO dispositioned
+/// `Continue`, because a `ContinuationAst::ExileOneOfThemFaceDown` marker on this
+/// SAME clause later rewrites the PRECEDING `Dig` into the exile-producing form
+/// and discards this raw `ChangeZone` during the LATER lowering pass.
+/// `chain_has_prior_exile_producer` is seeded during the earlier per-chunk PARSE
+/// pass, so skipping `Continue` clauses here would discard this clause's
+/// still-genuine exile evidence and wrongly flip Discover the Impossible to
+/// `ExiledBySource`. That is the load-bearing property of this predicate, and it
+/// is pinned by
+/// `discover_the_impossible_cast_target_stays_parent_target_after_exiled_by_source_fix`:
+/// re-adding a `!matches!(.., Continue { .. })` filter to the scan turns that
+/// test RED (verified by mutation probe during the U5/U6 port).
+///
+/// The continuation checks read both channels via the `ClauseDisposition`
+/// accessors that U5 introduced as the successors of the former
+/// `followup_continuation` / `intrinsic_continuation` fields. They are
+/// defense-in-depth, not the discriminator: on today's corpus the absorbed
+/// Hideaway clause is already caught by its own exile-shaped raw effect above.
+/// They are kept for a future continuation shape whose raw per-chunk effect is
+/// not itself exile-shaped.
 fn clause_ir_is_exile_producer(clause: &ClauseIr) -> bool {
     chain_clause_is_exile_producer(&clause.parsed.effect)
-        || matches!(
-            clause.followup_continuation,
-            Some(
-                ContinuationAst::ExileOneOfThemFaceDown | ContinuationAst::ExileLookedAtCard { .. }
-            )
-        )
-        || matches!(
-            clause.intrinsic_continuation,
-            Some(
-                ContinuationAst::ExileOneOfThemFaceDown | ContinuationAst::ExileLookedAtCard { .. }
-            )
-        )
+        || continuation_is_exile_producer(clause.disposition.followup())
+        || continuation_is_exile_producer(clause.disposition.intrinsic())
 }
 
 fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
@@ -26035,9 +26048,13 @@ pub(crate) fn parse_effect_chain_ir(
             // chain already produces an exile, so a later singular "the
             // exiled card" anaphor keeps its same-chain binding instead of
             // falling back to the durable `ExiledBySource` cross-resolution
-            // binding. Mirrors the `!absorbed_by_followup` filter used by
-            // `chain_prior_referent_is_created_token`/`any_prior_publishes`.
-            chain_has_prior_exile_producer: clauses.iter().any(clause_ir_is_exile_producer),
+            // binding. Unlike `any_prior_publishes`, this scan deliberately does
+            // NOT skip absorbed (`ClauseDisposition::Continue`) clauses — see
+            // `clause_ir_is_exile_producer` for why (Hideaway).
+            chain_has_prior_exile_producer: builder
+                .clauses()
+                .iter()
+                .any(clause_ir_is_exile_producer),
             // CR 608.2c: bind a bare "it" in this chunk's counter/anaphor to the
             // token created by an earlier clause when that token is the chain's
             // most-recent object referent (Esper Terra's "put up to three lore
