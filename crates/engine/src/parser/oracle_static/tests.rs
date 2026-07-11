@@ -13267,6 +13267,60 @@ fn continuous_subject_filter_legendary_is_supertype_not_subtype() {
     assert_eq!(tf.controller, Some(ControllerRef::You));
 }
 
+// CR 205.4a + CR 205.3m: "Legendary Humans you control" is a compound
+// supertype + subtype subject — the legendary supertype plus the Human subtype,
+// NOT a fabricated subtype named "Legendary Human" (which matches no card).
+// General's Enforcer / Kashi-Tribe Elite anthems previously applied to nothing.
+#[test]
+fn legendary_subtype_subject_peels_supertype_and_keeps_subtype() {
+    let def = parse_static_line("Legendary Humans you control have indestructible.")
+        .expect("legendary-subtype anthem should parse");
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("Expected Typed affected filter, got {:?}", def.affected);
+    };
+    assert_eq!(
+        tf.get_subtype(),
+        Some("Human"),
+        "remainder must be the real subtype, not a fabricated 'Legendary Human'"
+    );
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert!(
+        tf.properties.contains(&FilterProp::HasSupertype {
+            value: Supertype::Legendary,
+        }),
+        "expected HasSupertype(Legendary), got {:?}",
+        tf.properties
+    );
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Indestructible
+        }));
+}
+
+#[test]
+fn typed_filter_for_subtype_peels_leading_supertype() {
+    // Building-block: the single subtype-filter authority peels a leading
+    // supertype word into a HasSupertype property.
+    let filter = typed_filter_for_subtype("Legendary Human");
+    assert_eq!(filter.get_subtype(), Some("Human"));
+    assert!(filter.properties.contains(&FilterProp::HasSupertype {
+        value: Supertype::Legendary,
+    }));
+    // Regression: a plain subtype gains no supertype property.
+    let plain = typed_filter_for_subtype("Goblin");
+    assert_eq!(plain.get_subtype(), Some("Goblin"));
+    assert!(
+        !plain
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::HasSupertype { .. })),
+        "plain subtype must not gain a supertype, got {:?}",
+        plain.properties
+    );
+}
+
 #[test]
 fn static_jodah_anthem_affected_filter_uses_legendary_supertype() {
     // CR 205.4a + CR 613.4c: Jodah, the Unifier's anthem affects
