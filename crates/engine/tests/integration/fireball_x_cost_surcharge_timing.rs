@@ -120,21 +120,17 @@ fn cast_fireball(runner: &mut GameRunner, spell: ObjectId, card_id: CardId) {
 
 /// CR 601.2b: X is announced before targets for a distribute-among spell.
 fn drive_choose_x(runner: &mut GameRunner, x: u32) {
-    for _ in 0..40 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::ChooseXValue { .. } => {
-                runner
-                    .act(GameAction::ChooseX { value: x })
-                    .expect("ChooseX should succeed");
-                return;
-            }
-            WaitingFor::TargetSelection { .. } => {
-                panic!("X must be announced before targets for Fireball's distribute route");
-            }
-            _ => return,
+    match runner.state().waiting_for.clone() {
+        WaitingFor::ChooseXValue { .. } => {
+            runner
+                .act(GameAction::ChooseX { value: x })
+                .expect("ChooseX should succeed");
         }
+        WaitingFor::TargetSelection { .. } => {
+            panic!("X must be announced before targets for Fireball's distribute route");
+        }
+        other => panic!("expected ChooseXValue immediately after CastSpell, got {other:?}"),
     }
-    panic!("never reached ChooseXValue");
 }
 
 /// CR 601.2c: choose the given targets slot-by-slot (mirrors the production
@@ -189,7 +185,10 @@ fn drive_to_distribute(
 /// engine's `DistributeAmong` validator only requires sum == total and each ≥ 1.
 fn even_distribution(total: u32, targets: &[TargetRef]) -> Vec<(TargetRef, u32)> {
     let n = targets.len() as u32;
-    assert!(n > 0 && total % n == 0, "test uses evenly divisible X");
+    assert!(
+        n > 0 && total.is_multiple_of(n),
+        "test uses evenly divisible X"
+    );
     let share = total / n;
     targets.iter().map(|t| (t.clone(), share)).collect()
 }
