@@ -3738,6 +3738,38 @@ fn strip_subject_controller_suffix<'a>(
     (original, None)
 }
 
+/// CR 205.2a + CR 110.1: A bulk card-type / permanent noun — "creature(s)" (the
+/// creature card type) or "permanent(s)" (any permanent on the battlefield) —
+/// names a type, NOT a creature subtype. Returns the base `TypedFilter` for the
+/// noun so the subject parser never fabricates a `Subtype("Permanent")` (which
+/// matches no real card) or `Subtype("Creature")`.
+pub(crate) fn bulk_type_subject_base(word: &str) -> Option<TypedFilter> {
+    if word.eq_ignore_ascii_case("creature") || word.eq_ignore_ascii_case("creatures") {
+        Some(TypedFilter::creature())
+    } else if word.eq_ignore_ascii_case("permanent") || word.eq_ignore_ascii_case("permanents") {
+        Some(TypedFilter::permanent())
+    } else {
+        None
+    }
+}
+
+/// Apply the shared subject scope to a base subject filter: the controller
+/// suffix ("you control" → `ControllerRef`, CR 109.5) and the leading "Other "
+/// exclusion (`FilterProp::Another`).
+fn scoped_subject_filter(
+    mut typed: TypedFilter,
+    controller: Option<ControllerRef>,
+    has_other: bool,
+) -> TargetFilter {
+    if let Some(controller) = controller {
+        typed = typed.controller(controller);
+    }
+    if has_other {
+        typed = typed.properties(vec![FilterProp::Another]);
+    }
+    TargetFilter::Typed(typed)
+}
+
 pub(crate) fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();
@@ -3769,43 +3801,29 @@ pub(crate) fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilte
         // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         prefix.trim()
     } else if !descriptor_text.contains(' ') && descriptor_text.to_lowercase().ends_with('s') {
-        if descriptor_text.eq_ignore_ascii_case("creatures") {
-            // CR 205.2a: "creatures" names the creature card type, not a creature subtype.
-            let mut typed = TypedFilter::creature();
-            if let Some(controller) = controller {
-                typed = typed.controller(controller);
-            }
-            if has_other {
-                typed = typed.properties(vec![FilterProp::Another]);
-            }
-            return Some(TargetFilter::Typed(typed));
+        // CR 205.2a + CR 110.1: a bulk card-type / permanent noun ("creatures",
+        // "permanents") names a type, not a creature subtype — checked BEFORE the
+        // subtype fallback so "Permanents you control" spans every permanent
+        // rather than fabricating a zero-match Subtype("Permanent").
+        if let Some(base) = bulk_type_subject_base(descriptor_text) {
+            return Some(scoped_subject_filter(base, controller, has_other));
         }
         // CR 205.3m: Use parse_subtype for irregular plurals (Elves→Elf, Dwarves→Dwarf)
         if let Some((canonical, _)) = parse_subtype(descriptor_text) {
-            let mut typed = TypedFilter::creature().subtype(canonical);
-            if let Some(controller) = controller {
-                typed = typed.controller(controller);
-            }
-            if has_other {
-                typed = typed.properties(vec![FilterProp::Another]);
-            }
-            return Some(TargetFilter::Typed(typed));
+            return Some(scoped_subject_filter(
+                TypedFilter::creature().subtype(canonical),
+                controller,
+                has_other,
+            ));
         }
         descriptor_text.trim_end_matches('s').trim()
     } else {
         return None;
     };
 
-    if descriptor.eq_ignore_ascii_case("creature") {
-        // CR 205.2a: "creature" names the creature card type, not a creature subtype.
-        let mut typed = TypedFilter::creature();
-        if let Some(controller) = controller {
-            typed = typed.controller(controller);
-        }
-        if has_other {
-            typed = typed.properties(vec![FilterProp::Another]);
-        }
-        return Some(TargetFilter::Typed(typed));
+    // CR 205.2a + CR 110.1: bare "creature" / "permanent" name a type, not a subtype.
+    if let Some(base) = bulk_type_subject_base(descriptor) {
+        return Some(scoped_subject_filter(base, controller, has_other));
     }
 
     if descriptor.is_empty() {

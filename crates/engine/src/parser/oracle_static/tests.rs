@@ -13023,6 +13023,82 @@ fn parse_creature_subject_filter_generic_and_irregular_plurals() {
     }
 }
 
+// CR 205.2a + CR 110.1: "Permanents you control" names ANY permanent, not a
+// creature named subtype "Permanent". The old parse fabricated
+// [Creature, Subtype("Permanent")] (matching no real card), so anthems like
+// Wondrous Crucible, Mishra Tamer of Mak Fawa, Cursed Wombat and Innkeeper's
+// Talent applied to nothing.
+#[test]
+fn permanents_you_control_subject_is_any_permanent_not_creature_subtype() {
+    assert_eq!(
+        parse_creature_subject_filter("Permanents you control"),
+        Some(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::You)
+        ))
+    );
+    // The leading "Other " exclusion still attaches on the all-permanents base.
+    assert_eq!(
+        parse_creature_subject_filter("Other permanents you control"),
+        Some(TargetFilter::Typed(
+            TypedFilter::permanent()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Another])
+        ))
+    );
+}
+
+#[test]
+fn permanents_you_control_ward_anthem_applies_to_all_permanents() {
+    let def = parse_static_line("Permanents you control have ward {2}.")
+        .expect("permanents-you-control ward anthem must parse");
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::You)
+        ))
+    );
+    assert!(
+        def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Ward(_)
+            }
+        )),
+        "ward grant dropped: {:?}",
+        def.modifications
+    );
+}
+
+#[test]
+fn permanents_you_control_with_counters_keeps_qualifier_on_permanent_base() {
+    // Innkeeper's Talent: the trailing "with counters on them" qualifier still
+    // attaches as a FilterProp on top of the corrected all-permanents base.
+    let def = parse_static_line("Permanents you control with counters on them have ward {1}.")
+        .expect("permanents-with-counters anthem must parse");
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected typed permanent filter, got {:?}", def.affected);
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Permanent),
+        "must be the any-permanent base, got {:?}",
+        tf.type_filters
+    );
+    assert!(
+        !tf.type_filters.contains(&TypeFilter::Creature),
+        "must not narrow to Creature, got {:?}",
+        tf.type_filters
+    );
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(tf.get_subtype().is_none(), "must not fabricate a subtype");
+    assert!(
+        tf.properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Counters { .. })),
+        "counter qualifier dropped: {:?}",
+        tf.properties
+    );
+}
+
 #[test]
 fn continuous_subject_filter_nontoken_is_negation_not_subtype() {
     // CR 111.1 / CR 205.3: "Nontoken creatures you control" (Ashaya, Soul of

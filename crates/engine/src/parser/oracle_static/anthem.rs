@@ -223,6 +223,12 @@ pub(crate) fn parse_typed_you_control(
                     parse_token_you_control_descriptor(&TextPair::new(descriptor, &desc_lower))
                 {
                     filter
+                // CR 205.2a + CR 110.1: "Permanents you control" (and the bare
+                // "Creature" card-type word) name a type, not a subtype — resolve
+                // to the all-permanents base before the capitalized-subtype
+                // fallback fabricates a zero-match `Subtype("Permanent")`.
+                } else if let Some(base) = bulk_type_subject_base(descriptor) {
+                    TargetFilter::Typed(base.controller(ControllerRef::You))
                 } else if is_capitalized_words(descriptor) {
                     // CR 205.3m: Normalize plural subtypes to canonical singular form
                     let subtype_name = parse_subtype(descriptor)
@@ -234,6 +240,11 @@ pub(crate) fn parse_typed_you_control(
                 } else {
                     return None;
                 }
+            } else if let Some(base) = bulk_type_subject_base(desc_remaining) {
+                // CR 205.2a + CR 110.1: bulk permanent/creature noun after a
+                // combat-status prefix ("Untapped permanents you control") — base
+                // type, not a subtype.
+                TargetFilter::Typed(base.controller(ControllerRef::You).properties(extra_props))
             } else if is_capitalized_words(desc_remaining) {
                 // CR 205.3m: Normalize plural subtypes to canonical singular form
                 let subtype_name = parse_subtype(desc_remaining)
