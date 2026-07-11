@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4761
-- **Total card appearances across root causes:** 4795 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4760
+- **Total card appearances across root causes:** 4794 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -807,7 +807,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (606 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (605 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -1111,7 +1111,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Laboratory Drudge
 - Lagomos, Hand of Hatred
 - Lairwatch Giant
-- Land's Edge
 - Lashwhip Predator
 - Latchkey Faerie
 - Lava Burst
