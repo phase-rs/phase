@@ -659,20 +659,43 @@ pub(crate) fn parse_soulbond_paired_static(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
-    let parser = preceded(
-        tag("as long as "),
-        preceded(
-            terminated(parse_soulbond_paired_condition_nom, tag(", ")),
-            preceded(
-                alt((tag("each of those creatures "), tag("both creatures "))),
-                alt((terminated(take_until("."), tag(".")), rest)),
-            ),
-        ),
-    );
-    let (_, predicate) = all_consuming(parser).parse(tp.lower).ok()?;
-    let mut def = parse_continuous_gets_has(predicate, TargetFilter::SourceOrPaired, description)?;
+    // CR 702.95: Soulbond. The paired reminder-text grant — "As long as ~ is
+    // paired with another creature, each of those creatures <predicate>." — is a
+    // CR 613.1f layer-6 ability-adding effect applied to BOTH paired creatures
+    // (SourceOrPaired). Split the pairing frame off the granted predicate with
+    // TextPair so the predicate keeps its ORIGINAL case: a quoted granted
+    // ability's mana symbols (`{1}{U}`) must reach the cost parser un-lowercased.
+    let after = tp.strip_prefix("as long as ")?;
+    let (condition, predicate) = after
+        .split_around(", each of those creatures ")
+        .or_else(|| after.split_around(", both creatures "))?;
+    if !matches_soulbond_paired_condition(condition.lower) {
+        return None;
+    }
+    let predicate = strip_granted_predicate_period(&predicate);
+    let mut def = parse_continuous_gets_has(
+        predicate.original,
+        TargetFilter::SourceOrPaired,
+        description,
+    )?;
     def.condition = Some(StaticCondition::SourceIsPaired);
     Some(def)
+}
+
+/// Trim a granted predicate's sentence-ending period, but leave a quoted ability
+/// intact. A quoted activated (CR 602.1) or triggered (CR 603.1) granted ability
+/// terminates with its period INSIDE the closing quote (`has "{1}{U}: ... your
+/// control."`), so a predicate ending in `"` has no outside period to strip —
+/// only the bare keyword/P-T forms (`has flying.`, `gets +1/+1.`) carry an outer
+/// period. A period-terminated `take_until(".")` would instead sever the quote
+/// at that inner period and drop the whole granted ability.
+fn strip_granted_predicate_period<'a>(predicate: &TextPair<'a>) -> TextPair<'a> {
+    let predicate = predicate.trim_end();
+    if predicate.ends_with("\"") {
+        predicate
+    } else {
+        predicate.trim_end_matches('.')
+    }
 }
 
 pub(crate) fn bind_where_x_in_quantity_expr(

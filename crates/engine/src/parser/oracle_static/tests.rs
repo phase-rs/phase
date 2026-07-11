@@ -9635,6 +9635,114 @@ fn tokens_you_control_grant_spans_all_token_permanents() {
     );
 }
 
+// CR 702.95 + CR 613.1f: A soulbond pair grants a QUOTED activated/triggered
+// ability to both paired creatures — "As long as ~ is paired with another
+// creature, each of those creatures has "<ability>."". The granted ability's own
+// sentence period sits INSIDE its closing quote, so the paired predicate
+// extraction must not sever the quote at that inner period (regression: the
+// whole grant used to drop to empty `modifications` with a wrong `SelfRef`
+// scope). Covers the quoted class: Deadeye Navigator, Galvanic Alchemist,
+// Stonewright, Stern Mentor, Doom Weaver, Breathkeeper Seraph, Thundering
+// Mightmare, Imperious Mindbreaker, Tandem Lookout, Mirage Phalanx.
+#[test]
+fn soulbond_grants_quoted_activated_mana_ability() {
+    let def = parse_static_line(
+        "As long as ~ is paired with another creature, each of those creatures has \"{1}{U}: Exile ~, then return it to the battlefield under your control.\"",
+    )
+    .expect("soulbond quoted-ability grant must parse");
+    // CR 613.1f: the grant applies to BOTH paired creatures, gated on the pairing.
+    assert_eq!(def.affected, Some(TargetFilter::SourceOrPaired));
+    assert_eq!(def.condition, Some(StaticCondition::SourceIsPaired));
+    let ContinuousModification::GrantAbility { definition } = def
+        .modifications
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("must grant the quoted activated ability, not drop it")
+    else {
+        unreachable!()
+    };
+    assert_eq!(definition.kind, AbilityKind::Activated);
+    assert!(
+        definition.cost.is_some(),
+        "granted activated ability must keep its {{1}}{{U}} cost: {definition:?}"
+    );
+}
+
+#[test]
+fn soulbond_grants_quoted_tap_free_activated_ability() {
+    let def = parse_static_line(
+        "As long as ~ is paired with another creature, each of those creatures has \"{2}{U}: Untap ~.\"",
+    )
+    .expect("Galvanic Alchemist soulbond grant must parse");
+    assert_eq!(def.affected, Some(TargetFilter::SourceOrPaired));
+    assert_eq!(def.condition, Some(StaticCondition::SourceIsPaired));
+    assert!(
+        def.modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })),
+        "granted ability dropped: {:?}",
+        def.modifications
+    );
+}
+
+#[test]
+fn soulbond_grants_quoted_triggered_ability() {
+    let def = parse_static_line(
+        "As long as ~ is paired with another creature, each of those creatures has \"Whenever ~ deals damage to an opponent, draw a card.\"",
+    )
+    .expect("Tandem Lookout soulbond grant must parse");
+    assert_eq!(def.affected, Some(TargetFilter::SourceOrPaired));
+    assert_eq!(def.condition, Some(StaticCondition::SourceIsPaired));
+    // CR 603.1: a "Whenever ..." quoted body becomes a granted TRIGGER, not an
+    // activated ability, so trigger metadata is preserved.
+    assert!(
+        def.modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+        "quoted triggered ability must become a GrantTrigger: {:?}",
+        def.modifications
+    );
+}
+
+// Regression: the bare keyword/P-T soulbond grants (which never had a quoted
+// period) must still parse identically through the same paired seam.
+#[test]
+fn soulbond_paired_keyword_grant_still_parses() {
+    let def = parse_static_line(
+        "As long as ~ is paired with another creature, both creatures have flying.",
+    )
+    .expect("Wingcrafter soulbond keyword grant must parse");
+    assert_eq!(def.affected, Some(TargetFilter::SourceOrPaired));
+    assert_eq!(def.condition, Some(StaticCondition::SourceIsPaired));
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            }),
+        "keyword grant regressed: {:?}",
+        def.modifications
+    );
+}
+
+#[test]
+fn soulbond_paired_pt_grant_still_parses() {
+    let def = parse_static_line(
+        "As long as ~ is paired with another creature, each of those creatures gets +4/+4.",
+    )
+    .expect("Wolfir Silverheart soulbond P/T grant must parse");
+    assert_eq!(def.affected, Some(TargetFilter::SourceOrPaired));
+    assert_eq!(def.condition, Some(StaticCondition::SourceIsPaired));
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddPower { value: 4 })
+            && def
+                .modifications
+                .contains(&ContinuousModification::AddToughness { value: 4 }),
+        "P/T grant regressed: {:?}",
+        def.modifications
+    );
+}
+
 // CR 111.6: "Creature tokens you control" reaches the same token-descriptor arm
 // via the optional "creature " prefix, narrowing to creature tokens only.
 #[test]
