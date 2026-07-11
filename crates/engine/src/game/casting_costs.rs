@@ -13,9 +13,9 @@ use crate::types::ability::{
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActivationResidual, AssistState, CastPaymentMode, CastingVariant, ConvokeMode, CostResume,
-    CounterCostChoice, CounterRemoveChoice, DistributionUnit, GameState, PayCostKind, PendingCast,
-    PendingDiscardForCostResume, SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot,
-    WaitingFor,
+    CounterCostChoice, CounterRemoveChoice, DeferredSacrificeSelection, DistributionUnit,
+    GameState, PayCostKind, PendingCast, PendingDiscardForCostResume, SpellCostSource, StackEntry,
+    StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -41,6 +41,8 @@ use super::ability_utils::{
     modal_choice_for_player, random_select_targets_for_ability, target_constraints_from_modal,
 };
 use super::life_costs::PayLifeCostResult;
+
+const TERMINAL_CAST_CANCELLATION_ERROR: &str = "__terminal_cast_cancellation__";
 
 fn stamp_controller_controlled_as_cast(
     state: &GameState,
@@ -1131,6 +1133,10 @@ fn finish_pending_cost_or_cast(
             &mut pending.cost,
         );
     }
+    if !pending.deferred_sacrificed_permanents.is_empty() {
+        state.pending_cast = Some(Box::new(pending));
+        return enter_payment_step(state, player, None, events);
+    }
     let waiting_for = pay_and_push(
         state,
         player,
@@ -1614,6 +1620,221 @@ pub(crate) struct CostSelection<'a> {
     pub(crate) chosen: &'a [ObjectId],
 }
 
+fn can_defer_spell_sacrifice_until_mana_payment(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    chosen: &[ObjectId],
+) -> bool {
+    if chosen.is_empty() || pending.activation_ability_index.is_some() {
+        return false;
+    }
+    if sacrifice_selection_needs_replacement_choice(state, player, chosen) {
+        return false;
+    }
+
+    let mut cost = pending.cost.clone();
+    // CR 601.2f: preview the same final floor pass `finish_pending_cost_or_cast`
+    // will apply before the spell reaches final payment.
+    super::casting::apply_cost_floor(state, player, pending.object_id, &mut cost);
+    super::casting::apply_cost_floor_with_selected_targets(
+        state,
+        player,
+        pending.object_id,
+        &pending.ability,
+        &mut cost,
+    );
+
+    cost_has_x(&cost) || cost.mana_value() > 0
+}
+
+fn sacrifice_selection_needs_replacement_choice(
+    state: &GameState,
+    player: PlayerId,
+    chosen: &[ObjectId],
+) -> bool {
+    let mut simulated = state.clone();
+    let mut events = Vec::new();
+    chosen.iter().copied().any(|object_id| {
+        matches!(
+            super::sacrifice::sacrifice_permanent(&mut simulated, object_id, player, &mut events),
+            Ok(super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(
+                _
+            ))
+        )
+    })
+}
+
+fn auto_activate_spell_mana_abilities_before_deferred_sacrifice(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let previous_pending = state.pending_cast.clone();
+    let mut simulated = state.clone();
+    simulated.pending_cast = Some(Box::new(pending.clone()));
+    if pending.activation_ability_index.is_some()
+        || pending.payment_mode != CastPaymentMode::Auto
+        || cost_has_x(&pending.cost)
+        || !super::casting::can_pay_cost_after_auto_tap(
+            &simulated,
+            player,
+            pending.object_id,
+            &pending.cost,
+        )
+    {
+        return Ok(());
+    }
+
+    // CR 601.2g + CR 601.2h: spell mana abilities are activated before costs
+    // are paid, so a permanent can tap for mana first and then be sacrificed as
+    // a non-mana additional cost. The final spend remains in `finalize_cast`.
+    let mut simulated_events = events.clone();
+    let events_before = simulated_events.len();
+    let spell_meta = super::casting::build_spell_meta(&simulated, player, pending.object_id);
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    auto_tap_mana_sources_with_context(
+        &mut simulated,
+        player,
+        &pending.cost,
+        &mut simulated_events,
+        Some(pending.object_id),
+        spell_ctx.as_ref(),
+    );
+    // CR 605.4a: triggered mana abilities from those taps resolve immediately.
+    super::triggers::resolve_tap_mana_triggers_inline(
+        &mut simulated,
+        &mut simulated_events,
+        events_before,
+    );
+    validate_deferred_spell_sacrifices_at_commit(&simulated, player, pending)?;
+    simulated.pending_cast = previous_pending;
+    *state = simulated;
+    *events = simulated_events;
+    Ok(())
+}
+
+fn validate_deferred_spell_sacrifices_at_commit(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+) -> Result<(), EngineError> {
+    // CR 601.2h: Costs are paid only if they remain payable; a deferred
+    // sacrifice selection must still satisfy the original cost at commit.
+    for selection in &pending.deferred_sacrificed_permanents {
+        let id = selection.object_id;
+        let obj = state.objects.get(&id).ok_or_else(|| {
+            EngineError::InvalidAction("Deferred sacrifice permanent not found".to_string())
+        })?;
+        if obj.zone != Zone::Battlefield || obj.controller != player {
+            return Err(EngineError::ActionNotAllowed(
+                "Deferred sacrifice permanent is no longer on the battlefield under your control"
+                    .to_string(),
+            ));
+        }
+        if super::static_abilities::player_cant_sacrifice_as_cost(state, player, id) {
+            return Err(EngineError::ActionNotAllowed(
+                "Deferred sacrifice permanent cannot be sacrificed as a cost".to_string(),
+            ));
+        }
+        if !super::filter::matches_target_filter(
+            state,
+            id,
+            &selection.filter,
+            &super::filter::FilterContext::from_source(state, pending.object_id),
+        ) {
+            return Err(EngineError::ActionNotAllowed(
+                "Deferred sacrifice permanent no longer matches the sacrifice cost".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn pay_spell_mana_before_deferred_sacrifice(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<u32>, EngineError> {
+    if pending.deferred_sacrificed_permanents.is_empty() {
+        return Ok(None);
+    }
+
+    validate_deferred_spell_sacrifices_at_commit(state, player, pending)?;
+    auto_activate_spell_mana_abilities_before_deferred_sacrifice(state, player, pending, events)?;
+    stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
+    let actual_mana_spent = super::casting::pay_mana_cost_from_pool_with_choices(
+        state,
+        player,
+        pending.object_id,
+        &pending.cost,
+        phyrexian_choices,
+        events,
+    )?;
+    Ok(Some(actual_mana_spent))
+}
+
+fn pay_deferred_spell_sacrifices_at_commit(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<(usize, usize)>, EngineError> {
+    if pending.deferred_sacrificed_permanents.is_empty() {
+        return Ok(None);
+    }
+
+    let cost_event_start = events.len();
+    for selection in &pending.deferred_sacrificed_permanents {
+        let id = selection.object_id;
+        match super::sacrifice::sacrifice_permanent(state, id, player, events)
+            .map_err(|e| EngineError::InvalidAction(format!("{e}")))?
+        {
+            super::sacrifice::SacrificeOutcome::Complete => {}
+            super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(_) => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Deferred sacrifice cost requires replacement ordering".to_string(),
+                ));
+            }
+        }
+    }
+    // CR 603.10a + CR 701.21a + CR 601.2h + CR 118.8: permanents sacrificed to
+    // pay one cost component leave the battlefield together.
+    let departed_ids: Vec<ObjectId> = pending
+        .deferred_sacrificed_permanents
+        .iter()
+        .map(|selection| selection.object_id)
+        .collect();
+    crate::game::zones::mark_simultaneous_departures(
+        events,
+        &crate::game::zones::departed_subset(state, &departed_ids),
+    );
+    Ok(Some((cost_event_start, events.len())))
+}
+
+fn park_deferred_cost_triggers_if_paused(
+    state: &mut GameState,
+    events: &[GameEvent],
+    cost_event_range: Option<(usize, usize)>,
+    waiting_for: &WaitingFor,
+) {
+    if matches!(waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+    let Some((start, end)) = cost_event_range else {
+        return;
+    };
+    let cost_events: Vec<GameEvent> = events[start..end]
+        .iter()
+        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+        .cloned()
+        .collect();
+    crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
+}
+
 pub(crate) fn handle_sacrifice_for_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -1638,6 +1859,15 @@ pub(crate) fn handle_sacrifice_for_cost(
             "Must sacrifice {requirement}, got {}",
             chosen.len()
         )));
+    }
+    if chosen
+        .iter()
+        .enumerate()
+        .any(|(index, id)| chosen[index + 1..].contains(id))
+    {
+        return Err(EngineError::InvalidAction(
+            "Cannot sacrifice the same permanent more than once for a cost".to_string(),
+        ));
     }
     for id in chosen {
         if !legal_permanents.contains(id) {
@@ -1728,6 +1958,34 @@ pub(crate) fn handle_sacrifice_for_cost(
         );
     }
 
+    // CR 107.3a: The selected payment count defines X for this activation or
+    // additional cost while its ability is on the stack.
+    if min_count == 0 {
+        pending
+            .ability
+            .set_chosen_x_recursive(chosen.len().try_into().unwrap_or(u32::MAX));
+    }
+
+    let deferred_sacrifice_filter = paid_cost.and_then(|payment| {
+        super::casting::find_non_self_sacrifice_cost(payment.cost).map(|(_, filter)| filter.clone())
+    });
+    if let Some(filter) = deferred_sacrifice_filter {
+        if can_defer_spell_sacrifice_until_mana_payment(state, player, &pending, chosen) {
+            pending
+                .deferred_sacrificed_permanents
+                .extend(
+                    chosen
+                        .iter()
+                        .copied()
+                        .map(|object_id| DeferredSacrificeSelection {
+                            object_id,
+                            filter: filter.clone(),
+                        }),
+                );
+            return finish_pending_cost_or_cast(state, player, pending, events);
+        }
+    }
+
     // Boundary of the cost-payment events THIS handler produces — captured
     // before the sacrifice so the death/leaves-the-battlefield `ZoneChanged`
     // records (and their producer co-departed stamp, below) can be scanned for
@@ -1751,14 +2009,6 @@ pub(crate) fn handle_sacrifice_for_cost(
         &crate::game::zones::departed_subset(state, chosen),
     );
     let cost_event_end = events.len();
-
-    // CR 107.3a: The selected payment count defines X for this activation or
-    // additional cost while its ability is on the stack.
-    if min_count == 0 {
-        pending
-            .ability
-            .set_chosen_x_recursive(chosen.len().try_into().unwrap_or(u32::MAX));
-    }
 
     let waiting_for = finish_pending_cost_or_cast(state, player, pending, events)?;
 
@@ -5992,6 +6242,131 @@ pub(super) fn pay_and_push_adventure(
 ///
 /// Shared by `pay_and_push_adventure` (normal casting) and the
 /// `(ManaPayment, PassPriority)` handler (after interactive mana payment).
+#[derive(Clone, Debug)]
+struct FinalizePrePaymentChecks {
+    early_waiting_for: Option<WaitingFor>,
+    cascade_cast_transformed: bool,
+    resolution_success_waiting_for: Option<WaitingFor>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_cast_pre_payment_checks(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: &ResolvedAbility,
+    cost: &crate::types::mana::ManaCost,
+    casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
+    events: &mut Vec<GameEvent>,
+) -> Result<FinalizePrePaymentChecks, EngineError> {
+    // CR 601.3d + CR 702.8a: When the cast was authorized as-though-it-had-flash
+    // via a `SpellCastingOption` whose `condition` is target-dependent (e.g.,
+    // Timely Ward), targets must satisfy that condition before costs are paid.
+    // CR 702.102b: fuse-project the real-flash short-circuit for fused split casts.
+    if cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
+        && !super::restrictions::target_dependent_flash_permission_satisfied(
+            state,
+            player,
+            object_id,
+            ability,
+            casting_variant == CastingVariant::Fuse,
+        )
+    {
+        let pending_for_cancel =
+            PendingCast::new(object_id, card_id, ability.clone(), cost.clone());
+        super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
+        return Err(EngineError::ActionNotAllowed(
+            TERMINAL_CAST_CANCELLATION_ERROR.to_string(),
+        ));
+    }
+
+    // CR 702.85a: Evaluate cascade/resulting-MV constraints before payment.
+    // For the constraint we synthesize the resulting MV from the printed cost
+    // + chosen_x rather than reading `obj.cost_x_paid`, since that field is
+    // stamped only after payment.
+    let cascade_resulting_mv = state
+        .objects
+        .get(&object_id)
+        .map(|obj| obj.mana_cost.mana_value() + ability.chosen_x.unwrap_or(0));
+    let mut cascade_cast_transformed = false;
+    let mut resolution_success_waiting_for: Option<WaitingFor> = None;
+    if let Some(resulting_mv) = cascade_resulting_mv {
+        let cascade_check = match evaluate_cascade_constraint_with_resulting_mv(
+            state,
+            object_id,
+            player,
+            resulting_mv,
+            events,
+        ) {
+            CascadeCheck::NotApplicable => None,
+            CascadeCheck::Accepted {
+                cast_transformed,
+                waiting_for,
+            } => {
+                resolution_success_waiting_for = waiting_for.map(|wf| *wf);
+                Some(cast_transformed)
+            }
+            CascadeCheck::Rejected {
+                exiled_misses,
+                reject_action,
+            } => {
+                let waiting_for = handle_resolution_cast_rejection(
+                    state,
+                    player,
+                    object_id,
+                    exiled_misses,
+                    reject_action,
+                    events,
+                )?;
+                return Ok(FinalizePrePaymentChecks {
+                    early_waiting_for: Some(waiting_for),
+                    cascade_cast_transformed: false,
+                    resolution_success_waiting_for: None,
+                });
+            }
+        };
+        if cascade_check.is_none()
+            && !super::casting::selected_exile_alt_cost_permission_accepts_resulting_mv(
+                state,
+                object_id,
+                player,
+                resulting_mv,
+            )
+        {
+            let pending_for_cancel =
+                PendingCast::new(object_id, card_id, ability.clone(), cost.clone());
+            super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
+            return Err(EngineError::ActionNotAllowed(
+                TERMINAL_CAST_CANCELLATION_ERROR.to_string(),
+            ));
+        }
+        if cascade_check.is_none()
+            && !super::casting::exile_alt_cost_permissions_accept_resulting_mv(
+                state,
+                object_id,
+                player,
+                resulting_mv,
+            )
+        {
+            let pending_for_cancel =
+                PendingCast::new(object_id, card_id, ability.clone(), cost.clone());
+            super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
+            return Err(EngineError::ActionNotAllowed(
+                TERMINAL_CAST_CANCELLATION_ERROR.to_string(),
+            ));
+        }
+        cascade_cast_transformed = cascade_check == Some(true);
+    }
+
+    Ok(FinalizePrePaymentChecks {
+        early_waiting_for: None,
+        cascade_cast_transformed,
+        resolution_success_waiting_for,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finalize_cast(
     state: &mut GameState,
@@ -6037,6 +6412,51 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    finalize_cast_with_phyrexian_choices_inner(
+        state,
+        player,
+        object_id,
+        card_id,
+        ability,
+        cost,
+        casting_variant,
+        cast_timing_permission,
+        origin_zone,
+        phyrexian_choices,
+        None,
+        None,
+        events,
+    )
+    .map_err(|err| {
+        if matches!(
+            &err,
+            EngineError::ActionNotAllowed(message) if message == TERMINAL_CAST_CANCELLATION_ERROR
+        ) {
+            EngineError::ActionNotAllowed(
+                "Chosen targets do not satisfy the casting condition".to_string(),
+            )
+        } else {
+            err
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_cast_with_phyrexian_choices_inner(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: &crate::types::mana::ManaCost,
+    casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
+    origin_zone: Zone,
+    phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
+    pre_payment_checks: Option<FinalizePrePaymentChecks>,
+    prepaid_actual_mana_spent: Option<u32>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     // CR 702.150a: Record how many of this spell's Phyrexian mana symbols are
     // being paid with life. A compleated planeswalker entering from this spell
     // exposes this as an intrinsic AddCounter replacement so it can order with
@@ -6056,112 +6476,26 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         }
     }
 
-    // CR 601.3d + CR 702.8a: When the cast was authorized as-though-it-had-flash
-    // via a `SpellCastingOption` whose `condition` is target-dependent (e.g.,
-    // Timely Ward — "you may cast this spell as though it had flash if it
-    // targets a commander"), the condition could not be evaluated at the
-    // announcement-time `flash_timing_cost` check because targets weren't yet
-    // chosen. Now that the player has committed targets (and any cascade
-    // resulting-MV constraint will be evaluated below before payment), we can
-    // authoritatively re-validate: at least one `AsThoughHadFlash` option's
-    // condition (or a real Flash keyword) must authorize the cast. If none do,
-    // the cast is illegal under CR 601.3d — abort by popping the stack entry
-    // and surface the error to the caller.
-    // CR 702.102b: fuse-project the real-flash short-circuit for a fused split
-    // cast (this re-validation runs before the `fused_split_spell` marker is set
-    // below) so a value-keyed granted Flash is not dropped on the front half.
-    if cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
-        && !super::restrictions::target_dependent_flash_permission_satisfied(
+    let FinalizePrePaymentChecks {
+        early_waiting_for,
+        cascade_cast_transformed,
+        resolution_success_waiting_for,
+    } = match pre_payment_checks {
+        Some(checks) => checks,
+        None => finalize_cast_pre_payment_checks(
             state,
             player,
             object_id,
+            card_id,
             &ability,
-            casting_variant == CastingVariant::Fuse,
-        )
-    {
-        let pending_for_cancel = PendingCast::new(object_id, card_id, ability, cost.clone());
-        super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
-        return Err(EngineError::ActionNotAllowed(
-            "Chosen targets do not satisfy the flash casting condition".to_string(),
-        ));
-    }
-
-    // CR 702.85a: Evaluate the cascade resulting-MV constraint BEFORE mana is
-    // paid. By this point the player has chosen X (CR 601.2b runs at
-    // `enter_payment_step`/`ChooseXValue`), so `ability.chosen_x` reflects the
-    // final cost-X. Evaluating here means a rejection has nothing to rewind:
-    // no mana has left the pool, no `cost_x_paid` has been stamped, and no
-    // targets are committed beyond the announcement-time selections (which
-    // `handle_cascade_rejection` clears alongside popping the stack entry).
-    //
-    // For the constraint we synthesize the resulting MV from the printed cost
-    // + chosen_x rather than reading `obj.cost_x_paid`, since the latter is
-    // not stamped until after payment further below.
-    let cascade_resulting_mv = state
-        .objects
-        .get(&object_id)
-        .map(|obj| obj.mana_cost.mana_value() + ability.chosen_x.unwrap_or(0));
-    let mut cascade_cast_transformed = false;
-    let mut resolution_success_waiting_for: Option<WaitingFor> = None;
-    if let Some(resulting_mv) = cascade_resulting_mv {
-        let cascade_check = match evaluate_cascade_constraint_with_resulting_mv(
-            state,
-            object_id,
-            player,
-            resulting_mv,
+            cost,
+            casting_variant,
+            cast_timing_permission,
             events,
-        ) {
-            CascadeCheck::NotApplicable => None,
-            CascadeCheck::Accepted {
-                cast_transformed,
-                waiting_for,
-            } => {
-                resolution_success_waiting_for = waiting_for.map(|wf| *wf);
-                Some(cast_transformed)
-            }
-            CascadeCheck::Rejected {
-                exiled_misses,
-                reject_action,
-            } => {
-                return handle_resolution_cast_rejection(
-                    state,
-                    player,
-                    object_id,
-                    exiled_misses,
-                    reject_action,
-                    events,
-                );
-            }
-        };
-        if cascade_check.is_none()
-            && !super::casting::selected_exile_alt_cost_permission_accepts_resulting_mv(
-                state,
-                object_id,
-                player,
-                resulting_mv,
-            )
-        {
-            let pending_for_cancel = PendingCast::new(object_id, card_id, ability, cost.clone());
-            super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
-            return Err(EngineError::ActionNotAllowed(
-                "Spell mana value does not satisfy the cast permission".to_string(),
-            ));
-        }
-        if cascade_check.is_none()
-            && !super::casting::exile_alt_cost_permissions_accept_resulting_mv(
-                state,
-                object_id,
-                player,
-                resulting_mv,
-            )
-        {
-            let pending_for_cancel = PendingCast::new(object_id, card_id, ability, cost.clone());
-            super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
-            return Err(EngineError::ActionNotAllowed(
-                "Spell mana value does not satisfy the cast permission".to_string(),
-            ));
-        }
-        cascade_cast_transformed = cascade_check == Some(true);
+        )?,
+    };
+    if let Some(waiting_for) = early_waiting_for {
+        return Ok(waiting_for);
     }
 
     // CR 700.14: Snapshot pool size before payment to compute actual mana spent.
@@ -6187,14 +6521,16 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         obj.fused_split_spell = casting_variant == CastingVariant::Fuse;
     }
 
-    super::casting::pay_mana_cost_with_choices(
-        state,
-        player,
-        object_id,
-        cost,
-        phyrexian_choices,
-        events,
-    )?;
+    if prepaid_actual_mana_spent.is_none() {
+        super::casting::pay_mana_cost_with_choices(
+            state,
+            player,
+            object_id,
+            cost,
+            phyrexian_choices,
+            events,
+        )?;
+    }
 
     // CR 702.190a / CR 702.188a: Sneak and Web-slinging additionally require
     // returning a creature to its owner's hand as part of paying the casting
@@ -6223,7 +6559,8 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         .find(|p| p.id == player)
         .map(|p| p.mana_pool.produced_mana_total())
         .unwrap_or(0);
-    let actual_mana_spent = pool_before.saturating_sub(pool_after) as u32;
+    let actual_mana_spent =
+        prepaid_actual_mana_spent.unwrap_or_else(|| pool_before.saturating_sub(pool_after) as u32);
 
     // CR 603.4 + CR 903.8: `origin_zone` preserves the pre-announcement zone so
     // that "cast from hand/graveyard/exile" conditions evaluate correctly and
@@ -8671,6 +9008,46 @@ pub fn finalize_mana_payment(
             );
         }
 
+        let pre_payment_checks = if pending.deferred_sacrificed_permanents.is_empty() {
+            None
+        } else {
+            Some(finalize_cast_pre_payment_checks(
+                state,
+                player,
+                pending.object_id,
+                pending.card_id,
+                &pending.ability,
+                &pending.cost,
+                pending.casting_variant,
+                pending.cast_timing_permission,
+                events,
+            )?)
+        };
+        if let Some(waiting_for) = pre_payment_checks
+            .as_ref()
+            .and_then(|checks| checks.early_waiting_for.clone())
+        {
+            return Ok(waiting_for);
+        }
+
+        let pool_before_for_distribution = pending.distribute.as_ref().map(|_| {
+            state
+                .players
+                .iter()
+                .find(|pl| pl.id == player)
+                .map(|pl| pl.mana_pool.total())
+                .unwrap_or(0)
+        });
+        let prepaid_actual_mana_spent =
+            pay_spell_mana_before_deferred_sacrifice(state, player, &pending, None, events)?;
+        let deferred_sacrifice_events =
+            pay_deferred_spell_sacrifices_at_commit(state, player, &pending, events)?;
+        let final_cast_cost = if prepaid_actual_mana_spent.is_some() {
+            crate::types::mana::ManaCost::NoCost
+        } else {
+            pending.cost.clone()
+        };
+
         // NOTE: This branch is provably unreachable for every currently-implemented
         // distribute-unit + {X}-cost card (Fireball and siblings) — the CR 601.2c/d
         // gate in `ability_utils::ability_distribution_pool_needs_chosen_x` (added by
@@ -8688,14 +9065,24 @@ pub fn finalize_mana_payment(
         if let Some(unit) = pending.distribute {
             // CR 601.2d: X-spell distribution — pay mana first to determine X, then
             // trigger DistributeAmong with total = X.
-            let pool_before = state
-                .players
-                .iter()
-                .find(|pl| pl.id == player)
-                .map(|pl| pl.mana_pool.total())
-                .unwrap_or(0);
+            let pool_before = pool_before_for_distribution.unwrap_or_else(|| {
+                state
+                    .players
+                    .iter()
+                    .find(|pl| pl.id == player)
+                    .map(|pl| pl.mana_pool.total())
+                    .unwrap_or(0)
+            });
 
-            super::casting::pay_mana_cost(state, player, pending.object_id, &pending.cost, events)?;
+            if prepaid_actual_mana_spent.is_none() {
+                super::casting::pay_mana_cost(
+                    state,
+                    player,
+                    pending.object_id,
+                    &pending.cost,
+                    events,
+                )?;
+            }
 
             let pool_after = state
                 .players
@@ -8740,7 +9127,7 @@ pub fn finalize_mana_payment(
 
                 let pending = state.pending_cast.take().unwrap();
                 stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
-                let waiting_for = finalize_cast(
+                let waiting_for = finalize_cast_with_phyrexian_choices_inner(
                     state,
                     player,
                     pending.object_id,
@@ -8750,6 +9137,9 @@ pub fn finalize_mana_payment(
                     pending.casting_variant,
                     pending.cast_timing_permission,
                     pending.origin_zone,
+                    None,
+                    pre_payment_checks.clone(),
+                    prepaid_actual_mana_spent,
                     events,
                 )?;
                 return Ok(drain_deferred_triggers_after_stack_object_announcement(
@@ -8760,38 +9150,61 @@ pub fn finalize_mana_payment(
             }
 
             state.pending_cast = Some(Box::new(pending_resumed));
-            return Ok(WaitingFor::DistributeAmong {
+            let waiting_for = WaitingFor::DistributeAmong {
                 player,
                 total: x_value,
                 targets,
                 unit,
-            });
+            };
+            park_deferred_cost_triggers_if_paused(
+                state,
+                events,
+                deferred_sacrifice_events,
+                &waiting_for,
+            );
+            return Ok(waiting_for);
         }
 
         stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
-        let waiting_for = finalize_cast(
+        let waiting_for = finalize_cast_with_phyrexian_choices_inner(
             state,
             player,
             pending.object_id,
             pending.card_id,
             pending.ability,
-            &pending.cost,
+            &final_cast_cost,
             pending.casting_variant,
             pending.cast_timing_permission,
             pending.origin_zone,
+            None,
+            pre_payment_checks,
+            prepaid_actual_mana_spent,
             events,
         )?;
-        Ok(drain_deferred_triggers_after_stack_object_announcement(
+        let waiting_for =
+            drain_deferred_triggers_after_stack_object_announcement(state, events, waiting_for);
+        park_deferred_cost_triggers_if_paused(
             state,
             events,
-            waiting_for,
-        ))
+            deferred_sacrifice_events,
+            &waiting_for,
+        );
+        Ok(waiting_for)
     })();
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),
         Err(err) => {
+            if matches!(
+                &err,
+                EngineError::ActionNotAllowed(message)
+                    if message == TERMINAL_CAST_CANCELLATION_ERROR
+            ) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Chosen targets do not satisfy the casting condition".to_string(),
+                ));
+            }
             // CR 601.2h: A failed Pay attempt must not consume the pending cast —
             // the caster remains in the mana-payment window and may tap more
             // convoke sources or CancelCast (issue #4379).
@@ -8877,6 +9290,51 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             );
         }
 
+        let pre_payment_checks = if pending.deferred_sacrificed_permanents.is_empty() {
+            None
+        } else {
+            Some(finalize_cast_pre_payment_checks(
+                state,
+                player,
+                pending.object_id,
+                pending.card_id,
+                &pending.ability,
+                &pending.cost,
+                pending.casting_variant,
+                pending.cast_timing_permission,
+                events,
+            )?)
+        };
+        if let Some(waiting_for) = pre_payment_checks
+            .as_ref()
+            .and_then(|checks| checks.early_waiting_for.clone())
+        {
+            return Ok(waiting_for);
+        }
+
+        let pool_before_for_distribution = pending.distribute.as_ref().map(|_| {
+            state
+                .players
+                .iter()
+                .find(|pl| pl.id == player)
+                .map(|pl| pl.mana_pool.total())
+                .unwrap_or(0)
+        });
+        let prepaid_actual_mana_spent = pay_spell_mana_before_deferred_sacrifice(
+            state,
+            player,
+            &pending,
+            Some(phyrexian_choices),
+            events,
+        )?;
+        let deferred_sacrifice_events =
+            pay_deferred_spell_sacrifices_at_commit(state, player, &pending, events)?;
+        let final_cast_cost = if prepaid_actual_mana_spent.is_some() {
+            crate::types::mana::ManaCost::NoCost
+        } else {
+            pending.cost.clone()
+        };
+
         // NOTE: This branch is provably unreachable for every currently-implemented
         // distribute-unit + {X}-cost card (Fireball and siblings) — the CR 601.2c/d
         // gate in `ability_utils::ability_distribution_pool_needs_chosen_x` (added by
@@ -8896,21 +9354,25 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             // Fall through to the auto-decision distribution path for safety — the Phyrexian
             // choices were already consumed via pay_mana_cost_with_choices above (the X-spell
             // distribution path is orthogonal).
-            let pool_before = state
-                .players
-                .iter()
-                .find(|pl| pl.id == player)
-                .map(|pl| pl.mana_pool.total())
-                .unwrap_or(0);
+            let pool_before = pool_before_for_distribution.unwrap_or_else(|| {
+                state
+                    .players
+                    .iter()
+                    .find(|pl| pl.id == player)
+                    .map(|pl| pl.mana_pool.total())
+                    .unwrap_or(0)
+            });
 
-            super::casting::pay_mana_cost_with_choices(
-                state,
-                player,
-                pending.object_id,
-                &pending.cost,
-                Some(phyrexian_choices),
-                events,
-            )?;
+            if prepaid_actual_mana_spent.is_none() {
+                super::casting::pay_mana_cost_with_choices(
+                    state,
+                    player,
+                    pending.object_id,
+                    &pending.cost,
+                    Some(phyrexian_choices),
+                    events,
+                )?;
+            }
 
             let pool_after = state
                 .players
@@ -8947,7 +9409,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
 
                 let pending = state.pending_cast.take().unwrap();
                 stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
-                let waiting_for = finalize_cast(
+                let waiting_for = finalize_cast_with_phyrexian_choices_inner(
                     state,
                     player,
                     pending.object_id,
@@ -8957,49 +9419,81 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                     pending.casting_variant,
                     pending.cast_timing_permission,
                     pending.origin_zone,
+                    Some(phyrexian_choices),
+                    pre_payment_checks.clone(),
+                    prepaid_actual_mana_spent,
                     events,
                 )?;
-                return Ok(drain_deferred_triggers_after_stack_object_announcement(
+                let waiting_for = drain_deferred_triggers_after_stack_object_announcement(
                     state,
                     events,
                     waiting_for,
-                ));
+                );
+                park_deferred_cost_triggers_if_paused(
+                    state,
+                    events,
+                    deferred_sacrifice_events,
+                    &waiting_for,
+                );
+                return Ok(waiting_for);
             }
 
             state.pending_cast = Some(Box::new(pending_resumed));
-            return Ok(WaitingFor::DistributeAmong {
+            let waiting_for = WaitingFor::DistributeAmong {
                 player,
                 total: x_value,
                 targets,
                 unit,
-            });
+            };
+            park_deferred_cost_triggers_if_paused(
+                state,
+                events,
+                deferred_sacrifice_events,
+                &waiting_for,
+            );
+            return Ok(waiting_for);
         }
 
         stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
-        let waiting_for = finalize_cast_with_phyrexian_choices(
+        let waiting_for = finalize_cast_with_phyrexian_choices_inner(
             state,
             player,
             pending.object_id,
             pending.card_id,
             pending.ability,
-            &pending.cost,
+            &final_cast_cost,
             pending.casting_variant,
             pending.cast_timing_permission,
             pending.origin_zone,
             Some(phyrexian_choices),
+            pre_payment_checks,
+            prepaid_actual_mana_spent,
             events,
         )?;
-        Ok(drain_deferred_triggers_after_stack_object_announcement(
+        let waiting_for =
+            drain_deferred_triggers_after_stack_object_announcement(state, events, waiting_for);
+        park_deferred_cost_triggers_if_paused(
             state,
             events,
-            waiting_for,
-        ))
+            deferred_sacrifice_events,
+            &waiting_for,
+        );
+        Ok(waiting_for)
     })();
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),
         Err(err) => {
+            if matches!(
+                &err,
+                EngineError::ActionNotAllowed(message)
+                    if message == TERMINAL_CAST_CANCELLATION_ERROR
+            ) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Chosen targets do not satisfy the casting condition".to_string(),
+                ));
+            }
             // CR 601.2h: A failed Pay attempt must not consume the pending cast —
             // the caster remains in the mana-payment window and may tap more
             // convoke sources or CancelCast (issue #4379).
@@ -9721,6 +10215,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -14561,6 +15056,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -14690,6 +15186,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -14788,6 +15285,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -14875,6 +15373,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -14995,6 +15494,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -17639,13 +18139,13 @@ its replicate cost was paid.)\nDraw a card.";
         )
         .expect("sacrifice selection must succeed");
 
-        assert!(
-            !state.battlefield.contains(&spirit),
-            "sacrificed spirit must leave battlefield"
-        );
         let WaitingFor::ManaPayment { .. } = waiting else {
             panic!("expected ManaPayment after offering sacrifice, got {waiting:?}");
         };
+        assert!(
+            state.battlefield.contains(&spirit),
+            "selected spirit stays on the battlefield until the mana-payment commit"
+        );
         let pending = state
             .pending_cast
             .as_ref()
@@ -17657,6 +18157,17 @@ its replicate cost was paid.)\nDraw a card.";
                 generic: 1,
             },
             "{{3}}{{W}} reduced by {{1}}{{G}} must equal {{1}}{{W}}"
+        );
+
+        let waiting = finalize_mana_payment(&mut state, caster, &mut events)
+            .expect("final mana payment must commit the deferred offering sacrifice");
+        assert!(
+            !state.battlefield.contains(&spirit),
+            "sacrificed spirit must leave battlefield at payment commit"
+        );
+        assert!(
+            matches!(waiting, WaitingFor::Priority { .. }),
+            "offering spell should finish casting after final payment, got {waiting:?}"
         );
     }
 

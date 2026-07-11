@@ -2051,6 +2051,12 @@ impl ActivationResidual {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredSacrificeSelection {
+    pub object_id: ObjectId,
+    pub filter: TargetFilter,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingCast {
     pub object_id: ObjectId,
     pub card_id: CardId,
@@ -2158,6 +2164,11 @@ pub struct PendingCast {
     /// quantities can resolve later.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub convoked_creatures: Vec<ObjectId>,
+    /// CR 601.2g + CR 601.2h: Non-mana spell additional-cost permanents selected
+    /// for sacrifice, but whose actual zone move is deferred until the final
+    /// payment commit so mana abilities can be activated first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_sacrificed_permanents: Vec<DeferredSacrificeSelection>,
     /// CR 118.3a: Player-directed pin hints recorded during
     /// `WaitingFor::ManaPayment`. Each id names a pool `ManaUnit` the caster
     /// prefers to spend first; pins are priority hints, not removals — the unit
@@ -2238,6 +2249,7 @@ impl PendingCast {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -10602,6 +10614,7 @@ mod tests {
                 declared_kickers_to_pay: Vec::new(),
                 declined_kickers: Vec::new(),
                 convoked_creatures: Vec::new(),
+                deferred_sacrificed_permanents: Vec::new(),
                 pinned_pool_units: Vec::new(),
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
@@ -10968,6 +10981,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,

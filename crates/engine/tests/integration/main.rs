@@ -438,6 +438,7 @@ mod issue_4962_volo_guide_to_monsters;
 mod issue_4999_treasure_cruise_delve_tokens;
 mod issue_5145_violent_eruption_choose_target_distribution;
 mod issue_5159_attacks_alone_investigate;
+mod issue_5252_additional_sacrifice_after_mana_abilities;
 mod issue_5268_invincible_iron_man;
 mod issue_5274_call_the_spirit_dragons;
 mod issue_5279_grave_sifter;

@@ -12894,6 +12894,131 @@ pub(super) fn pay_mana_cost_with_choices(
     Ok(())
 }
 
+pub(super) fn pay_mana_cost_from_pool_with_choices(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, EngineError> {
+    super::layers::flush_layers(state);
+
+    let spell_meta = build_spell_meta(state, player, source_id);
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    let permissions = {
+        let any_color = player_can_spend_as_any_color_for_payment(
+            state,
+            player,
+            Some(source_id),
+            spell_ctx.as_ref(),
+        );
+        super::static_abilities::build_cost_permission_context(state, player, any_color)
+    };
+    {
+        let player_data = state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .expect("player exists");
+        if !mana_payment::can_pay_for_spell(
+            &player_data.mana_pool,
+            cost,
+            spell_ctx.as_ref(),
+            permissions,
+        ) {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot pay mana cost".to_string(),
+            ));
+        }
+    }
+
+    let hand_demand = mana_payment::compute_hand_color_demand(state, player, source_id);
+    let pins: Vec<crate::types::mana::ManaPipId> = state.active_payment_pins.clone();
+    let player_data = state
+        .players
+        .iter_mut()
+        .find(|p| p.id == player)
+        .expect("player exists");
+    let (spent_units, life_payments) = mana_payment::pay_cost_with_demand_and_choices(
+        &mut player_data.mana_pool,
+        cost,
+        Some(&hand_demand),
+        spell_ctx.as_ref(),
+        permissions.any_color,
+        phyrexian_choices,
+        permissions.life_colors,
+        &pins,
+    )
+    .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
+    if !spent_units.is_empty() && mana_payment::has_unspent_mana_continuous_effects(state) {
+        state.layers_dirty.mark_full();
+    }
+
+    for payment in &life_payments {
+        let amount = u32::try_from(payment.amount).unwrap_or(0);
+        match super::life_costs::pay_life_as_cast_or_activation_cost(state, player, amount, events)
+        {
+            super::life_costs::PayLifeCostResult::Paid { .. } => {}
+            super::life_costs::PayLifeCostResult::InsufficientLife
+            | super::life_costs::PayLifeCostResult::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay Phyrexian life cost".to_string(),
+                ));
+            }
+        }
+    }
+
+    let spent_convoke_sources = spent_units
+        .iter()
+        .filter(|unit| unit.is_convoke_payment())
+        .map(|unit| unit.source_id)
+        .collect::<HashSet<_>>();
+    cleanup_unused_convoke_payments(state, player, source_id, &spent_convoke_sources);
+
+    let mana_spent_units = spent_units
+        .iter()
+        .filter(|unit| !unit.is_convoke_payment())
+        .cloned()
+        .collect::<Vec<_>>();
+
+    apply_mana_spell_grants(state, source_id, &mana_spent_units);
+
+    if let Some(obj) = state.objects.get_mut(&source_id) {
+        obj.mana_spent_to_cast = false;
+        obj.mana_spent_to_cast_amount = 0;
+        obj.colors_spent_to_cast = crate::types::mana::ColoredManaCount::default();
+        obj.mana_spent_source_snapshots.clear();
+    }
+
+    if !mana_spent_units.is_empty() {
+        let source_snapshots: Vec<_> = mana_spent_units
+            .iter()
+            .filter_map(|unit| {
+                state
+                    .objects
+                    .get(&unit.source_id)
+                    .map(|source| source.snapshot_for_mana_spent())
+                    .or_else(|| state.lki_cache.get(&unit.source_id).cloned())
+                    .map(|lki| crate::types::game_state::ManaSpentSourceSnapshot {
+                        source_id: unit.source_id,
+                        lki,
+                    })
+            })
+            .collect();
+        if let Some(obj) = state.objects.get_mut(&source_id) {
+            obj.mana_spent_to_cast = true;
+            obj.mana_spent_to_cast_amount = mana_spent_units.len() as u32;
+            for unit in &mana_spent_units {
+                obj.colors_spent_to_cast.add_unit(unit);
+            }
+            obj.mana_spent_source_snapshots = source_snapshots;
+        }
+    }
+
+    Ok(mana_spent_units.len() as u32)
+}
+
 fn cleanup_unused_convoke_payments(
     state: &mut GameState,
     player: PlayerId,
