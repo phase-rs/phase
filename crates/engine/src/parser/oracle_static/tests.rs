@@ -5425,6 +5425,48 @@ fn static_spells_cost_less() {
     ));
 }
 
+// CR 205.4a: Kethis, the Hidden Hand — "Legendary spells you cast cost {1} less
+// to cast" must restrict to legendary spells via a HasSupertype filter, not drop
+// the restriction (spell_filter: None) and cheapen EVERY spell. `parse_type_phrase`
+// doesn't consume a lone supertype word, so it needed an explicit arm.
+#[test]
+fn static_legendary_spells_cost_less_keeps_supertype_filter() {
+    let def = parse_static_line("Legendary spells you cast cost {1} less to cast.").unwrap();
+    let StaticMode::ModifyCost {
+        spell_filter: Some(TargetFilter::Typed(tf)),
+        ..
+    } = &def.mode
+    else {
+        panic!("expected a filtered ModifyCost, got {:?}", def.mode);
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::HasSupertype {
+            value: crate::types::card_type::Supertype::Legendary,
+        }),
+        "expected HasSupertype(Legendary), got {:?}",
+        tf.properties
+    );
+}
+
+// Regression: a card-TYPE spell subject ("Artifact spells") still resolves to its
+// type filter — the new supertype arm only fires for bare supertype words.
+#[test]
+fn static_artifact_spells_cost_less_keeps_type_filter() {
+    let def = parse_static_line("Artifact spells you cast cost {1} less to cast.").unwrap();
+    let StaticMode::ModifyCost {
+        spell_filter: Some(TargetFilter::Typed(tf)),
+        ..
+    } = &def.mode
+    else {
+        panic!("expected a filtered ModifyCost, got {:?}", def.mode);
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Artifact),
+        "expected Artifact type filter, got {:?}",
+        tf.type_filters
+    );
+}
+
 #[test]
 fn static_opponent_spells_cost_more() {
     let def = parse_static_line("Spells your opponents cast cost {1} more to cast.").unwrap();

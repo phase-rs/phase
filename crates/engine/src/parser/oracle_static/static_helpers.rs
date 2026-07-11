@@ -38,6 +38,21 @@ pub(crate) fn parse_chosen_name_source_filter(subject_lower: &str) -> Option<Tar
 /// CR 601.2f: Parse the spell-type prefix of a cost-modification line before
 /// `"cost"`. Handles compound subjects such as Goblin Anarchomancer's
 /// "Each spell you cast that's red or green" via `parse_that_clause_suffix`.
+/// CR 205.4a: A bare supertype spell subject ("Legendary spells you cast cost
+/// {1} less", Kethis, the Hidden Hand) — `parse_type_phrase` doesn't consume a
+/// lone supertype word (it requires a following type noun), so the restriction
+/// would otherwise drop and reduce the cost of EVERY spell. Emit a `HasSupertype`
+/// card filter instead.
+fn parse_bare_supertype_spell_filter(base: &str) -> Option<TargetFilter> {
+    let lower = base.to_lowercase();
+    let (_, supertype) = all_consuming(nom_target::parse_supertype_word)
+        .parse(lower.as_str())
+        .ok()?;
+    Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+        FilterProp::HasSupertype { value: supertype },
+    ])))
+}
+
 fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
     let base = type_desc.trim();
     let base = tag::<_, _, OracleError<'_>>("each ")
@@ -108,14 +123,17 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
             TargetFilter::Or { filters } if !filters.is_empty() && remainder.is_empty() => {
                 Some(filter)
             }
-            // Bare color words ("white", "red") are not consumed by parse_type_phrase
-            // because color prefixes require a trailing type word ("white creature").
+            // Bare color words ("white", "red") and bare supertype words
+            // ("legendary") are not consumed by parse_type_phrase, which requires
+            // a trailing type noun ("white creature", "legendary permanent").
             _ if remainder.is_empty() || remainder.eq_ignore_ascii_case(base_part) => {
-                parse_named_color(base_part).map(|color| {
-                    TargetFilter::Typed(
-                        TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
-                    )
-                })
+                parse_named_color(base_part)
+                    .map(|color| {
+                        TargetFilter::Typed(
+                            TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
+                        )
+                    })
+                    .or_else(|| parse_bare_supertype_spell_filter(base_part))
             }
             _ => None,
         }
