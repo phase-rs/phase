@@ -205,6 +205,31 @@ impl Arena {
         id
     }
 
+    /// Return a MOVED def to top-level under its ORIGINAL `NodeId`.
+    ///
+    /// Identity tracks the def, not its position (U6-C2 ruling). A def that
+    /// survives into the output keeps its id even when re-parented or moved by
+    /// `mem::take`; only a genuinely NEW def gets a fresh id. Otherwise a binding
+    /// taken against that node before the move would silently resolve to nothing —
+    /// or to a *different* node — which is exactly the silent-no-op class
+    /// `Absorbed { into }` exists to prevent (it already means "same node, now
+    /// nested"; identity churn on re-parenting would contradict that model).
+    ///
+    /// Used by the two handlers that pop a def and push *that same def* back:
+    /// `Instead` (root = `chain_defs.remove(0)`, moved) and
+    /// `ModifyPrior::EntersTappedAttacking` (`patched` IS the popped def, mutated).
+    fn reinstate(&mut self, id: NodeId) {
+        self.detached.retain(|d| *d != id);
+        self.nodes[id.0 as usize].status = NodeStatus::Live;
+        self.order.push(id);
+        self.pushed_since_detach = true;
+    }
+
+    /// The id currently at top-level position `index`, if any.
+    fn id_at(&self, index: usize) -> Option<NodeId> {
+        self.order.get(index).copied()
+    }
+
     /// Mirror a `defs` length change we cannot hook from inside (helper-driven
     /// pushes in `apply_clause_continuation` / `attach_repeat_process_keywords`,
     /// and every handler pop). Ids are issued, never recycled.
@@ -307,6 +332,88 @@ struct AssemblyEnv {
     /// The continuation-pushed search-destination `ChangeZone` that
     /// `FoldSearchIntoElse` folds into its `else_ability`.
     last_search_destination: Option<NodeRef>,
+
+    // ---- U6-C2 binding registries -------------------------------------------
+    // Lists, not single slots: a guarded selector may have to walk PAST a
+    // candidate that fails its guard. `BranchOtherwise`'s fallback scan does
+    // exactly that (`optional_for.is_some() && sub_ability.is_none()` — the
+    // nearest optional head may already have a sub, in which case the live scan
+    // keeps going). A "last only" registry cannot reproduce that, so the walk is
+    // over a typed candidate list — never over the output tree.
+    /// Every top-level node whose `condition` is actually set, in emission order.
+    conditional_nodes: Vec<usize>,
+    /// Every top-level "any player may" head, in emission order.
+    optional_head_nodes: Vec<usize>,
+    /// Every continuation-pushed search-destination `ChangeZone`, in emission order.
+    search_destination_nodes: Vec<usize>,
+}
+
+/// Which antecedent a handler is binding to. Point selectors only (U6-C2);
+/// the range selector lands in C3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AntecedentSelector {
+    /// The most recently emitted top-level node ("the prior def").
+    LastEmitted,
+    /// The FIRST emitted node. `Instead` alone binds this — CR 608.2c: the
+    /// override replaces the first printed instruction. Do not unify with `Last*`.
+    FirstEmitted,
+    /// The most recent node registered under a role, walking back past any
+    /// candidate that fails the guard.
+    LastWithRole(AntecedentRole),
+    /// A node pushed by a continuation rather than a clause body — it has NO
+    /// `ClauseId` (audit §2), so it can only be named by role + provenance.
+    ContinuationProduct(ContinuationRole),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AntecedentRole {
+    /// `condition` actually set on the built def (never read off `ClauseIr`).
+    Conditional,
+    /// An "any player may" head (`optional_for`).
+    OptionalHead,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContinuationRole {
+    /// The search-destination `ChangeZone` a `SearchDestination` continuation pushes.
+    SearchDestination,
+}
+
+/// Evaluated against the BOUND NODE ONLY — never by walking the output graph, so
+/// the "handlers may not recursively inspect the output" rule holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindGuard {
+    /// The node must not already carry a `sub_ability` (mutable output state —
+    /// an earlier handler may have filled it).
+    NoSubAbility,
+    /// The node's effect must be of this class. Encodes the shape-gated SILENT
+    /// no-op in the type: if the prior def is the wrong shape the binding simply
+    /// misses, and `OnMiss::Ignore` makes the handler do nothing — exactly what
+    /// the pre-arena code did with an inline `matches!` + no else branch.
+    EffectShape(EffectClass),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectClass {
+    /// `CopyTokenOf` | `Token` | `ChangeZone` — the only effects
+    /// `ModifyPrior::EntersTappedAttacking` can patch.
+    PermanentCreator,
+    /// `ChooseDrawnThisTurnPayOrTopdeck` — the only effect
+    /// `DrawnThisTurnFollowup` patches.
+    DrawnThisTurnChoice,
+}
+
+/// What a handler does when its antecedent does not resolve.
+///
+/// **Deliberately has no `Default`.** A new binding site cannot compile without
+/// consciously choosing. `ModifyPrior::EntersTappedAttacking` and
+/// `DrawnThisTurnFollowup` are shape-gated SILENT no-ops today — a binding layer
+/// that failed loudly on a miss would itself be a behavior change, and it would
+/// fire on real cards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnMiss {
+    /// Do nothing. The clause contributes no def and no error.
+    Ignore,
 }
 
 impl AssemblyEnv {
@@ -338,6 +445,9 @@ impl AssemblyEnv {
         self.last_conditional = None;
         self.last_optional_for = None;
         self.last_search_destination = None;
+        self.conditional_nodes.clear();
+        self.optional_head_nodes.clear();
+        self.search_destination_nodes.clear();
 
         for (index, def) in defs.iter().enumerate() {
             let provenance = self.prov.get(index).copied().unwrap_or(NodeProvenance {
@@ -356,9 +466,26 @@ impl AssemblyEnv {
             // would bind to a node the current scan does not.
             if def.condition.is_some() {
                 self.last_conditional = Some(node);
+                self.conditional_nodes.push(index);
             }
             if def.optional_for.is_some() {
                 self.last_optional_for = Some(node);
+                self.optional_head_nodes.push(index);
+            }
+            // A search-destination `ChangeZone` is only a `ContinuationProduct`
+            // antecedent when a continuation actually pushed it — that is the whole
+            // point of carrying provenance (audit §2). A clause that happens to
+            // emit the same effect shape is NOT this antecedent.
+            if matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Hand,
+                    ..
+                }
+            ) && provenance.role == NodeRole::ContinuationProduct
+            {
+                self.search_destination_nodes.push(index);
             }
             match &*def.effect {
                 Effect::Dig { .. } | Effect::Mill { .. } | Effect::RevealUntil { .. } => {
@@ -380,6 +507,73 @@ impl AssemblyEnv {
                 } => self.last_search_destination = Some(node),
                 _ => {}
             }
+        }
+    }
+
+    /// The single authority for antecedent binding (U6-C2). Returns the bound
+    /// node's CURRENT index in `defs`, or `None` on a miss.
+    ///
+    /// Guards are evaluated against the bound node only. Role selectors walk back
+    /// over a typed candidate LIST (not the output tree) when a candidate fails
+    /// its guard — which is what `BranchOtherwise`'s fallback scan does today.
+    ///
+    /// `on_miss` is taken explicitly and has no default: a miss must be a
+    /// conscious choice, because two handlers rely on it being SILENT.
+    fn resolve(
+        &self,
+        defs: &[AbilityDefinition],
+        selector: AntecedentSelector,
+        guard: Option<BindGuard>,
+        on_miss: OnMiss,
+    ) -> Option<usize> {
+        let passes = |index: usize| -> bool {
+            match guard {
+                None => true,
+                Some(BindGuard::NoSubAbility) => defs[index].sub_ability.is_none(),
+                Some(BindGuard::EffectShape(EffectClass::PermanentCreator)) => matches!(
+                    &*defs[index].effect,
+                    Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::ChangeZone { .. }
+                ),
+                Some(BindGuard::EffectShape(EffectClass::DrawnThisTurnChoice)) => matches!(
+                    &*defs[index].effect,
+                    Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+                ),
+            }
+        };
+        let candidates: &[usize] = match selector {
+            AntecedentSelector::LastEmitted => {
+                let hit = defs.len().checked_sub(1).filter(|i| passes(*i));
+                return match hit {
+                    Some(i) => Some(i),
+                    None => match on_miss {
+                        OnMiss::Ignore => None,
+                    },
+                };
+            }
+            AntecedentSelector::FirstEmitted => {
+                let hit = (!defs.is_empty()).then_some(0).filter(|i| passes(*i));
+                return match hit {
+                    Some(i) => Some(i),
+                    None => match on_miss {
+                        OnMiss::Ignore => None,
+                    },
+                };
+            }
+            AntecedentSelector::LastWithRole(AntecedentRole::Conditional) => {
+                &self.conditional_nodes
+            }
+            AntecedentSelector::LastWithRole(AntecedentRole::OptionalHead) => {
+                &self.optional_head_nodes
+            }
+            AntecedentSelector::ContinuationProduct(ContinuationRole::SearchDestination) => {
+                &self.search_destination_nodes
+            }
+        };
+        match candidates.iter().rev().copied().find(|i| passes(*i)) {
+            Some(i) => Some(i),
+            None => match on_miss {
+                OnMiss::Ignore => None,
+            },
         }
     }
 }
@@ -434,10 +628,20 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // recomputed here, so parse-time and lower-time views cannot diverge.
                 match otherwise_kind {
                     OtherwiseKind::Bound => {
-                        // Walk defs backward to find the most recent conditional
+                        // U6-C2: bind "the most recent conditional def" by ROLE.
+                        // Registered where `def.condition` is ACTUALLY set, so the
+                        // GenericEffect static-pushdown nodes are skipped exactly as
+                        // the old backward scan skipped them.
+                        let bound = env.resolve(
+                            &defs,
+                            AntecedentSelector::LastWithRole(AntecedentRole::Conditional),
+                            None,
+                            OnMiss::Ignore,
+                        );
                         let mut attached = false;
-                        for d in defs.iter_mut().rev() {
-                            if d.condition.is_some() {
+                        if let Some(bound_index) = bound {
+                            let d = &mut defs[bound_index];
+                            {
                                 let mut else_def = else_def.clone();
                                 // CR 608.2c: when the gated clause acts on the
                                 // source (`SelfRef`), the else clause's "it" anaphor
@@ -468,7 +672,6 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                 }
                                 d.else_ability = Some(else_def);
                                 attached = true;
-                                break;
                             }
                         }
                         // CR 608.2d + CR 101.4: standalone "If no one does, X" on
@@ -481,15 +684,24 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         // true → negated false); on all-decline the runtime
                         // decline path fires it (see `handle_opponent_may_choice`).
                         if !attached {
-                            for d in defs.iter_mut().rev() {
-                                if d.optional_for.is_some() && d.sub_ability.is_none() {
-                                    let mut reward = (**else_def).clone();
-                                    reward.condition = Some(AbilityCondition::Not {
-                                        condition: Box::new(AbilityCondition::effect_performed()),
-                                    });
-                                    d.sub_ability = Some(Box::new(reward));
-                                    break;
-                                }
+                            // U6-C2: the guard is the point here — the nearest optional
+                            // head may ALREADY have a sub_ability (mutable output state),
+                            // in which case the old scan walked PAST it. The role list is
+                            // walked back with `NoSubAbility` applied to each candidate;
+                            // no output-tree inspection.
+                            let bound = env.resolve(
+                                &defs,
+                                AntecedentSelector::LastWithRole(AntecedentRole::OptionalHead),
+                                Some(BindGuard::NoSubAbility),
+                                OnMiss::Ignore,
+                            );
+                            if let Some(bound_index) = bound {
+                                let d = &mut defs[bound_index];
+                                let mut reward = (**else_def).clone();
+                                reward.condition = Some(AbilityCondition::Not {
+                                    condition: Box::new(AbilityCondition::effect_performed()),
+                                });
+                                d.sub_ability = Some(Box::new(reward));
                             }
                         }
                     }
@@ -532,15 +744,21 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         attach_mana_retention_to_prior_mana(&mut defs, *expiry);
                     }
                     PriorModifier::EntersTappedAttacking => {
-                        // CR 508.4 / CR 614.1: Conditional enters-tapped-attacking modifier
-                        if let Some(prev) = defs.last() {
-                            let can_patch = matches!(
-                                &*prev.effect,
-                                Effect::CopyTokenOf { .. }
-                                    | Effect::Token { .. }
-                                    | Effect::ChangeZone { .. }
-                            );
-                            if can_patch {
+                        // CR 508.4 / CR 614.1: Conditional enters-tapped-attacking modifier.
+                        // U6-C2: LastEmitted + an EffectShape guard. A wrong-shaped prior
+                        // def is a MISS, and `OnMiss::Ignore` makes it a silent no-op —
+                        // identical to the old inline `can_patch` check with no else arm.
+                        let bound = env.resolve(
+                            &defs,
+                            AntecedentSelector::LastEmitted,
+                            Some(BindGuard::EffectShape(EffectClass::PermanentCreator)),
+                            OnMiss::Ignore,
+                        );
+                        if bound.is_some() {
+                            {
+                                // Identity: `patched` IS the popped def, mutated — a MOVE,
+                                // not a creation. It must keep its NodeId.
+                                let patched_id = env.arena.id_at(defs.len() - 1);
                                 let mut patched = defs.pop().unwrap();
                                 env.observe(&defs, None, NodeRole::Unknown);
                                 match &mut *patched.effect {
@@ -605,6 +823,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                 patched.condition = clause_ir.condition.clone();
                                 patched.else_ability = Some(Box::new(original));
                                 defs.push(patched);
+                                if let Some(id) = patched_id {
+                                    env.arena.reinstate(id);
+                                }
                                 env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
                             }
                         }
@@ -649,7 +870,19 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         // 1 runs as printed, then the tail runs from
                         // `else_ability`. Single-clause bases collapse to the
                         // prior shape (empty tail → no `else_ability`).
-                        if !defs.is_empty() {
+                        // U6-C2: `Instead` is the ONLY handler that binds FirstEmitted
+                        // (CR 608.2c — the override replaces the FIRST printed
+                        // instruction). Do not unify it with the `Last*` selectors.
+                        let bound = env.resolve(
+                            &defs,
+                            AntecedentSelector::FirstEmitted,
+                            None,
+                            OnMiss::Ignore,
+                        );
+                        if bound.is_some() {
+                            // Identity: the root is MOVED out of `defs` and back in —
+                            // it keeps its NodeId (U6-C2 ruling). Capture before the take.
+                            let root_id = env.arena.id_at(0);
                             let mut chain_defs = std::mem::take(&mut defs);
                             env.observe(&defs, None, NodeRole::Unknown);
                             let mut root = chain_defs.remove(0);
@@ -673,6 +906,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             instead.else_ability = root.sub_ability.take();
                             root.sub_ability = Some(Box::new(instead));
                             defs.push(root);
+                            if let Some(id) = root_id {
+                                env.arena.reinstate(id);
+                            }
                             env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
                         }
                         true
@@ -710,20 +946,21 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 if let Some(cond) = effective_cond {
                     def = def.condition(cond.clone());
                 }
-                // Pop trailing search-destination ChangeZone and attach as else_ability
-                if defs.len() >= 2 {
-                    let trailing_is_search_destination = matches!(
-                        &*defs.last().unwrap().effect,
-                        Effect::ChangeZone {
-                            origin: Some(Zone::Library),
-                            destination: Zone::Hand,
-                            ..
-                        }
-                    );
-                    if trailing_is_search_destination {
-                        def.else_ability = Some(Box::new(defs.pop().unwrap()));
-                        env.observe(&defs, None, NodeRole::Unknown);
-                    }
+                // U6-C2: bind the PRIOR search's continuation-pushed destination node by
+                // PROVENANCE instead of sniffing the tail's effect shape. This is the
+                // binding the whole `origin: Option<ClauseId>` redesign existed for: the
+                // node belongs to no clause, so only role+provenance can name it. The
+                // positional `defs.len() >= 2` guard disappears — the binding either
+                // resolves or it does not.
+                let bound = env.resolve(
+                    &defs,
+                    AntecedentSelector::ContinuationProduct(ContinuationRole::SearchDestination),
+                    None,
+                    OnMiss::Ignore,
+                );
+                if let Some(bound_index) = bound {
+                    def.else_ability = Some(Box::new(defs.remove(bound_index)));
+                    env.observe(&defs, None, NodeRole::Unknown);
                 }
                 defs.push(def);
                 env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
@@ -737,11 +974,20 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 &clause_ir.disposition
             {
                 // Set the life payment on the prior drawn-this-turn choice; emits no def.
-                if let Some(last_def) = defs.last_mut() {
+                // U6-C2: LastEmitted + EffectShape guard. A wrong-shaped prior def is a
+                // MISS and `OnMiss::Ignore` keeps it a SILENT no-op — the old code did
+                // the same via a nested `if let` with no else arm.
+                let bound = env.resolve(
+                    &defs,
+                    AntecedentSelector::LastEmitted,
+                    Some(BindGuard::EffectShape(EffectClass::DrawnThisTurnChoice)),
+                    OnMiss::Ignore,
+                );
+                if let Some(bound_index) = bound {
                     if let Effect::ChooseDrawnThisTurnPayOrTopdeck {
                         life_payment: current,
                         ..
-                    } = &mut *last_def.effect
+                    } = &mut *defs[bound_index].effect
                     {
                         *current = life_payment.clone();
                     }
