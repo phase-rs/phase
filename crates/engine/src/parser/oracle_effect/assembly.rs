@@ -59,11 +59,12 @@ use super::{
     attach_repeat_process_keywords, attach_same_is_true_keywords,
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
-    fold_cast_copy_of_card_defs, has_explicit_player_target, inject_chosen_color_choice_grant,
-    mark_uses_tracked_set, parse_spell_graveyard_replacement_rider,
-    publishes_tracked_set_from_resolution, retarget_counter_additional_cost_to_target,
-    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
-    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
+    def_is_generic_effect_head, def_is_keyword_counter_placement, fold_cast_copy_of_card_defs,
+    has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
+    parse_spell_graveyard_replacement_rider, publishes_tracked_set_from_resolution,
+    retarget_counter_additional_cost_to_target, rewrite_parent_targets_to_tracked_set,
+    rewrite_rounding_mode, rewrite_that_type_mana_instead, stamp_delayed_returns,
+    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
 
 // ===========================================================================
@@ -419,6 +420,50 @@ pub(super) enum AntecedentRole {
     /// (`RestDestination` wants `Dig|RevealUntil`), so a shared union registry
     /// would mis-bind. Roles name a set, not a vibe.
     DigOrMill,
+
+    // ---- U6-C5 LIVE roles ---------------------------------------------------
+    // Membership is recomputed from `defs` on every `resolve` (see
+    // `live_role_predicate`), never cached in a registry.
+    /// A `GenericEffect` head — the template a "The same is true for <keywords>"
+    /// continuation replicates its first `StaticDefinition` from (CR 702).
+    ///
+    /// Membership is the EFFECT VARIANT ALONE. It deliberately does NOT require a
+    /// non-empty `static_abilities`: the pre-arena scan stopped (`return`) at the
+    /// first `GenericEffect` from the back and gave up when it carried no statics —
+    /// it did NOT keep walking to an earlier one. Narrowing the role to "has a
+    /// static" would resume that walk and bind a DIFFERENT def. The empty case is
+    /// the mutator's bail, not the role's filter.
+    GenericEffectHead,
+    /// A keyword-counter placement (`PutCounter { counter_type: Keyword(_) }`) —
+    /// the sibling template a "Repeat this process for <keywords>" continuation
+    /// clones (Kathril, Aspect Warper).
+    KeywordCounterPlacement,
+}
+
+/// Membership predicates for the roles whose candidacy is **live** — recomputed
+/// from `defs` on every `resolve` instead of read from a `refresh`-maintained
+/// registry. Returns `None` for the registry-backed roles (U6-C2/C3).
+///
+/// Why the split is a CORRECTNESS requirement, not a style choice: `refresh` only
+/// runs from `observe`, and `observe` is only called where **`defs.len()` changes**.
+/// These roles are sensitive to mutations that change no length at all — a
+/// `KeywordOverride` nesting a `sub_ability` in place (and, from U6-C5c, an
+/// `alt_ability_cost`/`expiry` slot being filled). A cached registry for them would
+/// be stale by construction; a live predicate cannot be.
+///
+/// Each predicate is a STRUCTURAL MIRROR of its mutator's success condition and
+/// lives beside it, so the two cannot drift apart unnoticed.
+fn live_role_predicate(role: AntecedentRole) -> Option<fn(&AbilityDefinition) -> bool> {
+    match role {
+        AntecedentRole::GenericEffectHead => Some(def_is_generic_effect_head),
+        AntecedentRole::KeywordCounterPlacement => Some(def_is_keyword_counter_placement),
+        AntecedentRole::Conditional
+        | AntecedentRole::OptionalHead
+        | AntecedentRole::DigOrRevealUntil
+        | AntecedentRole::DestroyLike
+        | AntecedentRole::FaceDownProfileHolder
+        | AntecedentRole::DigOrMill => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -649,58 +694,56 @@ impl AssemblyEnv {
                 }
             }
         };
-        let candidates: &[usize] = match selector {
-            AntecedentSelector::LastEmitted => {
-                let hit = defs.len().checked_sub(1).filter(|i| passes(*i));
-                return match hit {
-                    Some(i) => Some(i),
-                    None => match on_miss {
-                        OnMiss::Ignore => None,
-                    },
-                };
-            }
+        // The most recent index (in `defs` order) whose membership AND guard hold.
+        let last_live = |is_member: fn(&AbilityDefinition) -> bool| -> Option<usize> {
+            (0..defs.len())
+                .rev()
+                .find(|i| is_member(&defs[*i]) && passes(*i))
+        };
+        // The most recent candidate from a `refresh`-maintained emission-ordered list.
+        let last_cached =
+            |list: &[usize]| -> Option<usize> { list.iter().rev().copied().find(|i| passes(*i)) };
+
+        let hit: Option<usize> = match selector {
+            AntecedentSelector::LastEmitted => defs.len().checked_sub(1).filter(|i| passes(*i)),
             AntecedentSelector::FirstEmitted => {
-                let hit = (!defs.is_empty()).then_some(0).filter(|i| passes(*i));
-                return match hit {
-                    Some(i) => Some(i),
-                    None => match on_miss {
-                        OnMiss::Ignore => None,
-                    },
-                };
-            }
-            AntecedentSelector::LastWithRole(AntecedentRole::Conditional) => {
-                &self.conditional_nodes
-            }
-            AntecedentSelector::LastWithRole(AntecedentRole::OptionalHead) => {
-                &self.optional_head_nodes
+                (!defs.is_empty()).then_some(0).filter(|i| passes(*i))
             }
             AntecedentSelector::ContinuationProduct(ContinuationRole::SearchDestination) => {
-                &self.search_destination_nodes
-            }
-            AntecedentSelector::LastWithRole(AntecedentRole::DigOrMill) => &self.dig_or_mill_nodes,
-            AntecedentSelector::LastWithRole(AntecedentRole::DigOrRevealUntil) => {
-                &self.dig_or_reveal_until_nodes
-            }
-            AntecedentSelector::LastWithRole(AntecedentRole::DestroyLike) => {
-                &self.destroy_like_nodes
-            }
-            AntecedentSelector::LastWithRole(AntecedentRole::FaceDownProfileHolder) => {
-                &self.face_down_profile_nodes
+                last_cached(&self.search_destination_nodes)
             }
             AntecedentSelector::Between { anchor } => {
                 // Walk FORWARD over emission order from the anchor and take the
                 // FIRST qualifying node. Reads `order` only — never the output tree.
                 let anchor_pos = self.arena.order.iter().position(|id| *id == anchor);
-                let hit = anchor_pos.and_then(|a| ((a + 1)..defs.len()).find(|i| passes(*i)));
-                return match hit {
-                    Some(i) => Some(i),
-                    None => match on_miss {
-                        OnMiss::Ignore => None,
-                    },
-                };
+                anchor_pos.and_then(|a| ((a + 1)..defs.len()).find(|i| passes(*i)))
             }
+            // Roles split by HOW membership is determined — live predicate over
+            // `defs` (U6-C5) vs. emission-ordered registry (U6-C2/C3). The split and
+            // its rationale live in `live_role_predicate`.
+            AntecedentSelector::LastWithRole(role) => match live_role_predicate(role) {
+                Some(is_member) => last_live(is_member),
+                None => match role {
+                    AntecedentRole::Conditional => last_cached(&self.conditional_nodes),
+                    AntecedentRole::OptionalHead => last_cached(&self.optional_head_nodes),
+                    AntecedentRole::DigOrMill => last_cached(&self.dig_or_mill_nodes),
+                    AntecedentRole::DigOrRevealUntil => {
+                        last_cached(&self.dig_or_reveal_until_nodes)
+                    }
+                    AntecedentRole::DestroyLike => last_cached(&self.destroy_like_nodes),
+                    AntecedentRole::FaceDownProfileHolder => {
+                        last_cached(&self.face_down_profile_nodes)
+                    }
+                    // `live_role_predicate` returned `Some` for these, so this arm is
+                    // unreachable — but it is spelled out rather than wildcarded so a
+                    // NEW role cannot be added without choosing a side.
+                    AntecedentRole::GenericEffectHead | AntecedentRole::KeywordCounterPlacement => {
+                        None
+                    }
+                },
+            },
         };
-        match candidates.iter().rev().copied().find(|i| passes(*i)) {
+        match hit {
             Some(i) => Some(i),
             None => match on_miss {
                 OnMiss::Ignore => None,
@@ -856,10 +899,35 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // CR 702 / CR 608.2c: replicate the antecedent template clause once
                 // per listed keyword. `kind` selects which template shape (and thus
                 // helper); the keyword-swap logic lives unchanged in the helpers.
+                //
+                // U6-C5: both templates are bound by ROLE. These two sites were the
+                // last `defs.iter().rev()` scans that no earlier increment had even
+                // noticed — they never recursed into a sub-tree, so they are plain
+                // "most recent node of role X" bindings and needed no new machinery.
                 match kind {
-                    ReplicateKind::StaticGrant => attach_same_is_true_keywords(&mut defs, keywords),
+                    ReplicateKind::StaticGrant => {
+                        let bound = env.resolve(
+                            &defs,
+                            AntecedentSelector::LastWithRole(AntecedentRole::GenericEffectHead),
+                            None,
+                            OnMiss::Ignore,
+                        );
+                        if let Some(bound_index) = bound {
+                            attach_same_is_true_keywords(&mut defs[bound_index], keywords);
+                        }
+                    }
                     ReplicateKind::CounterPlacement => {
-                        attach_repeat_process_keywords(&mut defs, keywords)
+                        let bound = env.resolve(
+                            &defs,
+                            AntecedentSelector::LastWithRole(
+                                AntecedentRole::KeywordCounterPlacement,
+                            ),
+                            None,
+                            OnMiss::Ignore,
+                        );
+                        if let Some(bound_index) = bound {
+                            attach_repeat_process_keywords(&mut defs, bound_index, keywords);
+                        }
                     }
                 }
                 env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);

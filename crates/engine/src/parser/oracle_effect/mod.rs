@@ -20047,30 +20047,40 @@ pub(crate) fn rewrite_condition_keyword(condition: &mut StaticCondition, new_key
 /// This keeps Odric's 13 keyword grants structurally identical: one
 /// conditioned `StaticDefinition` each, all evaluated once at resolution time
 /// (see `StaticDefinition.condition` dual-semantics doc).
-fn attach_same_is_true_keywords(defs: &mut [AbilityDefinition], keywords: &[Keyword]) {
-    for def in defs.iter_mut().rev() {
-        if let Effect::GenericEffect {
-            static_abilities, ..
-        } = &mut *def.effect
-        {
-            let Some(template) = static_abilities.first().cloned() else {
-                return;
-            };
-            for keyword in keywords {
-                let mut new_def = template.clone();
-                for modification in &mut new_def.modifications {
-                    if let ContinuousModification::AddKeyword { keyword: kw } = modification {
-                        *kw = keyword.clone();
-                    }
-                }
-                if let Some(condition) = &mut new_def.condition {
-                    rewrite_condition_keyword(condition, keyword);
-                }
-                static_abilities.push(new_def);
+///
+/// U6-C5: the antecedent is bound by `AntecedentRole::GenericEffectHead` in
+/// `assembly.rs`; this applies the replication to the def it was handed.
+fn attach_same_is_true_keywords(def: &mut AbilityDefinition, keywords: &[Keyword]) {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &mut *def.effect
+    else {
+        return;
+    };
+    // The pre-arena scan STOPPED here when the head carried no statics — it did not
+    // resume walking to an earlier `GenericEffect`. Bailing (rather than missing and
+    // re-binding) preserves that exactly. See `AntecedentRole::GenericEffectHead`.
+    let Some(template) = static_abilities.first().cloned() else {
+        return;
+    };
+    for keyword in keywords {
+        let mut new_def = template.clone();
+        for modification in &mut new_def.modifications {
+            if let ContinuousModification::AddKeyword { keyword: kw } = modification {
+                *kw = keyword.clone();
             }
-            return;
         }
+        if let Some(condition) = &mut new_def.condition {
+            rewrite_condition_keyword(condition, keyword);
+        }
+        static_abilities.push(new_def);
     }
+}
+
+/// Membership mirror for `AntecedentRole::GenericEffectHead` — the effect variant
+/// alone, matching the arm `attach_same_is_true_keywords` binds on.
+pub(super) fn def_is_generic_effect_head(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::GenericEffect { .. })
 }
 
 /// CR 608.2c: Apply a "Repeat this process for <keyword list>" continuation
@@ -20083,23 +20093,16 @@ fn attach_same_is_true_keywords(defs: &mut [AbilityDefinition], keywords: &[Keyw
 /// resolves all keyword counters during the trigger's one resolution. This is
 /// the counters-class analogue of `attach_same_is_true_keywords` (static
 /// grants); it covers the whole "repeat this process for <list>" class.
-fn attach_repeat_process_keywords(defs: &mut Vec<AbilityDefinition>, keywords: &[Keyword]) {
-    let Some(template) = defs
-        .iter()
-        .rev()
-        .find(|d| {
-            matches!(
-                &*d.effect,
-                Effect::PutCounter {
-                    counter_type: CounterType::Keyword(_),
-                    ..
-                }
-            )
-        })
-        .cloned()
-    else {
-        return;
-    };
+///
+/// U6-C5: the template is bound by `AntecedentRole::KeywordCounterPlacement` in
+/// `assembly.rs` and handed in as `template_index`; the replicated siblings are
+/// still pushed onto `defs`.
+fn attach_repeat_process_keywords(
+    defs: &mut Vec<AbilityDefinition>,
+    template_index: usize,
+    keywords: &[Keyword],
+) {
+    let template = defs[template_index].clone();
     for keyword in keywords {
         let mut new_def = template.clone();
         if let Effect::PutCounter { counter_type, .. } = &mut *new_def.effect {
@@ -20113,6 +20116,18 @@ fn attach_repeat_process_keywords(defs: &mut Vec<AbilityDefinition>, keywords: &
         new_def.sub_ability = None;
         defs.push(new_def);
     }
+}
+
+/// Membership mirror for `AntecedentRole::KeywordCounterPlacement` — the shape
+/// `attach_repeat_process_keywords` clones its sibling template from.
+pub(super) fn def_is_keyword_counter_placement(def: &AbilityDefinition) -> bool {
+    matches!(
+        &*def.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Keyword(_),
+            ..
+        }
+    )
 }
 
 /// Swap the gating keyword inside an `AbilityCondition` to `new_keyword`. Used
