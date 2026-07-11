@@ -410,12 +410,20 @@ impl Arena {
                 .all(|id| matches!(self.node(*id).status, NodeStatus::Live)),
             "arena/defs divergence: a non-Live node is in `order`"
         );
-        debug_assert!(
-            self.nodes.iter().enumerate().all(|(i, n)| {
-                let live_by_status = matches!(n.status, NodeStatus::Live);
-                let live_by_order = self.order.contains(&NodeId(i as u32));
-                live_by_status == live_by_order
-            }),
+        // Live-by-status and live-by-`order` are the same SET. With the assert above
+        // ("everything in `order` is Live") this count is equivalent to a membership
+        // scan, and O(n) rather than the O(nodes x order) `contains`-in-a-loop it
+        // replaces — this assert is LIVE in the full-pool export, where
+        // `[profile.tool] inherits = "dev"` keeps `debug_assert` on.
+        //
+        // It is also strictly STRONGER: a duplicate id in `order` inflates the length
+        // and fails the count, where a `contains` scan would have waved it through.
+        debug_assert_eq!(
+            self.nodes
+                .iter()
+                .filter(|n| matches!(n.status, NodeStatus::Live))
+                .count(),
+            self.order.len(),
             "arena/defs divergence: Live status and `order` membership disagree"
         );
 
@@ -921,6 +929,19 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // `Comma`/`Then`/no boundary makes it a within-clause `ContinuationStep`.
     let mut prev_boundary: Option<ClauseBoundary> = None;
     for clause_ir in &ir.clauses {
+        // "The arena mirrors `defs`" is load-bearing for every binding below, and it
+        // is asserted HERE, at the one point every clause path must pass through.
+        //
+        // `settle` runs at the end of the normal and special paths, but the five
+        // rider `continue`s below skip it. Those are safe today only because their
+        // helpers fold into a PRIOR def without changing `defs.len()` — a fact
+        // nothing enforced. Asserting at the top of the loop enforces it for every
+        // path, including any rider added later: a clause that mutates `defs` without
+        // telling the arena is caught on the NEXT clause rather than silently
+        // self-healed by `sync_len` (which would push a fresh node carrying the wrong
+        // provenance and hand it to role membership).
+        env.arena.assert_mirrors(&defs);
+
         // CR 608.2c: Handle absorbed clauses and special (rider) clauses that
         // modify previous defs rather than emitting new sibling defs. Each path
         // evaluates to `true`; the boundary advance below then runs uniformly so
