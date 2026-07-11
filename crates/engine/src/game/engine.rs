@@ -4833,20 +4833,45 @@ fn apply_action(
 
             // CR 601.2d: Resume casting pipeline after distribution.
             if state.pending_cast.is_some() {
-                // Mid-cast distribution: resume finalize_cast to commit the spell.
+                // CR 601.2c + CR 601.2d + CR 601.2f: Targets and their division are now
+                // committed, so the total cost — including any target-dependent
+                // surcharge (Strive, CR 207.2c) — is finally determinable. Route through
+                // the single cost-determination authority every other post-target-
+                // selection path uses (`casting_targets::handle_select_targets` /
+                // `handle_choose_target`) instead of calling `finalize_cast` directly
+                // with the stale cost that was locked in at `ChooseXValue` time, before
+                // targets (and hence any per-target surcharge) were known.
                 let pending = state.pending_cast.take().unwrap();
-                casting_costs::finalize_cast(
+                // CR 601.2h ("Unpayable costs can't be paid"): mirror
+                // `finalize_mana_payment`'s `pending_for_restore` pattern
+                // (casting_costs.rs ~8623-8627/8778-8787) — `finish_pending_cast_cost_or_pay`'s
+                // downstream chain has no restore-on-error wrapper of its own, and
+                // `state.pending_cast` is already `None` here (unlike
+                // `handle_select_targets`, whose `pending_cast` lives inside the
+                // `WaitingFor::TargetSelection` variant and so is never destructively
+                // taken). Without this clone-and-restore, a recomputed cost that turns
+                // out unpayable would return `Err` with `state.pending_cast` gone while
+                // `state.waiting_for` still reports `DistributeAmong` — a resubmitted
+                // `DistributeAmong` action would then fall through to the
+                // resolution-time continuation branch below instead of being cleanly
+                // rejected.
+                let pending_for_restore = pending.clone();
+                let ability = pending.ability.clone();
+                let cost = pending.cost.clone();
+                match casting_costs::finish_pending_cast_cost_or_pay(
                     state,
                     p,
-                    pending.object_id,
-                    pending.card_id,
-                    pending.ability,
-                    &pending.cost,
-                    pending.casting_variant,
-                    pending.cast_timing_permission,
-                    pending.origin_zone,
+                    *pending,
+                    ability,
+                    cost,
                     &mut events,
-                )?
+                ) {
+                    Ok(waiting_for) => waiting_for,
+                    Err(err) => {
+                        state.pending_cast = Some(pending_for_restore);
+                        return Err(err);
+                    }
+                }
             } else if let Some(mut pending_trigger) = state.pending_trigger.take() {
                 // CR 601.2d + CR 603.3d: Triggered abilities divide effects
                 // while being put on the stack. The chosen per-target amounts

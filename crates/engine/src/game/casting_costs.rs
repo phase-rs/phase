@@ -8671,6 +8671,20 @@ pub fn finalize_mana_payment(
             );
         }
 
+        // NOTE: This branch is provably unreachable for every currently-implemented
+        // distribute-unit + {X}-cost card (Fireball and siblings) — the CR 601.2c/d
+        // gate in `ability_utils::ability_distribution_pool_needs_chosen_x` (added by
+        // issue #2856) forces `WaitingFor::ChooseXValue` before target selection
+        // whenever the divided amount is `Effect::DealDamage`/`Effect::PutCounter`
+        // with an unresolved X reference, which makes `chosen_x` always already set
+        // by the time `maybe_pause_for_cast_distribution` runs in
+        // `casting_targets::handle_select_targets`/`handle_choose_target` — so THAT
+        // path always wins first. If a future card's distribute-unit amount is
+        // neither `DealDamage` nor `PutCounter` (the one shape this gate does not
+        // cover), re-verify whether it also needs the CR 601.2f target-dependent
+        // cost recompute this branch currently skips (see
+        // `casting::apply_target_dependent_cost_modifiers`) before assuming this
+        // code path is exercised by existing coverage.
         if let Some(unit) = pending.distribute {
             // CR 601.2d: X-spell distribution — pay mana first to determine X, then
             // trigger DistributeAmong with total = X.
@@ -8863,6 +8877,20 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             );
         }
 
+        // NOTE: This branch is provably unreachable for every currently-implemented
+        // distribute-unit + {X}-cost card (Fireball and siblings) — the CR 601.2c/d
+        // gate in `ability_utils::ability_distribution_pool_needs_chosen_x` (added by
+        // issue #2856) forces `WaitingFor::ChooseXValue` before target selection
+        // whenever the divided amount is `Effect::DealDamage`/`Effect::PutCounter`
+        // with an unresolved X reference, which makes `chosen_x` always already set
+        // by the time `maybe_pause_for_cast_distribution` runs in
+        // `casting_targets::handle_select_targets`/`handle_choose_target` — so THAT
+        // path always wins first. If a future card's distribute-unit amount is
+        // neither `DealDamage` nor `PutCounter` (the one shape this gate does not
+        // cover), re-verify whether it also needs the CR 601.2f target-dependent
+        // cost recompute this branch currently skips (see
+        // `casting::apply_target_dependent_cost_modifiers`) before assuming this
+        // code path is exercised by existing coverage.
         if let Some(unit) = pending.distribute {
             // CR 601.2d: X + distribution + Phyrexian is extremely rare (no known current cards).
             // Fall through to the auto-decision distribution path for safety — the Phyrexian

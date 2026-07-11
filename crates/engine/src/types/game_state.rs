@@ -5051,7 +5051,16 @@ pub struct DamageSlot {
 pub enum DistributionUnit {
     Damage,
     /// CR 601.2d: Even split — engine auto-computes `total / num_targets` (rounded down).
-    /// No player choice needed; bypasses `WaitingFor::DistributeAmong`.
+    /// No player *choice* in HOW it's split, but whether the flow pauses at
+    /// `WaitingFor::DistributeAmong` depends on the casting route:
+    /// - Non-deferred-target-selection flow (inside `finalize_mana_payment`):
+    ///   the split is applied inline and `WaitingFor::DistributeAmong` is bypassed.
+    /// - Deferred-target-selection flow (e.g. Fireball, gated by
+    ///   `ability_utils::ability_distribution_pool_needs_chosen_x`): the cast still
+    ///   pauses at `WaitingFor::DistributeAmong` via
+    ///   `casting_targets::maybe_pause_for_cast_distribution` — the split itself is
+    ///   automatic, but the pause is needed so cost (CR 601.2f) and target legality
+    ///   can re-resolve once targets are known.
     EvenSplitDamage,
     Counters(String),
     Life,

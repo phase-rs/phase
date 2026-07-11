@@ -3967,18 +3967,33 @@ pub(super) fn handle_resolution_choice(
                         events,
                     )?;
                 } else {
-                    state.waiting_for = casting_costs::finalize_cast(
-                        state,
-                        player,
-                        pending.object_id,
-                        pending.card_id,
-                        pending.ability,
-                        &pending.cost,
-                        pending.casting_variant,
-                        pending.cast_timing_permission,
-                        pending.origin_zone,
-                        events,
-                    )?;
+                    // CR 601.2c + CR 601.2f (mirrors the identical fix for
+                    // GameAction::DistributeAmong in engine.rs): a NamedChoice
+                    // pause can occur after targets are already known, so the
+                    // total cost — including any target-dependent surcharge
+                    // (Strive, CR 207.2c) — must be re-derived through the
+                    // single cost-determination authority
+                    // (`finish_pending_cast_cost_or_pay`) rather than paying
+                    // the cost that was locked in earlier in the casting
+                    // sequence, before this resumption point. The
+                    // clone-and-restore-on-Err mirrors
+                    // `finalize_mana_payment`'s `pending_for_restore` pattern
+                    // (CR 601.2h, "unpayable costs can't be paid") since
+                    // `state.pending_cast` is already taken (`None`) here and
+                    // `finish_pending_cast_cost_or_pay`'s downstream chain has
+                    // no restore-on-error wrapper of its own.
+                    let pending_for_restore = pending.clone();
+                    let ability = pending.ability.clone();
+                    let cost = pending.cost.clone();
+                    state.waiting_for = match casting_costs::finish_pending_cast_cost_or_pay(
+                        state, player, *pending, ability, cost, events,
+                    ) {
+                        Ok(waiting_for) => waiting_for,
+                        Err(err) => {
+                            state.pending_cast = Some(pending_for_restore);
+                            return Err(err);
+                        }
+                    };
                 }
             } else if let Some(source) =
                 source_id.filter(|_| !state.deferred_entry_events.is_empty())

@@ -1056,6 +1056,15 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
+    /// Pin a Strive-style per-target cost surcharge (CR 207.2c + CR 601.2f) on
+    /// this card directly, bypassing Oracle-text parsing. Use when the parser's
+    /// recognition of the surcharge clause is out of scope for the test (e.g. a
+    /// card whose printed text predates the "Strive —" ability-word template).
+    pub fn with_strive_cost(&mut self, cost: crate::types::mana::ManaCost) -> &mut Self {
+        self.obj().strive_cost = Some(cost);
+        self
+    }
+
     /// Pre-mark damage on this permanent (for SBA / deathtouch tests).
     pub fn with_damage_marked(&mut self, damage: u32) -> &mut Self {
         self.obj().damage_marked = damage;
