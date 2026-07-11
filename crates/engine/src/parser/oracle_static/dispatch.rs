@@ -90,6 +90,28 @@ pub(crate) fn is_speed_unlock_sentence(lower: &str) -> bool {
     .is_ok()
 }
 
+/// CR 609.4b: Match a board-wide "[you|players] may spend mana as though it were
+/// mana of any color" static (Chromatic Orrery / Mycosynth Lattice / Mycosynthwave),
+/// with no activation-source or spell-class qualifier tail. Both subject prefixes
+/// map to the same all-players concession — the runtime scopes
+/// `TargetFilter::Player` to every player — so they share one recognizer. Replaces
+/// a verbatim-string `==` match; the tailed forms ("... to activate abilities of
+/// X", "... to cast it") are consumed by earlier arms and never reach here.
+fn parse_board_wide_spend_any_color(lower: &str) -> bool {
+    all_consuming(terminated(
+        preceded(
+            alt((
+                tag::<_, _, OracleError<'_>>("you may "),
+                tag("players may "),
+            )),
+            tag("spend mana as though it were mana of any color"),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(lower)
+    .is_ok()
+}
+
 /// CR 305.2: static land-play permissions with an explicit additional-drop
 /// count greater than the ordinary +1 grant. `u8::MAX` represents "any
 /// number"; runtime summing saturates so it stays effectively unbounded when
@@ -1049,8 +1071,14 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // CR 609.4b: "You may spend mana as though it were mana of any color."
-    if tp.lower.trim_end_matches('.') == "you may spend mana as though it were mana of any color" {
+    // CR 609.4b: "[You|Players] may spend mana as though it were mana of any
+    // color." The controller form (Chromatic Orrery, "You may ...") and the
+    // all-players form (Mycosynth Lattice / Mycosynthwave, "Players may ...")
+    // both grant the board-wide any-color concession with no activation-source
+    // or spell-class qualifier tail. The runtime scopes
+    // `affected: TargetFilter::Player` to every player (`check_static_ability`),
+    // so the two phrasings share one static shape.
+    if parse_board_wide_spend_any_color(tp.lower) {
         return Some(
             StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
                 spell_filter: None,

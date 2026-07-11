@@ -20049,6 +20049,38 @@ fn parser_shape_evelyn_collection_counter_play_permission_static_is_not_unimplem
     assert_eq!(def.mode, StaticMode::LinkedCollectionCounterPlayPermission);
 }
 
+// CR 609.4b: Mycosynth Lattice / Mycosynthwave — "Players may spend mana as
+// though it were mana of any color" grants the board-wide any-color concession to
+// every player (affected: TargetFilter::Player, which the runtime scopes to all
+// players). Previously the "Players may" subject dropped the whole static — only
+// the "You may" form was matched (by a verbatim string == check).
+#[test]
+fn static_players_may_spend_mana_as_any_color() {
+    let def =
+        parse_static_line("Players may spend mana as though it were mana of any color.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::SpendManaAsAnyColor {
+            spell_filter: None,
+            activation_source_filter: None,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::Player));
+}
+
+#[test]
+fn static_you_may_spend_mana_as_any_color_still_parses() {
+    // Regression: the controller "You may" form still parses to the same shape.
+    let def = parse_static_line("You may spend mana as though it were mana of any color.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::SpendManaAsAnyColor {
+            spell_filter: None,
+            activation_source_filter: None,
+        }
+    );
+}
+
 // --- Group B: Generic activated ability cost reduction ---
 
 #[test]
