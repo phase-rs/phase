@@ -341,11 +341,15 @@ impl Arena {
     /// parent — the arena recorded the continuation's node as parent of a def nested
     /// somewhere else entirely. Emission order is not a parenthood oracle, so the
     /// guess is gone rather than special-cased.
-    fn settle(&mut self, defs: &[AbilityDefinition]) {
+    ///
+    /// This does NOT assert the mirror. The two assert sites — the top of the clause
+    /// loop and the Phase-1/Phase-2 boundary — between them cover every clause's
+    /// mutations, and asserting here as well only duplicated the loop-top check on
+    /// every non-rider path. Coverage is the same or better at half the calls.
+    fn settle(&mut self) {
         for id in std::mem::take(&mut self.detached) {
             self.nodes[id.0 as usize].status = NodeStatus::Dropped;
         }
-        self.assert_mirrors(defs);
     }
 
     /// Follow an `Absorbed` chain up to the LIVE top-level node that still holds
@@ -402,14 +406,16 @@ impl Arena {
                 .all(|id| matches!(self.node(*id).status, NodeStatus::Live)),
             "arena/defs divergence: a non-Live node is in `order`"
         );
-        // Live-by-status and live-by-`order` are the same SET. With the assert above
-        // ("everything in `order` is Live") this count is equivalent to a membership
-        // scan, and O(n) rather than the O(nodes x order) `contains`-in-a-loop it
-        // replaces — this assert is LIVE in the full-pool export, where
-        // `[profile.tool] inherits = "dev"` keeps `debug_assert` on.
+        // Live-by-status and live-by-`order` are the same SET. Counting is O(n) rather
+        // than the O(nodes x order) `contains`-in-a-loop it replaces — and this assert
+        // is LIVE in the full-pool export (`[profile.tool] inherits = "dev"`).
         //
-        // It is also strictly STRONGER: a duplicate id in `order` inflates the length
-        // and fails the count, where a `contains` scan would have waved it through.
+        // Precisely: standalone, the count is INCOMPARABLE to the membership scan, not
+        // stronger. It catches a duplicate id in `order` (which inflates the length)
+        // that a `contains` scan waves through; it is blind to a duplicate that is
+        // exactly compensated by an orphaned Live node. That blind spot is covered —
+        // the identity assert below pins `order[i]` to `defs[i]` by witness, and an
+        // orphan cannot survive it. The SET of asserts is what holds, not this line.
         debug_assert_eq!(
             self.nodes
                 .iter()
@@ -1427,9 +1433,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // clause, not the stale boundary that preceded it.
         if handled_as_special {
             prev_boundary = clause_ir.boundary;
-            // U6-C1: classify anything this handler detached, then assert the
-            // arena's live nodes still mirror `defs` 1:1.
-            env.arena.settle(&defs);
+            // Classify anything this handler detached; the mirror is asserted at the
+            // next loop-top, or at the Phase-1/Phase-2 boundary for the last clause.
+            env.arena.settle();
             continue;
         }
 
@@ -1911,9 +1917,20 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // so a following normal clause must stamp `sub_link` from the boundary
         // AFTER the special clause, not the stale one that preceded it.
         prev_boundary = clause_ir.boundary;
-        // U6-C1: same settle + mirror assertion on the normal (`Emit`) path.
-        env.arena.settle(&defs);
+        // Classify anything this clause detached. The mirror is asserted at the top of
+        // the next iteration, and — for the LAST clause, which has no next iteration —
+        // at the Phase-1/Phase-2 boundary below.
+        env.arena.settle();
     }
+
+    // The terminal-clause blind spot: the loop-top assert validates each clause's
+    // mutations on the NEXT iteration, so drift introduced by a card's FINAL clause
+    // would never be asserted at all — a rider on the last clause (Brainstealer
+    // Dragon's trailing mana rider is the witness) could desync the arena and no
+    // assert would ever run again. Phase 2 does not touch `env`, so this is the last
+    // moment the mirror still means anything. Assert it here, and Phase 1 is covered
+    // end to end.
+    env.arena.assert_mirrors(&defs);
 
     // ── Phase 2: Post-loop assembly (unchanged) ────────────────────────
     let kind = ir.kind;
@@ -2298,7 +2315,31 @@ mod arena_tests {
 
         defs.remove(1); // MID-vector removal ...
         arena.sync_len(&defs, None, NodeRole::Unknown); // ... mirrored by a TAIL pop.
-        arena.settle(&defs);
+        arena.settle();
+        arena.assert_mirrors(&defs);
+    }
+
+    /// The TERMINAL-CLAUSE blind spot, and why the Phase-1/Phase-2 boundary assert
+    /// exists. The loop-top assert validates a clause's mutations on the NEXT
+    /// iteration — so a card's FINAL clause has no iteration after it, and drift it
+    /// introduces was asserted by nothing at all. Brainstealer Dragon's trailing mana
+    /// rider is the real witness: it corrupted the arena and only an output diff
+    /// caught it.
+    ///
+    /// This is the shape the boundary assert catches — a rider that mutated `defs` and
+    /// never told the arena. Note it is also the shape `sync_len` SELF-HEALS if it is
+    /// allowed to run first: it would push a fresh node carrying the wrong provenance
+    /// and hand it to role membership, which is why the drift must be caught, not
+    /// reconciled.
+    #[test]
+    #[should_panic(expected = "live node count != defs len")]
+    fn a_terminal_clause_that_mutates_defs_without_telling_the_arena_is_caught() {
+        let mut defs = vec![shuffle_def(), shuffle_def(), shuffle_def()];
+        let mut arena = Arena::default();
+        arena.sync_len(&defs, None, NodeRole::Primary);
+
+        defs.pop(); // a terminal rider mutates `defs` ...
+        arena.assert_mirrors(&defs); // ... and never told the arena.
     }
 
     /// The green half of the pair. Without it, the `should_panic` above proves only
@@ -2320,7 +2361,8 @@ mod arena_tests {
         let parent = arena.id_at(0).expect("defs[0] is live");
         arena.absorb(absorbed, parent);
 
-        arena.settle(&defs);
+        arena.settle();
+        arena.assert_mirrors(&defs);
         assert!(matches!(
             arena.node(absorbed).status,
             NodeStatus::Absorbed { into } if into == parent
