@@ -665,6 +665,7 @@ pub(crate) fn parse_soulbond_paired_static(
     // (SourceOrPaired). Split the pairing frame off the granted predicate with
     // TextPair so the predicate keeps its ORIGINAL case: a quoted granted
     // ability's mana symbols (`{1}{U}`) must reach the cost parser un-lowercased.
+    // allow-noncombinator: TextPair dual-string structural strip preserving original case
     let after = tp.strip_prefix("as long as ")?;
     let (condition, predicate) = after
         .split_around(", each of those creatures ")
@@ -691,6 +692,7 @@ pub(crate) fn parse_soulbond_paired_static(
 /// at that inner period and drop the whole granted ability.
 fn strip_granted_predicate_period<'a>(predicate: &TextPair<'a>) -> TextPair<'a> {
     let predicate = predicate.trim_end();
+    // allow-noncombinator: punctuation inspection on a pre-tokenized chunk, not parse dispatch
     if predicate.ends_with("\"") {
         predicate
     } else {
