@@ -613,6 +613,42 @@ fn browbeat() {
 }
 
 // ---------------------------------------------------------------------------
+// Per-keyword replication (U5-M2 ReplicatePerKeyword parity)
+// ---------------------------------------------------------------------------
+// Oracle text verified verbatim against Scryfall.
+
+// CR 702: StaticGrant — "The same is true for <keywords>." replicates the
+// antecedent static keyword-grant clause once per listed keyword, swapping the
+// keyword in both the grant and its gating condition (Odric, Lunarch Marshal).
+#[test]
+fn odric_lunarch_marshal() {
+    let (ir, lowered) = parse_two_layer(
+        "At the beginning of each combat, creatures you control gain first strike until end of turn if a creature you control has first strike. The same is true for flying, deathtouch, double strike, haste, hexproof, indestructible, lifelink, menace, reach, skulk, trample, and vigilance.",
+        "Odric, Lunarch Marshal",
+        &["Creature"],
+        &["Human", "Soldier"],
+    );
+    insta::assert_json_snapshot!("odric_lunarch_marshal_ir", &ir);
+    insta::assert_json_snapshot!("odric_lunarch_marshal_lowered", &lowered);
+}
+
+// CR 608.2c: CounterPlacement — "Repeat this process for <keywords>." replicates
+// the antecedent conditional keyword-counter clause once per listed keyword,
+// swapping the keyword in both the placed counter and the graveyard-keyword gate
+// (Kathril, Aspect Warper).
+#[test]
+fn kathril_aspect_warper() {
+    let (ir, lowered) = parse_two_layer(
+        "When Kathril enters, put a flying counter on any creature you control if a creature card in your graveyard has flying. Repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 counter on Kathril for each counter put on a creature this way.",
+        "Kathril, Aspect Warper",
+        &["Creature"],
+        &["Nightmare", "Insect"],
+    );
+    insta::assert_json_snapshot!("kathril_aspect_warper_ir", &ir);
+    insta::assert_json_snapshot!("kathril_aspect_warper_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
 // Triggers (various patterns)
 // ---------------------------------------------------------------------------
 

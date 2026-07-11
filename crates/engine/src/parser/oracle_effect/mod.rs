@@ -150,7 +150,7 @@ use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
-    EffectChainIr, OtherwiseKind, SpecialClause,
+    EffectChainIr, OtherwiseKind, ReplicateKind, SpecialClause,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -24534,9 +24534,9 @@ pub(crate) fn parse_effect_chain_ir(
                         normalized_text,
                         placeholder_parsed_clause("same_is_true_for_placeholder"),
                         chunk.boundary_after,
-                        ClauseDisposition::Special {
-                            action: SpecialClause::SameIsTrueFor(keywords),
-                            intrinsic: None,
+                        ClauseDisposition::ReplicatePerKeyword {
+                            keywords,
+                            kind: ReplicateKind::StaticGrant,
                         },
                     )
                     .push();
@@ -24556,9 +24556,9 @@ pub(crate) fn parse_effect_chain_ir(
                         normalized_text,
                         placeholder_parsed_clause("repeat_process_for_keywords_placeholder"),
                         chunk.boundary_after,
-                        ClauseDisposition::Special {
-                            action: SpecialClause::RepeatProcessForKeywords(keywords),
-                            intrinsic: None,
+                        ClauseDisposition::ReplicatePerKeyword {
+                            keywords,
+                            kind: ReplicateKind::CounterPlacement,
                         },
                     )
                     .push();

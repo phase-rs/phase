@@ -26,7 +26,7 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
-    ClauseDisposition, ClauseIr, EffectChainIr, OtherwiseKind, SpecialClause,
+    ClauseDisposition, ClauseIr, EffectChainIr, OtherwiseKind, ReplicateKind, SpecialClause,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
@@ -1434,6 +1434,19 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                     }
                 }
                 true
+            } else if let ClauseDisposition::ReplicatePerKeyword { keywords, kind } =
+                &clause_ir.disposition
+            {
+                // CR 702 / CR 608.2c: replicate the antecedent template clause once
+                // per listed keyword. `kind` selects which template shape (and thus
+                // helper); the keyword-swap logic lives unchanged in the helpers.
+                match kind {
+                    ReplicateKind::StaticGrant => attach_same_is_true_keywords(&mut defs, keywords),
+                    ReplicateKind::CounterPlacement => {
+                        attach_repeat_process_keywords(&mut defs, keywords)
+                    }
+                }
+                true
             } else if let ClauseDisposition::Special {
                 action: special,
                 intrinsic,
@@ -1638,14 +1651,6 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                     }
                     SpecialClause::ManaRetention(expiry) => {
                         attach_mana_retention_to_prior_mana(&mut defs, *expiry);
-                        true
-                    }
-                    SpecialClause::SameIsTrueFor(keywords) => {
-                        attach_same_is_true_keywords(&mut defs, keywords);
-                        true
-                    }
-                    SpecialClause::RepeatProcessForKeywords(keywords) => {
-                        attach_repeat_process_keywords(&mut defs, keywords);
                         true
                     }
                 }

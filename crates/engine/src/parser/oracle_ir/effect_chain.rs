@@ -136,18 +136,6 @@ pub(crate) enum SpecialClause {
     DrawnThisTurnPayOrTopdeck { life_payment: QuantityExpr },
     /// CR 106.4: Mana-retention rider — fold expiry onto the previous Mana effect.
     ManaRetention(ManaExpiry),
-    /// CR 702: "The same is true for <keyword list>." — Odric, Lunarch Marshal.
-    /// Each listed keyword extends the previous `GenericEffect` clause with one
-    /// additional `StaticDefinition` cloned from the antecedent grant template,
-    /// with both the granted keyword and the gating condition's keyword swapped.
-    SameIsTrueFor(Vec<Keyword>),
-    /// CR 608.2c: "Repeat this process for <keyword list>." — Kathril, Aspect
-    /// Warper. Replicates the antecedent conditional keyword-counter clause
-    /// (`PutCounter { counter_type: Keyword(..) }` gated by a graveyard-keyword
-    /// condition) once per listed keyword, swapping both the placed counter's
-    /// keyword and the gating condition's keyword. The counters-class analogue
-    /// of `SameIsTrueFor` (which handles static keyword grants).
-    RepeatProcessForKeywords(Vec<Keyword>),
 }
 
 // ===========================================================================
@@ -247,6 +235,15 @@ pub(crate) enum ClauseDisposition {
         else_def: Box<AbilityDefinition>,
         kind: OtherwiseKind,
     },
+    /// CR 608.2c / CR 702: replicate an antecedent template clause once per listed
+    /// keyword, swapping the keyword in both the granted ability/counter and its
+    /// gating condition. Promoted from `SpecialClause::{SameIsTrueFor,
+    /// RepeatProcessForKeywords}` (U5-M2). `kind` selects the replication helper;
+    /// the bound antecedent is the prior emitted clause (implicit, as `Continue`).
+    ReplicatePerKeyword {
+        keywords: Vec<Keyword>,
+        kind: ReplicateKind,
+    },
     /// A special-case adjacency action that modifies an adjacent clause during
     /// lowering (folds the former `special: Option<SpecialClause>`). `intrinsic`
     /// carries the self-patch some special arms apply (lower.rs:1600).
@@ -287,6 +284,19 @@ pub(crate) enum OtherwiseKind {
     /// No prior conditional at parse time: self-emit (an Unimplemented "otherwise"
     /// marker def followed by the else def).
     Fallback,
+}
+
+/// CR 608.2c / CR 702: which per-keyword replication is performed. Both replicate
+/// an antecedent template per listed keyword; `kind` selects which template shape
+/// (static grant vs. counter placement) and thus which lowering helper runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum ReplicateKind {
+    /// CR 702: "The same is true for <keywords>." — replicate the antecedent static
+    /// keyword-GRANT clause per keyword (Odric, Lunarch Marshal).
+    StaticGrant,
+    /// CR 608.2c: "Repeat this process for <keywords>." — replicate the antecedent
+    /// conditional keyword-COUNTER clause per keyword (Kathril, Aspect Warper).
+    CounterPlacement,
 }
 
 /// Per-clause IR: captures everything about a single parsed chunk before chain assembly.
@@ -376,7 +386,8 @@ impl ClauseDisposition {
             | ClauseDisposition::Special { intrinsic, .. } => intrinsic.as_ref(),
             ClauseDisposition::Continue { .. }
             | ClauseDisposition::Absorb { .. }
-            | ClauseDisposition::BranchOtherwise { .. } => None,
+            | ClauseDisposition::BranchOtherwise { .. }
+            | ClauseDisposition::ReplicatePerKeyword { .. } => None,
         }
     }
 
@@ -391,7 +402,8 @@ impl ClauseDisposition {
             } => followup.as_ref(),
             ClauseDisposition::Special { .. }
             | ClauseDisposition::Absorb { .. }
-            | ClauseDisposition::BranchOtherwise { .. } => None,
+            | ClauseDisposition::BranchOtherwise { .. }
+            | ClauseDisposition::ReplicatePerKeyword { .. } => None,
         }
     }
 }

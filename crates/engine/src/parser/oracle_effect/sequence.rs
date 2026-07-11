@@ -7051,8 +7051,9 @@ pub(super) fn parse_keyword_grant_list(input: &str) -> Option<(Vec<Keyword>, &st
 /// each additional listed keyword.
 ///
 /// Returns the parsed keyword list. The chunk loop wraps this in
-/// `SpecialClause::SameIsTrueFor`; lowering reads the antecedent
-/// `GenericEffect` clause and clones its grant template once per keyword.
+/// `ClauseDisposition::ReplicatePerKeyword { kind: StaticGrant }`; lowering reads
+/// the antecedent `GenericEffect` clause and clones its grant template once per
+/// keyword.
 /// Generalized over the whole evergreen-keyword vocabulary — covers every card
 /// of this "the same is true for …" class, not Odric alone.
 pub(crate) fn try_parse_same_is_true_continuation(text: &str) -> Option<Vec<Keyword>> {
@@ -7074,8 +7075,9 @@ pub(crate) fn try_parse_same_is_true_continuation(text: &str) -> Option<Vec<Keyw
 /// CR 608.2c: Parse a counter-class keyword-list continuation —
 /// "Repeat this process for <keyword list>." (Kathril, Aspect Warper) or
 /// "Do the same for <keyword list>." (Super-Adaptoid). Returns the keyword
-/// list; the chunk loop wraps it in `SpecialClause::RepeatProcessForKeywords`
-/// and lowering replicates the antecedent conditional keyword-counter clause
+/// list; the chunk loop wraps it in
+/// `ClauseDisposition::ReplicatePerKeyword { kind: CounterPlacement }` and
+/// lowering replicates the antecedent conditional keyword-counter clause
 /// once per keyword. Both phrasings are leaf-level variants of the same
 /// "replicate the prior keyword-counter clause for each listed keyword"
 /// directive, so they share one combinator and one `SpecialClause`. Mirrors
