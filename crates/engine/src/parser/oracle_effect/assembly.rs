@@ -1681,7 +1681,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
     }
 
-    // CR 702.33d + CR 608.2e: Resolve "create [N] of those tokens [instead]"
+    // CR 702.33d + CR 608.2c: Resolve "create [N] of those tokens [instead]"
     // anaphoric subs — the sub-ability parses as `Unimplemented` because the
     // noun "those tokens" refers back to the previous clause's token-creation
     // effect. Rewrite those subs by cloning the previous effect with an

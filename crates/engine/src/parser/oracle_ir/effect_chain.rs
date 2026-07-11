@@ -57,7 +57,7 @@ pub(crate) struct EffectChainIr {
 /// `sub_link` is the sole residue, so it is the sole shell field.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct AbilityShellIr {
-    /// CR 608.2e: how the lowered root attaches to its parent — a resolution step
+    /// CR 608.2c: how the lowered root attaches to its parent — a resolution step
     /// of the parent's instruction, or an independent following instruction that
     /// resolves even when an optional parent is declined.
     ///
@@ -304,7 +304,7 @@ pub(crate) enum ReplaceMeaningKind {
     /// CR 614.1a + CR 608.2c: multi-clause base + "instead" override via Cow-swap;
     /// tail clauses stashed in the override's `else_ability`.
     Instead(Box<AbilityDefinition>),
-    /// CR 608.2e: build this clause's def from `parsed` + condition, attach as the
+    /// CR 608.2c: build this clause's def from `parsed` + condition, attach as the
     /// prior def's `sub_ability` (keyword-instead override).
     KeywordOverride,
 }
