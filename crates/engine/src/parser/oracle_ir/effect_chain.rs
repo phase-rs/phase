@@ -125,14 +125,6 @@ pub(crate) enum SpecialClause {
     Otherwise(Box<AbilityDefinition>),
     /// CR 608.2c: "Otherwise" fallback — no conditional found, emit as Unimplemented + def.
     OtherwiseFallback(Box<AbilityDefinition>),
-    /// CR 614.1a + CR 514.2: Die-exile-rider — attach as sub_ability on previous def.
-    DieExileRider(Box<AbilityDefinition>),
-    /// CR 608.2c + CR 701.19c: "[noun] dealt damage this way can't be
-    /// regenerated this turn." — a separate-sentence regen rider that attaches
-    /// as a sub_ability on the previous damage clause (Incinerate, Flamebreak,
-    /// Jaya Ballard, Task Mage). Carries a `GenericEffect{CantBeRegenerated}`
-    /// whose `target: TrackedSet` binds to the damage clause's published set.
-    CantBeRegeneratedRider(Box<AbilityDefinition>),
     /// CR 608.2c: Dig-instead alternative — replace previous Dig with conditional alternative.
     DigInsteadAlt(Box<AbilityDefinition>),
     /// CR 608.2e: Generic instead clause — attach to previous def as sub_ability.
@@ -239,6 +231,17 @@ pub(crate) enum ClauseDisposition {
     Continue {
         continuation: Option<ContinuationAst>,
     },
+    /// CR 608.2c: this clause's def attaches as a sub_ability RIDER on the tail of
+    /// the prior emitted def's sub_ability chain, emitting no sibling def. Promoted
+    /// from the former `SpecialClause::{DieExileRider, CantBeRegeneratedRider}`
+    /// (U5-M2). `kind` preserves the distinct rules concept (they share the
+    /// `append_to_deepest_sub_ability` mechanic — Plan 01 §5 line 811). The bound
+    /// antecedent is the prior emitted def (implicit, as M1's `Continue`); the
+    /// explicit antecedent selector is JIT-deferred to U6.
+    Absorb {
+        rider: Box<AbilityDefinition>,
+        kind: AbsorbKind,
+    },
     /// A special-case adjacency action that modifies an adjacent clause during
     /// lowering (folds the former `special: Option<SpecialClause>`). `intrinsic`
     /// carries the self-patch some special arms apply (lower.rs:1600).
@@ -254,6 +257,17 @@ pub(crate) enum ClauseDisposition {
         action: SpecialClause,
         intrinsic: Option<ContinuationAst>,
     },
+}
+
+/// The distinct sub_ability-rider concepts that fold onto the prior emitted def.
+/// Both share the `append_to_deepest_sub_ability` mechanic; `kind` keeps the CR
+/// concept typed rather than collapsing it (Plan 01 §5 line 811).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum AbsorbKind {
+    /// CR 614.1a + CR 514.2: die-exile rider (attach as sub_ability tail).
+    DieExile,
+    /// CR 608.2c + CR 701.19c: "dealt damage this way can't be regenerated" rider.
+    CantBeRegenerated,
 }
 
 /// Per-clause IR: captures everything about a single parsed chunk before chain assembly.
@@ -336,25 +350,25 @@ pub(crate) struct ClauseIr {
 impl ClauseDisposition {
     /// The self-patch continuation parsed from a clause's own text (formerly the
     /// `intrinsic_continuation` field): applied to this clause's own lowered def
-    /// after it emits. `Emit`/`Special` carry it; `Continue` never does.
+    /// after it emits. `Emit`/`Special` carry it; `Continue`/`Absorb` never do.
     pub(crate) fn intrinsic(&self) -> Option<&ContinuationAst> {
         match self {
             ClauseDisposition::Emit { intrinsic, .. }
             | ClauseDisposition::Special { intrinsic, .. } => intrinsic.as_ref(),
-            ClauseDisposition::Continue { .. } => None,
+            ClauseDisposition::Continue { .. } | ClauseDisposition::Absorb { .. } => None,
         }
     }
 
     /// The prior-patch continuation (formerly the `followup_continuation` field):
     /// a normal (`Emit`) clause's followup that patches the PRIOR def, or a
-    /// `Continue` clause's continuation. `None` for `Special` clauses.
+    /// `Continue` clause's continuation. `None` for `Special`/`Absorb` clauses.
     pub(crate) fn followup(&self) -> Option<&ContinuationAst> {
         match self {
             ClauseDisposition::Emit { followup, .. }
             | ClauseDisposition::Continue {
                 continuation: followup,
             } => followup.as_ref(),
-            ClauseDisposition::Special { .. } => None,
+            ClauseDisposition::Special { .. } | ClauseDisposition::Absorb { .. } => None,
         }
     }
 }

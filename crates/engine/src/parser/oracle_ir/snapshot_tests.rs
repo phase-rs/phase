@@ -506,6 +506,59 @@ fn snapcaster_mage() {
 }
 
 // ---------------------------------------------------------------------------
+// Damage sub_ability riders (U5-M2 Absorb parity: die-exile / can't-regenerate)
+// ---------------------------------------------------------------------------
+
+// CR 608.2c + CR 701.19c: unconditional "can't be regenerated" rider on a
+// separate sentence after a damage clause (SpecialClause::CantBeRegeneratedRider
+// → ClauseDisposition::Absorb { kind: CantBeRegenerated }). Verified verbatim
+// against Scryfall.
+#[test]
+fn incinerate() {
+    let (ir, lowered) = parse_two_layer(
+        "Incinerate deals 3 damage to any target. A creature dealt damage this way can't be regenerated this turn.",
+        "Incinerate",
+        &["Instant"],
+        &[],
+    );
+    insta::assert_json_snapshot!("incinerate_ir", &ir);
+    insta::assert_json_snapshot!("incinerate_lowered", &lowered);
+}
+
+// CR 614.1a + CR 514.2: standalone "if [it] would die this turn, exile it
+// instead" die-exile rider on a separate sentence after a damage clause
+// (SpecialClause::DieExileRider → ClauseDisposition::Absorb { kind: DieExile }).
+// Verified verbatim against Scryfall (includes the printed Devoid keyword line).
+#[test]
+fn touch_of_the_void() {
+    let (ir, lowered) = parse_two_layer(
+        "Devoid (This card has no color.)\nTouch of the Void deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
+        "Touch of the Void",
+        &["Sorcery"],
+        &[],
+    );
+    insta::assert_json_snapshot!("touch_of_the_void_ir", &ir);
+    insta::assert_json_snapshot!("touch_of_the_void_lowered", &lowered);
+}
+
+// CR 109.2 + CR 608.2c: the conditional two-rider form ("If it's a creature, it
+// can't be regenerated this turn, and if it would die this turn, exile it
+// instead.") emits BOTH Absorb kinds from the conditional-regen block —
+// CantBeRegenerated then DieExile, each stamped with the creature-gate
+// condition. Verified verbatim against Scryfall.
+#[test]
+fn carbonize() {
+    let (ir, lowered) = parse_two_layer(
+        "Carbonize deals 3 damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+        "Carbonize",
+        &["Instant"],
+        &[],
+    );
+    insta::assert_json_snapshot!("carbonize_ir", &ir);
+    insta::assert_json_snapshot!("carbonize_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
 // Triggers (various patterns)
 // ---------------------------------------------------------------------------
 

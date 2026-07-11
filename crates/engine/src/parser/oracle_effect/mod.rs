@@ -149,8 +149,8 @@ use self::subject::{
 use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{
-    AbilityIr, AbilityShellIr, ClauseDisposition, ClauseIr, ClauseIrBuilder, EffectChainIr,
-    SpecialClause,
+    AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
+    EffectChainIr, SpecialClause,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -24755,9 +24755,9 @@ pub(crate) fn parse_effect_chain_ir(
                         normalized_text,
                         placeholder_parsed_clause("die_exile_rider_placeholder"),
                         chunk.boundary_after,
-                        ClauseDisposition::Special {
-                            action: SpecialClause::DieExileRider(Box::new(rider_def)),
-                            intrinsic: None,
+                        ClauseDisposition::Absorb {
+                            rider: Box::new(rider_def),
+                            kind: AbsorbKind::DieExile,
                         },
                     )
                     .push();
@@ -24864,9 +24864,9 @@ pub(crate) fn parse_effect_chain_ir(
                             "",
                         )),
                         chunk.boundary_after,
-                        ClauseDisposition::Special {
-                            action: SpecialClause::CantBeRegeneratedRider(Box::new(regen_def)),
-                            intrinsic: None,
+                        ClauseDisposition::Absorb {
+                            rider: Box::new(regen_def),
+                            kind: AbsorbKind::CantBeRegenerated,
                         },
                     )
                     .push();
@@ -24878,9 +24878,9 @@ pub(crate) fn parse_effect_chain_ir(
                         normalized_text,
                         parsed_clause(Effect::unimplemented("die_exile_rider_placeholder", "")),
                         chunk.boundary_after,
-                        ClauseDisposition::Special {
-                            action: SpecialClause::DieExileRider(Box::new(exile_def)),
-                            intrinsic: None,
+                        ClauseDisposition::Absorb {
+                            rider: Box::new(exile_def),
+                            kind: AbsorbKind::DieExile,
                         },
                     )
                     .push();
@@ -24893,8 +24893,8 @@ pub(crate) fn parse_effect_chain_ir(
                 normalized_text.trim_end_matches('.').trim(),
                 kind,
             ) {
-                // Structural sentinel: replaced during lowering by the
-                // SpecialClause attach (mirrors the DieExileRider placeholder).
+                // Structural sentinel: replaced during lowering by the Absorb
+                // rider attach (mirrors the DieExile placeholder).
                 builder
                     .clause(
                         normalized_text,
@@ -24903,9 +24903,9 @@ pub(crate) fn parse_effect_chain_ir(
                             "",
                         )),
                         chunk.boundary_after,
-                        ClauseDisposition::Special {
-                            action: SpecialClause::CantBeRegeneratedRider(Box::new(rider_def)),
-                            intrinsic: None,
+                        ClauseDisposition::Absorb {
+                            rider: Box::new(rider_def),
+                            kind: AbsorbKind::CantBeRegenerated,
                         },
                     )
                     .push();

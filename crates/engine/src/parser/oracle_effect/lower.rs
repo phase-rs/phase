@@ -1343,6 +1343,16 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                     apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
                 }
                 true
+            } else if let ClauseDisposition::Absorb { rider, kind: _ } = &clause_ir.disposition {
+                // CR 614.1a / CR 701.19c: attach the rider as the tail of the prior
+                // def's sub_ability chain instead of overwriting it — multi-target
+                // damage spells (Serpentine Spike) populate the chain with
+                // continuation events, so the rider must attach AFTER them. Both
+                // `AbsorbKind`s share this mechanic (`kind` is provenance only).
+                if let Some(last_def) = defs.last_mut() {
+                    append_to_deepest_sub_ability(last_def, Some(rider.clone()));
+                }
+                true
             } else if let ClauseDisposition::Special {
                 action: special,
                 intrinsic,
@@ -1423,32 +1433,6 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                             },
                         ));
                         defs.push(*else_def.clone());
-                        true
-                    }
-                    SpecialClause::DieExileRider(rider_def) => {
-                        if let Some(last_def) = defs.last_mut() {
-                            // CR 614.1a + CR 608.2c: Append the rider as the
-                            // tail of the existing sub_ability chain instead of
-                            // overwriting it. Multi-target damage spells
-                            // (Serpentine Spike) populate the sub_ability chain
-                            // with continuation damage events; the rider must
-                            // attach AFTER the chain so all continuation events
-                            // resolve before the replacement attaches.
-                            append_to_deepest_sub_ability(last_def, Some(rider_def.clone()));
-                        }
-                        true
-                    }
-                    SpecialClause::CantBeRegeneratedRider(rider_def) => {
-                        // CR 608.2c + CR 701.19c: Attach the "<noun> dealt damage
-                        // this way can't be regenerated" rider as the tail of the
-                        // preceding damage clause's sub_ability chain. The rider's
-                        // `GenericEffect{target: TrackedSet}` then trips
-                        // `next_sub_needs_tracked_set` on that damage clause, so it
-                        // publishes the damaged object ids the rider's
-                        // CantBeRegenerated static binds to.
-                        if let Some(last_def) = defs.last_mut() {
-                            append_to_deepest_sub_ability(last_def, Some(rider_def.clone()));
-                        }
                         true
                     }
                     SpecialClause::DigInsteadAlt(alt_def) => {
