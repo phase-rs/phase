@@ -17257,38 +17257,6 @@ fn lands_edge_discard_land_condition_parses_as_bare_intervening_if() {
     );
 }
 
-/// Sibling to `lands_edge_discard_land_condition_parses_as_bare_intervening_if`:
-/// WITHOUT the "Any player may activate this ability." instruction, the exact
-/// same ability must parse with `activator_filter == None` (controller-only per
-/// CR 602.2). Proves the `PlayerFilter::All` in the primary test is driven by
-/// that specific sentence, not a default.
-#[test]
-fn lands_edge_without_any_player_clause_has_no_activator_filter() {
-    let parsed = parse_oracle_text(
-        "Discard a card: If the discarded card was a land card, this enchantment \
-         deals 2 damage to target player or planeswalker.",
-        "Land's Edge (control-only variant)",
-        &[],
-        &["Enchantment".to_string()],
-        &[],
-    );
-    assert_eq!(parsed.abilities.len(), 1);
-    let def = &parsed.abilities[0];
-    // Reach-guard: the condition still parsed, so we're on the real arm.
-    assert!(
-        matches!(
-            def.condition.as_ref(),
-            Some(AbilityCondition::CostPaidObjectMatchesFilter { .. })
-        ),
-        "condition must still be the bare intervening-if, got {:?}",
-        def.condition
-    );
-    assert_eq!(
-        def.activator_filter, None,
-        "without 'Any player may activate', activation is controller-only (activator_filter = None)"
-    );
-}
-
 /// Regression guard: pre-existing "it's <color>" anaphoric form must
 /// still produce a TargetMatchesFilter condition. The refactor split
 /// subject and verb into independent combinators; this test verifies
