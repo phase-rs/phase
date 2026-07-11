@@ -15749,6 +15749,72 @@ fn all_lands_are_creatures_living_plane() {
     }
 }
 
+// CR 205.4a: a supertype word ("legendary", "snow", "basic") in an additive
+// "... in addition to its other types" type clause must add that supertype.
+// Super-Soldier Serum's "is a legendary Soldier in addition to its other types"
+// previously dropped the "legendary" supertype, keeping only the Soldier
+// subtype. The unified `classify_additive_type_word` now spans color / core
+// type / supertype / subtype.
+#[test]
+fn additive_type_clause_grants_supertype_and_subtype() {
+    use crate::types::card_type::Supertype;
+    let mods = parse_additive_type_clause_modifications(
+        "is a legendary Soldier in addition to its other types",
+    )
+    .expect("additive type clause must parse");
+    assert!(
+        mods.contains(&ContinuousModification::AddSupertype {
+            supertype: Supertype::Legendary
+        }),
+        "legendary supertype dropped: {mods:?}"
+    );
+    assert!(mods.contains(&ContinuousModification::AddSubtype {
+        subtype: "Soldier".to_string()
+    }));
+}
+
+#[test]
+fn additive_type_clause_still_classifies_color_and_subtype() {
+    use crate::types::mana::ManaColor;
+    // Regression: the unified word classifier keeps color + subtype grants
+    // (Rise from the Grave's "black Zombie").
+    let mods = parse_additive_type_clause_modifications(
+        "is a black Zombie in addition to its other types",
+    )
+    .expect("additive type clause must parse");
+    assert!(mods.contains(&ContinuousModification::AddColor {
+        color: ManaColor::Black
+    }));
+    assert!(mods.contains(&ContinuousModification::AddSubtype {
+        subtype: "Zombie".to_string()
+    }));
+}
+
+#[test]
+fn super_soldier_serum_static_adds_legendary_supertype() {
+    use crate::types::card_type::Supertype;
+    let def = parse_static_line(
+        "Enchanted creature gets +2/+2, has first strike and vigilance, and is a legendary Soldier in addition to its other types.",
+    )
+    .expect("Super-Soldier Serum static must parse");
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddSupertype {
+                supertype: Supertype::Legendary
+            }),
+        "legendary supertype dropped: {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddSubtype {
+                subtype: "Soldier".to_string()
+            }),
+        "Soldier subtype dropped: {:?}",
+        def.modifications
+    );
+}
+
 // CR 205.1b + CR 613.4b: single-subject land animation whose predicate uses the
 // explicit additive marker ("… creatures and <type> lands in addition to their
 // other types") must merge `parse_animation_spec` with

@@ -518,27 +518,8 @@ pub(crate) fn parse_additive_type_clause_modifications(
         if word.is_empty() {
             continue;
         }
-        let lower_word = word.to_lowercase();
-        // CR 105.2 + CR 613.1e: a color word ("black", "white", …) adds that
-        // color (layer 5), e.g. Rise from the Grave's "black Zombie".
-        // `all_consuming` asserts the whole token is the color word, matching
-        // the sibling guard idiom rather than a manual `rest.is_empty()` check.
-        if let Ok((_, color)) =
-            all_consuming(nom_primitives::parse_color).parse(lower_word.as_str())
-        {
-            modifications.push(ContinuousModification::AddColor { color });
-            continue;
-        }
-        if let Some(core_type) = core_type_from_additive_word(lower_word.as_str()) {
-            modifications.push(ContinuousModification::AddType { core_type });
-            continue;
-        }
-        // CR 205.3a: Only canonical subtypes from the curated list may be
-        // added. Unrecognized words are silently dropped rather than
-        // fabricated — a heuristic capitalize-and-strip-s would synthesize
-        // non-MTG subtypes from noise tokens.
-        if let Some((canonical, _)) = parse_subtype(lower_word.as_str()) {
-            modifications.push(ContinuousModification::AddSubtype { subtype: canonical });
+        if let Some(modification) = classify_additive_type_word(&word.to_lowercase()) {
+            modifications.push(modification);
         }
     }
 
@@ -560,6 +541,34 @@ pub(crate) fn core_type_from_additive_word(word: &str) -> Option<CoreType> {
         "battle" | "battles" => Some(CoreType::Battle),
         _ => None,
     }
+}
+
+/// Classify one word (already lowercased) of an additive "<...> in addition to
+/// its other types" clause into its continuous modification — a single authority
+/// spanning every characteristic a type-addition word can carry. `all_consuming`
+/// asserts the whole token is the classified word.
+///
+/// - CR 105.2 + CR 613.1e (Layer 5): a color word maps to `AddColor`.
+/// - CR 205.1 (Layer 4): a core-type word maps to `AddType`.
+/// - CR 205.4a (Layer 4): a supertype word ("legendary"/"snow"/"basic") maps to
+///   `AddSupertype` — previously dropped, so Super-Soldier Serum's "legendary
+///   Soldier" kept only the subtype.
+/// - CR 205.3a (Layer 4): a canonical subtype maps to `AddSubtype`; unrecognized
+///   words are dropped rather than fabricated into non-MTG subtypes.
+fn classify_additive_type_word(word: &str) -> Option<ContinuousModification> {
+    if let Ok((_, color)) = all_consuming(nom_primitives::parse_color).parse(word) {
+        return Some(ContinuousModification::AddColor { color });
+    }
+    if let Some(core_type) = core_type_from_additive_word(word) {
+        return Some(ContinuousModification::AddType { core_type });
+    }
+    if let Ok((_, supertype)) = all_consuming(nom_target::parse_supertype_word).parse(word) {
+        return Some(ContinuousModification::AddSupertype { supertype });
+    }
+    if let Some((canonical, _)) = parse_subtype(word) {
+        return Some(ContinuousModification::AddSubtype { subtype: canonical });
+    }
+    None
 }
 
 /// CR 205.3 + CR 700.8: Parse a self-static of the form
