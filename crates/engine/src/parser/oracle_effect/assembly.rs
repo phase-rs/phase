@@ -59,12 +59,12 @@ use super::{
     attach_repeat_process_keywords, attach_same_is_true_keywords,
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
-    def_is_generic_effect_head, def_is_keyword_counter_placement, fold_cast_copy_of_card_defs,
-    has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
-    parse_spell_graveyard_replacement_rider, publishes_tracked_set_from_resolution,
-    retarget_counter_additional_cost_to_target, rewrite_parent_targets_to_tracked_set,
-    rewrite_rounding_mode, rewrite_that_type_mana_instead, stamp_delayed_returns,
-    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
+    def_is_dig_or_mill, def_is_generic_effect_head, def_is_keyword_counter_placement,
+    fold_cast_copy_of_card_defs, has_explicit_player_target, inject_chosen_color_choice_grant,
+    mark_uses_tracked_set, parse_spell_graveyard_replacement_rider,
+    publishes_tracked_set_from_resolution, retarget_counter_additional_cost_to_target,
+    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
+    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
 
 // ===========================================================================
@@ -515,8 +515,6 @@ pub(super) struct AssemblyEnv {
     optional_head_nodes: Vec<usize>,
     /// Every continuation-pushed search-destination `ChangeZone`, in emission order.
     search_destination_nodes: Vec<usize>,
-    /// Every `Dig`/`Mill` node, in emission order (the `DigFromAmong` anchor set).
-    dig_or_mill_nodes: Vec<usize>,
     /// Every `Dig`/`RevealUntil` node (the `RestDestination` patchable set).
     dig_or_reveal_until_nodes: Vec<usize>,
     /// Every `Destroy`/`DestroyAll` node (the can't-be-regenerated antecedent set).
@@ -625,12 +623,20 @@ fn live_role_predicate(role: AntecedentRole) -> Option<fn(&AbilityDefinition) ->
     match role {
         AntecedentRole::GenericEffectHead => Some(def_is_generic_effect_head),
         AntecedentRole::KeywordCounterPlacement => Some(def_is_keyword_counter_placement),
+        // LIVE, not cached. The scan this role replaces (`sequence.rs`, the
+        // `DigFromAmong` fallthrough) re-derived its antecedent from `defs` on every
+        // call, so it saw the CURRENT effect of every def. A cached registry is
+        // refreshed only by `observe` — i.e. only when `defs.len()` changes — and the
+        // assembler performs LENGTH-PRESERVING in-place effect rewrites
+        // (`*previous.effect = Effect::ExileTop { .. }`) that turn a `Dig` into
+        // something else without any length change. Cached, this role would go on
+        // naming a def that is no longer a `Dig`/`Mill`. Live, it is EXACTLY the scan.
+        AntecedentRole::DigOrMill => Some(def_is_dig_or_mill),
         AntecedentRole::Conditional
         | AntecedentRole::OptionalHead
         | AntecedentRole::DigOrRevealUntil
         | AntecedentRole::DestroyLike
-        | AntecedentRole::FaceDownProfileHolder
-        | AntecedentRole::DigOrMill => None,
+        | AntecedentRole::FaceDownProfileHolder => None,
     }
 }
 
@@ -717,7 +723,6 @@ impl AssemblyEnv {
         self.conditional_nodes.clear();
         self.optional_head_nodes.clear();
         self.search_destination_nodes.clear();
-        self.dig_or_mill_nodes.clear();
         self.dig_or_reveal_until_nodes.clear();
         self.destroy_like_nodes.clear();
         self.face_down_profile_nodes.clear();
@@ -762,9 +767,6 @@ impl AssemblyEnv {
             ) && provenance.role == NodeRole::ContinuationProduct
             {
                 self.search_destination_nodes.push(index);
-            }
-            if matches!(&*def.effect, Effect::Dig { .. } | Effect::Mill { .. }) {
-                self.dig_or_mill_nodes.push(index);
             }
             if matches!(
                 &*def.effect,
@@ -892,7 +894,6 @@ impl AssemblyEnv {
                 None => match role {
                     AntecedentRole::Conditional => last_cached(&self.conditional_nodes),
                     AntecedentRole::OptionalHead => last_cached(&self.optional_head_nodes),
-                    AntecedentRole::DigOrMill => last_cached(&self.dig_or_mill_nodes),
                     AntecedentRole::DigOrRevealUntil => {
                         last_cached(&self.dig_or_reveal_until_nodes)
                     }
@@ -903,9 +904,9 @@ impl AssemblyEnv {
                     // `live_role_predicate` returned `Some` for these, so this arm is
                     // unreachable — but it is spelled out rather than wildcarded so a
                     // NEW role cannot be added without choosing a side.
-                    AntecedentRole::GenericEffectHead | AntecedentRole::KeywordCounterPlacement => {
-                        None
-                    }
+                    AntecedentRole::GenericEffectHead
+                    | AntecedentRole::KeywordCounterPlacement
+                    | AntecedentRole::DigOrMill => None,
                 },
             },
         };

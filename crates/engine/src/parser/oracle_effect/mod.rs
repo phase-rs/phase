@@ -20258,6 +20258,18 @@ pub(super) fn def_is_generic_effect_head(def: &AbilityDefinition) -> bool {
     matches!(&*def.effect, Effect::GenericEffect { .. })
 }
 
+/// Membership mirror for `AntecedentRole::DigOrMill` — the "look at / mill the top N"
+/// anchor a `DigFromAmong` continuation binds back to.
+///
+/// Mirrors where the scan it replaced STOPPED, which is the effect variant alone. The
+/// scan's caller then narrows to `Dig` for the intervening-sacrifice restructure, but
+/// that narrowing is the MUTATION's precondition, not the selector's — folding it in
+/// here would resume the walk past a `Mill` and bind an earlier def the old code never
+/// reached.
+pub(super) fn def_is_dig_or_mill(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::Dig { .. } | Effect::Mill { .. })
+}
+
 /// CR 608.2c: Apply a "Repeat this process for <keyword list>" continuation
 /// (Kathril, Aspect Warper). Walks `defs` from the back for the most recent
 /// conditional keyword-counter placement (`PutCounter { counter_type:

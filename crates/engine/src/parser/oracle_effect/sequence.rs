@@ -3758,13 +3758,24 @@ pub(super) fn apply_clause_continuation(
                 }
             }
 
-            let Some(previous) = defs
-                .iter_mut()
-                .rev()
-                .find(|d| matches!(&*d.effect, Effect::Dig { .. } | Effect::Mill { .. }))
-            else {
+            // U6-C3 (corrected): CONSUME the anchor bound by role above. This used to
+            // re-derive it with a raw backward scan, which made the role binding
+            // output-inert on every path except the intervening-sacrifice one — the
+            // only path that consumed `dig_pos` before returning. A probe that forced
+            // `dig_pos` wrong therefore could not change the export: this fallthrough
+            // silently recomputed the right answer. That is why the old "427 binds"
+            // figure measured CALL-SITE REACHABILITY rather than output divergence.
+            //
+            // Equivalent by construction, not by inspection: `DigOrMill` is now a LIVE
+            // predicate (`def_is_dig_or_mill`), so `LastWithRole(DigOrMill)` resolves
+            // to `(0..defs.len()).rev().find(|i| is_dig_or_mill(&defs[i]))` — which is
+            // this scan, evaluated over the same `defs` at the same moment. Nothing
+            // between the bind and here mutates `defs`: every mutation in the branch
+            // above is inside the `sac_pos` arm, which returns.
+            let Some(dig_pos) = dig_pos else {
                 return;
             };
+            let previous = &mut defs[dig_pos];
             if let Effect::Dig {
                 keep_count,
                 keep_count_expr,
