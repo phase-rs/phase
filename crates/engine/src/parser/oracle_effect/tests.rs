@@ -17143,6 +17143,152 @@ fn instead_condition_recognizes_sacrificed_creature_possessive_toughness() {
     }
 }
 
+/// CR 602.1 + CR 602.2 + CR 118.1 + CR 608.2c + CR 608.2k + CR 400.7j:
+/// Land's Edge — "Discard a card: If the discarded card was a land card, this
+/// enchantment deals 2 damage to target player or planeswalker. Any player may
+/// activate this ability." This is the bare, non-`instead` composition of the
+/// `CostPaidObjectMatchesFilter` building block (contrast the Stormscale
+/// Anarch / Surtland Flinger / Witch's Oven tests above, which wrap it in
+/// `ConditionInstead`): a plain `Discard` cost, an intervening-if condition
+/// gating the whole effect (NOT a "…instead" override), and a `PlayerFilter::All`
+/// activation instruction ("Any player may activate"). This composition had
+/// zero coverage; the test locks the full parse shape end-to-end.
+#[test]
+fn lands_edge_discard_land_condition_parses_as_bare_intervening_if() {
+    let parsed = parse_oracle_text(
+        "Discard a card: If the discarded card was a land card, this enchantment \
+         deals 2 damage to target player or planeswalker. Any player may activate \
+         this ability.",
+        "Land's Edge",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+
+    // Reach-guard (non-vacuous): a single activated ability parsed out, so the
+    // shape assertions below cannot pass on an empty/degenerate parse.
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "Land's Edge must parse to exactly one activated ability, got {:#?}",
+        parsed.abilities
+    );
+    let def = &parsed.abilities[0];
+    assert_eq!(def.kind, AbilityKind::Activated);
+
+    // (a) Cost: discard exactly one chosen card from hand, no cost-side filter
+    // (the land restriction is a *condition on the effect*, not a discard filter).
+    match def.cost.as_ref().expect("Land's Edge must carry a cost") {
+        AbilityCost::Discard {
+            count,
+            filter,
+            selection,
+            self_scope,
+        } => {
+            assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+            assert!(
+                filter.is_none(),
+                "discard cost must be unfiltered (any card), got {filter:?}"
+            );
+            assert_eq!(*selection, crate::types::ability::CardSelectionMode::Chosen);
+            assert_eq!(
+                *self_scope,
+                crate::types::ability::DiscardSelfScope::FromHand
+            );
+        }
+        other => panic!("expected Discard cost, got {other:?}"),
+    }
+
+    // (b) Condition: bare `CostPaidObjectMatchesFilter`, NOT wrapped in
+    // `ConditionInstead`. The discarded card's LKI snapshot must match a
+    // Card+Land typed filter for the effect to happen.
+    let cond = def
+        .condition
+        .as_ref()
+        .expect("Land's Edge must carry an intervening-if condition");
+    let AbilityCondition::CostPaidObjectMatchesFilter { filter } = cond else {
+        panic!("expected bare CostPaidObjectMatchesFilter (not ConditionInstead), got {cond:?}");
+    };
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected Typed filter, got {filter:?}");
+    };
+    assert!(
+        typed.type_filters.contains(&TypeFilter::Card),
+        "type_filters must include Card noun, got {:?}",
+        typed.type_filters
+    );
+    // Negative/sibling: the filter must require Land specifically — a nonland
+    // discard must NOT satisfy it. If Land were dropped, a nonland discard would
+    // wrongly gate the effect on.
+    assert!(
+        typed.type_filters.contains(&TypeFilter::Land),
+        "type_filters must include Land — discarding a nonland must not match, got {:?}",
+        typed.type_filters
+    );
+
+    // (c) Effect: 2 damage to "target player or planeswalker" (an Or filter
+    // containing the player pool).
+    match &*def.effect {
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Or { filters },
+            ..
+        } => {
+            assert!(
+                filters.contains(&TargetFilter::Player),
+                "damage target Or must include the Player pool, got {filters:?}"
+            );
+            assert!(
+                filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(t) if t.type_filters.contains(&TypeFilter::Planeswalker)
+                )),
+                "damage target Or must include the Planeswalker pool, got {filters:?}"
+            );
+        }
+        other => panic!("expected DealDamage(2) to player-or-planeswalker, got {other:?}"),
+    }
+
+    // (d) Activation permission: "Any player may activate this ability."
+    assert_eq!(
+        def.activator_filter,
+        Some(PlayerFilter::All),
+        "the 'Any player may activate' instruction must set activator_filter = All"
+    );
+}
+
+/// Sibling to `lands_edge_discard_land_condition_parses_as_bare_intervening_if`:
+/// WITHOUT the "Any player may activate this ability." instruction, the exact
+/// same ability must parse with `activator_filter == None` (controller-only per
+/// CR 602.2). Proves the `PlayerFilter::All` in the primary test is driven by
+/// that specific sentence, not a default.
+#[test]
+fn lands_edge_without_any_player_clause_has_no_activator_filter() {
+    let parsed = parse_oracle_text(
+        "Discard a card: If the discarded card was a land card, this enchantment \
+         deals 2 damage to target player or planeswalker.",
+        "Land's Edge (control-only variant)",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    let def = &parsed.abilities[0];
+    // Reach-guard: the condition still parsed, so we're on the real arm.
+    assert!(
+        matches!(
+            def.condition.as_ref(),
+            Some(AbilityCondition::CostPaidObjectMatchesFilter { .. })
+        ),
+        "condition must still be the bare intervening-if, got {:?}",
+        def.condition
+    );
+    assert_eq!(
+        def.activator_filter, None,
+        "without 'Any player may activate', activation is controller-only (activator_filter = None)"
+    );
+}
+
 /// Regression guard: pre-existing "it's <color>" anaphoric form must
 /// still produce a TargetMatchesFilter condition. The refactor split
 /// subject and verb into independent combinators; this test verifies
