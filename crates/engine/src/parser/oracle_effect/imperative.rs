@@ -15,7 +15,7 @@ use super::lower::{
     parse_for_each_multiplier_prefix, parse_multi_target_count_expr,
     parse_where_x_quantity_expression, strip_trailing_where_x,
 };
-use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
+use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
 use super::{
     attach_controller_if_absent, is_bare_object_pronoun, resolve_it_pronoun, ParseContext,
@@ -8270,7 +8270,7 @@ pub(super) fn parse_cost_resource_ast(
     })
     .is_some()
     {
-        return match try_parse_add_mana_effect(text) {
+        return match try_parse_add_mana_effect_with_context(text, ctx) {
             Some(Effect::Mana {
                 produced,
                 restrictions,

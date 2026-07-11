@@ -21,9 +21,12 @@ use crate::types::mana::{
 use crate::types::zones::Zone;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
-use super::super::oracle_quantity::{parse_cda_quantity, parse_event_context_quantity};
+use super::super::oracle_quantity::{
+    parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
+};
 use super::super::oracle_target::parse_type_phrase;
 use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
+use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::TargetFilter;
 
 /// Bridge: run a nom combinator on a lowercase copy, mapping the consumed length
@@ -160,13 +163,26 @@ fn parse_object_colors_scope(text: &str) -> Option<ObjectScope> {
     parser.parse(lower.as_str()).ok().map(|(_, scope)| scope)
 }
 
+#[cfg(test)]
 pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
+    try_parse_add_mana_effect_with_context(text, &mut ParseContext::default())
+}
+
+/// Context-aware `try_parse_add_mana_effect`. The `ctx` carries the trigger
+/// subject so a count clause referencing the triggering object ("… equal to the
+/// number of creatures you control that share a creature type with it", Mana
+/// Echoes) resolves "it" to `TriggeringSource` rather than an empty
+/// `ParentTarget`.
+pub(super) fn try_parse_add_mana_effect_with_context(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<Effect> {
     // CR 505.1 + CR 106.4: A subject-led mana clause routes the produced mana
     // to the named player. Strip the subject, parse the bare "add …" clause,
     // and stamp the recipient onto the resulting `Effect::Mana.target`.
     if let Some((recipient, rest)) = strip_mana_subject_prefix(text.trim()) {
         let synthetic = format!("add {rest}");
-        let mut effect = try_parse_add_mana_effect(&synthetic)?;
+        let mut effect = try_parse_add_mana_effect_with_context(&synthetic, ctx)?;
         if let Effect::Mana { target, .. } = &mut effect {
             if target.is_none() {
                 *target = Some(recipient);
@@ -275,7 +291,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
 
     // CR 106.1 / CR 106.3: "an amount of {color} equal to [quantity]"
     // e.g. "an amount of {G} equal to ~'s power"
-    if let Some(effect) = try_parse_amount_equal_to(clause, contribution) {
+    if let Some(effect) = try_parse_amount_equal_to_with_context(clause, contribution, ctx) {
         return Some(effect);
     }
 
@@ -2639,7 +2655,11 @@ fn parse_pure_color_symbol(
 
 /// CR 106.1 / CR 106.3: Parse "an amount of {color} equal to [quantity]"
 /// e.g. "an amount of {G} equal to ~'s power" -> AnyOneColor { count: SelfPower, [Green] }
-fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Option<Effect> {
+fn try_parse_amount_equal_to_with_context(
+    clause: &str,
+    contribution: ManaContribution,
+    ctx: &mut ParseContext,
+) -> Option<Effect> {
     let clause_lower = clause.to_lowercase();
     let (_, rest) = nom_on_lower(clause, &clause_lower, |i| {
         value((), tag("an amount of ")).parse(i)
@@ -2658,7 +2678,7 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
     }) {
         let quantity_text = quantity_text.trim().trim_end_matches(['.', '"']);
         let count = parse_event_context_quantity(quantity_text)
-            .or_else(|| parse_cda_quantity(quantity_text))?;
+            .or_else(|| parse_cda_quantity_with_context(quantity_text, ctx))?;
         return Some(Effect::Mana {
             produced: ManaProduction::ChosenColor {
                 count,
@@ -2688,7 +2708,7 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
         // triggering-spell spent-mana ref; fall back to `parse_cda_quantity` for
         // non-event quantities (e.g. "~'s power").
         let count = parse_event_context_quantity(quantity_text)
-            .or_else(|| parse_cda_quantity(quantity_text))?;
+            .or_else(|| parse_cda_quantity_with_context(quantity_text, ctx))?;
         return Some(Effect::Mana {
             produced: ManaProduction::Colorless { count },
             restrictions: vec![],
@@ -2733,6 +2753,51 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
 mod tests {
     use super::*;
     use crate::types::ability::{ControllerRef, TypeFilter};
+
+    #[test]
+    fn shares_type_with_it_in_trigger_context_uses_triggering_source() {
+        // #5329 Mana Echoes: with a trigger subject in context, "the number of
+        // creatures you control that share a creature type with it" must resolve
+        // "it" to `TriggeringSource`, not an empty `ParentTarget` (which counts
+        // nothing → adds no mana).
+        use crate::types::ability::{
+            FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+        };
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::default())),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_add_mana_effect_with_context(
+            "Add an amount of {C} equal to the number of creatures you control that share a creature type with it.",
+            &mut ctx,
+        )
+        .expect("mana amount clause must parse");
+        let Effect::Mana {
+            produced:
+                ManaProduction::Colorless {
+                    count:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        },
+                },
+            ..
+        } = effect
+        else {
+            panic!("expected Colorless ObjectCount, got {effect:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        let reference = tf.properties.iter().find_map(|p| match p {
+            FilterProp::SharesQuality { reference, .. } => reference.as_deref(),
+            _ => None,
+        });
+        assert_eq!(
+            reference,
+            Some(&TargetFilter::TriggeringSource),
+            "\"share a creature type with it\" must reference the triggering object, got {reference:?}",
+        );
+    }
 
     fn extract_combinations(oracle: &str) -> Option<Vec<Vec<ManaColor>>> {
         match try_parse_add_mana_effect(oracle) {
