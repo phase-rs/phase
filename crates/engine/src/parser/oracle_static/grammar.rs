@@ -298,9 +298,10 @@ pub(crate) fn typed_filter_for_subtype(subtype: &str) -> TypedFilter {
             .push(FilterProp::HasSupertype { value: supertype });
         return filter;
     }
-    // CR 302.6 + CR 508.4a: a bare battlefield-status adjective ("Untapped",
-    // "Tapped", "Attacking", …) used as a whole creature descriptor names a status
-    // the creature HAS, not a creature subtype — resolve it to a typed FilterProp
+    // CR 110.5a + CR 506.3: a bare battlefield descriptor ("Untapped", "Tapped",
+    // "Attacking", …) used as a whole creature descriptor names a status the
+    // creature HAS (CR 110.5a: "status is not a characteristic") or a combat role
+    // it's in (CR 506.3), not a creature subtype — resolve it to a typed FilterProp
     // instead of fabricating a zero-match `Subtype("Untapped")` (Builder's
     // Blessing / Castle "Untapped creatures you control get +0/+2").
     if let Some(filter) = bare_status_creature_filter(subtype) {
@@ -319,10 +320,12 @@ pub(crate) fn typed_filter_for_subtype(subtype: &str) -> TypedFilter {
     }
 }
 
-/// CR 302.6 + CR 508.4a: Recognize a bare battlefield-status adjective
-/// ("untapped", "tapped", "attacking", "blocking", "transformed", "suspected")
-/// used as a whole creature descriptor and resolve it to a creature filter
-/// carrying the matching `FilterProp`. Reuses the `parse_combat_status_prefix`
+/// CR 110.5a + CR 506.3: Recognize a bare battlefield descriptor ("untapped",
+/// "tapped", "attacking", "blocking", "transformed", "suspected") used as a whole
+/// creature descriptor and resolve it to a creature filter carrying the matching
+/// `FilterProp`. These name a permanent's status (CR 110.5, "not a characteristic"
+/// per CR 110.5a) or its combat role (CR 506.3), never a creature subtype.
+/// Reuses the `parse_combat_status_prefix`
 /// allowlist (appending a space to satisfy its prefix-boundary rule, then
 /// requiring the whole word be consumed) so "Untapped creatures you control"
 /// filters on `FilterProp::Untapped` rather than a zero-match `Subtype("Untapped")`.
