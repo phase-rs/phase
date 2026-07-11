@@ -13387,7 +13387,7 @@ fn strip_counter_conditional_demonstrative_target_non_trigger() {
 /// `strip_counter_conditional` (offered only in the trailing form), so
 /// `strip_counter_conditional` returns no condition here and this
 /// replacement-class clause stays on the same inert deferral path as upstream
-/// `main` (CR 608.2e). Discriminating: under the pre-fix over-acceptance the
+/// `main` (CR 608.2c). Discriminating: under the pre-fix over-acceptance the
 /// leading demonstrative matched and the condition became
 /// `QuantityCheck(Target, GE 1)`, with the "instead" replacement wrongly lowered
 /// as an additive 5-damage sibling (target with a counter → 3+5=8 instead of the

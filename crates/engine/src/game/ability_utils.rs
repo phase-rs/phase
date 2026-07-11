@@ -121,7 +121,7 @@ pub fn build_resolved_from_def_with_targets(
     resolved
 }
 
-/// CR 608.2c + CR 608.2e: Apply an "instead" swap from a sub-ability override
+/// CR 608.2c: Apply an "instead" swap from a sub-ability override
 /// onto a parent `ResolvedAbility`. Produces a new `ResolvedAbility` whose
 /// **identity / runtime context** comes from the parent (controller, source,
 /// already-announced targets, kicker context, chosen-X, etc.) but whose

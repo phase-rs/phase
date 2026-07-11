@@ -2323,7 +2323,7 @@ pub(super) fn strip_player_property_superlative_conditional(
     )
 }
 
-/// CR 608.2e + CR 122.1b: Parse "if that creature has <keyword>[ and ~ doesn't], <effect>".
+/// CR 608.2c + CR 122.1b: Parse "if that creature has <keyword>[ and ~ doesn't], <effect>".
 ///
 /// The optional " and ~ doesn't" conjunct (Super-Adaptoid: "If that creature
 /// has haste and Super-Adaptoid doesn't, put a haste counter on
@@ -3764,7 +3764,7 @@ fn build_instead_def(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
-    // CR 608.2e: An additional-cost-paid "instead" fold ("if it/this spell was
+    // CR 608.2c: An additional-cost-paid "instead" fold ("if it/this spell was
     // kicked, ... instead") is owned by `strip_additional_cost_conditional`,
     // which folds it to the dedicated `AdditionalCostPaidInstead`. Defer here so
     // the generic `parse_condition_text` recognizer (which now classifies "was
@@ -9085,7 +9085,7 @@ mod tests {
         ));
     }
 
-    /// CR 608.2e: Full instead-clause assembly for Fblthp's ETB draw rider.
+    /// CR 608.2c: Full instead-clause assembly for Fblthp's ETB draw rider.
     #[test]
     fn fblthp_library_origin_instead_clause() {
         let instead = try_parse_generic_instead_clause(
@@ -9108,7 +9108,7 @@ mod tests {
         ));
     }
 
-    /// CR 608.2e: ETB base draw + library-origin instead override chain.
+    /// CR 608.2c: ETB base draw + library-origin instead override chain.
     #[test]
     fn fblthp_etb_draw_chain_with_library_instead() {
         let def = parse_effect_chain(

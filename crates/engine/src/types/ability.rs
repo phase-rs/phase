@@ -16323,7 +16323,7 @@ pub enum AbilityCondition {
         )]
         subject: ObjectScope,
     },
-    /// CR 608.2e + CR 702.49 + CR 702.190a: "Instead" override gated on the source
+    /// CR 608.2c + CR 702.49 + CR 702.190a: "Instead" override gated on the source
     /// permanent having entered via a specified cast/activation variant this turn.
     /// Unlike AdditionalCostPaidInstead (which reads SpellContext.additional_cost_paid),
     /// this reads GameObject.cast_variant_paid from the game state.
@@ -16367,7 +16367,7 @@ pub enum AbilityCondition {
     /// CR 701.54a: True when the ability's source permanent is its controller's
     /// Ring-bearer. For "unless ~ is your Ring-bearer", wrap with `Not`.
     IsRingBearer,
-    /// CR 608.2e: "If [target] has [keyword], [override effect] instead"
+    /// CR 608.2c: "If [target] has [keyword], [override effect] instead"
     /// Checked at resolution time against the first resolved object target's keywords.
     /// Uses "Instead" override semantics: swaps the parent effect when condition is met.
     TargetHasKeywordInstead { keyword: Keyword },

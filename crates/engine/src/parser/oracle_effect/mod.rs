@@ -23377,7 +23377,7 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     let mut def = lower_effect_chain_ir(&ir.body);
     finalize_effect_chain(&mut def);
     apply_owner_library_reveal_anchor_from_text(&mut def, &ir.source_text);
-    // CR 608.2e: a root the chain cannot describe (it has no previous boundary).
+    // CR 608.2c: a root the chain cannot describe (it has no previous boundary).
     if let Some(sub_link) = ir.shell.sub_link {
         def.sub_link = sub_link;
     }
@@ -25074,7 +25074,7 @@ pub(crate) fn parse_effect_chain_ir(
             continue;
         }
 
-        // CR 608.2e: "if [condition], [effect] instead" — the preceding ability's effect
+        // CR 608.2c: "if [condition], [effect] instead" — the preceding ability's effect
         // is replaced when the condition holds. Keep the base effect as the root so
         // target collection stays anchored on the printed target-bearing clause.
         if let Some(instead_def) = try_parse_generic_instead_clause(normalized_text, kind, ctx) {
@@ -25270,7 +25270,7 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             (None, text)
         };
-        // CR 608.2e: "If that creature has [keyword], [effect] instead"
+        // CR 608.2c: "If that creature has [keyword], [effect] instead"
         let (keyword_instead_cond, text) = if condition.is_none()
             && if_you_do.is_none()
             && counter_cond.is_none()
@@ -25341,7 +25341,7 @@ pub(crate) fn parse_effect_chain_ir(
             UnlessSuffixStrip::Parsed(c) => Some(c),
             _ => condition,
         };
-        // CR 608.2e: Strip leading "instead " when a condition was extracted.
+        // CR 608.2c: Strip leading "instead " when a condition was extracted.
         // The condition already encodes the replacement gate; "instead" is a
         // textual marker that the effect parser doesn't need.
         let text = if condition.is_some() {
@@ -26537,7 +26537,7 @@ pub(crate) fn parse_effect_chain_ir(
             is_optional
         };
 
-        // CR 608.2e: "Instead" overrides — marker for lowering to attach as
+        // CR 608.2c: "Instead" overrides — marker for lowering to attach as
         // sub_ability on the previous def.
         if matches!(
             condition,
@@ -26569,7 +26569,7 @@ pub(crate) fn parse_effect_chain_ir(
             continue;
         }
 
-        // CR 608.2e: AdditionalCostPaidInstead + SearchLibrary pattern.
+        // CR 608.2c: AdditionalCostPaidInstead + SearchLibrary pattern.
         // In the old code, the trailing ChangeZone was an explicit def produced by the
         // SearchDestination intrinsic continuation. In the IR, the ChangeZone is implicit
         // in the SearchLibrary clause's intrinsic_continuation field. We check for either:

@@ -16715,7 +16715,7 @@ fn kicker_instead_chain_produces_correct_condition() {
 
 #[test]
 fn kicker_leading_instead_produces_correct_condition() {
-    // CR 608.2e: "if kicked, instead [effect]" — leading "instead" variant.
+    // CR 608.2c: "if kicked, instead [effect]" — leading "instead" variant.
     // Must produce AdditionalCostPaidInstead, same as trailing "instead".
     let ability = parse_effect_chain(
             "Destroy target creature or planeswalker with mana value 2 or less. If this spell was kicked, instead destroy target creature or planeswalker",
@@ -16816,7 +16816,7 @@ fn rite_of_replication_kicker_creates_five_copies() {
 
 #[test]
 fn general_condition_leading_instead_strips_prefix() {
-    // CR 608.2e: Ability-word / general condition with leading "instead"
+    // CR 608.2c: Ability-word / general condition with leading "instead"
     // (cross-line pattern like Traverse the Ulvenwald's delirium).
     let ability = parse_effect_chain(
         "If you control three or more creatures, instead draw two cards",

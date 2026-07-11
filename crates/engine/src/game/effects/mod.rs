@@ -6315,18 +6315,18 @@ fn resolve_chain_body(
         }
     }
 
-    // CR 608.2e: "Instead" kicker — check if a sub overrides the parent.
+    // CR 608.2c: "Instead" kicker — check if a sub overrides the parent.
     // When condition is met, replace the current ability's effect with the sub's
     // effect, preserving the full resolution flow (tracked sets, continuations).
     let ability = if let Some(ref sub) = ability.sub_ability {
-        // CR 608.2e: "Instead" kicker — swap parent effect with override sub's effect.
+        // CR 608.2c: "Instead" kicker — swap parent effect with override sub's effect.
         let should_swap = if matches!(
             sub.condition,
             Some(AbilityCondition::AdditionalCostPaidInstead)
         ) {
             ability.context.additional_cost_paid
         } else if let Some(AbilityCondition::CastVariantPaidInstead { variant }) = sub.condition {
-            // CR 608.2e + CR 702.49 + CR 702.190a: Read from GameObject, not SpellContext
+            // CR 608.2c + CR 702.49 + CR 702.190a: Read from GameObject, not SpellContext
             state
                 .objects
                 .get(&ability.source_id)
@@ -6335,7 +6335,7 @@ fn resolve_chain_body(
         } else if let Some(AbilityCondition::TargetHasKeywordInstead { ref keyword }) =
             sub.condition
         {
-            // CR 608.2e: Check if the first resolved object target has the keyword.
+            // CR 608.2c: Check if the first resolved object target has the keyword.
             ability
                 .targets
                 .iter()
@@ -6351,7 +6351,7 @@ fn resolve_chain_body(
             false
         };
         if should_swap {
-            // CR 608.2c + CR 608.2e: Single-authority swap helper preserves
+            // CR 608.2c: Single-authority swap helper preserves
             // every effect-shape field on the sub (player_scope, optional,
             // multi_target, repeat_for, …) and every runtime-context field on
             // the parent (controller, targets, chosen_x, …). See
@@ -7636,7 +7636,7 @@ fn resolve_chain_body(
         // Check if the sub_ability has a condition that gates its execution.
         // Casting-time conditions are evaluated against the parent's SpellContext.
         if let Some(ref condition) = sub.condition {
-            // CR 608.2e: "Instead" overrides are terminal — the Cow swap above either
+            // CR 608.2c: "Instead" overrides are terminal — the Cow swap above either
             // replaced the parent's effect (condition met) or didn't (condition not met).
             // For kicker/ninjutsu/keyword-instead, the base has no continuation chain.
             // For ConditionInstead, the base chain (else_ability) must run when NOT swapped.
@@ -14676,7 +14676,7 @@ mod tests {
 
     #[test]
     fn override_instead_condition_met_swaps_effect() {
-        // CR 608.2e: When AdditionalCostPaidInstead condition is met,
+        // CR 608.2c: When AdditionalCostPaidInstead condition is met,
         // the sub's effect replaces the parent's effect.
         let mut state = GameState::new_two_player(42);
 
@@ -14724,7 +14724,7 @@ mod tests {
 
     #[test]
     fn override_instead_condition_not_met_runs_parent() {
-        // CR 608.2e: When AdditionalCostPaidInstead condition is NOT met,
+        // CR 608.2c: When AdditionalCostPaidInstead condition is NOT met,
         // the parent runs normally and the override sub is skipped.
         let mut state = GameState::new_two_player(42);
 
