@@ -10048,10 +10048,10 @@ fn static_creatures_attacking_last_chosen_player_scope() {
 
 #[test]
 fn triarch_stalker_choose_opponent_persists_for_last_chosen_player_static() {
-    // CR 613.1 + CR 608.2c: the combat trigger "choose an opponent" must persist
-    // its choice durably (as `ChosenAttribute::Player`) BECAUSE a separate
-    // continuous static reads it via `ControllerRef::SourceChosenPlayer`. The
-    // `reconcile_persisted_player_choice_for_source_chosen_ref` pass flips the
+    // CR 607.2d + CR 613.1 + CR 608.2c: the combat trigger "choose an opponent"
+    // must persist its choice durably (as `ChosenAttribute::Player`) BECAUSE a
+    // separate continuous static reads it via `ControllerRef::SourceChosenPlayer`.
+    // The `DocumentRelationIr::LinkedChoice(PersistedPlayer)` relation flips the
     // choice's `persist` to true when such a reference is present.
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::ChoiceType;

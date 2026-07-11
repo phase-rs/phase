@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 
 use super::diagnostic::OracleDiagnostic;
 use super::effect_chain::EffectChainIr;
+use super::relation::DocumentRelationIr;
 use super::replacement::ReplacementIr;
 use super::static_ir::StaticIr;
 use super::trigger::TriggerIr;
@@ -409,6 +410,11 @@ pub(crate) struct OracleDocIr {
     /// Typed diagnostics accumulated during parsing (D-07).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) diagnostics: Vec<OracleDiagnostic>,
+    /// CR 607.2d: Cross-item document relations recovered at parse time by
+    /// pairing producer/consumer items by `OracleItemId`, applied by id in
+    /// `lower_oracle_ir`. Empty for the vast majority of cards. See `relation`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) relations: Vec<DocumentRelationIr>,
 }
 
 impl OracleDocIr {
@@ -904,6 +910,10 @@ impl OracleDocBuilder {
             source_text: source_text.to_string(),
             card_name: card_name.to_string(),
             diagnostics,
+            // Relations are recovered in `parse_oracle_ir` after the document is
+            // assembled (both the main path and the Class path converge there),
+            // where the full source-ordered item list and card types are in hand.
+            relations: Vec::new(),
         }
     }
 }

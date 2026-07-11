@@ -61,9 +61,10 @@ use super::oracle_effect::{
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
-    OracleDocBuilder, OracleDocIr, OracleItemIr, OracleNodeIr, OracleSourceSpan, OracleUnitSource,
-    PrintedAbilityIndex, PrintedTriggerIndex,
+    OracleDocBuilder, OracleDocIr, OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan,
+    OracleUnitSource, PrintedAbilityIndex, PrintedTriggerIndex,
 };
+use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     extract_keyword_line, is_keyword_cost_line, parse_keyword_from_oracle,
@@ -1028,48 +1029,143 @@ fn split_dual_cant_clause<'a>(line: &'a str, lower: &str) -> Option<(&'a str, &'
     Some((subject, p1, p2))
 }
 
-/// CR 607.2d: Reconcile self-chosen type statics with the source's linked
-/// persisted choice.
-/// CR 614.1c + CR 608.2d: Cards like Banner of Kinship parse "as ~ enters,
-/// choose a creature type" and "~ enters with a fellowship counter … for each
-/// creature you control of the chosen type" as two Moved replacements. The
-/// counter count depends on the persisted choice, so it must chain after the
-/// `Choose` post-entry effect — not fold into `enter_with_counters` during the
-/// replacement pipeline.
-fn reconcile_choose_then_chosen_dependent_etb_counters(result: &mut ParsedAbilities) {
-    let choose_idx = result.replacements.iter().position(|replacement| {
-        replacement.event == ReplacementEvent::Moved
-            && replacement
-                .execute
-                .as_ref()
-                .is_some_and(|def| is_persisted_as_enters_choice(def))
-    });
-    let counter_idx = result.replacements.iter().position(|replacement| {
-        replacement.event == ReplacementEvent::Moved
-            && replacement
-                .execute
-                .as_ref()
-                .is_some_and(|def| is_chosen_dependent_self_etb_counter(def))
-    });
-    let (Some(choose_idx), Some(counter_idx)) = (choose_idx, counter_idx) else {
-        return;
-    };
-    if choose_idx == counter_idx {
-        return;
-    }
+// ===========================================================================
+// Cross-item document relations (CR 607.2d)
+//
+// A document relation links two (or more) parsed items — a producer of a fact
+// and a consumer that reads it back. These links are recovered at PARSE time by
+// pairing items by `OracleItemId`, stored on `OracleDocIr.relations`, and applied
+// at the single `lower_oracle_ir` seam by resolving those ids back to their
+// lowered definitions. This is the single authority; it replaces five former
+// post-passes that rediscovered each pair by rescanning the lowered category
+// vectors for a matching shape (a dual authority the parse/lower split removes).
+// ===========================================================================
 
-    let counter_repl = result.replacements.remove(counter_idx);
-    let choose_idx = if counter_idx < choose_idx {
-        choose_idx - 1
-    } else {
-        choose_idx
-    };
-    let Some(counter_exec) = counter_repl.execute else {
-        return;
-    };
-    let choose_repl = &mut result.replacements[choose_idx];
-    if let Some(ref mut choose_exec) = choose_repl.execute {
-        append_sub_ability(choose_exec, *counter_exec);
+/// The lowered replacement definition an item carries, if it is a replacement.
+/// Only `PreLowered*` nodes are inspected: the dedicated IR variants
+/// (`Spell`/`Trigger`/`Static`/`Replacement`) are never constructed today, and
+/// gain relation participation when the dispatch-cutover unit builds them.
+fn item_replacement(item: &OracleItemIr) -> Option<&ReplacementDefinition> {
+    match &item.node {
+        OracleNodeIr::PreLoweredReplacement(def) => Some(def),
+        _ => None,
+    }
+}
+
+fn item_ability(item: &OracleItemIr) -> Option<&AbilityDefinition> {
+    match &item.node {
+        OracleNodeIr::PreLoweredSpell(def) => Some(def),
+        _ => None,
+    }
+}
+
+fn item_trigger(item: &OracleItemIr) -> Option<&TriggerDefinition> {
+    match &item.node {
+        OracleNodeIr::PreLoweredTrigger(def) => Some(def),
+        _ => None,
+    }
+}
+
+fn item_static(item: &OracleItemIr) -> Option<&StaticDefinition> {
+    match &item.node {
+        OracleNodeIr::PreLoweredStatic(def) => Some(def),
+        _ => None,
+    }
+}
+
+/// CR 607.2d: Recover every cross-item document relation from the assembled item
+/// list, pairing producer/consumer items by `OracleItemId`. Runs at parse time;
+/// both the main and Class document-construction paths converge here.
+fn finalize_document_relations(mut doc: OracleDocIr, types: &[String]) -> OracleDocIr {
+    doc.relations = detect_document_relations(&doc.items, types);
+    doc
+}
+
+fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<DocumentRelationIr> {
+    let mut relations = Vec::new();
+    detect_linked_choice_etb_counter(items, &mut relations);
+    detect_linked_choice_type_statics(items, types, &mut relations);
+    detect_linked_choice_persisted_player(items, &mut relations);
+    detect_etb_exile_ltb_return(items, &mut relations);
+    detect_active_player_punisher(items, &mut relations);
+    relations
+}
+
+/// Position of the lowered definition produced by `id` within its category track.
+fn position_of(ids: &[OracleItemId], id: OracleItemId) -> Option<usize> {
+    ids.iter().position(|candidate| *candidate == id)
+}
+
+// --- CR 607.2d + CR 614.1c: enters-choice → chosen-dependent ETB counter ------
+
+/// Pair the "as this enters, choose a creature type/color" replacement (producer)
+/// with the self-ETB counter replacement (consumer) whose count reads the chosen
+/// value. First-match of each mirrors the former `position()` over the folded
+/// replacement vector (replacements fold in item order).
+fn detect_linked_choice_etb_counter(
+    items: &[OracleItemIr],
+    relations: &mut Vec<DocumentRelationIr>,
+) {
+    let chooser = items.iter().find(|item| {
+        item_replacement(item).is_some_and(|replacement| {
+            replacement.event == ReplacementEvent::Moved
+                && replacement
+                    .execute
+                    .as_ref()
+                    .is_some_and(|def| is_persisted_as_enters_choice(def))
+        })
+    });
+    let counter = items.iter().find(|item| {
+        item_replacement(item).is_some_and(|replacement| {
+            replacement.event == ReplacementEvent::Moved
+                && replacement
+                    .execute
+                    .as_ref()
+                    .is_some_and(|def| is_chosen_dependent_self_etb_counter(def))
+        })
+    });
+    if let (Some(chooser), Some(counter)) = (chooser, counter) {
+        if chooser.id != counter.id {
+            relations.push(DocumentRelationIr::LinkedChoice(
+                LinkedChoiceKind::EtbCounterCount {
+                    chooser: chooser.id,
+                    counter: counter.id,
+                },
+            ));
+        }
+    }
+}
+
+/// Fold the counter replacement's execute into the chooser replacement's
+/// sub-ability chain and drop the standalone counter replacement. Positions are
+/// resolved by id *after* the removal, so no manual index fix-up is needed.
+fn apply_linked_choice_etb_counter(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    replacement_ids: &mut Vec<OracleItemId>,
+) {
+    for relation in relations {
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::EtbCounterCount {
+            chooser,
+            counter,
+        }) = relation
+        else {
+            continue;
+        };
+        let Some(counter_pos) = position_of(replacement_ids, *counter) else {
+            continue;
+        };
+        let counter_repl = result.replacements.remove(counter_pos);
+        replacement_ids.remove(counter_pos);
+        let Some(counter_exec) = counter_repl.execute else {
+            continue;
+        };
+        let Some(chooser_pos) = position_of(replacement_ids, *chooser) else {
+            continue;
+        };
+        if let Some(ref mut choose_exec) = result.replacements[chooser_pos].execute {
+            append_sub_ability(choose_exec, *counter_exec);
+        }
     }
 }
 
@@ -1164,52 +1260,166 @@ fn append_sub_ability(chain: &mut AbilityDefinition, tail: AbilityDefinition) {
     cursor.sub_ability = Some(Box::new(tail));
 }
 
-fn reconcile_self_chosen_type_statics(result: &mut ParsedAbilities, types: &[String]) {
-    let persisted_kind = chosen_subtype_kind_from_persisted_choice(result);
+// --- CR 607.2d + CR 205.3: chosen-subtype source → self-chosen-type surfaces ---
 
-    // CR 607.2d + CR 205.3 + CR 601.2f: A cost reducer that refers to "the chosen
-    // type" ("Spells of the chosen type you cast cost {W}{U}{B}{R}{G} less",
-    // Morophon) is LINKED to the same card's "choose a [value]" clause and must
-    // match whatever that clause picks. `static_helpers` defaults a bare-"spells"
-    // base (no creature type word) to `IsChosenCardType` — correct only for
-    // card-type choosers (Cloud Key / Umori / Stenn) — so a creature-type chooser
-    // is mis-discriminated and the reduction never matches a spell. Realign here,
-    // the only point with cross-clause visibility, keying STRICTLY on the
-    // persisted choice: a creature that chooses a CARD type (Umori) returns a
-    // card-type kind and must keep `IsChosenCardType`, so the creature-card-type
-    // fallback below must not drive this.
+/// Detect a chosen-subtype relation. The chosen kind comes from a persisted
+/// creature/land-type choice or, when the card's type line fixes it, its printed
+/// types (CR 205.3 — a Creature is its chosen creature type). Two consumer sets
+/// are gathered by id:
+///   * `retarget` — statics' `ModifyCost` spell filters and abilities'/triggers'
+///     `Dig` filters whose `IsChosenCardType` discriminator must become
+///     `IsChosenCreatureType`; gathered ONLY for a creature-type chooser, since a
+///     card-type chooser (Umori) legitimately keeps `IsChosenCardType`.
+///   * `set_subtype` — "~ is the chosen type" statics whose `AddChosenSubtype`
+///     kind is set to the resolved subtype.
+fn detect_linked_choice_type_statics(
+    items: &[OracleItemIr],
+    types: &[String],
+    relations: &mut Vec<DocumentRelationIr>,
+) {
+    let persisted_kind = chosen_subtype_kind_from_persisted_choice_items(items);
+
+    let mut retarget = Vec::new();
     if matches!(persisted_kind, Some(ChosenSubtypeKind::CreatureType)) {
-        for static_def in &mut result.statics {
-            if let crate::types::statics::StaticMode::ModifyCost {
-                spell_filter: Some(filter),
-                ..
-            } = &mut static_def.mode
-            {
-                retarget_chosen_card_type_to_creature_type(filter);
+        for item in items {
+            let is_cost_reducer = item_static(item).is_some_and(|s| {
+                matches!(
+                    &s.mode,
+                    crate::types::statics::StaticMode::ModifyCost {
+                        spell_filter: Some(_),
+                        ..
+                    }
+                )
+            });
+            let is_dig = item_ability(item).is_some_and(ability_chain_has_dig)
+                || item_trigger(item)
+                    .and_then(|trigger| trigger.execute.as_deref())
+                    .is_some_and(ability_chain_has_dig);
+            if is_cost_reducer || is_dig {
+                retarget.push(item.id);
             }
         }
-        retarget_creature_type_choice_dig_filters(result);
     }
 
-    let Some(chosen_kind) = persisted_kind.or_else(|| chosen_kind_from_card_types(types)) else {
+    let Some(chosen) = persisted_kind.or_else(|| chosen_kind_from_card_types(types)) else {
         return;
     };
 
-    for static_def in &mut result.statics {
-        let is_self_chosen_type_static = static_def.affected == Some(TargetFilter::SelfRef)
-            && static_def
-                .description
-                .as_deref()
-                .is_some_and(is_self_chosen_type_description);
-        if !is_self_chosen_type_static {
-            continue;
+    let mut set_subtype = Vec::new();
+    for item in items {
+        if item_static(item).is_some_and(static_is_self_chosen_type_with_add_subtype) {
+            set_subtype.push(item.id);
         }
-        for modification in &mut static_def.modifications {
-            if let ContinuousModification::AddChosenSubtype { kind } = modification {
-                *kind = chosen_kind.clone();
+    }
+
+    if !retarget.is_empty() || !set_subtype.is_empty() {
+        relations.push(DocumentRelationIr::LinkedChoice(
+            LinkedChoiceKind::ChosenTypeStatic {
+                chosen,
+                retarget,
+                set_subtype,
+            },
+        ));
+    }
+}
+
+/// CR 607.2d + CR 205.3: A cost reducer / dig filter that refers to "the chosen
+/// type" (Morophon, For the Ancestors) is LINKED to the same card's "choose a
+/// [value]" clause and must match whatever it picks; the bare-"spells"/"cards"
+/// base defaults to `IsChosenCardType`, so a creature-type chooser needs its
+/// discriminator realigned. Self-"~ is the chosen type" statics get their
+/// `AddChosenSubtype` kind set. Applied by id — the parallel track the id lands
+/// in selects the surface, so no lowered shape is rescanned to find it.
+fn apply_linked_choice_type_statics(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    ability_ids: &[OracleItemId],
+    trigger_ids: &[OracleItemId],
+    static_ids: &[OracleItemId],
+) {
+    for relation in relations {
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::ChosenTypeStatic {
+            chosen,
+            retarget,
+            set_subtype,
+        }) = relation
+        else {
+            continue;
+        };
+        for id in retarget {
+            if let Some(pos) = position_of(static_ids, *id) {
+                if let crate::types::statics::StaticMode::ModifyCost {
+                    spell_filter: Some(filter),
+                    ..
+                } = &mut result.statics[pos].mode
+                {
+                    retarget_chosen_card_type_to_creature_type(filter);
+                }
+            } else if let Some(pos) = position_of(ability_ids, *id) {
+                retarget_creature_type_choice_dig_filters_in_ability(&mut result.abilities[pos]);
+            } else if let Some(pos) = position_of(trigger_ids, *id) {
+                if let Some(execute) = result.triggers[pos].execute.as_mut() {
+                    retarget_creature_type_choice_dig_filters_in_ability(execute);
+                }
+            }
+        }
+        for id in set_subtype {
+            if let Some(pos) = position_of(static_ids, *id) {
+                for modification in &mut result.statics[pos].modifications {
+                    if let ContinuousModification::AddChosenSubtype { kind } = modification {
+                        *kind = chosen.clone();
+                    }
+                }
             }
         }
     }
+}
+
+/// Whether an ability's effect chain (recursing the sub-ability chain) contains a
+/// `Dig` effect — a chosen-type dig-filter consumer surface.
+fn ability_chain_has_dig(def: &AbilityDefinition) -> bool {
+    matches!(*def.effect, Effect::Dig { .. })
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_chain_has_dig)
+}
+
+/// Whether a static is a self-"~ is the chosen type" `AddChosenSubtype` surface.
+fn static_is_self_chosen_type_with_add_subtype(def: &StaticDefinition) -> bool {
+    def.affected == Some(TargetFilter::SelfRef)
+        && def
+            .description
+            .as_deref()
+            .is_some_and(is_self_chosen_type_description)
+        && def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddChosenSubtype { .. }))
+}
+
+/// The persisted creature/land-type choice on the card, if any. Priority mirrors
+/// the former result-vector scan exactly: replacements' executes first, then
+/// abilities, then triggers' executes.
+fn chosen_subtype_kind_from_persisted_choice_items(
+    items: &[OracleItemIr],
+) -> Option<ChosenSubtypeKind> {
+    items
+        .iter()
+        .filter_map(|item| item_replacement(item)?.execute.as_deref())
+        .find_map(chosen_subtype_kind_from_ability)
+        .or_else(|| {
+            items
+                .iter()
+                .filter_map(item_ability)
+                .find_map(chosen_subtype_kind_from_ability)
+        })
+        .or_else(|| {
+            items
+                .iter()
+                .filter_map(|item| item_trigger(item)?.execute.as_deref())
+                .find_map(chosen_subtype_kind_from_ability)
+        })
 }
 
 /// CR 607.2d: Within a creature-type chooser's cost-modifier spell filter,
@@ -1241,19 +1451,9 @@ fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilter) {
 
 /// CR 608.2c: Dig/reveal continuations after "Choose a creature type" refer to
 /// creature subtypes ("cards of the chosen type", For the Ancestors). The bare
-/// "cards" base defaults to `IsChosenCardType`; realign those dig filters once
-/// the persisted choice is known to be creature-type.
-fn retarget_creature_type_choice_dig_filters(result: &mut ParsedAbilities) {
-    for ability in &mut result.abilities {
-        retarget_creature_type_choice_dig_filters_in_ability(ability);
-    }
-    for trigger in &mut result.triggers {
-        if let Some(execute) = trigger.execute.as_mut() {
-            retarget_creature_type_choice_dig_filters_in_ability(execute);
-        }
-    }
-}
-
+/// "cards" base defaults to `IsChosenCardType`; realign a dig filter once the
+/// persisted choice is known to be creature-type. Applied per resolved consumer
+/// item by `apply_linked_choice_type_statics`.
 fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinition) {
     if let Effect::Dig { filter, .. } = &mut *def.effect {
         retarget_chosen_card_type_to_creature_type(filter);
@@ -1292,50 +1492,89 @@ fn reconcile_host_bound_phase_outs_in_ability(def: &mut AbilityDefinition) {
     }
 }
 
+// --- CR 607.2d + CR 613.1: player choice → durable SourceChosenPlayer reader ---
+
 /// CR 613.1 + CR 608.2c: A `choose a player` / `choose an opponent` instruction
 /// whose chosen player is later read by a CONTINUOUS ability must persist that
-/// choice durably on the source as a `ChosenAttribute::Player`; otherwise the
-/// resolution-scoped choice vanishes when the trigger finishes resolving and the
-/// static reads nothing. Triarch Stalker / Beckoning Will-o'-Wisp pair a combat
-/// trigger (`At the beginning of combat on your turn, choose an opponent`) with a
-/// separate static (`Creatures attacking the last chosen player ...`) that reads
-/// the choice via `ControllerRef::SourceChosenPlayer`.
+/// choice durably on the source; otherwise the resolution-scoped choice vanishes
+/// when the trigger finishes resolving and the static reads nothing. Triarch
+/// Stalker / Beckoning Will-o'-Wisp pair a combat trigger (`choose an opponent`)
+/// with a separate static (`Creatures attacking the last chosen player ...`) that
+/// reads the choice via `ControllerRef::SourceChosenPlayer`.
 ///
-/// The general path (`lower_choose_ast`) leaves player/opponent choices
-/// `persist: false` because most such choices are consumed within the same
-/// resolution (Ruhan's `choose an opponent. ~ attacks that player`, which reads
-/// the resolution-scoped `ChosenPlayer { index }`). This pass flips `persist` to
-/// `true` on those choices ONLY when the card also carries a durable
-/// `SourceChosenPlayer` reference — mirroring the "persist when referred back to"
-/// intent documented on `Effect::Choose`. The reference can live in a static
-/// (`Creatures attacking the last chosen player ...`), an activated ability, or a
-/// triggered ability — a phase trigger scoped to "the chosen player's" step
-/// (`oracle_trigger.rs`) or an effect keyed to the chosen player — so all three
-/// surfaces are scanned as readers.
-fn reconcile_persisted_player_choice_for_source_chosen_ref(result: &mut ParsedAbilities) {
-    let references_source_chosen_player = result
-        .statics
-        .iter()
-        .any(static_references_source_chosen_player)
-        || result
-            .abilities
-            .iter()
-            .any(ability_references_source_chosen_player)
-        || result
-            .triggers
-            .iter()
-            .any(trigger_references_source_chosen_player);
-    if !references_source_chosen_player {
+/// The relation is emitted ONLY when the card carries a durable
+/// `SourceChosenPlayer` reader — living in a static, an activated ability, or a
+/// triggered ability — so a resolution-scoped choice with no durable reader stays
+/// non-persisted. `choosers` names every ability/trigger item whose effect chain
+/// makes a player/opponent choice; each is persisted at lowering.
+fn detect_linked_choice_persisted_player(
+    items: &[OracleItemIr],
+    relations: &mut Vec<DocumentRelationIr>,
+) {
+    let has_durable_reader = items.iter().any(|item| {
+        item_static(item).is_some_and(static_references_source_chosen_player)
+            || item_ability(item).is_some_and(ability_references_source_chosen_player)
+            || item_trigger(item).is_some_and(trigger_references_source_chosen_player)
+    });
+    if !has_durable_reader {
         return;
     }
-    for ability in &mut result.abilities {
-        persist_player_choice_in_ability(ability);
+    let choosers: Vec<OracleItemId> = items
+        .iter()
+        .filter(|item| {
+            item_ability(item).is_some_and(ability_chain_has_player_choice)
+                || item_trigger(item)
+                    .and_then(|trigger| trigger.execute.as_deref())
+                    .is_some_and(ability_chain_has_player_choice)
+        })
+        .map(|item| item.id)
+        .collect();
+    if !choosers.is_empty() {
+        relations.push(DocumentRelationIr::LinkedChoice(
+            LinkedChoiceKind::PersistedPlayer { choosers },
+        ));
     }
-    for trigger in &mut result.triggers {
-        if let Some(execute) = trigger.execute.as_mut() {
-            persist_player_choice_in_ability(execute);
+}
+
+/// Flip `persist: true` on every player/opponent choice made by the linked
+/// chooser items, resolved by id.
+fn apply_linked_choice_persisted_player(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    ability_ids: &[OracleItemId],
+    trigger_ids: &[OracleItemId],
+) {
+    for relation in relations {
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::PersistedPlayer { choosers }) =
+            relation
+        else {
+            continue;
+        };
+        for id in choosers {
+            if let Some(pos) = position_of(ability_ids, *id) {
+                persist_player_choice_in_ability(&mut result.abilities[pos]);
+            } else if let Some(pos) = position_of(trigger_ids, *id) {
+                if let Some(execute) = result.triggers[pos].execute.as_mut() {
+                    persist_player_choice_in_ability(execute);
+                }
+            }
         }
     }
+}
+
+/// Whether an ability's effect chain (recursing sub-abilities) makes a
+/// player/opponent choice.
+fn ability_chain_has_player_choice(def: &AbilityDefinition) -> bool {
+    matches!(
+        def.effect.as_ref(),
+        Effect::Choose {
+            choice_type: ChoiceType::Player | ChoiceType::Opponent { .. },
+            ..
+        }
+    ) || def
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_chain_has_player_choice)
 }
 
 /// Whether a static definition's `affected` filter reads the source's persisted
@@ -1544,29 +1783,6 @@ fn chosen_kind_from_card_types(types: &[String]) -> Option<ChosenSubtypeKind> {
     } else {
         None
     }
-}
-
-fn chosen_subtype_kind_from_persisted_choice(
-    result: &ParsedAbilities,
-) -> Option<ChosenSubtypeKind> {
-    result
-        .replacements
-        .iter()
-        .filter_map(|replacement| replacement.execute.as_deref())
-        .find_map(chosen_subtype_kind_from_ability)
-        .or_else(|| {
-            result
-                .abilities
-                .iter()
-                .find_map(chosen_subtype_kind_from_ability)
-        })
-        .or_else(|| {
-            result
-                .triggers
-                .iter()
-                .filter_map(|trigger| trigger.execute.as_deref())
-                .find_map(chosen_subtype_kind_from_ability)
-        })
 }
 
 fn chosen_subtype_kind_from_ability(def: &AbilityDefinition) -> Option<ChosenSubtypeKind> {
@@ -2413,7 +2629,7 @@ fn parse_flash_cleanup_sacrifice_casting_option(
 /// `ParsedAbilities` stays category-grouped because it is the runtime-facing
 /// type; only *within*-category order and explicit cross-item relations are
 /// semantic after lowering.
-pub(crate) fn lower_oracle_ir(ir: &OracleDocIr, types: &[String]) -> ParsedAbilities {
+pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
     let mut result = ParsedAbilities {
         abilities: Vec::new(),
         triggers: Vec::new(),
@@ -2428,21 +2644,34 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr, types: &[String]) -> ParsedAbili
         strive_cost: None,
         parse_warnings: Vec::new(),
     };
+    // CR 607.2d: Parallel `OracleItemId` tracks per category, so cross-item
+    // relations (recovered at parse time, `ir.relations`) can be applied by
+    // resolving a producer/consumer id back to its lowered definition's position
+    // — never by rescanning a category vector for a matching lowered shape.
+    // `_ids[k]` is the id of the item that lowered into `result.<category>[k]`.
+    let mut ability_ids: Vec<OracleItemId> = Vec::new();
+    let mut trigger_ids: Vec<OracleItemId> = Vec::new();
+    let mut static_ids: Vec<OracleItemId> = Vec::new();
+    let mut replacement_ids: Vec<OracleItemId> = Vec::new();
     for item in &ir.items {
         match &item.node {
             OracleNodeIr::Spell(effect_ir) => {
                 result.abilities.push(lower_effect_chain_ir(effect_ir));
+                ability_ids.push(item.id);
             }
             OracleNodeIr::Trigger(trigger_ir) => {
                 result.triggers.push(lower_trigger_ir(trigger_ir));
+                trigger_ids.push(item.id);
             }
             OracleNodeIr::Static(static_ir) => {
                 result.statics.push(lower_static_ir(static_ir));
+                static_ids.push(item.id);
             }
             OracleNodeIr::Replacement(replacement_ir) => {
                 result
                     .replacements
                     .push(lower_replacement_ir(replacement_ir));
+                replacement_ids.push(item.id);
             }
             OracleNodeIr::Keyword(kw) => {
                 result.extracted_keywords.push(kw.clone());
@@ -2467,38 +2696,49 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr, types: &[String]) -> ParsedAbili
             }
             OracleNodeIr::PreLoweredTrigger(def) => {
                 result.triggers.push(def.clone());
+                trigger_ids.push(item.id);
             }
             OracleNodeIr::PreLoweredStatic(def) => {
                 result.statics.push(def.clone());
+                static_ids.push(item.id);
             }
             OracleNodeIr::PreLoweredReplacement(def) => {
                 result.replacements.push(def.clone());
+                replacement_ids.push(item.id);
             }
             OracleNodeIr::PreLoweredSpell(def) => {
                 result.abilities.push(def.clone());
+                ability_ids.push(item.id);
             }
         }
     }
     result.parse_warnings = ir.diagnostics.clone();
 
-    // ---- u4-c2 relocated post-fold passes -------------------------------------
-    // These five consumers read the ASSEMBLED `result` vectors, which the
-    // source-order cutover moved off the old `result` accumulator and into the
-    // document builder. They therefore run HERE (post-fold), not in the dispatch
-    // loop. PLACEMENT PIN: immediately after the item fold + `parse_warnings`
-    // copy, in their original relative order (the 4 reconciles, then the swallow
-    // audit), and BEFORE `synthesize_etb_exile_ltb_return_pair` /
-    // `bind_active_player_punisher_target`. This reproduces today's global order
-    // (reconciles → swallow → fold → synthesize → bind) exactly.
+    // ---- Cross-item document relation application (CR 607.2d) -----------------
+    // `ir.relations` were recovered at parse time by pairing producer/consumer
+    // items by `OracleItemId` (see `oracle_ir::relation` + `detect_document_
+    // relations`). They are applied HERE, post-fold, by resolving each id back to
+    // its lowered definition through the parallel `_ids` tracks — the single
+    // authority, replacing the former five lowered-shape post-passes.
     //
-    // The `PreLowered*` nodes identity-lower (the fold reproduces the same defs),
-    // and finish()'s CR 707.9a stamping does not touch the fields these mutate, so
-    // this is behavior-preserving. Kept STANDALONE (not merged) so a future
-    // `LinkedChoice` conversion of the three cross-item reconciles is unimpeded.
-    reconcile_choose_then_chosen_dependent_etb_counters(&mut result);
-    reconcile_self_chosen_type_statics(&mut result, types);
+    // PLACEMENT PIN: the two enters-choice relations run first, then the
+    // within-item `reconcile_host_bound_phase_outs` chain repair (NOT a document
+    // relation — it belongs to unit 7), then the persisted-player relation, then
+    // the swallow audit, then the two enters/attack relations — reproducing the
+    // exact order the five standalone passes ran in (choose-counter → self-chosen
+    // type → host-bound → persisted-player → swallow → etb-exile → punisher).
+    // Order is behavior-load-bearing: the swallow audit reads `result` between the
+    // player-persist and the etb-exile/punisher applications.
+    apply_linked_choice_etb_counter(&mut result, &ir.relations, &mut replacement_ids);
+    apply_linked_choice_type_statics(
+        &mut result,
+        &ir.relations,
+        &ability_ids,
+        &trigger_ids,
+        &static_ids,
+    );
     reconcile_host_bound_phase_outs(&mut result);
-    reconcile_persisted_player_choice_for_source_chosen_ref(&mut result);
+    apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
     // the swallow audit against the parsed result so any unrepresented clause
@@ -2530,95 +2770,104 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr, types: &[String]) -> ParsedAbili
     result.parse_warnings.extend(swallow_diags);
     // ---------------------------------------------------------------------------
 
-    // CR 607.1 + CR 610.3: Two-trigger exile-return synthesis. Cards like
-    // Journey to Nowhere and Oblivion Ring use a two-trigger design:
-    //   Line 1 (ETB): "When ~ enters, exile target creature."
-    //   Line 2 (LTB): "When ~ leaves the battlefield, return the exiled card
-    //                  to the battlefield under its owner's control."
-    // The ETB exile produces no duration (the oracle text has no "until" clause),
-    // so no ExileLink::UntilSourceLeaves is created and the exiled card is
-    // never returned. Fix: when we detect this paired pattern, set
-    // Duration::UntilHostLeavesPlay on the ETB exile's execute ability so the
-    // existing exile-link mechanism handles the return correctly. The LTB
-    // trigger stays registered as-is (its TrackedSet target gracefully resolves
-    // to nothing when the exile link has already returned the card).
-    synthesize_etb_exile_ltb_return_pair(&mut result.triggers);
-    bind_active_player_punisher_target(&mut result.abilities);
+    // CR 607.1 + CR 610.3: Two-trigger exile-return synthesis (Journey to
+    // Nowhere, Oblivion Ring — see `DocumentRelationIr::EtbExileLtbReturn`).
+    // CR 102.1 + CR 603.7c + CR 608.2c: active-player punisher rebinding (Siren's
+    // Call — see `DocumentRelationIr::ActivePlayerPunisher`). Applied here, after
+    // the swallow audit, to preserve the pre-relocation order in which the two
+    // former `synthesize`/`bind` passes ran (the audit reads `result` first).
+    apply_etb_exile_ltb_return(&mut result, &ir.relations, &trigger_ids);
+    apply_active_player_punisher(&mut result, &ir.relations, &ability_ids);
     result
 }
 
-/// CR 102.1 + CR 603.7c + CR 608.2c: Bind the delayed punisher's "that player
-/// controls" anaphor to the active player named by the sibling mass-attack
-/// coerce clause (Siren's Call). The two lines parse to two abilities: a
-/// mass-`MustAttack` `GenericEffect` over an `ActivePlayer` subject, and a
-/// sibling delayed `DestroyAll` over a non-Wall creature filter carrying
-/// `Not(AttackedThisTurn)` whose controller parsed to the default `You`. When
-/// BOTH siblings co-exist in one card's abilities (frame-local), rewrite the
-/// DestroyAll target's controller to `ActivePlayer`. A standalone "destroy all
-/// creatures you control" with no coerce sibling is untouched.
-fn bind_active_player_punisher_target(abilities: &mut [AbilityDefinition]) {
-    use crate::parser::oracle_effect::{
-        set_target_filter_controller_ref, target_filter_controller_ref,
-    };
+// --- CR 102.1 + CR 603.7c + CR 608.2c: active-player coerce → delayed punisher --
 
-    // Detect the mass-MustAttack coerce clause over an ActivePlayer subject.
-    let ability_has_active_player_coerce = |a: &AbilityDefinition| {
-        let Effect::GenericEffect {
-            static_abilities, ..
-        } = a.effect.as_ref()
-        else {
-            return false;
-        };
-        static_abilities.iter().any(|st| {
-            matches!(st.mode, StaticMode::MustAttack)
-                && st.affected.as_ref().and_then(target_filter_controller_ref)
-                    == Some(ControllerRef::ActivePlayer)
-        })
+/// Whether an ability is the mass-`MustAttack` coerce clause over an
+/// `ActivePlayer` subject (Siren's Call, first line).
+fn ability_is_active_player_coerce(def: &AbilityDefinition) -> bool {
+    use crate::parser::oracle_effect::target_filter_controller_ref;
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = def.effect.as_ref()
+    else {
+        return false;
     };
-    let has_active_player_coerce = abilities.iter().any(ability_has_active_player_coerce);
-    if !has_active_player_coerce {
+    static_abilities.iter().any(|st| {
+        matches!(st.mode, StaticMode::MustAttack)
+            && st.affected.as_ref().and_then(target_filter_controller_ref)
+                == Some(ControllerRef::ActivePlayer)
+    })
+}
+
+/// Whether an ability is the sibling delayed `DestroyAll` punisher whose
+/// "that player controls" anaphor defaulted to `You` (Siren's Call, second line).
+fn ability_is_active_player_punisher(def: &AbilityDefinition) -> bool {
+    use crate::parser::oracle_effect::target_filter_controller_ref;
+    let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() else {
+        return false;
+    };
+    let Effect::DestroyAll { target, .. } = effect.effect.as_ref() else {
+        return false;
+    };
+    target_filter_has_not_attacked_this_turn(target)
+        && target_filter_controller_ref(target) == Some(ControllerRef::You)
+}
+
+/// CR 102.1 + CR 603.7c + CR 608.2c: Pair the mass-attack coerce clause
+/// (`coerce`) with each sibling delayed punisher (`punisher`) on the same card.
+fn detect_active_player_punisher(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
+    let Some(coerce) = items
+        .iter()
+        .find(|item| item_ability(item).is_some_and(ability_is_active_player_coerce))
+    else {
         return;
-    }
-
-    for ability in abilities.iter_mut() {
-        // Siren's Call route: the coerce and the delayed DestroyAll are SEPARATE
-        // top-level abilities. Rewrite the delayed punisher whose target carries
-        // `Not(AttackedThisTurn)` and defaulted to `controller: You`.
-        if let Effect::CreateDelayedTrigger { effect, .. } = ability.effect.as_mut() {
-            let inner = effect.as_mut();
-            if let Effect::DestroyAll { target, .. } = inner.effect.as_mut() {
-                if target_filter_has_not_attacked_this_turn(target)
-                    && target_filter_controller_ref(target) == Some(ControllerRef::You)
-                {
-                    set_target_filter_controller_ref(target, ControllerRef::ActivePlayer);
-
-                    // CR 302.6 + CR 508.1a: Siren's Call exemption — "Ignore this
-                    // effect for each creature the player didn't control
-                    // continuously since the beginning of the turn." Attach the
-                    // continuity predicate to the destroyed set and CONSUME the
-                    // redundant `Unimplemented{"ignore"}` sibling, so the destroyed
-                    // set = non-Wall ∧ ActivePlayer ∧ Not(AttackedThisTurn) ∧
-                    // ControlledContinuouslySinceTurnBegan.
-                    if sub_ability_is_continuity_exemption(inner.sub_ability.as_deref()) {
-                        add_filter_prop_to_typed(
-                            target,
-                            FilterProp::ControlledContinuouslySinceTurnBegan,
-                        );
-                        inner.sub_ability = None;
-                    }
-                }
-            }
+    };
+    for item in items {
+        if item_ability(item).is_some_and(ability_is_active_player_punisher) {
+            relations.push(DocumentRelationIr::ActivePlayerPunisher {
+                coerce: coerce.id,
+                punisher: item.id,
+            });
         }
+    }
+}
 
-        // CR 608.2c: Maddening Imp's "each of those creatures that didn't attack
-        // this turn" is now a FROZEN tracked-set snapshot — the mass-MustAttack
-        // coerce publishes the population it named at resolution
-        // (`is_mass_coerce_static` → `publish_tracked_set_with_causes`) and the
-        // delayed `DestroyAll{TrackedSetFiltered{0, Not(AttackedThisTurn)}}`
-        // consumes it (sentinel pinned to the concrete id at delayed-trigger
-        // creation by `bind_tracked_set_to_effect`). No card-assembly rewrite is
-        // needed here for Maddening Imp; the former live-refilter route (and its
-        // `coerce_affected_filter` helper) was superseded and removed.
+/// Rebind the punisher's destroyed-set controller from `You` to `ActivePlayer`
+/// and fold the CR 302.6 / CR 508.1a continuous-control exemption sibling into
+/// the set predicate. Applied to the punisher ability resolved by id.
+fn apply_active_player_punisher(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    ability_ids: &[OracleItemId],
+) {
+    use crate::parser::oracle_effect::set_target_filter_controller_ref;
+    for relation in relations {
+        let DocumentRelationIr::ActivePlayerPunisher { punisher, .. } = relation else {
+            continue;
+        };
+        let Some(pos) = position_of(ability_ids, *punisher) else {
+            continue;
+        };
+        let Effect::CreateDelayedTrigger { effect, .. } = result.abilities[pos].effect.as_mut()
+        else {
+            continue;
+        };
+        let inner = effect.as_mut();
+        let Effect::DestroyAll { target, .. } = inner.effect.as_mut() else {
+            continue;
+        };
+        set_target_filter_controller_ref(target, ControllerRef::ActivePlayer);
+        // CR 302.6 + CR 508.1a: Siren's Call exemption — "Ignore this effect for
+        // each creature the player didn't control continuously since the
+        // beginning of the turn." Attach the continuity predicate to the
+        // destroyed set and CONSUME the redundant `Unimplemented{"ignore"}`
+        // sibling, so the destroyed set = non-Wall ∧ ActivePlayer ∧
+        // Not(AttackedThisTurn) ∧ ControlledContinuouslySinceTurnBegan.
+        if sub_ability_is_continuity_exemption(inner.sub_ability.as_deref()) {
+            add_filter_prop_to_typed(target, FilterProp::ControlledContinuouslySinceTurnBegan);
+            inner.sub_ability = None;
+        }
     }
 }
 
@@ -2684,48 +2933,78 @@ fn target_filter_has_not_attacked_this_turn(filter: &TargetFilter) -> bool {
     }
 }
 
-/// CR 607.1 + CR 610.3: Detect an (ETB exile, LTB return) trigger pair and
-/// upgrade the ETB exile to `Duration::UntilHostLeavesPlay` so the
-/// `ExileLink::UntilSourceLeaves` mechanism returns the exiled card when the
-/// source leaves. Covers Journey to Nowhere, Oblivion Ring, and the broader
-/// "exile target X … LTB return" two-trigger class.
-fn synthesize_etb_exile_ltb_return_pair(triggers: &mut [TriggerDefinition]) {
-    let has_ltb_return = triggers.iter().any(|t| {
-        t.mode == TriggerMode::LeavesBattlefield
-            && t.execute.as_deref().is_some_and(|ex| {
-                matches!(
+// --- CR 607.1 + CR 610.3: ETB exile → LTB return two-trigger pair --------------
+
+/// Whether a trigger is the LTB "return the exiled card to the battlefield" side.
+fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
+    def.mode == TriggerMode::LeavesBattlefield
+        && def.execute.as_deref().is_some_and(|ex| {
+            matches!(
+                ex.effect.as_ref(),
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::TrackedSet { .. },
+                    ..
+                }
+            )
+        })
+}
+
+/// Whether a trigger is the ETB "exile target X" side with no printed duration
+/// (the side that must gain `Duration::UntilHostLeavesPlay`).
+fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
+    def.mode == TriggerMode::ChangesZone
+        && def.destination == Some(Zone::Battlefield)
+        && def.execute.as_deref().is_some_and(|ex| {
+            ex.duration.is_none()
+                && matches!(
                     ex.effect.as_ref(),
                     Effect::ChangeZone {
-                        destination: Zone::Battlefield,
-                        target: TargetFilter::TrackedSet { .. },
+                        destination: Zone::Exile,
                         ..
                     }
                 )
-            })
-    });
+        })
+}
 
-    if !has_ltb_return {
+/// CR 607.1 + CR 610.3: Pair each ETB "exile target X" trigger with the LTB
+/// "return the exiled card" trigger (Journey to Nowhere, Oblivion Ring, and the
+/// broader two-trigger class). Emitted only when the LTB-return side exists.
+fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
+    let Some(ltb) = items
+        .iter()
+        .find(|item| item_trigger(item).is_some_and(trigger_is_ltb_return))
+    else {
         return;
-    }
-
-    for trig in triggers.iter_mut() {
-        if trig.mode != TriggerMode::ChangesZone || trig.destination != Some(Zone::Battlefield) {
-            continue;
+    };
+    for item in items {
+        if item_trigger(item).is_some_and(trigger_is_etb_exile_pending_duration) {
+            relations.push(DocumentRelationIr::EtbExileLtbReturn {
+                etb_exile: item.id,
+                ltb_return: ltb.id,
+            });
         }
-        let Some(execute) = trig.execute.as_deref_mut() else {
+    }
+}
+
+/// Stamp `Duration::UntilHostLeavesPlay` on the ETB exile's execute so the
+/// existing `ExileLink::UntilSourceLeaves` mechanism returns the exiled card.
+fn apply_etb_exile_ltb_return(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    trigger_ids: &[OracleItemId],
+) {
+    for relation in relations {
+        let DocumentRelationIr::EtbExileLtbReturn { etb_exile, .. } = relation else {
             continue;
         };
-        if !matches!(
-            execute.effect.as_ref(),
-            Effect::ChangeZone {
-                destination: Zone::Exile,
-                ..
-            }
-        ) {
+        let Some(pos) = position_of(trigger_ids, *etb_exile) else {
             continue;
-        }
-        if execute.duration.is_none() {
-            execute.duration = Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+        };
+        if let Some(execute) = result.triggers[pos].execute.as_deref_mut() {
+            if execute.duration.is_none() {
+                execute.duration = Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+            }
         }
     }
 }
@@ -3094,7 +3373,8 @@ pub(crate) fn parse_oracle_ir(
     if subtypes.iter().any(|s| s == "Class") {
         let class_result =
             parse_class_oracle_text(&lines, card_name, mtgjson_keyword_names, result);
-        return parsed_abilities_to_doc_ir(class_result, oracle_text, card_name, &mut ctx);
+        let doc = parsed_abilities_to_doc_ir(class_result, oracle_text, card_name, &mut ctx);
+        return finalize_document_relations(doc, types);
     }
 
     // CR 714 / CR 717: Pre-parse Saga chapters and Attraction visit lines, emitting
@@ -5260,7 +5540,8 @@ pub(crate) fn parse_oracle_ir(
         emitter.strive_cost_at(strive_cost_line.unwrap_or(0), cost);
     }
 
-    emitter.finish(oracle_text, card_name, std::mem::take(&mut ctx.diagnostics))
+    let doc = emitter.finish(oracle_text, card_name, std::mem::take(&mut ctx.diagnostics));
+    finalize_document_relations(doc, types)
 }
 
 fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
@@ -5485,7 +5766,7 @@ pub fn parse_oracle_text(
         types,
         subtypes,
     );
-    let mut parsed = lower_oracle_ir(&ir, types);
+    let mut parsed = lower_oracle_ir(&ir);
     scrub_granting_placeholder_descriptions(&mut parsed);
     parsed
 }
