@@ -13473,8 +13473,9 @@ fn typed_filter_for_subtype_peels_leading_supertype() {
     );
 }
 
-// CR 302.6 + CR 508.4a: a bare battlefield-status adjective ("Untapped"/"Tapped")
-// used as a whole creature descriptor names a status the creature HAS, not a
+// CR 110.5a + CR 506.3: a bare battlefield descriptor ("Untapped"/"Tapped")
+// used as a whole creature descriptor names a status the creature HAS (CR 110.5a:
+// "status is not a characteristic") or a combat role it's in (CR 506.3), not a
 // creature subtype. The single subtype-filter authority must resolve it to a
 // typed FilterProp instead of fabricating a zero-match Subtype("Untapped").
 #[test]
