@@ -1836,6 +1836,21 @@ pub(super) fn parse_targeted_action_ast(
         };
         let is_mass = is_mass || count.is_some();
         let origin = super::infer_origin_zone(rest_lower);
+        // CR 400.7: A returned card's target filter must be scoped to its origin
+        // zone. Without this, "return target ... card from your graveyard to the
+        // battlefield" enumerates legal targets on the battlefield (the default
+        // zone for a bare permanent filter) instead of the graveyard. Mirrors the
+        // sibling `try_parse_verb_and_target` handler in `mod.rs`, which stamps
+        // the same `InZone`/`Owned` constraints (e.g. Dance of the Manse's
+        // graveyard-scoped "artifact and/or non-Aura enchantment cards"). Only
+        // stamp when `parse_type_phrase` did not already capture the origin zone
+        // itself ("... creature card from your graveyard" parses the zone + owner
+        // inline) — re-stamping an already-zoned filter would double-scope it.
+        let target = if target.extract_in_zone().is_none() {
+            super::add_inferred_origin_constraints_to_target(target, origin, rest_lower)
+        } else {
+            target
+        };
 
         // CR 400.7: Single-object battlefield destinations use ChangeZone;
         // mass destinations use ChangeZoneAll. Only pure mass-bounce

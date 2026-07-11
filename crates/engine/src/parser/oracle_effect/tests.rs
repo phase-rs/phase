@@ -43359,3 +43359,45 @@ fn grimoire_thief_counter_all_named_spells_unchanged() {
         "single conjunct must NOT become an Or: {target:?}"
     );
 }
+
+/// CR 400.7: Dance of the Manse returns cards from the *graveyard*, so its
+/// target filter must be scoped to the graveyard (and to your own cards). A
+/// bare "artifact and/or non-Aura enchantment cards" filter with no zone
+/// defaults to the battlefield, which made target selection offer battlefield
+/// permanents instead of graveyard cards. The disjunctive `Or` branches each
+/// carry the inferred `InZone { Graveyard }` + `Owned { You }` constraints.
+#[test]
+fn dance_of_the_manse_targets_graveyard_not_battlefield() {
+    let effect = parse_effect("Return up to X target artifact and/or non-Aura enchantment cards each with mana value X or less from your graveyard to the battlefield.");
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        ..
+    } = effect
+    else {
+        panic!("expected ChangeZone, got {effect:?}");
+    };
+    assert_eq!(origin, Some(Zone::Graveyard));
+    assert_eq!(destination, Zone::Battlefield);
+    let TargetFilter::Or { filters } = &target else {
+        panic!("expected an Or target filter, got {target:?}");
+    };
+    assert!(!filters.is_empty(), "Or filter must have branches");
+    for branch in filters {
+        assert_eq!(
+            branch.extract_in_zone(),
+            Some(Zone::Graveyard),
+            "each Or branch must be scoped to the graveyard: {branch:?}"
+        );
+        let TargetFilter::Typed(tf) = branch else {
+            panic!("expected Typed branch, got {branch:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::Owned {
+                controller: ControllerRef::You,
+            }),
+            "each Or branch must be scoped to your own cards: {tf:?}"
+        );
+    }
+}

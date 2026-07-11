@@ -28383,6 +28383,14 @@ fn add_inferred_origin_constraints_to_target(
     let Some(zone) = origin else {
         return target;
     };
+    // CR 400.7: A self-reference ("return this card from your graveyard") already
+    // identifies one specific object, so an origin `InZone`/`Owned` constraint is
+    // meaningless — and `add_filter_props` would corrupt it by wrapping the bare
+    // `SelfRef` in an `And`. Only class-enumerating filters (Typed/Or/And/Not),
+    // whose candidate set defaults to the battlefield, need origin scoping.
+    if matches!(target, TargetFilter::SelfRef) {
+        return target;
+    }
     if let Some((matched_zone, _, props)) = super::oracle_target::scan_zone_phrase(lower) {
         if matched_zone == zone
             && props.iter().any(|prop| {
