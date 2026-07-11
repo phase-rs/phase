@@ -1719,27 +1719,8 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         let last = defs.pop().unwrap();
         let mut chain = last;
         while let Some(mut prev) = defs.pop() {
-            if prev.condition == Some(AbilityCondition::AdditionalCostPaidInstead) {
-                if let Some(base_chain) = prev.else_ability.as_mut() {
-                    if matches!(
-                        (&*base_chain.effect, &*chain.effect),
-                        (
-                            Effect::ChangeZone {
-                                origin: Some(Zone::Library),
-                                destination: Zone::Hand,
-                                ..
-                            },
-                            Effect::ChangeZone {
-                                origin: Some(Zone::Library),
-                                destination: Zone::Hand,
-                                ..
-                            }
-                        )
-                    ) {
-                        append_to_deepest_sub_ability(base_chain, chain.sub_ability.clone());
-                    }
-                }
-            }
+            // R1 — a SHAPE REPAIR, not materialization.
+            merge_search_tail_into_additional_cost_else(&mut prev, &chain);
             // A node attached as a `sub_ability` is a resolution continuation
             // of its parent, not an independently activatable ability.
             // Normalize its kind to `Spell` (the "resolves alongside parent"
@@ -1747,36 +1728,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // dedicated clause builders that construct sub-abilities directly
             // (e.g., `try_parse_pump_with_damage_sub` at line 3220).
             chain.kind = AbilityKind::Spell;
-            if prev.optional && is_linked_exile_cast_bottom_cleanup(&prev.effect, &chain.effect) {
-                normalize_linked_exile_cast_bottom_cleanup(&mut chain.effect);
-                prev.else_ability = Some(Box::new(chain.clone()));
-            }
+            // R2 — a SHAPE REPAIR, not materialization.
+            normalize_linked_exile_cast_pair(&mut prev, &mut chain);
             if prev.sub_ability.is_some() {
                 // Walk to the deepest sub_ability and append there
                 let mut cursor = &mut prev;
                 while cursor.sub_ability.is_some() {
                     cursor = cursor.sub_ability.as_mut().unwrap();
                 }
-                // FIX C — CR 120.1 + CR 208.1 + CR 608.2c: a "Then it deals damage equal to
-                // its power to <fresh opponent>" tail appended after a `ConditionInstead`
-                // override is the same one-sided-fight anaphor as the non-nested Ambuscade
-                // form ("It" = the boosted creature = Target1, the source; "its power" read
-                // live). The generic fold loop appends it without the chunk-loop's anaphor
-                // rebind, so it would otherwise keep the subject-stamping default
-                // (`Power{Source}` + `damage_source: None` → 0 damage from the spell). Reuse
-                // the one-sided-fight rebind to restore `Power{Anaphoric}` + `DamageSource::
-                // Target`. No-op (returns false, mutates nothing) for non-damage /
-                // non-fresh-opponent tails (Evil's Thrall's Untap, the Draw tails). Gated to
-                // the override cursor + an independent `SequentialSibling` tail so non-nested
-                // Ambuscade/Bite Down/Rabid Bite (rebound at the chunk-loop site) are
-                // untouched.
-                if matches!(
-                    cursor.condition,
-                    Some(AbilityCondition::ConditionInstead { .. })
-                ) && chain.sub_link == SubAbilityLink::SequentialSibling
-                {
-                    bind_anaphoric_damage_subject_keep_recipient(chain.effect.as_mut());
-                }
+                // R3 — a SHAPE REPAIR, not materialization.
+                rebind_condition_instead_damage_anaphor(cursor, &mut chain);
                 cursor.sub_ability = Some(Box::new(chain));
             } else {
                 prev.sub_ability = Some(Box::new(chain));
@@ -1907,4 +1868,107 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     super::propagate_guess_branch_condition_to_continuations(&mut result);
 
     result
+}
+
+// ===========================================================================
+// The three SHAPE REPAIRS hidden in the final fold (U6-C4)
+// ===========================================================================
+//
+// The fold does two jobs: pure materialization (link each def into the next via
+// `sub_ability`), and these three adjacency-sniffing semantic repairs. They were
+// anonymous, interleaved with the linking, and each fires on a handful of cards
+// out of 35,396 — so a materialization rewrite could drop all three and the suite
+// would stay green. Naming them means C5's diff has to VISIBLY keep calling them.
+//
+// C4 is pure code motion: bodies are byte-identical, call order is unchanged.
+
+/// R1 — CR 608.2c + CR 601.2b: the ELSE-SIDE half of `FoldSearchIntoElse`.
+///
+/// One rules concept implemented in two places. `ClauseDisposition::FoldSearchIntoElse`
+/// binds the *search* side at clause time (by provenance, since U6-C2); this fold-time
+/// repair binds the *else* side by SHAPE-SNIFFING the pair. When an additional cost was
+/// paid (CR 601.2b) and both the stashed base chain and the incoming tail are
+/// search-destination moves, the tail's continuation is appended to the base's deepest
+/// sub — later text modifying the meaning of earlier text (CR 608.2c).
+///
+/// Note it reads `chain.sub_ability` only; `chain` itself is linked normally afterward.
+/// Returns whether the repair fired.
+fn merge_search_tail_into_additional_cost_else(
+    prev: &mut AbilityDefinition,
+    chain: &AbilityDefinition,
+) -> bool {
+    if prev.condition == Some(AbilityCondition::AdditionalCostPaidInstead) {
+        if let Some(base_chain) = prev.else_ability.as_mut() {
+            if matches!(
+                (&*base_chain.effect, &*chain.effect),
+                (
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Library),
+                        destination: Zone::Hand,
+                        ..
+                    },
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Library),
+                        destination: Zone::Hand,
+                        ..
+                    }
+                )
+            ) {
+                append_to_deepest_sub_ability(base_chain, chain.sub_ability.clone());
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// R2 — CR 608.2c + CR 401.4: linked-exile-cast bottom cleanup.
+///
+/// After an optional `CastFromZone` from a linked exile, the trailing "put it on the
+/// bottom" cleanup is normalized in place AND stashed as `prev.else_ability`.
+///
+/// DELIBERATE, DO NOT "FIX": `chain` is cloned into `else_ability` here and is ALSO
+/// linked as `prev`'s sub by the caller below, so the node is reachable via two paths.
+/// That duplication is the existing behavior; preserving it is the point of C4.
+/// Returns whether the repair fired.
+fn normalize_linked_exile_cast_pair(
+    prev: &mut AbilityDefinition,
+    chain: &mut AbilityDefinition,
+) -> bool {
+    if prev.optional && is_linked_exile_cast_bottom_cleanup(&prev.effect, &chain.effect) {
+        normalize_linked_exile_cast_bottom_cleanup(&mut chain.effect);
+        prev.else_ability = Some(Box::new(chain.clone()));
+        return true;
+    }
+    false
+}
+
+/// R3 — CR 120.1 + CR 208.1 + CR 608.2c: a "Then it deals damage equal to
+/// its power to <fresh opponent>" tail appended after a `ConditionInstead`
+/// override is the same one-sided-fight anaphor as the non-nested Ambuscade
+/// form ("It" = the boosted creature = Target1, the source; "its power" read
+/// live). The generic fold loop appends it without the chunk-loop's anaphor
+/// rebind, so it would otherwise keep the subject-stamping default
+/// (`Power{Source}` + `damage_source: None` → 0 damage from the spell). Reuse
+/// the one-sided-fight rebind to restore `Power{Anaphoric}` + `DamageSource::
+/// Target`. No-op (returns false, mutates nothing) for non-damage /
+/// non-fresh-opponent tails (Evil's Thrall's Untap, the Draw tails). Gated to
+/// the override cursor + an independent `SequentialSibling` tail so non-nested
+/// Ambuscade/Bite Down/Rabid Bite (rebound at the chunk-loop site) are
+/// untouched.
+///
+/// Returns whether the rebind actually mutated the tail (the gate can pass while the
+/// rebind is a no-op — see above), so a fire count measures real repairs, not gate hits.
+fn rebind_condition_instead_damage_anaphor(
+    cursor: &AbilityDefinition,
+    chain: &mut AbilityDefinition,
+) -> bool {
+    if matches!(
+        cursor.condition,
+        Some(AbilityCondition::ConditionInstead { .. })
+    ) && chain.sub_link == SubAbilityLink::SequentialSibling
+    {
+        return bind_anaphoric_damage_subject_keep_recipient(chain.effect.as_mut());
+    }
+    false
 }
