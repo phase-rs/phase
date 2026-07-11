@@ -8,7 +8,7 @@ use super::support::*;
 use crate::types::ability::PlayerFilter;
 use nom::character::complete::{alphanumeric1, char, digit1, one_of};
 use nom::combinator::{all_consuming, map_res, not, opt, peek, recognize};
-use nom::sequence::{delimited, pair};
+use nom::sequence::{delimited, pair, terminated};
 
 /// Lower a parsed rule-static predicate into the runtime static mode.
 pub(crate) fn lower_rule_static(
@@ -318,8 +318,15 @@ pub(crate) fn typed_filter_for_subtype(subtype: &str) -> TypedFilter {
 /// so a plain subtype falls through to the subtype path unchanged.
 fn split_leading_supertype(descriptor: &str) -> Option<(Supertype, &str)> {
     let lower = descriptor.to_lowercase();
-    let (rest_lower, supertype) = nom_target::parse_supertype_word(&lower).ok()?;
-    let rest_lower = rest_lower.strip_prefix(' ')?;
+    // Consume the supertype word AND its separating space atomically: a bare
+    // supertype (no following subtype) fails the trailing ` ` and declines here,
+    // so a plain subtype falls through to the subtype path unchanged.
+    let (rest_lower, supertype) = terminated(
+        nom_target::parse_supertype_word,
+        tag::<_, _, OracleError<'_>>(" "),
+    )
+    .parse(&lower)
+    .ok()?;
     let rest = descriptor[descriptor.len() - rest_lower.len()..].trim();
     (!rest.is_empty()).then_some((supertype, rest))
 }
