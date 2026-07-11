@@ -512,6 +512,7 @@ mod kodama_anti_recursion_intervening_if;
 mod krark_clan_ironworks_castability;
 mod krark_thumb_coin_flip;
 mod kutzils_flanker_mode_one_counter;
+mod land_equilibrium_forced_sacrifice;
 mod lathiel_end_step_counters_repro;
 mod leeching_sliver;
 mod leyline_taps_for_mana_repro;

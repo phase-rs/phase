@@ -3992,6 +3992,31 @@ pub(crate) fn controller_controls_source_gate(
 
 /// Evaluate a replacement condition against the current game state.
 /// Returns `true` if the replacement should apply, `false` if it should be skipped.
+/// CR 608.2c + CR 109.5: Quantity-resolution context for a replacement condition.
+/// `scoped_player` binds `ControllerRef::ScopedPlayer` to the entering/affected
+/// object's controller — the SPECIFIC player the replacement is evaluated against
+/// (Land Equilibrium's "an opponent who controls at least as many lands as you
+/// do") — while `ControllerRef::You` stays on the printed ability's controller.
+/// `entering` is left `None` so this is byte-identical to the prior
+/// `resolve_quantity` call for every existing `OnlyIfQuantity`/`UnlessQuantity`
+/// card (none of which populate `scoped_player`); only `ScopedPlayer`-flavored
+/// filters observe the new binding.
+fn replacement_condition_quantity_ctx(
+    state: &GameState,
+    source_id: ObjectId,
+    affected_object_id: Option<ObjectId>,
+) -> crate::game::quantity::QuantityContext {
+    let scoped_player = affected_object_id
+        .and_then(|id| state.objects.get(&id))
+        .map(replacement_source_player);
+    crate::game::quantity::QuantityContext {
+        entering: None,
+        source: source_id,
+        recipient: None,
+        scoped_player,
+    }
+}
+
 fn evaluate_replacement_condition(
     condition: &ReplacementCondition,
     controller: PlayerId,
@@ -4131,10 +4156,13 @@ fn evaluate_replacement_condition(
             if !turn_ok {
                 return true; // Turn requirement not met → replacement applies
             }
+            // CR 608.2c: resolve with the scoped-player context so `ScopedPlayer`
+            // filters bind to the entering/affected object's controller.
+            let ctx = replacement_condition_quantity_ctx(state, source_id, affected_object_id);
             let lhs_val =
-                crate::game::quantity::resolve_quantity(state, lhs, controller, source_id);
+                crate::game::quantity::resolve_quantity_with_ctx(state, lhs, controller, ctx);
             let rhs_val =
-                crate::game::quantity::resolve_quantity(state, rhs, controller, source_id);
+                crate::game::quantity::resolve_quantity_with_ctx(state, rhs, controller, ctx);
             !comparator.evaluate(lhs_val, rhs_val)
         }
         ReplacementCondition::OnlyIfQuantity {
@@ -4173,10 +4201,14 @@ fn evaluate_replacement_condition(
             if !turn_ok {
                 return false;
             }
+            // CR 608.2c: resolve with the scoped-player context so `ScopedPlayer`
+            // filters bind to the entering/affected object's controller (Land
+            // Equilibrium's LHS "an opponent who controls at least as many lands").
+            let ctx = replacement_condition_quantity_ctx(state, source_id, affected_object_id);
             let lhs_val =
-                crate::game::quantity::resolve_quantity(state, lhs, controller, source_id);
+                crate::game::quantity::resolve_quantity_with_ctx(state, lhs, controller, ctx);
             let rhs_val =
-                crate::game::quantity::resolve_quantity(state, rhs, controller, source_id);
+                crate::game::quantity::resolve_quantity_with_ctx(state, rhs, controller, ctx);
             comparator.evaluate(lhs_val, rhs_val)
         }
         ReplacementCondition::HasMaxSpeed => super::speed::has_max_speed(state, controller),
@@ -6348,10 +6380,28 @@ fn apply_single_replacement(
                     // CR 615.5 + CR 609.7: only the Prevented arm populates
                     // `post_replacement_event_source`; clear here so a prior
                     // prevention's source can't leak into a non-prevention stash.
+                    //
+                    // CR 614.13 + CR 608.2c: stash the AFFECTED object of the
+                    // (possibly modified) event as the continuation source, so a
+                    // scoped-player execute (Land Equilibrium's "that player …
+                    // sacrifices a land": `ControllerRef::You` bound via the entering
+                    // land's resulting controller) keys off the entering object, not
+                    // the replacement's own source. For a self-scoped replacement
+                    // (`valid_card: SelfRef`, the Devour family) these coincide.
+                    //
+                    // NOTE: for battlefield-ENTRY drains this is defensive alignment
+                    // rather than the sole binding — the land-play epilogue
+                    // (`engine.rs`) and the general zone-change drain
+                    // (`engine_replacement.rs`, "For ZoneChange events the post-effect
+                    // resolves against the zone-changing object") both clear
+                    // `post_replacement_source` and re-pass the entering object at
+                    // drain time. The stashed source is observable only on the
+                    // `TokenEntry` drain path, which does not clear it. See the
+                    // implementation report's Part 3 finding.
                     stash_post_replacement_continuation(
                         state,
                         post,
-                        rid.source,
+                        new_event.affected_object_id().unwrap_or(rid.source),
                         replacement_applied.clone(),
                         None,
                         None,

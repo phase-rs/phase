@@ -17,7 +17,10 @@ use super::oracle_effect::{
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
-use super::oracle_nom::condition::{parse_attached_subject_target_filter, parse_inner_condition};
+use super::oracle_nom::condition::{
+    parse_attached_subject_target_filter, parse_inner_condition,
+    parse_opponent_who_controls_at_least_as_many,
+};
 use super::oracle_nom::duration::parse_duration;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
@@ -740,6 +743,18 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // --- Damage redirection: "all damage that would be dealt to [target] is dealt to ~ instead" ---
     // CR 614.1a: Replacement effects that redirect damage to a different recipient.
     if let Some(def) = parse_damage_redirection_replacement(&norm_lower, &text) {
+        return Some(def);
+    }
+
+    // --- "If an opponent who controls at least as many <filter> as you do would
+    //     put a land onto the battlefield, that player instead puts that land onto
+    //     the battlefield then sacrifices a land of their choice." (Land
+    //     Equilibrium) ---
+    // CR 614.1a: an "instead" replacement whose applicability is gated by a
+    // quantity comparison bound to the SPECIFIC entering opponent. Checked before
+    // the generic event-substitution / mana handlers so the chained "then
+    // sacrifices" rider is not dropped (misparse backlog category #4).
+    if let Some(def) = parse_opponent_put_land_sacrifice_replacement(&norm_lower, &text) {
         return Some(def);
     }
 
@@ -9105,6 +9120,130 @@ fn parse_event_substitution_replacement(
     }
 
     None
+}
+
+/// CR 614.1a: Land Equilibrium — "If an opponent who controls at least as many
+/// lands as you do would put a land onto the battlefield, that player instead
+/// puts that land onto the battlefield then sacrifices a land of their choice."
+///
+/// A `Moved`/Battlefield replacement whose applicability is gated by an
+/// `OnlyIfQuantity` comparison bound to the SPECIFIC entering opponent (via
+/// `ControllerRef::ScopedPlayer` on the LHS filter — threaded from the entering
+/// land's controller through `evaluate_replacement_condition`). The chained "then
+/// sacrifices a land of their choice" rider becomes the mandatory `execute`
+/// ability (misparse-backlog root-cause category #4: conjoined second clause).
+fn parse_opponent_put_land_sacrifice_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Combinator-only dispatch: strip "if ", extract the opponent-comparison
+    // subject via the shared condition combinator, then match the replaced event
+    // and its sacrifice rider as two composed `tag`s (no string dispatch).
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if ").parse(norm_lower).ok()?;
+    let (rest, (type_filter, you_filter)) =
+        parse_opponent_who_controls_at_least_as_many(rest).ok()?;
+    // The replaced event: the specific opponent putting a permanent of the SAME
+    // type the applicability gate counts onto the battlefield. Rather than hardcode
+    // "a land" (which silently diverges from the already-parsed gate type), match
+    // the structural frame and re-derive the entering permanent's filter from the
+    // event noun via the shared `parse_type_phrase` combinator, then require it to
+    // equal the gate's `type_filter`. This keeps the condition, the replaced event,
+    // and the sacrifice rider bound to one type — so the same construction with a
+    // different permanent noun stays internally consistent instead of half generic.
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" would put a ")
+        .parse(rest)
+        .ok()?;
+    let (rest, event_noun) = take_until::<_, _, OracleError<'_>>(" onto the battlefield")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" onto the battlefield")
+        .parse(rest)
+        .ok()?;
+    let (event_filter, event_rem) = parse_type_phrase(event_noun.trim());
+    if !event_rem.trim().is_empty() || event_filter != type_filter {
+        return None;
+    }
+    // Preserve the parsed gate type for the sacrifice rider before the applicability
+    // gate's LHS below consumes `type_filter`.
+    let sacrifice_type_filter = type_filter.clone();
+    // The chained rider: "that player instead puts that land onto the battlefield
+    // then sacrifices a land of their choice." This is the clause a naive "instead"
+    // handler drops.
+    let (rest, _) = tag::<_, _, OracleError<'_>>(
+        ", that player instead puts that land onto the battlefield then sacrifices a land of their choice",
+    )
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = opt(char::<_, OracleError<'_>>('.')).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    // CR 614.1a: applicability gate. LHS counts lands the SPECIFIC entering
+    // opponent controls (`ScopedPlayer` — resolved from the entering land's
+    // controller at condition-evaluation time, before the land enters); RHS counts
+    // lands "you" (Land Equilibrium's controller) control. GE ⇒ "at least as many."
+    let condition = ReplacementCondition::OnlyIfQuantity {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: inject_controller(type_filter, ControllerRef::ScopedPlayer),
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter: you_filter },
+        },
+        active_player_req: None,
+    };
+
+    // CR 701.21a: "sacrifices a land of their choice." `ControllerRef::You`
+    // resolves to the entering land's resulting controller because the
+    // post-replacement continuation is stashed with the ENTERING object as its
+    // source (see `apply_single_replacement`), NOT `ControllerRef::ParentTargetController`
+    // (which has no target context here and would never resolve).
+    //
+    // KNOWN, ACCEPTED SCOPE LIMITATION (CR 614.13 / Gatherer ruling): Land
+    // Equilibrium's official ruling states "it doesn't matter under whose control
+    // the land enters … If the opponent would put the land onto the battlefield
+    // under someone else's control (as a result of Yavimaya Dryad's ability, for
+    // example), that opponent will still have to sacrifice a land." This
+    // implementation binds the sacrificer to the entering land's RESULTING
+    // controller, not the player who performed the "put" action. These are the
+    // same player in the overwhelming majority of cases and diverge only in
+    // control-redirect scenarios (Yavimaya Dryad's "enters under target player's
+    // control"), which are not currently reachable for lands in this engine
+    // (Yavimaya Dryad does not implement `enters_under` today — a separate
+    // pre-existing gap, out of scope for this change).
+    let sacrifice_ability = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            // CR 701.21a: the sacrificed permanent is the SAME type the gate counts,
+            // derived from the parsed `type_filter` (not a hardcoded land), so a card
+            // of this class with a different permanent noun stays consistent. For
+            // Land Equilibrium this is byte-identical to `TypedFilter::land()`.
+            target: inject_controller(sacrifice_type_filter, ControllerRef::You),
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    );
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::land().controller(ControllerRef::Opponent),
+            ))
+            // CR 614.1c: battlefield-ENTRY-scoped — gate on the destination so the
+            // replacement matches an opponent's land ENTERING, not any departure.
+            .destination_zone(Zone::Battlefield)
+            .condition(condition)
+            .execute(sacrifice_ability)
+            // `valid_player` intentionally omitted: `evaluate_replacement_condition`
+            // consults `valid_player` only for LifeGain/Draw/Scry/Mill/Proliferate/
+            // CoinFlip/AddCounter events, NOT ZoneChange/Moved — it would be silently
+            // inert here. Opponent-scoping for this event is done entirely via
+            // `valid_card`'s `controller = Opponent`.
+            .description(original_text.to_string()),
+    )
 }
 
 /// CR 106.3 + CR 614.1a: Parse mana replacement effects.

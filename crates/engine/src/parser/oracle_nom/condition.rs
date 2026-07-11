@@ -7708,6 +7708,30 @@ fn player_count_comparison_filters(type_text: &str) -> Option<(TargetFilter, Tar
     Some((type_filter, you_filter))
 }
 
+/// CR 614.1a: "an opponent who controls at least as many <filter> as you do" —
+/// the applicability condition of an "instead" replacement effect (Land
+/// Equilibrium). The relative clause ("who controls …") binds to the SPECIFIC
+/// entering/acting opponent — the player who would put the permanent onto the
+/// battlefield — not to an existential aggregate over all opponents. Returns the
+/// bare `(type_filter, you_filter)` pair (via the comparator-agnostic
+/// `player_count_comparison_filters` helper) so the replacement-condition builder
+/// can compose it directly into `ReplacementCondition::OnlyIfQuantity` with the
+/// scoped-player controller stamped on `type_filter`. This deliberately does NOT
+/// build `StaticCondition::QuantityComparison` / `PlayerFilter::ControlsCount`
+/// (the shape used by `parse_opponent_controls_more_than_you`): that shape is an
+/// existential "an opponent controls more <filter> than you" aggregate check and
+/// would be WRONG here — it does not bind the count to the specific entering
+/// player the replacement is evaluated against.
+pub(crate) fn parse_opponent_who_controls_at_least_as_many(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, TargetFilter)> {
+    let (rest, _) = tag("an opponent who controls at least as many ").parse(input)?;
+    let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" as you do").parse(rest)?;
+    let (rest, _) = tag(" as you do").parse(rest)?;
+    let pair = player_count_comparison_filters(type_text).ok_or_else(|| oracle_err(type_text))?;
+    Ok((rest, pair))
+}
+
 /// CR 118.12a: Parse "[player] pays {cost}" → UnlessPay { cost }.
 ///
 /// Handles "you pay {N}", "their controller pays {N}", "its controller pays {N}".

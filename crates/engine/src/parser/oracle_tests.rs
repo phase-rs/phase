@@ -6039,6 +6039,73 @@ fn library_of_leng_parses_hand_size_static_and_discard_replacement() {
     ));
 }
 
+/// Land Equilibrium: the chained "then sacrifices a land of their choice" clause
+/// must be represented, not dropped as a `SwallowedClause` (misparse-backlog
+/// category #4). Asserts the parser now yields a single `Moved` replacement gated
+/// by an `OnlyIfQuantity { comparator: GE }` land-count comparison whose execute
+/// is the forced `Sacrifice`. Revert-discriminating: before Part 1/Part 2 the
+/// card produced `replacements: []` plus a `SwallowedClause/Replacement_Instead`
+/// warning.
+#[test]
+fn land_equilibrium_parses_chained_sacrifice_replacement() {
+    use crate::types::ability::{
+        Comparator, ControllerRef, Effect, ReplacementCondition, TargetFilter, TypedFilter,
+    };
+    use crate::types::replacements::ReplacementEvent;
+
+    let text = "If an opponent who controls at least as many lands as you do would put a land onto the battlefield, that player instead puts that land onto the battlefield then sacrifices a land of their choice.";
+    let r = parse(text, "Land Equilibrium", &[], &["Enchantment"], &[]);
+
+    // The conjoined second clause must NOT be swallowed.
+    assert!(
+        !r.parse_warnings.iter().any(|w| matches!(
+            w,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Replacement_Instead"
+        )),
+        "Land Equilibrium must no longer emit a Replacement_Instead SwallowedClause; got {:?}",
+        r.parse_warnings
+    );
+
+    assert_eq!(
+        r.replacements.len(),
+        1,
+        "one replacement, got {:?}",
+        r.replacements
+    );
+    let repl = &r.replacements[0];
+    assert_eq!(repl.event, ReplacementEvent::Moved);
+    // Gate: the entering opponent controls >= as many lands as the caster.
+    assert!(
+        matches!(
+            &repl.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                comparator: Comparator::GE,
+                ..
+            })
+        ),
+        "condition must be an OnlyIfQuantity GE land-count gate; got {:?}",
+        repl.condition
+    );
+    // The dropped rider is now the mandatory forced sacrifice.
+    let execute = repl
+        .execute
+        .as_ref()
+        .expect("replacement execute (the sacrifice rider)");
+    // The sacrifice target is now derived from the parsed gate type rather than a
+    // hardcoded `TypedFilter::land()`. For Land Equilibrium's own Oracle text the
+    // derivation must be byte-identical to the previous hardcoded filter — a land
+    // controlled by the entering player (ControllerRef::You), with no extra
+    // properties leaked from the type-phrase parse.
+    let Effect::Sacrifice { target, .. } = &*execute.effect else {
+        panic!("execute must be a Sacrifice; got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+        "sacrifice target must be byte-identical to a You-controlled land filter"
+    );
+}
+
 #[test]
 fn block_restriction_routes_to_static_parser() {
     let r = parse(
