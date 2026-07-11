@@ -26,7 +26,8 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
-    ClauseDisposition, ClauseIr, EffectChainIr, OtherwiseKind, ReplicateKind, SpecialClause,
+    ClauseDisposition, ClauseIr, EffectChainIr, OtherwiseKind, PriorModifier, ReplicateKind,
+    SpecialClause,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
@@ -1447,72 +1448,17 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                     }
                 }
                 true
-            } else if let ClauseDisposition::Special {
-                action: special,
-                intrinsic,
-            } = &clause_ir.disposition
-            {
-                match special {
-                    SpecialClause::AltCostRider(cost) => {
+            } else if let ClauseDisposition::ModifyPrior { modifier } = &clause_ir.disposition {
+                // CR 608.2c: fold a field-level modification onto the prior emitted
+                // def; emit no sibling. `modifier` selects which field/aspect.
+                match modifier {
+                    PriorModifier::AltCost(cost) => {
                         attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost.clone());
-                        true
                     }
-                    SpecialClause::DigInsteadAlt(alt_def) => {
-                        if let Some(last_def) = defs.pop() {
-                            let mut new_def = *alt_def.clone();
-                            apply_where_x_ability_expression(
-                                &mut new_def,
-                                clause_ir.where_x_expression.as_deref(),
-                            );
-                            new_def.else_ability = Some(Box::new(last_def));
-                            defs.push(new_def);
-                        }
-                        true
+                    PriorModifier::ManaRetention(expiry) => {
+                        attach_mana_retention_to_prior_mana(&mut defs, *expiry);
                     }
-                    SpecialClause::InsteadClause(instead_def) => {
-                        // CR 614.1a + CR 608.2c: assemble a multi-clause base + an
-                        // "instead" override so the runtime can produce both
-                        // branches. Clause 1 becomes the root and is the Cow-swap
-                        // target — when the override's `ConditionInstead` fires,
-                        // `effects/mod.rs` swaps the root's effect with the
-                        // override's at parent resolution, and the override branch
-                        // returns terminally (see the `ConditionInstead` arm at
-                        // ~line 2713 in `effects/mod.rs`). To make the tail clauses
-                        // (2..N) conditional on the override NOT firing, we stash
-                        // them in the override's `else_ability`: the runtime only
-                        // walks `else_ability` when the swap did not happen. Net:
-                        // condition true → only the override's effect runs (clause
-                        // 1 swapped away, tail bypassed); condition false → clause
-                        // 1 runs as printed, then the tail runs from
-                        // `else_ability`. Single-clause bases collapse to the
-                        // prior shape (empty tail → no `else_ability`).
-                        if !defs.is_empty() {
-                            let mut chain_defs = std::mem::take(&mut defs);
-                            let mut root = chain_defs.remove(0);
-                            for next in chain_defs {
-                                append_to_deepest_sub_ability(&mut root, Some(Box::new(next)));
-                            }
-                            let mut instead = *instead_def.clone();
-                            // CR 702.33d + CR 707.10: Resolve "create N of those
-                            // tokens" anaphor against the root (the antecedent
-                            // for a multi-clause base is the first printed clause).
-                            rewrite_those_tokens_from_antecedent(&mut instead.effect, &root.effect);
-                            if rewrite_counter_instead_target_from_antecedent(
-                                &mut instead.effect,
-                                &root.effect,
-                            ) {
-                                instead.target_choice_timing = root.target_choice_timing;
-                            }
-                            if has_explicit_player_target(root.effect.as_ref()) {
-                                rewrite_player_anaphor_targets_in_definition(&mut instead);
-                            }
-                            instead.else_ability = root.sub_ability.take();
-                            root.sub_ability = Some(Box::new(instead));
-                            defs.push(root);
-                        }
-                        true
-                    }
-                    SpecialClause::EntersTappedAttacking => {
+                    PriorModifier::EntersTappedAttacking => {
                         // CR 508.4 / CR 614.1: Conditional enters-tapped-attacking modifier
                         if let Some(prev) = defs.last() {
                             let can_patch = matches!(
@@ -1587,6 +1533,68 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                                 defs.push(patched);
                             }
                         }
+                    }
+                }
+                true
+            } else if let ClauseDisposition::Special {
+                action: special,
+                intrinsic,
+            } = &clause_ir.disposition
+            {
+                match special {
+                    SpecialClause::DigInsteadAlt(alt_def) => {
+                        if let Some(last_def) = defs.pop() {
+                            let mut new_def = *alt_def.clone();
+                            apply_where_x_ability_expression(
+                                &mut new_def,
+                                clause_ir.where_x_expression.as_deref(),
+                            );
+                            new_def.else_ability = Some(Box::new(last_def));
+                            defs.push(new_def);
+                        }
+                        true
+                    }
+                    SpecialClause::InsteadClause(instead_def) => {
+                        // CR 614.1a + CR 608.2c: assemble a multi-clause base + an
+                        // "instead" override so the runtime can produce both
+                        // branches. Clause 1 becomes the root and is the Cow-swap
+                        // target — when the override's `ConditionInstead` fires,
+                        // `effects/mod.rs` swaps the root's effect with the
+                        // override's at parent resolution, and the override branch
+                        // returns terminally (see the `ConditionInstead` arm at
+                        // ~line 2713 in `effects/mod.rs`). To make the tail clauses
+                        // (2..N) conditional on the override NOT firing, we stash
+                        // them in the override's `else_ability`: the runtime only
+                        // walks `else_ability` when the swap did not happen. Net:
+                        // condition true → only the override's effect runs (clause
+                        // 1 swapped away, tail bypassed); condition false → clause
+                        // 1 runs as printed, then the tail runs from
+                        // `else_ability`. Single-clause bases collapse to the
+                        // prior shape (empty tail → no `else_ability`).
+                        if !defs.is_empty() {
+                            let mut chain_defs = std::mem::take(&mut defs);
+                            let mut root = chain_defs.remove(0);
+                            for next in chain_defs {
+                                append_to_deepest_sub_ability(&mut root, Some(Box::new(next)));
+                            }
+                            let mut instead = *instead_def.clone();
+                            // CR 702.33d + CR 707.10: Resolve "create N of those
+                            // tokens" anaphor against the root (the antecedent
+                            // for a multi-clause base is the first printed clause).
+                            rewrite_those_tokens_from_antecedent(&mut instead.effect, &root.effect);
+                            if rewrite_counter_instead_target_from_antecedent(
+                                &mut instead.effect,
+                                &root.effect,
+                            ) {
+                                instead.target_choice_timing = root.target_choice_timing;
+                            }
+                            if has_explicit_player_target(root.effect.as_ref()) {
+                                rewrite_player_anaphor_targets_in_definition(&mut instead);
+                            }
+                            instead.else_ability = root.sub_ability.take();
+                            root.sub_ability = Some(Box::new(instead));
+                            defs.push(root);
+                        }
                         true
                     }
                     SpecialClause::KeywordInsteadOverride => {
@@ -1647,10 +1655,6 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                                 *current = life_payment.clone();
                             }
                         }
-                        true
-                    }
-                    SpecialClause::ManaRetention(expiry) => {
-                        attach_mana_retention_to_prior_mana(&mut defs, *expiry);
                         true
                     }
                 }

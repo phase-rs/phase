@@ -119,14 +119,10 @@ pub(crate) enum DoesTheSameSubject {
 /// become markers that lowering processes when building the def list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum SpecialClause {
-    /// CR 118.9 + CR 119.4: Alternative-cost rider — fold cost onto previous CastFromZone.
-    AltCostRider(AbilityCost),
     /// CR 608.2c: Dig-instead alternative — replace previous Dig with conditional alternative.
     DigInsteadAlt(Box<AbilityDefinition>),
     /// CR 608.2e: Generic instead clause — attach to previous def as sub_ability.
     InsteadClause(Box<AbilityDefinition>),
-    /// CR 508.4 / CR 614.1: Conditional enters-tapped-attacking modifier on previous clause.
-    EntersTappedAttacking,
     /// CR 608.2e: TargetHasKeywordInstead — attach to previous def as sub_ability.
     KeywordInsteadOverride,
     /// CR 608.2e: AdditionalCostPaidInstead + SearchLibrary — fold else_ability from previous.
@@ -134,8 +130,6 @@ pub(crate) enum SpecialClause {
     /// Follow-up to a drawn-this-turn choice: sets the life payment and
     /// confirms the topdeck branch without emitting a separate effect.
     DrawnThisTurnPayOrTopdeck { life_payment: QuantityExpr },
-    /// CR 106.4: Mana-retention rider — fold expiry onto the previous Mana effect.
-    ManaRetention(ManaExpiry),
 }
 
 // ===========================================================================
@@ -189,6 +183,10 @@ pub(crate) struct ClauseId(pub(crate) u32);
 ///   emitted (lower.rs:1314).
 /// - `special`: some arms apply `intrinsic` to the special-built def
 ///   (lower.rs:1600, `AdditionalCostInsteadSearch`).
+// Intentional: variants carry parser IR directly (the `Emit` channels hold two
+// `ContinuationAst` options). Mirrors `oracle_ir::doc.rs`. This IR enum is
+// short-lived per-clause and Vec-allocated, so the size gap is acceptable.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ClauseDisposition {
     /// CR 608.2c: this clause emits its own definition(s). `followup` is a
@@ -244,6 +242,10 @@ pub(crate) enum ClauseDisposition {
         keywords: Vec<Keyword>,
         kind: ReplicateKind,
     },
+    /// CR 608.2c: fold a `PriorModifier` onto the prior emitted def; emits no
+    /// sibling. Promoted from the three rider `SpecialClause` variants (U5-M2). The
+    /// bound antecedent is the prior emitted def (implicit, as `Continue`).
+    ModifyPrior { modifier: PriorModifier },
     /// A special-case adjacency action that modifies an adjacent clause during
     /// lowering (folds the former `special: Option<SpecialClause>`). `intrinsic`
     /// carries the self-patch some special arms apply (lower.rs:1600).
@@ -270,6 +272,22 @@ pub(crate) enum AbsorbKind {
     DieExile,
     /// CR 608.2c + CR 701.19c: "dealt damage this way can't be regenerated" rider.
     CantBeRegenerated,
+}
+
+/// CR 608.2c: a field-level modification folded onto the prior emitted def
+/// (emits no sibling). Promoted from `SpecialClause::{AltCostRider, ManaRetention,
+/// EntersTappedAttacking}` (U5-M2). Each variant is a distinct rules concept that
+/// modifies a different field/aspect of the prior def.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum PriorModifier {
+    /// CR 118.9 + CR 119.4: fold an alternative cost onto the prior CastFromZone.
+    AltCost(AbilityCost),
+    /// CR 106.4: fold a mana-retention expiry onto the prior Mana effect.
+    ManaRetention(ManaExpiry),
+    /// CR 508.4 / CR 614.1: mark the prior token/copy/zone-change to enter tapped
+    /// and attacking (conditional modifier; carries the gate on the clause's
+    /// `condition`, with the unpatched original stashed in `else_ability`).
+    EntersTappedAttacking,
 }
 
 /// CR 608.2c: whether the "Otherwise" else-branch binds to a prior conditional or
@@ -387,7 +405,8 @@ impl ClauseDisposition {
             ClauseDisposition::Continue { .. }
             | ClauseDisposition::Absorb { .. }
             | ClauseDisposition::BranchOtherwise { .. }
-            | ClauseDisposition::ReplicatePerKeyword { .. } => None,
+            | ClauseDisposition::ReplicatePerKeyword { .. }
+            | ClauseDisposition::ModifyPrior { .. } => None,
         }
     }
 
@@ -403,7 +422,8 @@ impl ClauseDisposition {
             ClauseDisposition::Special { .. }
             | ClauseDisposition::Absorb { .. }
             | ClauseDisposition::BranchOtherwise { .. }
-            | ClauseDisposition::ReplicatePerKeyword { .. } => None,
+            | ClauseDisposition::ReplicatePerKeyword { .. }
+            | ClauseDisposition::ModifyPrior { .. } => None,
         }
     }
 }

@@ -649,6 +649,44 @@ fn kathril_aspect_warper() {
 }
 
 // ---------------------------------------------------------------------------
+// Prior-def modifiers (U5-M2 ModifyPrior parity)
+// ---------------------------------------------------------------------------
+// Oracle text verified verbatim against Scryfall. AltCost + ManaRetention have
+// real cards below; the third ModifyPrior kind (EntersTappedAttacking) has no
+// card in the 568-card fixture and a complex pop+patch body — it is covered by a
+// direct handler unit test in oracle_trigger_tests.rs instead.
+
+// CR 118.9 + CR 119.4: AltCost — "pay <cost> rather than paying its mana cost."
+// folds an `alt_ability_cost` onto the prior CastFromZone play grant (Nashi,
+// Moon Sage's Scion).
+#[test]
+fn nashi_moon_sages_scion() {
+    let (ir, lowered) = parse_two_layer(
+        "Ninjutsu {3}{B} ({3}{B}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever Nashi deals combat damage to a player, exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.",
+        "Nashi, Moon Sage's Scion",
+        &["Creature"],
+        &["Rat", "Ninja"],
+    );
+    insta::assert_json_snapshot!("nashi_moon_sages_scion_ir", &ir);
+    insta::assert_json_snapshot!("nashi_moon_sages_scion_lowered", &lowered);
+}
+
+// CR 106.4: ManaRetention — "you don't lose this mana as steps and phases end."
+// folds a mana-retention expiry onto the prior mana-production effect (Karn,
+// Legacy Reforged).
+#[test]
+fn karn_legacy_reforged() {
+    let (ir, lowered) = parse_two_layer(
+        "Karn's power and toughness are each equal to the greatest mana value among artifacts you control.\nAt the beginning of your upkeep, add {C} for each artifact you control. This mana can't be spent to cast nonartifact spells. Until end of turn, you don't lose this mana as steps and phases end.",
+        "Karn, Legacy Reforged",
+        &["Artifact", "Creature"],
+        &["Golem"],
+    );
+    insta::assert_json_snapshot!("karn_legacy_reforged_ir", &ir);
+    insta::assert_json_snapshot!("karn_legacy_reforged_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
 // Triggers (various patterns)
 // ---------------------------------------------------------------------------
 

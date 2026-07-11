@@ -17496,6 +17496,109 @@ fn branch_otherwise_fallback_self_emits_unimplemented_marker_and_else() {
     );
 }
 
+/// CR 508.4 / CR 614.1: direct handler coverage for `ClauseDisposition::ModifyPrior
+/// { modifier: EntersTappedAttacking }`. No card in the 568-card fixture produces
+/// it, and its lowering body (pop the prior token/copy/zone-change, set
+/// enters-tapped-attacking, stash the unpatched original as `else_ability` gated
+/// on the clause condition) is the most involved of the three ModifyPrior kinds —
+/// so this constructs the disposition directly to pin the verbatim-moved body.
+/// The Token effect is sourced from the real parser to avoid hand-listing every
+/// `Effect::Token` field.
+#[test]
+fn modify_prior_enters_tapped_attacking_patches_prior_token_with_condition_else() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
+    use crate::parser::oracle_ir::effect_chain::{
+        ClauseDisposition, ClauseIrBuilder, EffectChainIr, PriorModifier,
+    };
+
+    let token_def = parse_effect_chain(
+        "Create a 1/1 white Soldier creature token.",
+        AbilityKind::Spell,
+    );
+    let token_effect = (*token_def.effect).clone();
+    // Precondition: a Token that does NOT yet enter tapped/attacking.
+    assert!(
+        matches!(
+            &token_effect,
+            Effect::Token {
+                enters_attacking: false,
+                tapped: false,
+                ..
+            }
+        ),
+        "fixture must be a plain Token, got {token_effect:?}"
+    );
+
+    let gate = AbilityCondition::effect_performed();
+
+    let mut builder = ClauseIrBuilder::new("");
+    // clause 0: the token creation (normal Emit).
+    builder
+        .clause(
+            "",
+            parsed_clause(token_effect),
+            Some(ClauseBoundary::Sentence),
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    // clause 1: the conditional enters-tapped-attacking modifier on the prior token.
+    builder
+        .clause(
+            "",
+            parsed_clause(Effect::NoOp),
+            None,
+            ClauseDisposition::ModifyPrior {
+                modifier: PriorModifier::EntersTappedAttacking,
+            },
+        )
+        .condition(Some(gate.clone()))
+        .push();
+    let ir = EffectChainIr {
+        clauses: builder.finish(),
+        kind: AbilityKind::Spell,
+        chain_rounding: None,
+        actor: None,
+        repeat_until: None,
+    };
+
+    let root = lower_effect_chain_ir(&ir);
+    // The prior token is patched to enter tapped + attacking, gated by the condition …
+    assert!(
+        matches!(
+            &*root.effect,
+            Effect::Token {
+                enters_attacking: true,
+                tapped: true,
+                ..
+            }
+        ),
+        "patched token must enter tapped+attacking, got {:?}",
+        root.effect
+    );
+    assert_eq!(root.condition.as_ref(), Some(&gate));
+    // … with the UNPATCHED original stashed as the else_ability.
+    let original = root
+        .else_ability
+        .as_deref()
+        .expect("else_ability must carry the unpatched original token");
+    assert!(
+        matches!(
+            &*original.effect,
+            Effect::Token {
+                enters_attacking: false,
+                tapped: false,
+                ..
+            }
+        ),
+        "else_ability must be the unpatched token, got {:?}",
+        original.effect
+    );
+}
+
 #[test]
 fn trigger_subject_predicate_it_gains() {
     // "it gains haste" — subject-predicate with "it" as subject.

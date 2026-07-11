@@ -150,7 +150,7 @@ use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
-    EffectChainIr, OtherwiseKind, ReplicateKind, SpecialClause,
+    EffectChainIr, OtherwiseKind, PriorModifier, ReplicateKind, SpecialClause,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -24354,9 +24354,8 @@ pub(crate) fn parse_effect_chain_ir(
                     normalized_text,
                     placeholder_parsed_clause("alt_cost_rider_placeholder"),
                     chunk.boundary_after,
-                    ClauseDisposition::Special {
-                        action: SpecialClause::AltCostRider(cost),
-                        intrinsic: None,
+                    ClauseDisposition::ModifyPrior {
+                        modifier: PriorModifier::AltCost(cost),
                     },
                 )
                 .push();
@@ -24402,9 +24401,8 @@ pub(crate) fn parse_effect_chain_ir(
                         normalized_text,
                         placeholder_parsed_clause("mana_retention_placeholder"),
                         chunk.boundary_after,
-                        ClauseDisposition::Special {
-                            action: SpecialClause::ManaRetention(expiry),
-                            intrinsic: None,
+                        ClauseDisposition::ModifyPrior {
+                            modifier: PriorModifier::ManaRetention(expiry),
                         },
                     )
                     .push();
@@ -25397,9 +25395,8 @@ pub(crate) fn parse_effect_chain_ir(
                                 normalized_text,
                                 placeholder_parsed_clause("enters_tapped_attacking_placeholder"),
                                 chunk.boundary_after,
-                                ClauseDisposition::Special {
-                                    action: SpecialClause::EntersTappedAttacking,
-                                    intrinsic: None,
+                                ClauseDisposition::ModifyPrior {
+                                    modifier: PriorModifier::EntersTappedAttacking,
                                 },
                             )
                             .condition(condition)
