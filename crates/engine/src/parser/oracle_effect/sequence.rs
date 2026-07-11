@@ -3550,12 +3550,16 @@ pub(super) fn apply_clause_continuation(
             // adjacent — e.g. Kirtar's Wrath threshold has a Token creation
             // between the DestroyAll and "Creatures destroyed this way can't
             // be regenerated."
-            if let Some(def) = defs.iter_mut().rev().find(|d| {
-                matches!(
-                    &*d.effect,
-                    Effect::Destroy { .. } | Effect::DestroyAll { .. }
-                )
-            }) {
+            let bound = env.resolve(
+                defs,
+                super::assembly::AntecedentSelector::LastWithRole(
+                    super::assembly::AntecedentRole::DestroyLike,
+                ),
+                None,
+                super::assembly::OnMiss::Ignore,
+            );
+            if let Some(bound_index) = bound {
+                let def = &mut defs[bound_index];
                 match &mut *def.effect {
                     Effect::Destroy {
                         cant_regenerate, ..
@@ -3599,14 +3603,18 @@ pub(super) fn apply_clause_continuation(
             // clause, `defs.last()` is the intervening clause. Search back for
             // the nearest rest-patchable def (`Dig`/`RevealUntil` — what
             // `patch_rest_destination_recursively` handles).
-            let Some(previous) = defs
-                .iter_mut()
-                .rev()
-                .find(|d| matches!(&*d.effect, Effect::Dig { .. } | Effect::RevealUntil { .. }))
-            else {
+            let bound = env.resolve(
+                defs,
+                super::assembly::AntecedentSelector::LastWithRole(
+                    super::assembly::AntecedentRole::DigOrRevealUntil,
+                ),
+                None,
+                super::assembly::OnMiss::Ignore,
+            );
+            let Some(bound_index) = bound else {
                 return;
             };
-            patch_rest_destination_recursively(previous, destination, reorder_all);
+            patch_rest_destination_recursively(&mut defs[bound_index], destination, reorder_all);
         }
         ContinuationAst::DigFromAmong {
             quantity,
@@ -3915,7 +3923,18 @@ pub(super) fn apply_clause_continuation(
             // `face_down_profile` (set by the "... face down ..." put-clause) and
             // overwrite it with the specified profile. Mirror the DigFromAmong /
             // PutRest backward-walk idiom.
-            for def in defs.iter_mut().rev() {
+            // U6-C2b: bind the profile-holder by ROLE. "Already carries a profile"
+            // is the binding condition itself — a node without one is not this
+            // antecedent at all — so it lives in the registry, not in a guard.
+            let bound = env.resolve(
+                defs,
+                super::assembly::AntecedentSelector::LastWithRole(
+                    super::assembly::AntecedentRole::FaceDownProfileHolder,
+                ),
+                None,
+                super::assembly::OnMiss::Ignore,
+            );
+            for def in bound.map(|i| &mut defs[i]).into_iter() {
                 match &mut *def.effect {
                     Effect::ChangeZoneAll {
                         face_down_profile: fdp @ Some(_),

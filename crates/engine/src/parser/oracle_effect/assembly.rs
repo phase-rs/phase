@@ -348,6 +348,12 @@ pub(super) struct AssemblyEnv {
     search_destination_nodes: Vec<usize>,
     /// Every `Dig`/`Mill` node, in emission order (the `DigFromAmong` anchor set).
     dig_or_mill_nodes: Vec<usize>,
+    /// Every `Dig`/`RevealUntil` node (the `RestDestination` patchable set).
+    dig_or_reveal_until_nodes: Vec<usize>,
+    /// Every `Destroy`/`DestroyAll` node (the can't-be-regenerated antecedent set).
+    destroy_like_nodes: Vec<usize>,
+    /// Every node already carrying a face-down profile (CR 708.2a spec antecedent).
+    face_down_profile_nodes: Vec<usize>,
 }
 
 /// Which antecedent a handler is binding to. Point selectors only (U6-C2);
@@ -393,6 +399,18 @@ pub(super) enum AntecedentRole {
     Conditional,
     /// An "any player may" head (`optional_for`).
     OptionalHead,
+    /// A `Dig` or `RevealUntil` — the set `patch_rest_destination_recursively`
+    /// can patch, which a `RestDestination` ("put the rest ...") clause binds back
+    /// to. Deliberately a DIFFERENT set from `DigOrMill`.
+    DigOrRevealUntil,
+    /// A `Destroy` or `DestroyAll` — the antecedent of a "can't be regenerated"
+    /// rider, which may be non-adjacent (Kirtar's Wrath puts a Token between them).
+    DestroyLike,
+    /// A move/manifest/turn-face-down node that ALREADY carries a face-down
+    /// profile — the antecedent a "They're N/M ... creatures." spec refines
+    /// (CR 708.2a). "Already carries one" is the binding condition itself, not a
+    /// guard: a node with no profile is not this antecedent at all.
+    FaceDownProfileHolder,
     /// A `Dig` or `Mill` — the "look at / mill N cards" anchor a `DigFromAmong`
     /// continuation binds back to.
     ///
@@ -492,6 +510,9 @@ impl AssemblyEnv {
         self.optional_head_nodes.clear();
         self.search_destination_nodes.clear();
         self.dig_or_mill_nodes.clear();
+        self.dig_or_reveal_until_nodes.clear();
+        self.destroy_like_nodes.clear();
+        self.face_down_profile_nodes.clear();
 
         for (index, def) in defs.iter().enumerate() {
             let provenance = self.prov.get(index).copied().unwrap_or(NodeProvenance {
@@ -533,6 +554,38 @@ impl AssemblyEnv {
             }
             if matches!(&*def.effect, Effect::Dig { .. } | Effect::Mill { .. }) {
                 self.dig_or_mill_nodes.push(index);
+            }
+            if matches!(
+                &*def.effect,
+                Effect::Dig { .. } | Effect::RevealUntil { .. }
+            ) {
+                self.dig_or_reveal_until_nodes.push(index);
+            }
+            if matches!(
+                &*def.effect,
+                Effect::Destroy { .. } | Effect::DestroyAll { .. }
+            ) {
+                self.destroy_like_nodes.push(index);
+            }
+            if matches!(
+                &*def.effect,
+                Effect::ChangeZoneAll {
+                    face_down_profile: Some(_),
+                    library_position: None,
+                    random_order: false,
+                    ..
+                } | Effect::ChangeZone {
+                    face_down_profile: Some(_),
+                    ..
+                } | Effect::Manifest {
+                    profile: Some(_),
+                    ..
+                } | Effect::TurnFaceDown {
+                    profile: Some(_),
+                    ..
+                }
+            ) {
+                self.face_down_profile_nodes.push(index);
             }
             match &*def.effect {
                 Effect::Dig { .. } | Effect::Mill { .. } | Effect::RevealUntil { .. } => {
@@ -625,6 +678,15 @@ impl AssemblyEnv {
                 &self.search_destination_nodes
             }
             AntecedentSelector::LastWithRole(AntecedentRole::DigOrMill) => &self.dig_or_mill_nodes,
+            AntecedentSelector::LastWithRole(AntecedentRole::DigOrRevealUntil) => {
+                &self.dig_or_reveal_until_nodes
+            }
+            AntecedentSelector::LastWithRole(AntecedentRole::DestroyLike) => {
+                &self.destroy_like_nodes
+            }
+            AntecedentSelector::LastWithRole(AntecedentRole::FaceDownProfileHolder) => {
+                &self.face_down_profile_nodes
+            }
             AntecedentSelector::Between { anchor } => {
                 // Walk FORWARD over emission order from the anchor and take the
                 // FIRST qualifying node. Reads `order` only — never the output tree.
