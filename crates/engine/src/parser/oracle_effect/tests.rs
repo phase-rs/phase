@@ -43420,3 +43420,163 @@ fn dance_of_the_manse_targets_graveyard_not_battlefield() {
         );
     }
 }
+// ===========================================================================
+// U5-M2 capstone: reach-guards for the two final typed dispositions
+// ===========================================================================
+// `ClauseDisposition` is consumed inside `lower_effect_chain_ir` and never
+// serialized, so the parity snapshots in `oracle_ir::snapshot_tests` cannot show
+// WHICH arm a card takes. These assert the route directly: if an emit site stops
+// producing the disposition (or drops its payload), they fail even though the
+// lowered tree might still look plausible.
+
+/// CR 608.2c + CR 601.2b: Aang's Journey's "instead, search …" clause must land
+/// on `FoldSearchIntoElse` AND carry its own `SearchDestination` intrinsic. The
+/// intrinsic is the load-bearing part: it is the SECOND search's self-patch
+/// (destination/reveal), so dropping it silently strips the search's destination.
+#[test]
+fn aangs_journey_reaches_fold_search_into_else() {
+    let mut ctx = ParseContext::default();
+    let ir = parse_effect_chain_ir(
+        "Search your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card. Reveal those cards, put them into your hand, then shuffle.",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    let fold = ir
+        .clauses
+        .iter()
+        .find(|c| matches!(c.disposition, ClauseDisposition::FoldSearchIntoElse { .. }))
+        .expect("the kicked 'instead search' clause must lower via FoldSearchIntoElse");
+    assert!(
+        matches!(
+            fold.disposition.intrinsic(),
+            Some(ContinuationAst::SearchDestination {
+                destination: Zone::Hand,
+                ..
+            })
+        ),
+        "FoldSearchIntoElse must preserve the second search's own SearchDestination \
+         intrinsic, got {:?}",
+        fold.disposition.intrinsic()
+    );
+}
+
+/// CR 608.2c + CR 601.2b: same disposition via a DIFFERENT additional cost (collect
+/// evidence, not kicker) with a revealing search — the class, not the card.
+#[test]
+fn analyze_the_pollen_reaches_fold_search_into_else() {
+    let mut ctx = ParseContext::default();
+    let ir = parse_effect_chain_ir(
+        "Search your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle.",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    let fold = ir
+        .clauses
+        .iter()
+        .find(|c| matches!(c.disposition, ClauseDisposition::FoldSearchIntoElse { .. }))
+        .expect("the evidence 'instead search' clause must lower via FoldSearchIntoElse");
+    assert!(
+        matches!(
+            fold.disposition.intrinsic(),
+            Some(ContinuationAst::SearchDestination {
+                destination: Zone::Hand,
+                reveal: true,
+                ..
+            })
+        ),
+        "revealing search must preserve `reveal: true` in its intrinsic, got {:?}",
+        fold.disposition.intrinsic()
+    );
+}
+
+/// Sylvan Library's "For each of those cards, pay 4 life …" clause must land on
+/// `DrawnThisTurnFollowup` carrying the parsed payment.
+#[test]
+fn sylvan_library_reaches_drawn_this_turn_followup() {
+    let mut ctx = ParseContext::default();
+    let ir = parse_effect_chain_ir(
+        "You may draw two additional cards. If you do, choose two cards in your hand drawn this turn. For each of those cards, pay 4 life or put the card on top of your library.",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    let followup = ir
+        .clauses
+        .iter()
+        .find_map(|c| match &c.disposition {
+            ClauseDisposition::DrawnThisTurnFollowup { life_payment } => Some(life_payment),
+            _ => None,
+        })
+        .expect(
+            "the 'for each of those cards, pay N life' clause must lower via DrawnThisTurnFollowup",
+        );
+    assert_eq!(*followup, QuantityExpr::Fixed { value: 4 });
+}
+
+/// Direct handler coverage for `ClauseDisposition::DrawnThisTurnFollowup`: it
+/// WRITES the disposition's `life_payment` onto the prior
+/// `ChooseDrawnThisTurnPayOrTopdeck` def and emits no def of its own.
+///
+/// Constructed directly with a NON-default payment (3, vs the parser's hardcoded
+/// default of 4) because Sylvan Library — the only card of this class — parses a
+/// payment identical to that default, so a card-level assertion of `4` would pass
+/// even if this handler never ran. Here, if the arm is dropped or mis-wired, the
+/// payment stays 4 and this fails.
+#[test]
+fn drawn_this_turn_followup_overwrites_prior_life_payment() {
+    use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
+    use crate::parser::oracle_ir::effect_chain::{ClauseIrBuilder, EffectChainIr};
+
+    let choose = || Effect::ChooseDrawnThisTurnPayOrTopdeck {
+        count: QuantityExpr::Fixed { value: 2 },
+        life_payment: QuantityExpr::Fixed { value: 4 },
+        player: TargetFilter::Controller,
+    };
+
+    let mut builder = ClauseIrBuilder::new("");
+    // clause 0: the prior emitted choice def the follow-up patches.
+    builder
+        .clause(
+            "",
+            parsed_clause(choose()),
+            Some(ClauseBoundary::Sentence),
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    // clause 1: the follow-up — sets the payment, emits nothing.
+    builder
+        .clause(
+            "",
+            parsed_clause(choose()),
+            None,
+            ClauseDisposition::DrawnThisTurnFollowup {
+                life_payment: QuantityExpr::Fixed { value: 3 },
+            },
+        )
+        .push();
+    let ir = EffectChainIr {
+        clauses: builder.finish(),
+        kind: AbilityKind::Spell,
+        chain_rounding: None,
+        actor: None,
+        repeat_until: None,
+    };
+
+    let root = lower_effect_chain_ir(&ir);
+    let Effect::ChooseDrawnThisTurnPayOrTopdeck { life_payment, .. } = &*root.effect else {
+        panic!("expected the choice def as root, got {:?}", root.effect);
+    };
+    assert_eq!(
+        *life_payment,
+        QuantityExpr::Fixed { value: 3 },
+        "DrawnThisTurnFollowup must overwrite the prior def's life_payment (3), \
+         not leave the parsed default (4)"
+    );
+    assert!(
+        root.sub_ability.is_none(),
+        "the follow-up clause must emit no def of its own, got {:?}",
+        root.sub_ability
+    );
+}

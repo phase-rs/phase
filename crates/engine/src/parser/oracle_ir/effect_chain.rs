@@ -112,20 +112,6 @@ pub(crate) enum DoesTheSameSubject {
     TargetOpponent,
 }
 
-/// Special-case clause actions that modify or attach to adjacent clauses during lowering.
-///
-/// The chunk loop's special-case handlers (otherwise, instead, alt-cost rider, etc.)
-/// currently modify `defs: Vec<AbilityDefinition>` inline. In the IR split, these
-/// become markers that lowering processes when building the def list.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) enum SpecialClause {
-    /// CR 608.2e: AdditionalCostPaidInstead + SearchLibrary — fold else_ability from previous.
-    AdditionalCostInsteadSearch,
-    /// Follow-up to a drawn-this-turn choice: sets the life payment and
-    /// confirms the topdeck branch without emitting a separate effect.
-    DrawnThisTurnPayOrTopdeck { life_payment: QuantityExpr },
-}
-
 // ===========================================================================
 // Typed clause provenance (Plan 01 §5) — Unit 5, milestone M1
 // ===========================================================================
@@ -159,7 +145,8 @@ pub(crate) struct ClauseId(pub(crate) u32);
 /// The single explicit disposition of a clause: what it does relative to the
 /// rest of the chain. Replaces the former ad-hoc `absorbed_by_followup` boolean,
 /// `intrinsic_continuation`/`followup_continuation` options, `is_otherwise`
-/// boolean, and `special` marker.
+/// boolean, and the `special` marker enum (fully decomposed into typed
+/// dispositions by U5-M2; the marker enum no longer exists).
 ///
 /// A continuation clause STAYS in the IR with its own id/source even when it
 /// emits no independent definition (Plan 01 §5). The explicit antecedent SELECTOR
@@ -175,8 +162,8 @@ pub(crate) struct ClauseId(pub(crate) u32);
 ///   emitted, then `intrinsic` patches SELF (lower.rs:2078).
 /// - absorbed/`Continue`: `continuation` patches PRIOR defs; no self def is
 ///   emitted (lower.rs:1314).
-/// - `special`: some arms apply `intrinsic` to the special-built def
-///   (lower.rs:1600, `AdditionalCostInsteadSearch`).
+/// - `FoldSearchIntoElse`: applies `intrinsic` to the def it builds, inline at its
+///   own tail (the former `special` path's only intrinsic carrier).
 // Intentional: variants carry parser IR directly (the `Emit` channels hold two
 // `ContinuationAst` options). Mirrors `oracle_ir::doc.rs`. This IR enum is
 // short-lived per-clause and Vec-allocated, so the size gap is acceptable.
@@ -209,7 +196,7 @@ pub(crate) enum ClauseDisposition {
     },
     /// CR 608.2c: this clause's def attaches as a sub_ability RIDER on the tail of
     /// the prior emitted def's sub_ability chain, emitting no sibling def. Promoted
-    /// from the former `SpecialClause::{DieExileRider, CantBeRegeneratedRider}`
+    /// from the former special-clause markers `DieExileRider` / `CantBeRegeneratedRider`
     /// (U5-M2). `kind` preserves the distinct rules concept (they share the
     /// `append_to_deepest_sub_ability` mechanic — Plan 01 §5 line 811). The bound
     /// antecedent is the prior emitted def (implicit, as M1's `Continue`); the
@@ -219,7 +206,8 @@ pub(crate) enum ClauseDisposition {
         kind: AbsorbKind,
     },
     /// CR 608.2c: an "Otherwise, [effect]" else-branch. Promoted from
-    /// `SpecialClause::{Otherwise, OtherwiseFallback}` (U5-M2). `kind` carries the
+    /// the former special-clause markers `Otherwise` / `OtherwiseFallback` (U5-M2).
+    /// `kind` carries the
     /// PARSE-TIME determination of whether a prior conditional exists — do NOT
     /// recompute it at lowering (parse-time and lower-time "prior conditional
     /// present?" states could diverge and move output).
@@ -229,39 +217,53 @@ pub(crate) enum ClauseDisposition {
     },
     /// CR 608.2c / CR 702: replicate an antecedent template clause once per listed
     /// keyword, swapping the keyword in both the granted ability/counter and its
-    /// gating condition. Promoted from `SpecialClause::{SameIsTrueFor,
-    /// RepeatProcessForKeywords}` (U5-M2). `kind` selects the replication helper;
+    /// gating condition. Promoted from the former special-clause markers
+    /// `SameIsTrueFor` / `RepeatProcessForKeywords` (U5-M2). `kind` selects the
+    /// replication helper;
     /// the bound antecedent is the prior emitted clause (implicit, as `Continue`).
     ReplicatePerKeyword {
         keywords: Vec<Keyword>,
         kind: ReplicateKind,
     },
     /// CR 608.2c: fold a `PriorModifier` onto the prior emitted def; emits no
-    /// sibling. Promoted from the three rider `SpecialClause` variants (U5-M2). The
+    /// sibling. Promoted from the three former rider special-clause markers (U5-M2). The
     /// bound antecedent is the prior emitted def (implicit, as `Continue`).
     ModifyPrior { modifier: PriorModifier },
     /// CR 608.2c / CR 614.1a: this clause replaces or overrides the meaning of the
     /// prior emitted def(s) rather than emitting an independent sibling. Promoted
-    /// from `SpecialClause::{DigInsteadAlt, InsteadClause, KeywordInsteadOverride}`
-    /// (U5-M2). `kind` carries each variant's payload and keeps the distinct rules
+    /// from the former special-clause markers `DigInsteadAlt` / `InsteadClause` /
+    /// `KeywordInsteadOverride` (U5-M2). `kind` carries each variant's payload and
+    /// keeps the distinct rules
     /// concept typed (Plan 01 §5 line 811). Bound antecedent is the prior emitted
     /// def(s) (implicit, as `Continue`).
     ReplaceMeaning { kind: ReplaceMeaningKind },
-    /// A special-case adjacency action that modifies an adjacent clause during
-    /// lowering (folds the former `special: Option<SpecialClause>`). `intrinsic`
-    /// carries the self-patch some special arms apply (lower.rs:1600).
+    /// CR 608.2c + CR 601.2b: an "if <additional cost was paid>, instead search …"
+    /// clause — later text that modifies the meaning of earlier text (CR 608.2c),
+    /// gated on an additional cost announced at cast (CR 601.2b). Build this clause's
+    /// def, fold the PRIOR `SearchLibrary`'s trailing search-destination `ChangeZone`
+    /// into this def's `else_ability`, then apply this clause's own intrinsic
+    /// continuation. Promoted from the former special-clause marker
+    /// `AdditionalCostInsteadSearch` (U5-M2).
     ///
-    // TEMPORARY: faithful carry; decomposed into typed dispositions in U5-M2.
-    /// This wraps the existing `SpecialClause` value AS-IS — zero information
-    /// reconstructed or re-derived (it MOVES the value, unlike a projection
-    /// shim). This is not a generic "patch previous" collapse (Plan 01 §5, line
-    /// 811): the distinct concepts stay distinct inside `SpecialClause`. U5-M2
-    /// promotes each variant to its own typed disposition/attribute with a
-    /// snapshot + lowered-parity test, then deletes the `SpecialClause` enum.
-    Special {
-        action: SpecialClause,
-        intrinsic: Option<ContinuationAst>,
-    },
+    /// NOTE: the deleted marker's doc cited CR 608.2e; that rule is APNAP ordering for
+    /// multi-player multi-step actions and does not describe this fold. Re-derived to
+    /// CR 608.2c, which names this exact shape ("later text … may modify the meaning of
+    /// earlier text").
+    ///
+    /// The sole intrinsic-carrying disposition besides `Emit`: the second
+    /// `SearchLibrary` of an "additional cost … instead, search your library" chain
+    /// needs its OWN `SearchDestination` self-patch, which the handler applies inline
+    /// at its tail. It is also read by the parse-time `previous_is_search_with_hand_dest`
+    /// guard (`oracle_effect/mod.rs`), so the `intrinsic()` accessor must expose it.
+    FoldSearchIntoElse { intrinsic: Option<ContinuationAst> },
+    /// CR 608.2c: follow-up to a drawn-this-turn choice ("For each of those cards,
+    /// pay N life or put the card on top of your library") — later text that
+    /// parameterizes earlier text. Sets the life payment on the prior
+    /// `ChooseDrawnThisTurnPayOrTopdeck` effect and confirms the topdeck branch,
+    /// emitting no separate def. Promoted from the former special-clause marker
+    /// `DrawnThisTurnPayOrTopdeck` (U5-M2). The bound antecedent is the prior
+    /// emitted def (implicit, as `Continue`).
+    DrawnThisTurnFollowup { life_payment: QuantityExpr },
 }
 
 /// The distinct sub_ability-rider concepts that fold onto the prior emitted def.
@@ -276,8 +278,9 @@ pub(crate) enum AbsorbKind {
 }
 
 /// CR 608.2c: a field-level modification folded onto the prior emitted def
-/// (emits no sibling). Promoted from `SpecialClause::{AltCostRider, ManaRetention,
-/// EntersTappedAttacking}` (U5-M2). Each variant is a distinct rules concept that
+/// (emits no sibling). Promoted from the former special-clause markers
+/// `AltCostRider` / `ManaRetention` / `EntersTappedAttacking` (U5-M2). Each
+/// variant is a distinct rules concept that
 /// modifies a different field/aspect of the prior def.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum PriorModifier {
@@ -413,35 +416,38 @@ pub(crate) struct ClauseIr {
 impl ClauseDisposition {
     /// The self-patch continuation parsed from a clause's own text (formerly the
     /// `intrinsic_continuation` field): applied to this clause's own lowered def
-    /// after it emits. `Emit`/`Special` carry it; `Continue`/`Absorb` never do.
+    /// after it emits. `Emit`/`FoldSearchIntoElse` carry it; the other dispositions
+    /// never do.
     pub(crate) fn intrinsic(&self) -> Option<&ContinuationAst> {
         match self {
             ClauseDisposition::Emit { intrinsic, .. }
-            | ClauseDisposition::Special { intrinsic, .. } => intrinsic.as_ref(),
+            | ClauseDisposition::FoldSearchIntoElse { intrinsic } => intrinsic.as_ref(),
             ClauseDisposition::Continue { .. }
             | ClauseDisposition::Absorb { .. }
             | ClauseDisposition::BranchOtherwise { .. }
             | ClauseDisposition::ReplicatePerKeyword { .. }
             | ClauseDisposition::ModifyPrior { .. }
-            | ClauseDisposition::ReplaceMeaning { .. } => None,
+            | ClauseDisposition::ReplaceMeaning { .. }
+            | ClauseDisposition::DrawnThisTurnFollowup { .. } => None,
         }
     }
 
     /// The prior-patch continuation (formerly the `followup_continuation` field):
     /// a normal (`Emit`) clause's followup that patches the PRIOR def, or a
-    /// `Continue` clause's continuation. `None` for `Special`/`Absorb` clauses.
+    /// `Continue` clause's continuation. `None` for every other disposition.
     pub(crate) fn followup(&self) -> Option<&ContinuationAst> {
         match self {
             ClauseDisposition::Emit { followup, .. }
             | ClauseDisposition::Continue {
                 continuation: followup,
             } => followup.as_ref(),
-            ClauseDisposition::Special { .. }
-            | ClauseDisposition::Absorb { .. }
+            ClauseDisposition::Absorb { .. }
             | ClauseDisposition::BranchOtherwise { .. }
             | ClauseDisposition::ReplicatePerKeyword { .. }
             | ClauseDisposition::ModifyPrior { .. }
-            | ClauseDisposition::ReplaceMeaning { .. } => None,
+            | ClauseDisposition::ReplaceMeaning { .. }
+            | ClauseDisposition::FoldSearchIntoElse { .. }
+            | ClauseDisposition::DrawnThisTurnFollowup { .. } => None,
         }
     }
 }

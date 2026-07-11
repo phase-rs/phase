@@ -1,0 +1,370 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 763
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 66,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Kicker {2} (You may pay an additional {2} as you cast this spell.)"
+      },
+      "node": {
+        "Keyword": {
+          "Kicker": {
+            "type": "Cost",
+            "shards": [],
+            "generic": 2
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 66,
+          "precision": "Exact",
+          "ordinal_within_span": 1
+        },
+        "fragment": "Kicker {2} (You may pay an additional {2} as you cast this spell.)"
+      },
+      "node": {
+        "AdditionalCost": {
+          "type": "Kicker",
+          "data": {
+            "costs": [
+              {
+                "type": "Mana",
+                "cost": {
+                  "type": "Cost",
+                  "shards": [],
+                  "generic": 2
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 67,
+          "end_byte": 263,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Search your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card. Reveal those cards, put them into your hand, then shuffle."
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "SearchLibrary",
+            "filter": {
+              "type": "Typed",
+              "type_filters": [
+                "Land"
+              ],
+              "controller": null,
+              "properties": [
+                {
+                  "type": "HasSupertype",
+                  "value": "Basic"
+                }
+              ]
+            },
+            "count": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "reveal": false
+          },
+          "cost": null,
+          "sub_ability": {
+            "kind": "Spell",
+            "effect": {
+              "type": "SearchLibrary",
+              "filter": {
+                "type": "Or",
+                "filters": [
+                  {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Land"
+                    ],
+                    "controller": null,
+                    "properties": [
+                      {
+                        "type": "HasSupertype",
+                        "value": "Basic"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Enchantment",
+                      {
+                        "Subtype": "Shrine"
+                      }
+                    ],
+                    "controller": null,
+                    "properties": []
+                  }
+                ]
+              },
+              "count": {
+                "type": "Fixed",
+                "value": 2
+              },
+              "reveal": false,
+              "selection_constraint": {
+                "type": "MatchEachFilter",
+                "filters": [
+                  {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Land"
+                    ],
+                    "controller": null,
+                    "properties": [
+                      {
+                        "type": "HasSupertype",
+                        "value": "Basic"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Enchantment",
+                      {
+                        "Subtype": "Shrine"
+                      }
+                    ],
+                    "controller": null,
+                    "properties": []
+                  }
+                ]
+              }
+            },
+            "cost": null,
+            "sub_ability": {
+              "kind": "Spell",
+              "effect": {
+                "type": "ChangeZone",
+                "origin": "Library",
+                "destination": "Hand",
+                "target": {
+                  "type": "Any"
+                },
+                "owner_library": false,
+                "enter_transformed": false,
+                "enter_tapped": false,
+                "enters_attacking": false
+              },
+              "cost": null,
+              "sub_ability": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "ChangeZone",
+                  "origin": null,
+                  "destination": "Hand",
+                  "target": {
+                    "type": "ParentTarget"
+                  },
+                  "owner_library": false,
+                  "enter_transformed": false,
+                  "enter_tapped": false,
+                  "enters_attacking": false
+                },
+                "cost": null,
+                "sub_ability": {
+                  "kind": "Spell",
+                  "effect": {
+                    "type": "Shuffle",
+                    "target": {
+                      "type": "Controller"
+                    }
+                  },
+                  "cost": null,
+                  "sub_ability": {
+                    "kind": "Spell",
+                    "effect": {
+                      "type": "GainLife",
+                      "amount": {
+                        "type": "Fixed",
+                        "value": 2
+                      }
+                    },
+                    "cost": null,
+                    "sub_ability": null,
+                    "duration": null,
+                    "description": null,
+                    "target_prompt": null,
+                    "condition": null,
+                    "optional_targeting": false,
+                    "optional": false,
+                    "forward_result": false,
+                    "sub_link": "SequentialSibling"
+                  },
+                  "duration": null,
+                  "description": null,
+                  "target_prompt": null,
+                  "condition": null,
+                  "optional_targeting": false,
+                  "optional": false,
+                  "forward_result": false
+                },
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
+            },
+            "else_ability": {
+              "kind": "Spell",
+              "effect": {
+                "type": "ChangeZone",
+                "origin": "Library",
+                "destination": "Hand",
+                "target": {
+                  "type": "Any"
+                },
+                "owner_library": false,
+                "enter_transformed": false,
+                "enter_tapped": false,
+                "enters_attacking": false
+              },
+              "cost": null,
+              "sub_ability": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "ChangeZone",
+                  "origin": null,
+                  "destination": "Hand",
+                  "target": {
+                    "type": "ParentTarget"
+                  },
+                  "owner_library": false,
+                  "enter_transformed": false,
+                  "enter_tapped": false,
+                  "enters_attacking": false
+                },
+                "cost": null,
+                "sub_ability": {
+                  "kind": "Spell",
+                  "effect": {
+                    "type": "Shuffle",
+                    "target": {
+                      "type": "Controller"
+                    }
+                  },
+                  "cost": null,
+                  "sub_ability": {
+                    "kind": "Spell",
+                    "effect": {
+                      "type": "GainLife",
+                      "amount": {
+                        "type": "Fixed",
+                        "value": 2
+                      }
+                    },
+                    "cost": null,
+                    "sub_ability": null,
+                    "duration": null,
+                    "description": null,
+                    "target_prompt": null,
+                    "condition": null,
+                    "optional_targeting": false,
+                    "optional": false,
+                    "forward_result": false,
+                    "sub_link": "SequentialSibling"
+                  },
+                  "duration": null,
+                  "description": null,
+                  "target_prompt": null,
+                  "condition": null,
+                  "optional_targeting": false,
+                  "optional": false,
+                  "forward_result": false
+                },
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
+            },
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": {
+              "type": "AdditionalCostPaidInstead"
+            },
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "duration": null,
+          "description": "Search your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card. Reveal those cards, put them into your hand, then shuffle.\nYou gain 2 life.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    }
+  ],
+  "source_text": "Kicker {2} (You may pay an additional {2} as you cast this spell.)\nSearch your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card. Reveal those cards, put them into your hand, then shuffle.\nYou gain 2 life.",
+  "card_name": "Aang's Journey"
+}

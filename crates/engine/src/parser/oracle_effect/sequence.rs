@@ -7080,7 +7080,8 @@ pub(crate) fn try_parse_same_is_true_continuation(text: &str) -> Option<Vec<Keyw
 /// lowering replicates the antecedent conditional keyword-counter clause
 /// once per keyword. Both phrasings are leaf-level variants of the same
 /// "replicate the prior keyword-counter clause for each listed keyword"
-/// directive, so they share one combinator and one `SpecialClause`. Mirrors
+/// directive, so they share one combinator and one `ReplicatePerKeyword`
+/// disposition kind. Mirrors
 /// `try_parse_same_is_true_continuation`; covers every card of this class, not
 /// Kathril or Super-Adaptoid alone.
 pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Keyword>> {
@@ -7107,11 +7108,11 @@ pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Ke
 /// — an effect-replication directive (The Wedding of River Song). The clause has
 /// no effect of its own; it *would* replicate the immediately-preceding sibling
 /// clause for a targeted opponent. NOT YET IMPLEMENTED: there is no
-/// `SpecialClause::DoesTheSame` variant and no antecedent-cloning lowering. The
+/// `DoesTheSame` clause disposition and no antecedent-cloning lowering. The
 /// chunk loop instead emits a *documented* `Effect::Unimplemented` (keyed by
 /// `does_the_same_unimplemented_name`) for a recognized match — a typed
 /// strict-failure, never a silent misparse. The future fix (a `DoesTheSame`
-/// special clause whose lowering clones the antecedent action and retargets it
+/// disposition whose lowering clones the antecedent action and retargets it
 /// onto the opponent's own objects, CR 608.2d) is tracked as backlog work; the
 /// typed `DoesTheSameSubject` return is preserved so it can slot in cleanly.
 ///

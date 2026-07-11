@@ -17361,7 +17361,7 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
     };
     // A `BranchOtherwise { kind: Bound }` with no prior conditional def is a
     // silent no-op (attaches nowhere) — the same boundary-advancing behavior the
-    // former `SpecialClause::Otherwise` had, so clause 0 needs no condition.
+    // former `Otherwise` special-clause marker had, so clause 0 needs no condition.
     let otherwise_def = Box::new(crate::types::ability::AbilityDefinition::new(
         AbilityKind::Spell,
         draw_one(),

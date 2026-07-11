@@ -510,8 +510,8 @@ fn snapcaster_mage() {
 // ---------------------------------------------------------------------------
 
 // CR 608.2c + CR 701.19c: unconditional "can't be regenerated" rider on a
-// separate sentence after a damage clause (SpecialClause::CantBeRegeneratedRider
-// → ClauseDisposition::Absorb { kind: CantBeRegenerated }). Verified verbatim
+// separate sentence after a damage clause
+// (ClauseDisposition::Absorb { kind: CantBeRegenerated }). Verified verbatim
 // against Scryfall.
 #[test]
 fn incinerate() {
@@ -527,7 +527,7 @@ fn incinerate() {
 
 // CR 614.1a + CR 514.2: standalone "if [it] would die this turn, exile it
 // instead" die-exile rider on a separate sentence after a damage clause
-// (SpecialClause::DieExileRider → ClauseDisposition::Absorb { kind: DieExile }).
+// (ClauseDisposition::Absorb { kind: DieExile }).
 // Verified verbatim against Scryfall (includes the printed Devoid keyword line).
 #[test]
 fn touch_of_the_void() {
@@ -736,6 +736,69 @@ fn conformer_shuriken() {
     );
     insta::assert_json_snapshot!("conformer_shuriken_ir", &ir);
     insta::assert_json_snapshot!("conformer_shuriken_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Search-fold + drawn-this-turn follow-up (U5-M2 capstone parity)
+// ---------------------------------------------------------------------------
+// The last two special-clause markers, now typed dispositions. Oracle text
+// verified verbatim against Scryfall. Reach-guards asserting these texts really
+// land on the new dispositions live in `oracle_effect::tests`
+// (`*_reaches_fold_search_into_else`, `sylvan_library_reaches_drawn_this_turn_followup`) —
+// `ClauseDisposition` is never serialized, so a snapshot alone cannot show which
+// arm ran.
+
+// CR 608.2c + CR 601.2b: FoldSearchIntoElse — an "instead, search your library …"
+// clause whose additional cost was paid (CR 601.2b) is later text modifying the
+// meaning of the earlier search (CR 608.2c). It builds its own def and folds the
+// PRIOR search's trailing search-destination `ChangeZone` into its `else_ability`,
+// then applies its OWN intrinsic `SearchDestination` continuation. Kicker variant.
+#[test]
+fn aangs_journey() {
+    let (ir, lowered) = parse_two_layer(
+        "Kicker {2} (You may pay an additional {2} as you cast this spell.)\nSearch your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card. Reveal those cards, put them into your hand, then shuffle.\nYou gain 2 life.",
+        "Aang's Journey",
+        &["Sorcery"],
+        &["Lesson"],
+    );
+    insta::assert_json_snapshot!("aangs_journey_ir", &ir);
+    insta::assert_json_snapshot!("aangs_journey_lowered", &lowered);
+}
+
+// CR 608.2c + CR 601.2b: FoldSearchIntoElse, second card of the class — the cost
+// is `collect evidence` rather than kicker, and the search reveals (the intrinsic
+// carries `reveal: true`). Same disposition, different cost + intrinsic payload:
+// this is the class, not the card.
+#[test]
+fn analyze_the_pollen() {
+    let (ir, lowered) = parse_two_layer(
+        "As an additional cost to cast this spell, you may collect evidence 8. (Exile cards with total mana value 8 or greater from your graveyard.)\nSearch your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle.",
+        "Analyze the Pollen",
+        &["Sorcery"],
+        &[],
+    );
+    insta::assert_json_snapshot!("analyze_the_pollen_ir", &ir);
+    insta::assert_json_snapshot!("analyze_the_pollen_lowered", &lowered);
+}
+
+// DrawnThisTurnFollowup — "For each of those cards, pay N life or put the card on
+// top of your library" sets the life payment on the prior
+// `ChooseDrawnThisTurnPayOrTopdeck` and emits no def of its own (Sylvan Library).
+// NOTE: this is the only card of its class and it is NOT in the 568-card fixture
+// corpus, so the payment write is additionally pinned by a direct handler test
+// (`drawn_this_turn_followup_overwrites_prior_life_payment`) using a NON-default
+// payment — Sylvan Library's parsed default is already 4, so asserting 4 here
+// would be vacuous.
+#[test]
+fn sylvan_library() {
+    let (ir, lowered) = parse_two_layer(
+        "At the beginning of your draw step, you may draw two additional cards. If you do, choose two cards in your hand drawn this turn. For each of those cards, pay 4 life or put the card on top of your library.",
+        "Sylvan Library",
+        &["Enchantment"],
+        &[],
+    );
+    insta::assert_json_snapshot!("sylvan_library_ir", &ir);
+    insta::assert_json_snapshot!("sylvan_library_lowered", &lowered);
 }
 
 // ---------------------------------------------------------------------------

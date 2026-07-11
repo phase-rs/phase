@@ -150,7 +150,7 @@ use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
-    EffectChainIr, OtherwiseKind, PriorModifier, ReplaceMeaningKind, ReplicateKind, SpecialClause,
+    EffectChainIr, OtherwiseKind, PriorModifier, ReplaceMeaningKind, ReplicateKind,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -24524,7 +24524,8 @@ pub(crate) fn parse_effect_chain_ir(
 
         // CR 702: "The same is true for <keyword list>." — Odric, Lunarch
         // Marshal. Extends the previous `GenericEffect` keyword grant to each
-        // additional keyword. Recorded as a `SpecialClause`; lowering reads
+        // additional keyword. Recorded as a `ReplicatePerKeyword` disposition;
+        // lowering reads
         // the antecedent grant template and emits one `StaticDefinition` per
         // keyword. Requires a prior clause to attach to.
         if !builder.is_empty() {
@@ -24818,7 +24819,7 @@ pub(crate) fn parse_effect_chain_ir(
             // `AbilityDefinition.condition` (evaluated per sub_ability at
             // resolution; skipped when false; the empty-target sub inherits the
             // parent's chosen targets so `TargetMatchesFilter` resolves the damage
-            // target). The SpecialClause lowering arms move the def as-is, so the
+            // target). The `Absorb` lowering arms move the def as-is, so the
             // condition must be stamped on the DEF, not the ClauseIr.
             let conditional_regen_matched = 'conditional_regen: {
                 let regen_body = normalized_text.trim_end_matches('.').trim();
@@ -24945,10 +24946,7 @@ pub(crate) fn parse_effect_chain_ir(
                         normalized_text,
                         placeholder_parsed_clause("drawn_this_turn_pay_or_topdeck_placeholder"),
                         chunk.boundary_after,
-                        ClauseDisposition::Special {
-                            action: SpecialClause::DrawnThisTurnPayOrTopdeck { life_payment },
-                            intrinsic: None,
-                        },
+                        ClauseDisposition::DrawnThisTurnFollowup { life_payment },
                     )
                     .push();
                 continue;
@@ -26614,10 +26612,7 @@ pub(crate) fn parse_effect_chain_ir(
                         normalized_text,
                         clause,
                         chunk.boundary_after,
-                        ClauseDisposition::Special {
-                            action: SpecialClause::AdditionalCostInsteadSearch,
-                            intrinsic: ic,
-                        },
+                        ClauseDisposition::FoldSearchIntoElse { intrinsic: ic },
                     )
                     .condition(condition)
                     .is_optional(is_optional)

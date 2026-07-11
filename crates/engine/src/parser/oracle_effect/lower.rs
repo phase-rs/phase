@@ -27,7 +27,7 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
     ClauseDisposition, ClauseIr, EffectChainIr, OtherwiseKind, PriorModifier, ReplaceMeaningKind,
-    ReplicateKind, SpecialClause,
+    ReplicateKind,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
@@ -1541,7 +1541,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             {
                 // CR 608.2c / CR 614.1a: replace/override the meaning of the prior
                 // emitted def(s); `kind` selects which (moved verbatim from the old
-                // SpecialClause arms).
+                // special-clause arms).
                 match replace_kind {
                     ReplaceMeaningKind::DigAlt(alt_def) => {
                         if let Some(last_def) = defs.pop() {
@@ -1614,58 +1614,57 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                         true
                     }
                 }
-            } else if let ClauseDisposition::Special {
-                action: special,
-                intrinsic,
-            } = &clause_ir.disposition
+            } else if let ClauseDisposition::FoldSearchIntoElse { intrinsic } =
+                &clause_ir.disposition
             {
-                match special {
-                    SpecialClause::AdditionalCostInsteadSearch => {
-                        // Build this clause's def and fold else_ability from the trailing clause.
-                        // The trailing ChangeZone was produced by the previous SearchLibrary's
-                        // intrinsic continuation (SearchDestination).
-                        let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
-                        let effective_cond = clause_ir
-                            .condition
-                            .as_ref()
-                            .or(clause_ir.parsed.condition.as_ref());
-                        if let Some(cond) = effective_cond {
-                            def = def.condition(cond.clone());
+                // CR 608.2c + CR 601.2b: later text ("if this spell was kicked, instead
+                // search …") modifies the meaning of the earlier search, gated on an
+                // additional cost announced at cast. Build this clause's def and fold
+                // else_ability from the trailing clause. The trailing ChangeZone was
+                // produced by the previous SearchLibrary's intrinsic continuation
+                // (SearchDestination).
+                let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+                let effective_cond = clause_ir
+                    .condition
+                    .as_ref()
+                    .or(clause_ir.parsed.condition.as_ref());
+                if let Some(cond) = effective_cond {
+                    def = def.condition(cond.clone());
+                }
+                // Pop trailing search-destination ChangeZone and attach as else_ability
+                if defs.len() >= 2 {
+                    let trailing_is_search_destination = matches!(
+                        &*defs.last().unwrap().effect,
+                        Effect::ChangeZone {
+                            origin: Some(Zone::Library),
+                            destination: Zone::Hand,
+                            ..
                         }
-                        // Pop trailing search-destination ChangeZone and attach as else_ability
-                        if defs.len() >= 2 {
-                            let trailing_is_search_destination = matches!(
-                                &*defs.last().unwrap().effect,
-                                Effect::ChangeZone {
-                                    origin: Some(Zone::Library),
-                                    destination: Zone::Hand,
-                                    ..
-                                }
-                            );
-                            if trailing_is_search_destination {
-                                def.else_ability = Some(Box::new(defs.pop().unwrap()));
-                            }
-                        }
-                        defs.push(def);
-                        // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
-                        if let Some(continuation) = intrinsic {
-                            apply_clause_continuation(&mut defs, continuation.clone(), kind);
-                        }
-                        true
-                    }
-                    SpecialClause::DrawnThisTurnPayOrTopdeck { life_payment } => {
-                        if let Some(last_def) = defs.last_mut() {
-                            if let Effect::ChooseDrawnThisTurnPayOrTopdeck {
-                                life_payment: current,
-                                ..
-                            } = &mut *last_def.effect
-                            {
-                                *current = life_payment.clone();
-                            }
-                        }
-                        true
+                    );
+                    if trailing_is_search_destination {
+                        def.else_ability = Some(Box::new(defs.pop().unwrap()));
                     }
                 }
+                defs.push(def);
+                // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
+                if let Some(continuation) = intrinsic {
+                    apply_clause_continuation(&mut defs, continuation.clone(), kind);
+                }
+                true
+            } else if let ClauseDisposition::DrawnThisTurnFollowup { life_payment } =
+                &clause_ir.disposition
+            {
+                // Set the life payment on the prior drawn-this-turn choice; emits no def.
+                if let Some(last_def) = defs.last_mut() {
+                    if let Effect::ChooseDrawnThisTurnPayOrTopdeck {
+                        life_payment: current,
+                        ..
+                    } = &mut *last_def.effect
+                    {
+                        *current = life_payment.clone();
+                    }
+                }
+                true
             } else {
                 false
             }
