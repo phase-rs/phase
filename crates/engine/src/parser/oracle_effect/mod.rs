@@ -1,4 +1,5 @@
 pub(crate) mod animation;
+pub(super) mod assembly;
 pub(crate) mod become_copy_except;
 pub(crate) mod conditions;
 pub(crate) mod counter;
