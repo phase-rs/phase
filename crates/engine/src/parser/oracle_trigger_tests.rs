@@ -17283,37 +17283,30 @@ fn trigger_copy_token_suffix_condition_attaches_otherwise() {
 #[test]
 fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
     use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
-    use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
+    use crate::parser::oracle_ir::effect_chain::{
+        ClauseDisposition, ClauseIrBuilder, EffectChainIr, SpecialClause,
+    };
     use crate::types::ability::SubAbilityLink;
 
-    fn make_clause(
+    fn push_clause(
+        builder: &mut ClauseIrBuilder,
         effect: Effect,
         boundary: Option<ClauseBoundary>,
         special: Option<SpecialClause>,
-    ) -> ClauseIr {
-        ClauseIr {
-            parsed: parsed_clause(effect),
-            boundary,
-            condition: None,
-            is_optional: false,
-            opponent_may_scope: None,
-            repeat_for: None,
-            player_scope: None,
-            starting_with: None,
-            delayed_condition: None,
-            prefix_delayed_condition: None,
-            intrinsic_continuation: None,
-            followup_continuation: None,
-            absorbed_by_followup: false,
-            multi_target: None,
-            where_x_expression: None,
-            is_otherwise: false,
-            unless_pay: None,
-            special,
-            source_text: String::new(),
-            target_selection_mode: Default::default(),
-            target_chooser: None,
-        }
+    ) {
+        let disposition = match special {
+            Some(action) => ClauseDisposition::Special {
+                action,
+                intrinsic: None,
+            },
+            None => ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        };
+        builder
+            .clause("", parsed_clause(effect), boundary, disposition)
+            .push();
     }
 
     let draw_one = || Effect::Draw {
@@ -17327,19 +17320,20 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
         draw_one(),
     ));
 
+    let mut builder = ClauseIrBuilder::new("");
+    // clause 0: normal, trailing boundary = Comma
+    push_clause(&mut builder, draw_one(), Some(ClauseBoundary::Comma), None);
+    // clause 1: SpecialClause::Otherwise, trailing boundary = Sentence
+    push_clause(
+        &mut builder,
+        draw_one(),
+        Some(ClauseBoundary::Sentence),
+        Some(SpecialClause::Otherwise(otherwise_def)),
+    );
+    // clause 2: normal — must stamp sub_link from clause 1's Sentence
+    push_clause(&mut builder, draw_one(), None, None);
     let ir = EffectChainIr {
-        clauses: vec![
-            // clause 0: normal, trailing boundary = Comma
-            make_clause(draw_one(), Some(ClauseBoundary::Comma), None),
-            // clause 1: SpecialClause::Otherwise, trailing boundary = Sentence
-            make_clause(
-                draw_one(),
-                Some(ClauseBoundary::Sentence),
-                Some(SpecialClause::Otherwise(otherwise_def)),
-            ),
-            // clause 2: normal — must stamp sub_link from clause 1's Sentence
-            make_clause(draw_one(), None, None),
-        ],
+        clauses: builder.finish(),
         kind: AbilityKind::Spell,
         chain_rounding: None,
         actor: None,

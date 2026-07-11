@@ -25,7 +25,9 @@ use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
+use crate::parser::oracle_ir::effect_chain::{
+    ClauseDisposition, ClauseIr, EffectChainIr, SpecialClause,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, CastFromZoneDriver, CastingPermission, Comparator, ConjureSource,
@@ -893,7 +895,11 @@ fn is_spend_mana_as_any_color_rider(clause: &ClauseIr) -> bool {
         return false;
     }
 
-    let lower = clause.source_text.to_ascii_lowercase();
+    let lower = clause
+        .source
+        .fragment()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let parsed = all_consuming((
         opt(alt((
             tag::<_, _, OracleError<'_>>("if you cast a spell this way, "),
@@ -1002,15 +1008,23 @@ fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
 /// printed increase (`{1}`, `{2}`, …); the mana symbols are case-insensitive
 /// digits in the common generic case.
 fn cast_cost_raise_rider(clause: &ClauseIr) -> Option<ManaCost> {
-    let lower = clause.source_text.to_ascii_lowercase();
-    nom_on_lower(clause.source_text.trim(), lower.trim(), |i| {
-        let (i, _) = tag("each spell cast this way costs ").parse(i)?;
-        let (i, cost) = nom_primitives::parse_mana_cost(i)?;
-        let (i, _) = tag(" more to cast").parse(i)?;
-        let (i, _) = opt(tag(".")).parse(i)?;
-        eof(i)?;
-        Ok((i, cost))
-    })
+    let lower = clause
+        .source
+        .fragment()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    nom_on_lower(
+        clause.source.fragment().unwrap_or_default().trim(),
+        lower.trim(),
+        |i| {
+            let (i, _) = tag("each spell cast this way costs ").parse(i)?;
+            let (i, cost) = nom_primitives::parse_mana_cost(i)?;
+            let (i, _) = tag(" more to cast").parse(i)?;
+            let (i, _) = opt(tag(".")).parse(i)?;
+            eof(i)?;
+            Ok((i, cost))
+        },
+    )
     .map(|(cost, _)| cost)
 }
 
@@ -1028,7 +1042,11 @@ fn parses_land_enters_tapped_rider(input: &str) -> bool {
 /// preceding `PlayFromExile` grant ("this way"), so it folds into the grant's
 /// `land_enter_tapped` rather than emitting a board-wide ETB-tapped replacement.
 fn is_land_enters_tapped_rider(clause: &ClauseIr) -> bool {
-    let lower = clause.source_text.to_ascii_lowercase();
+    let lower = clause
+        .source
+        .fragment()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let trimmed = lower.trim().trim_end_matches('.').trim();
     parses_land_enters_tapped_rider(trimmed)
 }
@@ -1048,10 +1066,16 @@ fn parse_until_next_same_source_exile_invalidation(input: &str) -> OracleResult<
 }
 
 fn is_until_next_same_source_exile_rider(clause: &ClauseIr) -> bool {
-    let lower = clause.source_text.to_ascii_lowercase();
-    nom_on_lower(clause.source_text.trim(), lower.trim(), |i| {
-        all_consuming(parse_until_next_same_source_exile_invalidation).parse(i)
-    })
+    let lower = clause
+        .source
+        .fragment()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    nom_on_lower(
+        clause.source.fragment().unwrap_or_default().trim(),
+        lower.trim(),
+        |i| all_consuming(parse_until_next_same_source_exile_invalidation).parse(i),
+    )
     .is_some()
 }
 
@@ -1311,14 +1335,19 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // evaluates to `true`; the boundary advance below then runs uniformly so
         // a following normal clause stamps `sub_link` from the correct boundary.
         let handled_as_special: bool = {
-            if clause_ir.absorbed_by_followup {
-                // Apply the followup continuation to the defs built so far.
-                if let Some(ref continuation) = clause_ir.followup_continuation {
+            if matches!(clause_ir.disposition, ClauseDisposition::Continue { .. }) {
+                // Apply the Continue clause's continuation to the defs built so far
+                // (formerly the absorbed `followup_continuation` path).
+                if let Some(continuation) = clause_ir.disposition.followup() {
                     apply_clause_continuation(&mut defs, continuation.clone(), kind);
                     apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
                 }
                 true
-            } else if let Some(ref special) = clause_ir.special {
+            } else if let ClauseDisposition::Special {
+                action: special,
+                intrinsic,
+            } = &clause_ir.disposition
+            {
                 match special {
                     SpecialClause::AltCostRider(cost) => {
                         attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost.clone());
@@ -1597,7 +1626,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                         }
                         defs.push(def);
                         // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
-                        if let Some(ref continuation) = clause_ir.intrinsic_continuation {
+                        if let Some(continuation) = intrinsic {
                             apply_clause_continuation(&mut defs, continuation.clone(), kind);
                         }
                         true
@@ -1663,9 +1692,13 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // before the generic chain assembly mistakes a `PutAtLibraryPosition{
         // Bottom}` for the Sanwell free-cast bottom-cleanup. Exile is left to its
         // existing clean path (the helper declines it).
-        if let Some(dest) =
-            parse_spell_graveyard_replacement_rider(&clause_ir.source_text.to_lowercase())
-        {
+        if let Some(dest) = parse_spell_graveyard_replacement_rider(
+            &clause_ir
+                .source
+                .fragment()
+                .unwrap_or_default()
+                .to_lowercase(),
+        ) {
             if attach_graveyard_redirect_rider_to_prior_cast_from_zone(&mut defs, dest) {
                 prev_boundary = clause_ir.boundary;
                 continue;
@@ -1699,8 +1732,8 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         }
 
         // Non-absorbed, non-special followup continuation — apply it to the
-        // previous defs before building this clause's def.
-        if let Some(ref continuation) = clause_ir.followup_continuation {
+        // previous defs before building this clause's def (`Emit.followup`).
+        if let Some(continuation) = clause_ir.disposition.followup() {
             apply_clause_continuation(&mut defs, continuation.clone(), kind);
             apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
         }
@@ -1719,7 +1752,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                 ..
             }
         ) {
-            def.description = Some(clause_ir.source_text.clone());
+            def.description = Some(clause_ir.source.fragment().unwrap_or_default().to_string());
         }
         // CR 608.2c: This clause's link to its parent = the boundary that
         // SEPARATED the previous clause from this one. A `Sentence` boundary
@@ -1798,7 +1831,11 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             );
         let is_pay_to_end_effect_termination =
             crate::parser::clause_shell::is_you_may_pay_to_end_effect_phrase(
-                &clause_ir.source_text.to_ascii_lowercase(),
+                &clause_ir
+                    .source
+                    .fragment()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase(),
             );
         if clause_ir.is_optional
             && !matches!(&clause_ir.parsed.effect, Effect::SearchOutsideGame { .. })
@@ -1947,26 +1984,40 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         }
         // CR 115.1d: Apply multi-target spec — prefer explicit choose-count text,
         // then strip result, then clause-level propagation.
-        if let Some(spec) = extract_exact_target_multi_target(&clause_ir.source_text) {
+        if let Some(spec) =
+            extract_exact_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
+        {
             def = def.multi_target(spec);
-        } else if let Some(spec) = extract_bounded_target_multi_target(&clause_ir.source_text) {
+        } else if let Some(spec) =
+            extract_bounded_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
+        {
             def = def.multi_target(spec);
-        } else if let Some(spec) = extract_optional_target_multi_target(&clause_ir.source_text) {
+        } else if let Some(spec) =
+            extract_optional_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
+        {
             def = def.multi_target(spec);
-        } else if let Some(spec) = extract_verb_up_to_multi_target(&clause_ir.source_text) {
+        } else if let Some(spec) =
+            extract_verb_up_to_multi_target(clause_ir.source.fragment().unwrap_or_default())
+        {
             def = def.multi_target(spec);
         } else if let Some(ref spec) = clause_ir.multi_target {
             def = def.multi_target(spec.clone());
         } else if let Some(ref spec) = clause_ir.parsed.multi_target {
             def = def.multi_target(spec.clone());
         }
-        if parse_controlled_by_different_players_target_constraint(&clause_ir.source_text) {
+        if parse_controlled_by_different_players_target_constraint(
+            clause_ir.source.fragment().unwrap_or_default(),
+        ) {
             def = def.target_constraint(TargetSelectionConstraint::DifferentObjectControllers);
         }
-        if let Some(constraint) = parse_same_zone_owner_target_constraint(&clause_ir.source_text) {
+        if let Some(constraint) =
+            parse_same_zone_owner_target_constraint(clause_ir.source.fragment().unwrap_or_default())
+        {
             def = def.target_constraint(constraint);
         }
-        if let Some(constraint) = parse_total_mana_value_target_constraint(&clause_ir.source_text) {
+        if let Some(constraint) = parse_total_mana_value_target_constraint(
+            clause_ir.source.fragment().unwrap_or_default(),
+        ) {
             def = def.target_constraint(constraint);
         }
         // CR 601.2d: Propagate distribute flag.
@@ -2023,7 +2074,11 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // CR 603.7: Cross-clause pronoun → mark uses_tracked_set on delayed trigger
         // and bind direct follow-up ParentTarget references to the affected set.
         if !current_defs.is_empty() {
-            let source_text_lower = clause_ir.source_text.to_lowercase();
+            let source_text_lower = clause_ir
+                .source
+                .fragment()
+                .unwrap_or_default()
+                .to_lowercase();
             // CR 603.7: Scan ALL prior clauses for a tracked-set publisher — an
             // intermediate non-publishing clause (e.g. Investigate) must not
             // shadow an earlier exile clause. Example: Disorder in the Court
@@ -2074,8 +2129,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
 
         defs.extend(current_defs);
 
-        // Apply intrinsic continuation after extending defs with current clause's defs.
-        if let Some(ref continuation) = clause_ir.intrinsic_continuation {
+        // Apply intrinsic continuation after extending defs with current clause's
+        // defs (`Emit.intrinsic`).
+        if let Some(continuation) = clause_ir.disposition.intrinsic() {
             apply_clause_continuation(&mut defs, continuation.clone(), kind);
             apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
         }
@@ -2599,7 +2655,11 @@ fn filter_mentions_exiled_by_source(filter: &TargetFilter) -> bool {
 
 fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
     if let Effect::PutCounter { target, .. } = &clause_ir.parsed.effect {
-        let lower = clause_ir.source_text.to_ascii_lowercase();
+        let lower = clause_ir
+            .source
+            .fragment()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         if !nom_primitives::scan_contains(&lower, "target ")
             && target.contains_source_attachment_host()
         {
@@ -2607,7 +2667,11 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
         }
     }
     if matches!(clause_ir.parsed.effect, Effect::MultiplyCounter { .. }) {
-        let lower = clause_ir.source_text.to_ascii_lowercase();
+        let lower = clause_ir
+            .source
+            .fragment()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         if !nom_primitives::scan_contains(&lower, "target ") {
             return TargetChoiceTiming::Resolution;
         }
@@ -2622,7 +2686,11 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
         }
     ) && clause_ir.multi_target.is_some()
     {
-        let lower = clause_ir.source_text.to_ascii_lowercase();
+        let lower = clause_ir
+            .source
+            .fragment()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         if !nom_primitives::scan_contains(&lower, "target ") {
             return TargetChoiceTiming::Resolution;
         }
@@ -2639,7 +2707,11 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
         return TargetChoiceTiming::Stack;
     }
 
-    let lower = clause_ir.source_text.to_ascii_lowercase();
+    let lower = clause_ir
+        .source
+        .fragment()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if nom_primitives::scan_contains(&lower, "target ") {
         TargetChoiceTiming::Stack
     } else {

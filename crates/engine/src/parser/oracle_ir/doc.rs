@@ -84,6 +84,23 @@ pub(crate) enum SpanPrecision {
     ///
     /// UNIT-3B DEBT — emitted only by `OracleSourceSpan::whole_document`.
     WholeDocument,
+    /// The span's byte range is exact **within the effect chain** it was parsed
+    /// from, but NOT card-absolute: it is an offset into a single
+    /// `parse_effect_chain_ir` invocation's text, not into the whole Oracle
+    /// document. Minted by the item-scoped `ClauseIrBuilder`, whose local
+    /// allocator is seeded over the chain text because the document allocator is
+    /// not yet threaded through `ParseContext` (same wall `AbilityIr` documents).
+    ///
+    /// It is HONEST, not fabricated: the offset is truthful relative to the
+    /// chain, and the verbatim `fragment` is retained so a later
+    /// allocator-threading unit can upgrade it to a card-absolute
+    /// `SpanPrecision::Exact` by adding the chain's base offset — or, if
+    /// preprocessing was not offset-linear, by re-locating the fragment in the
+    /// card text. A renderer must NOT print `first_line`/`start_byte` as a
+    /// card-absolute position, exactly as for `WholeDocument`.
+    ///
+    /// U5 DEBT — upgrades to `Exact` when the allocator is threaded.
+    ChainRelative,
 }
 
 /// Position of a unit within the original Oracle text, plus how precisely that
@@ -159,12 +176,57 @@ impl OracleSourceSpan {
         }
     }
 
-    /// True when this span's bounds locate the unit exactly. A position renderer
-    /// must consult this before printing a line number or byte offset.
+    /// A span whose byte range is exact **within one effect chain** but not
+    /// card-absolute. See `SpanPrecision::ChainRelative`. Minted by
+    /// `ClauseIrBuilder` for per-clause provenance; carries a verbatim fragment
+    /// (the guard in `check_fragment_precision` requires it) so the eventual
+    /// allocator-threading unit can upgrade it to `Exact`.
+    pub(crate) fn chain_relative(
+        first_line: usize,
+        last_line: usize,
+        start_byte: usize,
+        end_byte: usize,
+        ordinal_within_span: u32,
+    ) -> Self {
+        Self {
+            first_line,
+            last_line,
+            start_byte,
+            end_byte,
+            precision: SpanPrecision::ChainRelative,
+            ordinal_within_span,
+        }
+    }
+
+    /// True when this span's bounds locate the unit exactly **card-absolutely**.
+    /// A position renderer must consult this before printing a line number or
+    /// byte offset as a card position. `ChainRelative` is deliberately NOT exact:
+    /// its offsets are truthful only within a single chain.
     ///
-    /// Live in production today: `check_fragment_precision` <- `emit`.
+    /// The fragment-precision guard now consults the widened `carries_fragment`
+    /// (which admits `ChainRelative`), so this exact-only accessor has no
+    /// production caller in M1 — it is retained solely as the card-absolute
+    /// distinction the precision-tier tests assert on, hence `#[cfg(test)]`
+    /// rather than a dead-code allow.
+    #[cfg(test)]
     pub(crate) fn is_exact(&self) -> bool {
         matches!(self.precision, SpanPrecision::Exact)
+    }
+
+    /// True when this precision tier is allowed to carry a verbatim `fragment`.
+    ///
+    /// Both `Exact` (card-absolute) and `ChainRelative` (chain-local honest)
+    /// address a concrete byte range and therefore have a real verbatim
+    /// fragment; only `WholeDocument`, whose sole honest "fragment" would be the
+    /// entire card, must not. This is the single authority the fail-closed
+    /// `check_fragment_precision` guard consults — widened (not loosened) from
+    /// `is_exact` so the ChainRelative tier can carry its fragment without
+    /// reopening the whole-document-fragment hole `SpanPrecision` closed.
+    pub(crate) fn carries_fragment(&self) -> bool {
+        matches!(
+            self.precision,
+            SpanPrecision::Exact | SpanPrecision::ChainRelative
+        )
     }
 
     /// True when `self` and `other` cover overlapping bytes *and* claim the same
@@ -235,7 +297,7 @@ impl OracleUnitSource {
     /// A unit whose fragment presence contradicts its span precision is a parser
     /// contract violation, not an Oracle-text problem. Fail closed.
     fn check_fragment_precision(&self) -> Result<(), DocBuilderError> {
-        if self.fragment.is_some() == self.span.is_exact() {
+        if self.fragment.is_some() == self.span.carries_fragment() {
             Ok(())
         } else {
             Err(DocBuilderError::FragmentPrecisionMismatch {

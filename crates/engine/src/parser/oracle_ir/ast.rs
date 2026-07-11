@@ -23,6 +23,20 @@ pub(crate) struct ParsedEffectClause {
     pub(crate) effect: Effect,
     pub(crate) duration: Option<Duration>,
     /// Compound "and" remainder parsed into a sub_ability chain.
+    ///
+    /// **#13 / gate-9 residual (DEFERRED, not closed by Unit 5).** This holds a
+    /// fully-lowered `AbilityDefinition` with NO clause identity of its own. It is
+    /// constructed deep in imperative/subject parsing (e.g. `imperative.rs`), long
+    /// before the enclosing clause reaches `ClauseIrBuilder`, so no `ClauseId` is
+    /// in scope at construction. The enclosing `ClauseIr` IS addressed (it carries
+    /// a `ClauseId` + `OracleUnitSource`), so this nested def is covered
+    /// transitively by its parent clause's id — but it has no INDEPENDENT clause
+    /// identity. Minting one requires U6's `ClauseId`-keyed assembly arena
+    /// (Plan 01 §6, line 823), which owns the nested sub-clause id-space; a bespoke
+    /// nested id-space here would preempt that decision. The `rg 'ClauseIr {'`
+    /// removal gate does not cover this field (it holds an `AbilityDefinition`, not
+    /// a `ClauseIr`), so this doc comment is the honest marker: independent
+    /// sub-clause identity upgrades in U6.
     pub(crate) sub_ability: Option<Box<AbilityDefinition>>,
     /// CR 601.2d: When set, this effect requires distribution among targets at cast time.
     pub(crate) distribute: Option<DistributionUnit>,
@@ -1595,6 +1609,22 @@ pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
         optional: false,
         unless_pay: None,
     }
+}
+
+/// A `.parsed` placeholder for a clause whose real semantics live in its
+/// `ClauseDisposition` (e.g. a `Special` action), not in its effect. Distinct
+/// from `Effect::unimplemented`: it carries no fragment (`description: None`)
+/// because it marks an intentional structural non-effect, not an unparsed gap —
+/// a `Some(fragment)` here would leak into the coverage report as a false parse
+/// gap. `name` is a stable snake_case pattern-class key.
+pub(crate) fn placeholder_parsed_clause(name: &str) -> ParsedEffectClause {
+    // Structural placeholder for a disposition-carried clause; the None fragment is
+    // load-bearing (a Some(_) would surface as a false parse gap in coverage).
+    // allow-noncombinator: intentional Effect::Unimplemented placeholder, not parse dispatch.
+    parsed_clause(Effect::Unimplemented {
+        name: name.to_string(),
+        description: None,
+    })
 }
 
 pub(crate) fn with_clause_duration(
