@@ -242,6 +242,89 @@ fn the_kingpin_of_crime_full_card_has_no_unimplemented() {
     }
 }
 
+/// CR 601.2c + CR 611.2c (#4751, Tail Swipe / Joust / Blizzard Brawl): the
+/// two-target fight class — "Choose target creature you control and target
+/// creature you don't control. [buff the you-control creature]. Then those
+/// creatures fight each other." — must NOT drop the second target. The buff verb
+/// ("gets +1/+1") lives in a LATER sentence, so `starts_target_continuous_clause`
+/// previously scanned across the period and mis-split the two-target declaration
+/// at its "and", leaving `Effect::unimplemented("target", "target creature you
+/// don't control")`. Both target slots must survive AND the buff must bind slot 0
+/// (the you-control creature), not the whole board.
+#[test]
+fn two_target_fight_pump_keeps_both_slots_and_buffs_slot_zero() {
+    fn collect(ability: &AbilityDefinition, out: &mut Vec<Effect>) {
+        out.push((*ability.effect).clone());
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            collect(sub, out);
+        }
+        if let Some(els) = ability.else_ability.as_deref() {
+            collect(els, out);
+        }
+    }
+
+    for (text, ty) in [
+        (
+            "Choose target creature you control and target creature you don't control. \
+             If you cast this spell during your main phase, the creature you control gets \
+             +1/+1 until end of turn. Then those creatures fight each other.",
+            "Sorcery",
+        ),
+        (
+            "Choose target creature you control and target creature you don't control. \
+             The creature you control gets +2/+1 until end of turn if it's a Knight. \
+             Then those creatures fight each other.",
+            "Sorcery",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, "Fight Card", &[], &[ty.to_string()], &[]);
+        let ability = parsed
+            .abilities
+            .first()
+            .unwrap_or_else(|| panic!("expected a spell ability for: {text}"));
+        assert!(
+            !ability_chain_has_unimplemented(ability),
+            "two-target fight chain dropped a slot to Unimplemented: {ability:#?}"
+        );
+
+        let mut effects = Vec::new();
+        collect(ability, &mut effects);
+
+        // Both target slots announced: you-control (A) and you-don't-control (B).
+        let controllers: Vec<Option<ControllerRef>> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(tf),
+                } => Some(tf.controller.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            controllers.contains(&Some(ControllerRef::You)),
+            "missing the you-control target slot: {controllers:?}"
+        );
+        assert!(
+            controllers
+                .iter()
+                .any(|c| matches!(c, Some(ControllerRef::Opponent))),
+            "missing the opponent target slot: {controllers:?}"
+        );
+
+        // CR 611.2c: the "the creature you control gets +N/+M" buff binds slot 0,
+        // never an unscoped `Any`/`ParentTarget` whole-board target.
+        let pump_target = effects.iter().find_map(|e| match e {
+            Effect::Pump { target, .. } => Some(target.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            pump_target,
+            Some(TargetFilter::ParentTargetSlot { index: 0 }),
+            "the pump must buff the first-declared you-control creature (slot 0)"
+        );
+    }
+}
+
 /// Recursively walk an ability chain (root effect + `sub_ability` + `else_ability`)
 /// for any `Effect::Unimplemented` node — the coverage-gap sentinel the one-shot
 /// effect pipeline emits when a clause matches no combinator.
