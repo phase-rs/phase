@@ -3568,8 +3568,9 @@ pub(crate) fn priority_actions_with_probe(
                                 Some(
                                     crate::types::ability::ActivationRestriction::OnlyOnceEachTurn
                                 )
-                            ) && state.crew_activated_this_turn.contains(&obj_id)
-                            {
+                            ) && crate::game::engine::crew_activated_this_turn_contains(
+                                state, obj_id,
+                            ) {
                                 break;
                             }
                             // CR 702.122a: a Vehicle can't crew itself, so exclude

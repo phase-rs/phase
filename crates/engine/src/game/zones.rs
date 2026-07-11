@@ -2,7 +2,9 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 #[cfg(test)]
 use crate::types::game_state::ZoneChangeRecord;
-use crate::types::game_state::{GameState, ZoneChangeCombatStatus};
+use crate::types::game_state::{
+    GameState, ResolutionSourceRelatch, StackEntry, ZoneChangeCombatStatus,
+};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
@@ -546,6 +548,54 @@ pub(crate) fn record_descend_on_graveyard_arrival(
     }
 }
 
+/// CR 400.7j (+ CR 400.7g/h cast hop): if the currently-resolving ability just
+/// moved its OWN source (`object_id == resolving ability's source_id`), record the
+/// from→to incarnation so `source_is_current` can re-find the moved object after
+/// the all-zone bump advanced its epoch. Chains across multiple self-moves in one
+/// resolution: the first self-move sets `original_stamp` (bound to the ability's
+/// captured incarnation); a chained self-move keeps `original_stamp` fixed and only
+/// advances `current_incarnation`. A foreign object, or a move whose pre-move
+/// incarnation matches neither the captured stamp nor the record's current value,
+/// never writes. Call AFTER the bump, passing the pre-bump and post-bump values.
+pub(crate) fn record_resolution_source_relatch(
+    state: &mut GameState,
+    object_id: ObjectId,
+    pre_move_incarnation: u64,
+    new_incarnation: u64,
+) {
+    // A faithful READ of the resolving ability's captured source identity. The
+    // clone is disconnected from the local resolving borrow, so it cannot be the
+    // carrier — the record on `state` is (consumed inside `source_is_current`).
+    let Some((source_id, Some(captured))) = state
+        .resolving_stack_entry
+        .as_ref()
+        .and_then(StackEntry::ability)
+        .map(|a| (a.source_id, a.source_incarnation))
+    else {
+        return;
+    };
+    if object_id != source_id {
+        return;
+    }
+    // First self-move: pre-move value must equal the ability's captured stamp.
+    let matches_first = pre_move_incarnation == captured;
+    // Chained self-move: pre-move value must equal the record's current value.
+    let chained = state
+        .resolution_source_relatch
+        .as_ref()
+        .filter(|r| r.object_id == object_id && r.current_incarnation == pre_move_incarnation);
+    if matches_first || chained.is_some() {
+        // Keep `original_stamp` fixed across chained hops; the CR 400.7j identity
+        // is the FIRST captured stamp, not each intermediate incarnation.
+        let original_stamp = chained.map_or(captured, |r| r.original_stamp);
+        state.resolution_source_relatch = Some(ResolutionSourceRelatch {
+            object_id,
+            original_stamp,
+            current_incarnation: new_incarnation,
+        });
+    }
+}
+
 /// CR 400.7: Move an object to a new zone. An object that moves to a new zone becomes a new object.
 pub fn move_to_zone(
     state: &mut GameState,
@@ -705,6 +755,10 @@ pub fn move_to_zone(
     let entry_timestamp = (to == Zone::Battlefield).then(|| state.next_timestamp());
 
     let obj_mut = state.objects.get_mut(&object_id).unwrap();
+    // CR 400.7j: capture the pre-bump incarnation BEFORE any bump (the battlefield
+    // arm bumps inside `reset_for_battlefield_entry`, which has no state access) so
+    // the resolution re-latch can chain the source across a self-move.
+    let pre_bump_incarnation = obj_mut.incarnation;
     obj_mut.zone = to;
 
     if to == Zone::Battlefield {
@@ -717,6 +771,15 @@ pub fn move_to_zone(
         // distinguishable from the original entrant when an ETB intervening-if is
         // rechecked at resolution (CR 603.4 + CR 608.2h).
         zone_change_record.entered_incarnation = Some(obj_mut.incarnation);
+    } else if from != to {
+        // CR 400.7: a move FROM one zone TO another makes a new object. The
+        // `from != to` guard generalizes the BF→BF no-op guard (upstream) to every
+        // same-zone case (Exile→Exile, GY→GY) that can reach this else-arm.
+        obj_mut.bump_incarnation();
+    }
+    let new_incarnation = obj_mut.incarnation;
+    if new_incarnation != pre_bump_incarnation {
+        record_resolution_source_relatch(state, object_id, pre_bump_incarnation, new_incarnation);
     }
 
     // CR 700.11: a permanent card was put into its owner's graveyard.
@@ -1048,8 +1111,20 @@ pub fn move_to_library_at_index(
         None => player.library.push_back(object_id),
     }
 
+    let mut bump: Option<(u64, u64)> = None;
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
+        let pre_bump_incarnation = obj_mut.incarnation;
         obj_mut.zone = Zone::Library;
+        // CR 400.7: a move INTO the library from any other zone makes a new object.
+        // A within-Library reposition (reveal / scry bottom placement / look-at-top-N,
+        // CR 701.20b) is zero moves — `from == Library` here — and must NOT bump.
+        if from != Zone::Library {
+            obj_mut.bump_incarnation();
+            bump = Some((pre_bump_incarnation, obj_mut.incarnation));
+        }
+    }
+    if let Some((pre, new)) = bump {
+        record_resolution_source_relatch(state, object_id, pre, new);
     }
 
     let turn_zone_change_index =

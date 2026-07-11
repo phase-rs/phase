@@ -550,6 +550,7 @@ mod msh_wave5a_group1_classifier;
 mod msh_wave5a_group2_conditions;
 mod multi_upkeep_triggers_suspend;
 mod mycoloth_upkeep_trigger;
+mod myrkul_crew_phase1_incarnation;
 mod mystic_forge_regression;
 mod narset_jeskai_waymaster_draw_spells_cast;
 mod necrodominance_pay_any_life_draw;

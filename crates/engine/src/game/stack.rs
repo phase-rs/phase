@@ -189,6 +189,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // spell has left the stack) — so it is cleared here at the start of the
     // *next* resolution rather than at the end of this one.
     state.resolving_stack_entry = None;
+    // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
+    // `resolving_stack_entry` so it never leaks into the next resolution.
+    state.resolution_source_relatch = None;
 
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
     let entry = match state.stack.pop_back() {
@@ -2130,6 +2133,8 @@ fn resolve_batched(
     let consumed = plan.consumed();
     crate::game::perf_counters::record_stack_batched_entries(consumed);
     state.resolving_stack_entry = None;
+    // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
+    state.resolution_source_relatch = None;
 
     // Pop the run's entries (resolution order is back-to-front), cleaning the
     // per-entry side tables exactly as `resolve_top` does for a single entry.
@@ -2456,6 +2461,8 @@ fn resolve_inert_noop_batch(
     events: &mut Vec<GameEvent>,
 ) -> u32 {
     state.resolving_stack_entry = None;
+    // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
+    state.resolution_source_relatch = None;
     for _ in 0..consumed {
         let Some(entry) = state.stack.pop_back() else {
             break;

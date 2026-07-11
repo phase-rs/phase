@@ -100,6 +100,8 @@ fn park_search_observer_triggers(
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
     {
         state.resolving_stack_entry = None;
+        // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
+        state.resolution_source_relatch = None;
     }
     ResolutionChoiceOutcome::WaitingForWithParkedObservers(state.waiting_for.clone())
 }

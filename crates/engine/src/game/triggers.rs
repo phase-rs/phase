@@ -3487,6 +3487,20 @@ enum TriggerOrderingDisposition {
 pub(crate) fn normalize_ability_identity(ability: &mut ResolvedAbility) {
     ability.source_id = ObjectId(0);
     ability.source_card_id = None;
+    // CR 400.7: `source_incarnation` is a source-identity field, the same identity
+    // class as `source_id`/`source_card_id`, so this single "strip ability source
+    // identity" authority must zero it too. This keeps every consumer consistent:
+    //   * CR 104.4b + CR 732.4 (mandatory-loop detection): the stack comparators
+    //     `analysis::resource::normalized_stack_entries` (the growing-cascade covering
+    //     pair) and the `normalize_for_loop` ring snapshots must agree on
+    //     `source_incarnation`. Without this, a normalized ring snapshot (`None`) would
+    //     fail to match a live entry (`Some(N)`) once the all-zone incarnation bump
+    //     advances the epoch, so a mandatory loop whose source cycles zones would no
+    //     longer be recognized as the same repeating state.
+    //   * CR 603.3b (trigger auto-ordering): `group_is_order_independent` compares two
+    //     structurally-identical triggers for order-independence — which is correct
+    //     regardless of which source incarnation each was captured at.
+    ability.source_incarnation = None;
     if let Some(sub) = ability.sub_ability.as_mut() {
         normalize_ability_identity(sub);
     }

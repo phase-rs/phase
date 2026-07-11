@@ -250,7 +250,7 @@ fn crew_once_per_turn_vehicle_rejects_second_activation_same_turn() {
     )
     .unwrap();
     assert!(
-        state.crew_activated_this_turn.contains(&vehicle_id),
+        crate::game::engine::crew_activated_this_turn_contains(&state, vehicle_id),
         "first crew records the vehicle as crewed this turn"
     );
 
@@ -269,6 +269,42 @@ fn crew_once_per_turn_vehicle_rejects_second_activation_same_turn() {
              rejected; got {second:?}"
     );
     let _ = creature_b;
+}
+
+// T-reentry (§3): the crew-cadence ledger is keyed to the exact object incarnation
+// (CR 400.7 + CR 602.5b), so a Vehicle that leaves and returns — a new object at a
+// higher incarnation — is no longer recorded as crewed and may be crewed again.
+// Fails if the ledger were keyed by bare `ObjectId`. The reach-guard (the positive
+// `contains` at incarnation N) proves the record was actually made, so the negative
+// is not vacuous. The end-to-end card-test (crew → blink → crew again through
+// `apply()`) lands in Phase 2A, which wires the production blink path; Phase 1
+// unit-tests the identity-keyed ledger directly.
+#[test]
+fn crew_reentry_new_incarnation_clears_activation_ledger() {
+    let mut state = setup_main_phase();
+    let vehicle_id = make_vehicle(&mut state, 1);
+
+    let n = state.objects[&vehicle_id].incarnation;
+    crate::game::engine::record_crew_activation(&mut state, vehicle_id);
+    assert!(
+        crate::game::engine::crew_activated_this_turn_contains(&state, vehicle_id),
+        "reach-guard: the crew activation is recorded at the current incarnation ({n})"
+    );
+
+    // CR 400.7: the Vehicle leaves and returns as a NEW object (higher incarnation).
+    state
+        .objects
+        .get_mut(&vehicle_id)
+        .unwrap()
+        .bump_incarnation();
+    assert!(
+        state.objects[&vehicle_id].incarnation > n,
+        "the re-entered object is a new incarnation"
+    );
+    assert!(
+        !crate::game::engine::crew_activated_this_turn_contains(&state, vehicle_id),
+        "after re-entry the incarnation-keyed ledger no longer matches → crewable again"
+    );
 }
 
 #[test]

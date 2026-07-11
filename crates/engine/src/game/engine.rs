@@ -6396,6 +6396,30 @@ fn is_tappable_creature_for_cost(state: &GameState, id: ObjectId, player: Player
     })
 }
 
+/// CR 602.5b + CR 702.122a: "activate only once each turn" is keyed to the exact
+/// object incarnation, so a Vehicle that leaves and returns (a new object per
+/// CR 400.7) may be crewed again. Single authority for reading the crew-cadence
+/// set — callers never touch `crew_activated_this_turn` directly.
+pub(crate) fn crew_activated_this_turn_contains(state: &GameState, vehicle_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&vehicle_id)
+        .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+        .is_some_and(|r| state.crew_activated_this_turn.contains(&r))
+}
+
+/// CR 602.5b + CR 702.122a: record a crew activation against the Vehicle's current
+/// incarnation. Single authority for writing the crew-cadence set.
+pub(crate) fn record_crew_activation(state: &mut GameState, vehicle_id: ObjectId) {
+    if let Some(r) = state
+        .objects
+        .get(&vehicle_id)
+        .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+    {
+        state.crew_activated_this_turn.insert(r);
+    }
+}
+
 fn handle_crew_activation(
     state: &mut GameState,
     player: PlayerId,
@@ -6449,7 +6473,7 @@ fn handle_crew_activation(
 
     // CR 602.5b: "Activate only once each turn" — reject a second crew activation
     // of this Vehicle in the same turn.
-    if crew_once_per_turn && state.crew_activated_this_turn.contains(&vehicle_id) {
+    if crew_once_per_turn && crew_activated_this_turn_contains(state, vehicle_id) {
         return Err(EngineError::ActionNotAllowed(
             "This Vehicle's crew ability can be activated only once each turn".to_string(),
         ));
@@ -6614,7 +6638,7 @@ fn handle_crew_announcement(
 
     // CR 602.5b: Record this crew activation so an "Activate only once each turn"
     // Vehicle cannot be crewed a second time this turn. Cleared at turn start.
-    state.crew_activated_this_turn.insert(vehicle_id);
+    record_crew_activation(state, vehicle_id);
 
     Ok(push_keyword_action(
         state,

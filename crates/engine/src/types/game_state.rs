@@ -22,7 +22,7 @@ use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
 use super::events::{GameEvent, PlayerActionKind};
 use super::format::FormatConfig;
-use super::identifiers::{CardId, ObjectId, TrackedSetId};
+use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
@@ -5673,6 +5673,20 @@ pub struct StackEntry {
     pub kind: StackEntryKind,
 }
 
+/// CR 400.7j: from→to record of a source object moved by its own resolving
+/// ability, so `source_is_current` can re-find it after the all-zone incarnation
+/// bump. `original_stamp` is the incarnation the resolving ability captured (fixed
+/// across chained self-moves); `current_incarnation` tracks the latest post-move
+/// value. Bound to `original_stamp` so only the ability that captured the pre-move
+/// identity relatches — a stale-stamped delayed trigger for the same `object_id`
+/// cannot ride the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolutionSourceRelatch {
+    pub object_id: ObjectId,
+    pub original_stamp: u64,
+    pub current_incarnation: u64,
+}
+
 impl StackEntry {
     /// Access the resolved ability for this stack entry (immutable).
     /// Returns `None` for permanent spells with no spell-level effect, and for
@@ -7224,7 +7238,7 @@ pub struct GameState {
     /// `abilities[]` entry, so it cannot use `activated_abilities_this_turn`
     /// (keyed by `(source_id, ability_index)`). Cleared at turn start.
     #[serde(default)]
-    pub crew_activated_this_turn: HashSet<ObjectId>,
+    pub crew_activated_this_turn: HashSet<ObjectIncarnationRef>,
     /// CR 606.1 + CR 606.3 + CR 603.4: Per-player count of loyalty-ability
     /// activations this turn. Incremented in
     /// `planeswalker::finalize_loyalty_activation` whenever any loyalty ability
@@ -8161,6 +8175,18 @@ pub struct GameState {
     /// `current_trigger_event`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolving_stack_entry: Option<StackEntry>,
+    /// CR 400.7j (+ CR 400.7g/h cast hop): a resolution-scoped record of a source
+    /// object that the currently-resolving ability moved as part of its own
+    /// resolution (Siege "exile it, then you may cast it"). It lets
+    /// `source_is_current` re-find the moved object even though the all-zone
+    /// incarnation bump advanced its epoch. Chains across multiple self-moves in
+    /// one resolution (BF→Exile→Stack). Like `resolving_stack_entry` this is a
+    /// serialized, resolution-scoped field that survives an optional-choice pause;
+    /// it is cleared at the same sites. It carries incarnation values, so it is
+    /// deliberately EXCLUDED from `GameState::PartialEq` (loop equality) — including
+    /// it would recreate the identity-field loop leak Condition 2 fixes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_source_relatch: Option<ResolutionSourceRelatch>,
     /// Transient plural form of `current_trigger_event` for batched triggers.
     /// Event-context filters that can legally compare against a group read this.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -9025,6 +9051,7 @@ impl GameState {
             current_trigger_event: None,
             current_trigger_match_count: None,
             resolving_stack_entry: None,
+            resolution_source_relatch: None,
             current_trigger_events: Vec::new(),
             last_discover_value: None,
             stack_trigger_event_batches: HashMap::new(),
@@ -9384,6 +9411,40 @@ impl GameState {
         // the live ring → recursive/quadratic growth. Cleared ⇒ every stored snapshot
         // has clone depth 1. Does not affect any comparison (the ring is eq-excluded).
         clone.loop_detect_ring.clear();
+        // CR 104.4b + CR 400.7: the all-zone incarnation bump advances a source's
+        // epoch on every zone change, so a mandatory loop that cycles its source's
+        // zones would otherwise carry a growing `ResolvedAbility::source_incarnation`
+        // into loop equality and never confirm a draw. Canonicalize it to `None`
+        // across EVERY eq-compared carrier that transitively holds a
+        // `ResolvedAbility`. (`pending_trigger_entry` is an `Option<ObjectId>`, not
+        // an ability carrier, so it needs no normalization; `waiting_for` is
+        // `Priority` at the post-pipeline loop-sample point and `priority_yields`
+        // latches its `YieldTarget::ThisObject { incarnation }` once at
+        // registration — both are loop-stable and carry no growing epoch.)
+        for entry in clone.stack.iter_mut() {
+            if let Some(ability) = entry.ability_mut() {
+                ability.set_source_incarnation_recursive(None);
+            }
+        }
+        if let Some(pt) = clone.pending_trigger.as_mut() {
+            pt.ability.set_source_incarnation_recursive(None);
+        }
+        for ctx in clone.deferred_triggers.iter_mut() {
+            ctx.pending.ability.set_source_incarnation_recursive(None);
+        }
+        if let Some(order) = clone.pending_trigger_order.as_mut() {
+            for group in order.groups.iter_mut() {
+                for ctx in group.triggers.iter_mut() {
+                    ctx.pending.ability.set_source_incarnation_recursive(None);
+                }
+            }
+        }
+        for dt in clone.delayed_triggers.iter_mut() {
+            dt.ability.set_source_incarnation_recursive(None);
+        }
+        for epic in clone.epic_effects.iter_mut() {
+            epic.spell.set_source_incarnation_recursive(None);
+        }
         clone
     }
 
@@ -9827,6 +9888,77 @@ mod tests {
             before,
             state.loop_fingerprint(),
             "advancing the RNG stream must change the loop fingerprint"
+        );
+    }
+
+    /// T-loop (§4 Condition 2): the all-zone incarnation bump advances a source's
+    /// epoch every time it changes zones, so a mandatory loop that cycles its
+    /// source's zones would carry a growing `ResolvedAbility::source_incarnation`
+    /// into loop equality and never confirm a CR 104.4b draw. `normalize_for_loop`
+    /// canonicalizes `source_incarnation` to `None` across every eq-compared carrier
+    /// (here: `delayed_triggers` — the Warp "return at next end step" loop class —
+    /// and `stack`).
+    ///
+    /// REVERT-PROBE: drop the carrier normalization in `normalize_for_loop` → the
+    /// two normalized states differ in `source_incarnation` → `loop_states_equal`
+    /// returns false → the draw is missed.
+    #[test]
+    fn normalize_for_loop_zeroes_source_incarnation_across_carriers() {
+        use crate::types::ability::{DelayedTriggerCondition, Effect};
+        use crate::types::phase::Phase;
+
+        fn draw_ability(inc: u64) -> ResolvedAbility {
+            let mut a = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(5),
+                PlayerId(0),
+            );
+            a.set_source_incarnation_recursive(Some(inc));
+            a
+        }
+
+        let mut a = GameState::new_two_player(7);
+        a.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            ability: draw_ability(1),
+            controller: PlayerId(0),
+            source_id: ObjectId(5),
+            one_shot: true,
+        });
+        a.stack.push_back(StackEntry {
+            id: ObjectId(20),
+            source_id: ObjectId(5),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(5),
+                ability: draw_ability(1),
+            },
+        });
+
+        // `b` differs ONLY in the sources' incarnation (a loop iteration cycled the
+        // source's zones and re-created its delayed trigger at a higher epoch).
+        let mut b = a.clone();
+        b.delayed_triggers[0]
+            .ability
+            .set_source_incarnation_recursive(Some(2));
+        b.stack
+            .back_mut()
+            .unwrap()
+            .ability_mut()
+            .unwrap()
+            .set_source_incarnation_recursive(Some(2));
+
+        assert_ne!(
+            a, b,
+            "fixture must actually differ in source_incarnation before normalization"
+        );
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "normalize_for_loop must zero source_incarnation across delayed_triggers + stack"
         );
     }
 

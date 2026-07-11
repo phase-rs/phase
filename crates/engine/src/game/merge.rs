@@ -622,6 +622,12 @@ fn put_component_into_zone(
     crate::game::zones::add_to_zone(state, component_id, dest, owner);
     if let Some(obj) = state.objects.get_mut(&component_id) {
         obj.zone = dest;
+        // CR 730.3 + CR 400.7: when a merged permanent leaves, each absorbed
+        // component becomes a NEW object in its own owner's zone. Bump here (beside
+        // this mover, NOT inside the shared `apply_zone_exit_cleanup`, which
+        // `move_to_zone` also calls → double-bump) so a stamp-N delayed trigger on
+        // the component reads `source_is_current` false against the new object.
+        obj.bump_incarnation();
     }
 
     // CR 700.11: a nontoken permanent card put into its owner's graveyard from

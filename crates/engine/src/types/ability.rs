@@ -19677,10 +19677,19 @@ impl ResolvedAbility {
     pub fn source_is_current(&self, state: &crate::types::game_state::GameState) -> bool {
         match self.source_incarnation {
             None => true,
-            Some(captured) => state
-                .objects
-                .get(&self.source_id)
-                .is_some_and(|obj| obj.incarnation == captured),
+            Some(captured) => {
+                let current = state.objects.get(&self.source_id).map(|o| o.incarnation);
+                current == Some(captured)
+                    // CR 400.7j (+ CR 400.7g/h cast hop): a source that moved (possibly
+                    // twice) as part of THIS resolution carries its identity-dependent
+                    // continuations with it. Bind to `original_stamp` so only the ability
+                    // that captured the pre-move identity relatches — a stale-stamped
+                    // delayed trigger for the same object cannot ride the record.
+                    || matches!(state.resolution_source_relatch, Some(r)
+                        if r.object_id == self.source_id
+                            && r.original_stamp == captured
+                            && Some(r.current_incarnation) == current)
+            }
         }
     }
 
