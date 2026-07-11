@@ -12894,6 +12894,8 @@ pub(super) fn pay_mana_cost_with_choices(
     Ok(())
 }
 
+/// CR 601.2h: Pay the locked spell mana cost from the current pool without
+/// opening another mana-ability window.
 pub(super) fn pay_mana_cost_from_pool_with_choices(
     state: &mut GameState,
     player: PlayerId,

@@ -1005,6 +1005,8 @@ pub fn handle_exile_for_mana_ability(
                 "Selected card not eligible for mana ability exile cost".to_string(),
             ));
         }
+        // CR 118.10: One payment cannot apply to both this mana ability cost
+        // and a pending spell sacrifice cost.
         if deferred_spell_sacrifice_reserved(state, *id) {
             return Err(EngineError::InvalidAction(
                 "Selected card is already committed to a spell sacrifice cost".to_string(),
@@ -1052,6 +1054,8 @@ pub fn handle_sacrifice_for_mana_ability(
                 "Selected permanent not eligible for mana ability sacrifice cost".to_string(),
             ));
         }
+        // CR 118.10: One payment cannot apply to both this mana ability cost
+        // and a pending spell sacrifice cost.
         if deferred_spell_sacrifice_reserved(state, *id) {
             return Err(EngineError::InvalidAction(
                 "Selected permanent is already committed to a spell sacrifice cost".to_string(),
