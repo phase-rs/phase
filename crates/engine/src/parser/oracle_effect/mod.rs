@@ -150,7 +150,7 @@ use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
-    EffectChainIr, OtherwiseKind, PriorModifier, ReplicateKind, SpecialClause,
+    EffectChainIr, OtherwiseKind, PriorModifier, ReplaceMeaningKind, ReplicateKind, SpecialClause,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -24986,9 +24986,8 @@ pub(crate) fn parse_effect_chain_ir(
                             normalized_text,
                             parsed_clause((*alt_def.effect).clone()),
                             chunk.boundary_after,
-                            ClauseDisposition::Special {
-                                action: SpecialClause::DigInsteadAlt(Box::new(alt_def)),
-                                intrinsic: None,
+                            ClauseDisposition::ReplaceMeaning {
+                                kind: ReplaceMeaningKind::DigAlt(Box::new(alt_def)),
                             },
                         )
                         .where_x_expression(inherited_where_x_expression)
@@ -25084,9 +25083,8 @@ pub(crate) fn parse_effect_chain_ir(
                         normalized_text,
                         placeholder_parsed_clause("instead_clause_placeholder"),
                         chunk.boundary_after,
-                        ClauseDisposition::Special {
-                            action: SpecialClause::InsteadClause(Box::new(instead_def)),
-                            intrinsic: None,
+                        ClauseDisposition::ReplaceMeaning {
+                            kind: ReplaceMeaningKind::Instead(Box::new(instead_def)),
                         },
                     )
                     .push();
@@ -26554,9 +26552,8 @@ pub(crate) fn parse_effect_chain_ir(
                     normalized_text,
                     clause,
                     chunk.boundary_after,
-                    ClauseDisposition::Special {
-                        action: SpecialClause::KeywordInsteadOverride,
-                        intrinsic: None,
+                    ClauseDisposition::ReplaceMeaning {
+                        kind: ReplaceMeaningKind::KeywordOverride,
                     },
                 )
                 .condition(condition)

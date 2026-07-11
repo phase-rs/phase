@@ -119,12 +119,6 @@ pub(crate) enum DoesTheSameSubject {
 /// become markers that lowering processes when building the def list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum SpecialClause {
-    /// CR 608.2c: Dig-instead alternative — replace previous Dig with conditional alternative.
-    DigInsteadAlt(Box<AbilityDefinition>),
-    /// CR 608.2e: Generic instead clause — attach to previous def as sub_ability.
-    InsteadClause(Box<AbilityDefinition>),
-    /// CR 608.2e: TargetHasKeywordInstead — attach to previous def as sub_ability.
-    KeywordInsteadOverride,
     /// CR 608.2e: AdditionalCostPaidInstead + SearchLibrary — fold else_ability from previous.
     AdditionalCostInsteadSearch,
     /// Follow-up to a drawn-this-turn choice: sets the life payment and
@@ -246,6 +240,13 @@ pub(crate) enum ClauseDisposition {
     /// sibling. Promoted from the three rider `SpecialClause` variants (U5-M2). The
     /// bound antecedent is the prior emitted def (implicit, as `Continue`).
     ModifyPrior { modifier: PriorModifier },
+    /// CR 608.2c / CR 614.1a: this clause replaces or overrides the meaning of the
+    /// prior emitted def(s) rather than emitting an independent sibling. Promoted
+    /// from `SpecialClause::{DigInsteadAlt, InsteadClause, KeywordInsteadOverride}`
+    /// (U5-M2). `kind` carries each variant's payload and keeps the distinct rules
+    /// concept typed (Plan 01 §5 line 811). Bound antecedent is the prior emitted
+    /// def(s) (implicit, as `Continue`).
+    ReplaceMeaning { kind: ReplaceMeaningKind },
     /// A special-case adjacency action that modifies an adjacent clause during
     /// lowering (folds the former `special: Option<SpecialClause>`). `intrinsic`
     /// carries the self-patch some special arms apply (lower.rs:1600).
@@ -288,6 +289,21 @@ pub(crate) enum PriorModifier {
     /// and attacking (conditional modifier; carries the gate on the clause's
     /// `condition`, with the unpatched original stashed in `else_ability`).
     EntersTappedAttacking,
+}
+
+/// CR 608.2c / CR 614.1a: which meaning-replacement the clause performs on the
+/// prior emitted def(s). Each variant carries its own payload and rules concept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum ReplaceMeaningKind {
+    /// CR 608.2c: pop the prior def; wrap this alternative def with the prior as its
+    /// `else_ability` (dig-instead alternative).
+    DigAlt(Box<AbilityDefinition>),
+    /// CR 614.1a + CR 608.2c: multi-clause base + "instead" override via Cow-swap;
+    /// tail clauses stashed in the override's `else_ability`.
+    Instead(Box<AbilityDefinition>),
+    /// CR 608.2e: build this clause's def from `parsed` + condition, attach as the
+    /// prior def's `sub_ability` (keyword-instead override).
+    KeywordOverride,
 }
 
 /// CR 608.2c: whether the "Otherwise" else-branch binds to a prior conditional or
@@ -406,7 +422,8 @@ impl ClauseDisposition {
             | ClauseDisposition::Absorb { .. }
             | ClauseDisposition::BranchOtherwise { .. }
             | ClauseDisposition::ReplicatePerKeyword { .. }
-            | ClauseDisposition::ModifyPrior { .. } => None,
+            | ClauseDisposition::ModifyPrior { .. }
+            | ClauseDisposition::ReplaceMeaning { .. } => None,
         }
     }
 
@@ -423,7 +440,8 @@ impl ClauseDisposition {
             | ClauseDisposition::Absorb { .. }
             | ClauseDisposition::BranchOtherwise { .. }
             | ClauseDisposition::ReplicatePerKeyword { .. }
-            | ClauseDisposition::ModifyPrior { .. } => None,
+            | ClauseDisposition::ModifyPrior { .. }
+            | ClauseDisposition::ReplaceMeaning { .. } => None,
         }
     }
 }

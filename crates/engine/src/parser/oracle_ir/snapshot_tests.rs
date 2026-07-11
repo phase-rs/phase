@@ -687,6 +687,58 @@ fn karn_legacy_reforged() {
 }
 
 // ---------------------------------------------------------------------------
+// Meaning-replacement overrides (U5-M2 ReplaceMeaning parity)
+// ---------------------------------------------------------------------------
+// All three kinds have real cards in the 568-card fixture (DigAlt 2, Instead 24,
+// KeywordOverride 1). Oracle text verified verbatim against Scryfall.
+
+// CR 608.2c: DigAlt — "you may instead <alternative dig disposition>" pops the
+// prior dig def and wraps the alternative with the prior as its `else_ability`
+// (Follow the Lumarets). "Infusion —" is an ability word (stripped like Landfall).
+#[test]
+fn follow_the_lumarets() {
+    let (ir, lowered) = parse_two_layer(
+        "Infusion — Look at the top four cards of your library. You may reveal a creature or land card from among them and put it into your hand. If you gained life this turn, you may instead reveal two creature and/or land cards from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
+        "Follow the Lumarets",
+        &["Sorcery"],
+        &[],
+    );
+    insta::assert_json_snapshot!("follow_the_lumarets_ir", &ir);
+    insta::assert_json_snapshot!("follow_the_lumarets_lowered", &lowered);
+}
+
+// CR 614.1a + CR 608.2c: Instead — the multi-clause Cow-swap. Clause 1 ("gain
+// control … until end of turn") is the root/swap target; the "… instead" override
+// carries the `ConditionInstead`, and the TAIL clauses ("Untap that creature. It
+// gains haste …") are stashed in the override's `else_ability` (Evil's Thrall).
+#[test]
+fn evils_thrall() {
+    let (ir, lowered) = parse_two_layer(
+        "Gain control of target creature until end of turn. If you control a Villain with greater mana value than that creature, gain control of that creature until the end of your next turn instead. Untap that creature. It gains haste until end of turn.",
+        "Evil's Thrall",
+        &["Sorcery"],
+        &[],
+    );
+    insta::assert_json_snapshot!("evils_thrall_ir", &ir);
+    insta::assert_json_snapshot!("evils_thrall_lowered", &lowered);
+}
+
+// CR 608.2e: KeywordOverride — a "TargetHasKeywordInstead"-conditioned clause
+// builds its def from the parsed effect + condition and attaches as the prior
+// def's `sub_ability` (Conformer Shuriken's granted attack trigger).
+#[test]
+fn conformer_shuriken() {
+    let (ir, lowered) = parse_two_layer(
+        "Equipped creature has \"Whenever this creature attacks, tap target creature defending player controls. If that creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.\"\nEquip {2}",
+        "Conformer Shuriken",
+        &["Artifact"],
+        &["Equipment"],
+    );
+    insta::assert_json_snapshot!("conformer_shuriken_ir", &ir);
+    insta::assert_json_snapshot!("conformer_shuriken_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
 // Triggers (various patterns)
 // ---------------------------------------------------------------------------
 

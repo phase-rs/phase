@@ -26,8 +26,8 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
-    ClauseDisposition, ClauseIr, EffectChainIr, OtherwiseKind, PriorModifier, ReplicateKind,
-    SpecialClause,
+    ClauseDisposition, ClauseIr, EffectChainIr, OtherwiseKind, PriorModifier, ReplaceMeaningKind,
+    ReplicateKind, SpecialClause,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
@@ -1536,13 +1536,14 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                     }
                 }
                 true
-            } else if let ClauseDisposition::Special {
-                action: special,
-                intrinsic,
-            } = &clause_ir.disposition
+            } else if let ClauseDisposition::ReplaceMeaning { kind: replace_kind } =
+                &clause_ir.disposition
             {
-                match special {
-                    SpecialClause::DigInsteadAlt(alt_def) => {
+                // CR 608.2c / CR 614.1a: replace/override the meaning of the prior
+                // emitted def(s); `kind` selects which (moved verbatim from the old
+                // SpecialClause arms).
+                match replace_kind {
+                    ReplaceMeaningKind::DigAlt(alt_def) => {
                         if let Some(last_def) = defs.pop() {
                             let mut new_def = *alt_def.clone();
                             apply_where_x_ability_expression(
@@ -1554,7 +1555,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                         }
                         true
                     }
-                    SpecialClause::InsteadClause(instead_def) => {
+                    ReplaceMeaningKind::Instead(instead_def) => {
                         // CR 614.1a + CR 608.2c: assemble a multi-clause base + an
                         // "instead" override so the runtime can produce both
                         // branches. Clause 1 becomes the root and is the Cow-swap
@@ -1597,7 +1598,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                         }
                         true
                     }
-                    SpecialClause::KeywordInsteadOverride => {
+                    ReplaceMeaningKind::KeywordOverride => {
                         // Build the def for this clause and attach to previous as sub_ability
                         let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
                         let effective_cond = clause_ir
@@ -1612,6 +1613,13 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                         }
                         true
                     }
+                }
+            } else if let ClauseDisposition::Special {
+                action: special,
+                intrinsic,
+            } = &clause_ir.disposition
+            {
+                match special {
                     SpecialClause::AdditionalCostInsteadSearch => {
                         // Build this clause's def and fold else_ability from the trailing clause.
                         // The trailing ChangeZone was produced by the previous SearchLibrary's
