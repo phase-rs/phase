@@ -3329,6 +3329,7 @@ pub(super) fn apply_clause_continuation(
     defs: &mut Vec<AbilityDefinition>,
     continuation: ContinuationAst,
     kind: AbilityKind,
+    env: &super::assembly::AssemblyEnv,
 ) {
     match continuation {
         ContinuationAst::SearchDestination {
@@ -3633,24 +3634,33 @@ pub(super) fn apply_clause_continuation(
             // sub_ability; a decline branch Dig (keep_count=0, rest→Library)
             // is its else_ability, routing all 7 cards to library bottom if
             // the player declined the sacrifice.
-            let dig_pos = defs
-                .iter()
-                .rposition(|d| matches!(&*d.effect, Effect::Dig { .. } | Effect::Mill { .. }));
+            // U6-C3: bind the ANCHOR by role (`Dig`/`Mill`) instead of `rposition`.
+            let dig_pos = env.resolve(
+                defs,
+                super::assembly::AntecedentSelector::LastWithRole(
+                    super::assembly::AntecedentRole::DigOrMill,
+                ),
+                None,
+                super::assembly::OnMiss::Ignore,
+            );
             if let Some(dig_pos) = dig_pos {
                 if matches!(&*defs[dig_pos].effect, Effect::Dig { .. }) {
-                    // Find an optional, lookback-transparent sacrifice/pay-cost
-                    // clause between the root Dig and the end of defs.
-                    let sac_pos = defs[dig_pos + 1..]
-                        .iter()
-                        .position(|d| {
-                            d.optional
-                                && clause_is_dig_lookback_transparent(&d.effect)
-                                && matches!(
-                                    &*d.effect,
-                                    Effect::Sacrifice { .. } | Effect::PayCost { .. }
-                                )
-                        })
-                        .map(|i| dig_pos + 1 + i);
+                    // U6-C3 `Between { anchor }` — a LOOKBACK-TRANSPARENT INTERVENING
+                    // CLAUSE between an anchor and its dependent. The dependent
+                    // ("from among those cards") binds back to the anchor `Dig`, but a
+                    // transparent clause (an optional Sacrifice/PayCost) may sit BETWEEN
+                    // them in written order; the dependent looks straight through it.
+                    // CR 608.2c: written order is real, so the intervening clause must be
+                    // found by walking emission order FORWARD from the anchor — not by
+                    // assuming adjacency. Resolved over `order`, never the output tree.
+                    let sac_pos = env.node_id_at(dig_pos).and_then(|anchor| {
+                        env.resolve(
+                            defs,
+                            super::assembly::AntecedentSelector::Between { anchor },
+                            Some(super::assembly::BindGuard::DigLookbackTransparentCost),
+                            super::assembly::OnMiss::Ignore,
+                        )
+                    });
 
                     if let Some(sac_pos) = sac_pos {
                         // CR 608.2c + CR 701.20e: Birthing Ritual pattern.
@@ -9028,6 +9038,12 @@ mod tests {
             AbilityKind::Spell,
             make_dig_effect(),
         )];
+        let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
+        env.observe(
+            &defs,
+            None,
+            crate::parser::oracle_effect::assembly::NodeRole::Primary,
+        );
         apply_clause_continuation(
             &mut defs,
             ContinuationAst::DigFromAmong {
@@ -9041,6 +9057,7 @@ mod tests {
                 reveal_verb: false,
             },
             AbilityKind::Spell,
+            &env,
         );
 
         let Effect::Dig {
@@ -9065,6 +9082,12 @@ mod tests {
             AbilityKind::Spell,
             make_dig_effect(),
         )];
+        let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
+        env.observe(
+            &defs,
+            None,
+            crate::parser::oracle_effect::assembly::NodeRole::Primary,
+        );
         apply_clause_continuation(
             &mut defs,
             ContinuationAst::DigFromAmong {
@@ -9078,6 +9101,7 @@ mod tests {
                 reveal_verb: false,
             },
             AbilityKind::Spell,
+            &env,
         );
 
         let Effect::Dig {
@@ -9106,6 +9130,12 @@ mod tests {
                 destination: Zone::Graveyard,
             },
         )];
+        let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
+        env.observe(
+            &defs,
+            None,
+            crate::parser::oracle_effect::assembly::NodeRole::Primary,
+        );
         apply_clause_continuation(
             &mut defs,
             ContinuationAst::DigFromAmong {
@@ -9119,6 +9149,7 @@ mod tests {
                 reveal_verb: false,
             },
             AbilityKind::Spell,
+            &env,
         );
 
         assert_eq!(defs.len(), 2, "expected Mill + pushed ChangeZone");
@@ -9165,6 +9196,12 @@ mod tests {
                 destination: Zone::Graveyard,
             },
         )];
+        let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
+        env.observe(
+            &defs,
+            None,
+            crate::parser::oracle_effect::assembly::NodeRole::Primary,
+        );
         apply_clause_continuation(
             &mut defs,
             ContinuationAst::DigFromAmong {
@@ -9178,6 +9215,7 @@ mod tests {
                 reveal_verb: false,
             },
             AbilityKind::Spell,
+            &env,
         );
         // The Mill is left intact; a new ChangeZone def is pushed.
         assert_eq!(defs.len(), 2, "expected Mill + pushed ChangeZone");

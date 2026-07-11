@@ -99,7 +99,7 @@ use super::{
 
 /// How a node in `defs` came to exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NodeRole {
+pub(super) enum NodeRole {
     /// Emitted by a clause body on the normal (`Emit`) path.
     Primary,
     /// Built by a disposition handler out of a clause.
@@ -152,7 +152,7 @@ struct NodeRef {
 /// Stable identity for an assembled node. NOT a `defs` index — indices are
 /// invalidated by the very next `pop()`/`mem::take()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct NodeId(u32);
+pub(super) struct NodeId(u32);
 
 /// Where a node stands relative to top-level `defs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,7 +226,7 @@ impl Arena {
     }
 
     /// The id currently at top-level position `index`, if any.
-    fn id_at(&self, index: usize) -> Option<NodeId> {
+    pub(super) fn id_at(&self, index: usize) -> Option<NodeId> {
         self.order.get(index).copied()
     }
 
@@ -311,7 +311,7 @@ impl Arena {
 // expected and intentional for exactly one increment.
 #[allow(dead_code)]
 #[derive(Debug, Default)]
-struct AssemblyEnv {
+pub(super) struct AssemblyEnv {
     /// U6-C1 dual-run arena. Maintained in lockstep with `defs`, read by nothing.
     arena: Arena,
     /// Provenance parallel to `defs`, kept the same length by `observe`.
@@ -346,12 +346,14 @@ struct AssemblyEnv {
     optional_head_nodes: Vec<usize>,
     /// Every continuation-pushed search-destination `ChangeZone`, in emission order.
     search_destination_nodes: Vec<usize>,
+    /// Every `Dig`/`Mill` node, in emission order (the `DigFromAmong` anchor set).
+    dig_or_mill_nodes: Vec<usize>,
 }
 
 /// Which antecedent a handler is binding to. Point selectors only (U6-C2);
 /// the range selector lands in C3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AntecedentSelector {
+pub(super) enum AntecedentSelector {
     /// The most recently emitted top-level node ("the prior def").
     LastEmitted,
     /// The FIRST emitted node. `Instead` alone binds this — CR 608.2c: the
@@ -363,18 +365,46 @@ enum AntecedentSelector {
     /// A node pushed by a continuation rather than a clause body — it has NO
     /// `ClauseId` (audit §2), so it can only be named by role + provenance.
     ContinuationProduct(ContinuationRole),
+    /// **A lookback-transparent intervening clause between an anchor and its
+    /// dependent** — the one RANGE binding in the assembler.
+    ///
+    /// Grammatical class, not a card: a dependent clause binds back to an anchor
+    /// (e.g. a "look at the top N" `Dig`), but a *transparent* clause may sit
+    /// BETWEEN them in written order — one the dependent looks straight through.
+    /// The dependent must therefore find the first qualifying clause emitted
+    /// AFTER the anchor, not simply the previous def. CR 608.2c: instructions are
+    /// followed in written order, so the intervening clause is real and ordered,
+    /// not noise to be skipped.
+    ///
+    /// Resolved over `order` (append-only EMISSION provenance) — never over the
+    /// output tree, so the no-recursive-inspection rule holds. Unlike every other
+    /// selector this walks FORWARD from the anchor and takes the FIRST match.
+    ///
+    /// Full-pool hit count: **2 of 35,034 cards** (measured, not estimated).
+    /// Birthing Ritual is an instance of the class, not its name. A two-card
+    /// selector is accepted KNOWINGLY: the alternative is leaving a raw positional
+    /// scan in the assembler, which reintroduces exactly the coupling U6 removes.
+    Between { anchor: NodeId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AntecedentRole {
+pub(super) enum AntecedentRole {
     /// `condition` actually set on the built def (never read off `ClauseIr`).
     Conditional,
     /// An "any player may" head (`optional_for`).
     OptionalHead,
+    /// A `Dig` or `Mill` — the "look at / mill N cards" anchor a `DigFromAmong`
+    /// continuation binds back to.
+    ///
+    /// NOTE the set is deliberately NARROWER than the `last_dig` registry, which
+    /// is a `Dig|Mill|RevealUntil` union. The two consumers want DIFFERENT sets
+    /// (`RestDestination` wants `Dig|RevealUntil`), so a shared union registry
+    /// would mis-bind. Roles name a set, not a vibe.
+    DigOrMill,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContinuationRole {
+pub(super) enum ContinuationRole {
     /// The search-destination `ChangeZone` a `SearchDestination` continuation pushes.
     SearchDestination,
 }
@@ -382,10 +412,13 @@ enum ContinuationRole {
 /// Evaluated against the BOUND NODE ONLY — never by walking the output graph, so
 /// the "handlers may not recursively inspect the output" rule holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BindGuard {
+pub(super) enum BindGuard {
     /// The node must not already carry a `sub_ability` (mutable output state —
     /// an earlier handler may have filled it).
     NoSubAbility,
+    /// The node is an optional, lookback-transparent cost clause
+    /// (`Sacrifice`/`PayCost`) — the "intervening clause" half of `Between`.
+    DigLookbackTransparentCost,
     /// The node's effect must be of this class. Encodes the shape-gated SILENT
     /// no-op in the type: if the prior def is the wrong shape the binding simply
     /// misses, and `OnMiss::Ignore` makes the handler do nothing — exactly what
@@ -394,7 +427,7 @@ enum BindGuard {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EffectClass {
+pub(super) enum EffectClass {
     /// `CopyTokenOf` | `Token` | `ChangeZone` — the only effects
     /// `ModifyPrior::EntersTappedAttacking` can patch.
     PermanentCreator,
@@ -411,19 +444,29 @@ enum EffectClass {
 /// that failed loudly on a miss would itself be a behavior change, and it would
 /// fire on real cards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OnMiss {
+pub(super) enum OnMiss {
     /// Do nothing. The clause contributes no def and no error.
     Ignore,
 }
 
 impl AssemblyEnv {
+    /// The stable id of the node currently at top-level `index`.
+    pub(super) fn node_id_at(&self, index: usize) -> Option<NodeId> {
+        self.arena.id_at(index)
+    }
+
     /// Record provenance for any nodes `defs` gained since the last call, then
     /// recompute the registries against the current `defs`.
     ///
     /// `defs` only ever grows by push/extend or shrinks from the TAIL (`pop`) or
     /// wholesale (`mem::take`), so truncating/extending `prov` to `defs.len()`
     /// keeps the two aligned without tracking each op individually.
-    fn observe(&mut self, defs: &[AbilityDefinition], origin: Option<ClauseId>, role: NodeRole) {
+    pub(super) fn observe(
+        &mut self,
+        defs: &[AbilityDefinition],
+        origin: Option<ClauseId>,
+        role: NodeRole,
+    ) {
         // U6-C1: mirror the same length change into the arena. Same call sites,
         // same discipline (after EVERY statement that changes `defs.len()`).
         self.arena.sync_len(defs.len(), origin, role);
@@ -448,6 +491,7 @@ impl AssemblyEnv {
         self.conditional_nodes.clear();
         self.optional_head_nodes.clear();
         self.search_destination_nodes.clear();
+        self.dig_or_mill_nodes.clear();
 
         for (index, def) in defs.iter().enumerate() {
             let provenance = self.prov.get(index).copied().unwrap_or(NodeProvenance {
@@ -487,6 +531,9 @@ impl AssemblyEnv {
             {
                 self.search_destination_nodes.push(index);
             }
+            if matches!(&*def.effect, Effect::Dig { .. } | Effect::Mill { .. }) {
+                self.dig_or_mill_nodes.push(index);
+            }
             match &*def.effect {
                 Effect::Dig { .. } | Effect::Mill { .. } | Effect::RevealUntil { .. } => {
                     self.last_dig = Some(node);
@@ -519,7 +566,7 @@ impl AssemblyEnv {
     ///
     /// `on_miss` is taken explicitly and has no default: a miss must be a
     /// conscious choice, because two handlers rely on it being SILENT.
-    fn resolve(
+    pub(super) fn resolve(
         &self,
         defs: &[AbilityDefinition],
         selector: AntecedentSelector,
@@ -538,6 +585,15 @@ impl AssemblyEnv {
                     &*defs[index].effect,
                     Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
                 ),
+                Some(BindGuard::DigLookbackTransparentCost) => {
+                    let d = &defs[index];
+                    d.optional
+                        && super::sequence::clause_is_dig_lookback_transparent(&d.effect)
+                        && matches!(
+                            &*d.effect,
+                            Effect::Sacrifice { .. } | Effect::PayCost { .. }
+                        )
+                }
             }
         };
         let candidates: &[usize] = match selector {
@@ -567,6 +623,19 @@ impl AssemblyEnv {
             }
             AntecedentSelector::ContinuationProduct(ContinuationRole::SearchDestination) => {
                 &self.search_destination_nodes
+            }
+            AntecedentSelector::LastWithRole(AntecedentRole::DigOrMill) => &self.dig_or_mill_nodes,
+            AntecedentSelector::Between { anchor } => {
+                // Walk FORWARD over emission order from the anchor and take the
+                // FIRST qualifying node. Reads `order` only — never the output tree.
+                let anchor_pos = self.arena.order.iter().position(|id| *id == anchor);
+                let hit = anchor_pos.and_then(|a| ((a + 1)..defs.len()).find(|i| passes(*i)));
+                return match hit {
+                    Some(i) => Some(i),
+                    None => match on_miss {
+                        OnMiss::Ignore => None,
+                    },
+                };
             }
         };
         match candidates.iter().rev().copied().find(|i| passes(*i)) {
@@ -603,7 +672,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // Apply the Continue clause's continuation to the defs built so far
                 // (formerly the absorbed `followup_continuation` path).
                 if let Some(continuation) = clause_ir.disposition.followup() {
-                    apply_clause_continuation(&mut defs, continuation.clone(), kind);
+                    apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
                     env.observe(&defs, None, NodeRole::ContinuationProduct);
                     apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
                 }
@@ -966,7 +1035,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
                 // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
                 if let Some(continuation) = intrinsic {
-                    apply_clause_continuation(&mut defs, continuation.clone(), kind);
+                    apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
                     env.observe(&defs, None, NodeRole::ContinuationProduct);
                 }
                 true
@@ -1074,7 +1143,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // Non-absorbed, non-special followup continuation — apply it to the
         // previous defs before building this clause's def (`Emit.followup`).
         if let Some(continuation) = clause_ir.disposition.followup() {
-            apply_clause_continuation(&mut defs, continuation.clone(), kind);
+            apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
             env.observe(&defs, None, NodeRole::ContinuationProduct);
             apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
         }
@@ -1478,7 +1547,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // Apply intrinsic continuation after extending defs with current clause's
         // defs (`Emit.intrinsic`).
         if let Some(continuation) = clause_ir.disposition.intrinsic() {
-            apply_clause_continuation(&mut defs, continuation.clone(), kind);
+            apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
             env.observe(&defs, None, NodeRole::ContinuationProduct);
             apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
         }

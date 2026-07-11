@@ -26687,7 +26687,14 @@ pub(crate) fn parse_effect_chain_ir(
                 // Build a temporary defs list, apply the continuation, and use the last effect.
                 let mut temp_defs =
                     vec![AbilityDefinition::new(kind, previous.parsed.effect.clone())];
-                apply_clause_continuation(&mut temp_defs, ic.clone(), kind);
+                // This is a SIMULATION on a scratch chain (what would `defs.last()` be
+                // after the continuation?), so it has no assembly arena of its own.
+                // Give it a throwaway env mirroring the scratch chain rather than a
+                // positional fallback path — the bindings stay uniform, and no legacy
+                // scan has to survive for this caller.
+                let mut temp_env = assembly::AssemblyEnv::default();
+                temp_env.observe(&temp_defs, None, assembly::NodeRole::Primary);
+                apply_clause_continuation(&mut temp_defs, ic.clone(), kind, &temp_env);
                 (*temp_defs.last().unwrap().effect).clone()
             } else if previous.disposition.followup().is_some() {
                 // A non-absorbed clause with a followup continuation means the continuation
