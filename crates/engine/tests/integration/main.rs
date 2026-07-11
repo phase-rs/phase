@@ -533,6 +533,7 @@ mod mass_phase_out_1792_repro;
 mod master_of_ceremonies;
 mod mauhur_swarming_of_moria;
 mod maze_of_ith_untap_bidirectional_prevent;
+mod mechtitan_core_return_exiled;
 mod memory_plunder_free_cast_2884;
 mod militant_angel_attacked_opponents;
 mod mill_double_redirect_choice_continuation;

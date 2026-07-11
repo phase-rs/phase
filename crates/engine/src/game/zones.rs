@@ -479,6 +479,18 @@ pub(crate) fn apply_zone_exit_cleanup(
         // source self-exiles mid-activation and returns with the same ObjectId,
         // so the material links must survive its battlefield exit for the
         // returned permanent to still read what it was crafted with.
+        // CR 607.2a + CR 400.7: `TrackedBySource` links are preserved when the
+        // source leaves the battlefield TO EXILE. A source that self-exiles
+        // (typically as its own activation cost — Mechtitan Core: "Exile this
+        // Vehicle and four other …: … return all cards exiled with this Vehicle
+        // …") keeps a stable ObjectId in exile and remains the linked-ability
+        // referent (CR 607.2a: the second ability refers to the cards put in exile
+        // by the first). Preserve its links so a deferred `ExiledBySource` return
+        // still finds the pile turns later — the blink-identity reset instead
+        // happens if that source RE-ENTERS the battlefield (paired entry prune
+        // below). Narrowed to the exile-exit so ordinary death/bounce (to
+        // graveyard/hand) still prunes.
+        let source_exits_to_exile = to == Zone::Exile;
         state.exile_links.retain(|link| {
             link.source_id != object_id
                 || matches!(
@@ -487,6 +499,11 @@ pub(crate) fn apply_zone_exit_cleanup(
                         | crate::types::game_state::ExileLinkKind::Haunt
                         | crate::types::game_state::ExileLinkKind::CraftMaterial
                 )
+                || (source_exits_to_exile
+                    && matches!(
+                        link.kind,
+                        crate::types::game_state::ExileLinkKind::TrackedBySource
+                    ))
         });
     }
 }
@@ -785,6 +802,26 @@ pub fn move_to_zone(
     // CR 700.11: a permanent card was put into its owner's graveyard.
     if to == Zone::Graveyard {
         record_descend_on_graveyard_arrival(state, object_id, owner);
+    }
+
+    // CR 400.7: A permanent that re-enters the battlefield is a new object with no
+    // relation to its previous existence, so it sheds the "exiled with it"
+    // associations of its prior incarnation. The battlefield-EXIT cleanup above
+    // now preserves a source's `TrackedBySource` links when it leaves TO EXILE
+    // (so a self-exiled source's pending linked return still finds its pile —
+    // Mechtitan Core); this paired entry prune is the blink-back reset that drops
+    // those stale links if that same source is later returned to the battlefield,
+    // preventing `ExiledBySource` from reading a prior incarnation's pile. Scoped
+    // to `TrackedBySource`: `CraftMaterial` links must survive re-entry (the craft
+    // source returns transformed and must still read its materials).
+    if to == Zone::Battlefield {
+        state.exile_links.retain(|link| {
+            link.source_id != object_id
+                || !matches!(
+                    link.kind,
+                    crate::types::game_state::ExileLinkKind::TrackedBySource
+                )
+        });
     }
 
     // CR 611.3a + CR 400.3: Hand size affects continuous effects gated on the
@@ -2728,6 +2765,95 @@ mod tests {
                 .iter()
                 .all(|link| link.source_id != source),
             "TrackedBySource links should still be pruned immediately after LTB"
+        );
+    }
+
+    /// CR 607.2a + CR 400.7: A source that leaves the battlefield TO EXILE
+    /// (self-exile as an activation cost — Mechtitan Core) keeps a stable
+    /// ObjectId in exile and stays the linked-ability referent for its
+    /// "exiled with ~" pile, so its `TrackedBySource` links must survive the
+    /// exit. The sibling above (exit to graveyard) proves the survival is
+    /// exile-scoped, not a blanket "never prune".
+    #[test]
+    fn tracked_by_source_links_survive_source_exit_to_exile() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(60),
+            PlayerId(0),
+            "Mechtitan Core".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(1),
+            "Exiled With Source".to_string(),
+            Zone::Exile,
+        );
+        state.exile_links.push(crate::types::game_state::ExileLink {
+            source_id: source,
+            exiled_id: exiled,
+            kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, source, Zone::Exile, &mut events);
+
+        assert!(
+            state
+                .exile_links
+                .iter()
+                .any(|link| link.source_id == source && link.exiled_id == exiled),
+            "TrackedBySource link must survive the source's self-exile"
+        );
+        // Reach-guard: the deferred `ExiledBySource` lookup keyed to the now-exiled
+        // source still resolves the pile (the property the Mechtitan return relies on).
+        assert!(
+            crate::game::players::linked_exile_cards_for_source(&state, source)
+                .iter()
+                .any(|snap| snap.exiled_id == exiled),
+            "linked_exile_cards_for_source must return the pile after the source self-exiles"
+        );
+    }
+
+    /// CR 400.7: A source that self-exiled (keeping its `TrackedBySource` links)
+    /// and is then returned to the battlefield is a new object and sheds those
+    /// stale links, so a later "cards exiled with ~" reference cannot read a
+    /// prior incarnation's pile. This is the blink-back reset paired with the
+    /// exit-to-exile preservation above.
+    #[test]
+    fn tracked_by_source_links_reset_on_battlefield_reentry() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(62),
+            PlayerId(0),
+            "Blinked Source".to_string(),
+            Zone::Exile,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(63),
+            PlayerId(1),
+            "Old Pile Card".to_string(),
+            Zone::Exile,
+        );
+        state.exile_links.push(crate::types::game_state::ExileLink {
+            source_id: source,
+            exiled_id: exiled,
+            kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+
+        assert!(
+            state
+                .exile_links
+                .iter()
+                .all(|link| link.source_id != source),
+            "TrackedBySource links keyed to a re-entering source must be dropped (CR 400.7)"
         );
     }
 

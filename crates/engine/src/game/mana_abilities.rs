@@ -6279,9 +6279,16 @@ mod tests {
 
     #[test]
     fn pit_of_offerings_blink_clears_exile_links() {
-        // CR 400.7 + CR 610.3: When Pit of Offerings leaves the battlefield,
-        // its `TrackedBySource` exile links are dropped. A blink (LTB then
-        // re-ETB) creates a new object that inherits no linkage.
+        // CR 400.7: A blink (LTB then re-ETB) creates a new object that inherits
+        // no linkage — the re-entered Pit's mana ability must not read the old
+        // incarnation's exiled cards.
+        //
+        // CR 607.2a: `TrackedBySource` links now SURVIVE the leg into exile (a
+        // self-exiled source stays the linked-ability referent for its pile —
+        // Mechtitan Core); the blink reset happens on RE-ENTRY, not on the exit.
+        // While Pit sits in exile the preserved link is inert (its "{T}: add mana
+        // among cards exiled with ~" ability can only be activated on the
+        // battlefield), so this staged blink still ends with no stale linkage.
         let mut state = GameState::new_two_player(42);
         let (pit, _exiled) = pit_of_offerings_with_exiled_card(
             &mut state,
@@ -6292,14 +6299,20 @@ mod tests {
 
         assert_eq!(state.exile_links.len(), 1, "precondition: link was created");
 
+        // LTB into exile: the link is preserved (CR 607.2a durability), not yet cleared.
         let mut events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, pit, Zone::Exile, &mut events);
+        assert!(
+            state.exile_links.iter().any(|link| link.source_id == pit),
+            "an exit into exile preserves the TrackedBySource link (CR 607.2a)"
+        );
 
-        // The TrackedBySource link keyed to the (departed) Pit object must be gone.
+        // Re-ETB (the blink completes): the new object sheds the stale linkage.
+        crate::game::zones::move_to_zone(&mut state, pit, Zone::Battlefield, &mut events);
         assert!(
             state.exile_links.iter().all(|link| link.source_id != pit),
-            "TrackedBySource exile links must be pruned when the source leaves \
-             the battlefield (CR 400.7)"
+            "TrackedBySource exile links must be cleared when the source re-enters \
+             the battlefield as a new object (CR 400.7)"
         );
     }
 
