@@ -150,7 +150,7 @@ use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
-    EffectChainIr, SpecialClause,
+    EffectChainIr, OtherwiseKind, SpecialClause,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -24430,14 +24430,18 @@ pub(crate) fn parse_effect_chain_ir(
                     let ir = parse_effect_chain_ir(&else_text, kind, ctx);
                     lower_effect_chain_ir(&ir)
                 };
+                // Bound by construction: this arm is reached only inside
+                // `builder.clauses().any(clause_has_anaphoric_control_condition)`,
+                // so a prior clause carries a control condition that lowers to a
+                // conditional def the Bound handler attaches the else-branch to.
                 builder
                     .clause(
                         normalized_text,
                         placeholder_parsed_clause("otherwise_placeholder"),
                         chunk.boundary_after,
-                        ClauseDisposition::Special {
-                            action: SpecialClause::Otherwise(Box::new(else_def)),
-                            intrinsic: None,
+                        ClauseDisposition::BranchOtherwise {
+                            else_def: Box::new(else_def),
+                            kind: OtherwiseKind::Bound,
                         },
                     )
                     .push();
@@ -24496,19 +24500,22 @@ pub(crate) fn parse_effect_chain_ir(
                 .clauses()
                 .iter()
                 .any(|c| c.opponent_may_scope.is_some());
-            let special = if has_condition || has_optional_may_head {
-                SpecialClause::Otherwise(Box::new(else_def))
+            // PARSE-TIME Bound/Fallback determination — this predicate MUST stay
+            // exactly here (parse time). Recomputing "prior conditional present?"
+            // at lowering could diverge from this state and move output.
+            let kind = if has_condition || has_optional_may_head {
+                OtherwiseKind::Bound
             } else {
-                SpecialClause::OtherwiseFallback(Box::new(else_def))
+                OtherwiseKind::Fallback
             };
             builder
                 .clause(
                     normalized_text,
                     placeholder_parsed_clause("otherwise_placeholder"),
                     chunk.boundary_after,
-                    ClauseDisposition::Special {
-                        action: special,
-                        intrinsic: None,
+                    ClauseDisposition::BranchOtherwise {
+                        else_def: Box::new(else_def),
+                        kind,
                     },
                 )
                 .push();

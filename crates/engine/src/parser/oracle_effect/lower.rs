@@ -26,7 +26,7 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
-    ClauseDisposition, ClauseIr, EffectChainIr, SpecialClause,
+    ClauseDisposition, ClauseIr, EffectChainIr, OtherwiseKind, SpecialClause,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
@@ -1353,17 +1353,16 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                     append_to_deepest_sub_ability(last_def, Some(rider.clone()));
                 }
                 true
-            } else if let ClauseDisposition::Special {
-                action: special,
-                intrinsic,
+            } else if let ClauseDisposition::BranchOtherwise {
+                else_def,
+                kind: otherwise_kind,
             } = &clause_ir.disposition
             {
-                match special {
-                    SpecialClause::AltCostRider(cost) => {
-                        attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost.clone());
-                        true
-                    }
-                    SpecialClause::Otherwise(else_def) => {
+                // CR 608.2c: `otherwise_kind` was determined at PARSE time (whether
+                // a prior conditional / opponent-may head existed) — it is NOT
+                // recomputed here, so parse-time and lower-time views cannot diverge.
+                match otherwise_kind {
+                    OtherwiseKind::Bound => {
                         // Walk defs backward to find the most recent conditional
                         let mut attached = false;
                         for d in defs.iter_mut().rev() {
@@ -1422,9 +1421,8 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                                 }
                             }
                         }
-                        true
                     }
-                    SpecialClause::OtherwiseFallback(else_def) => {
+                    OtherwiseKind::Fallback => {
                         defs.push(AbilityDefinition::new(
                             kind,
                             Effect::Unimplemented {
@@ -1433,6 +1431,17 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                             },
                         ));
                         defs.push(*else_def.clone());
+                    }
+                }
+                true
+            } else if let ClauseDisposition::Special {
+                action: special,
+                intrinsic,
+            } = &clause_ir.disposition
+            {
+                match special {
+                    SpecialClause::AltCostRider(cost) => {
+                        attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost.clone());
                         true
                     }
                     SpecialClause::DigInsteadAlt(alt_def) => {

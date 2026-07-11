@@ -559,6 +559,60 @@ fn carbonize() {
 }
 
 // ---------------------------------------------------------------------------
+// "Otherwise" else-branches (U5-M2 BranchOtherwise parity)
+// ---------------------------------------------------------------------------
+// All three exercise the Bound kind (prior conditional / opponent-may head
+// present at parse time); Fallback has no real corpus card (0/568 fixture
+// cards). Oracle text verified verbatim against Scryfall.
+
+// CR 608.2c + CR 205.3a: Bound → attach-to-conditional + self-ref rebind
+// (`definition_targets_self_source` → `rewrite_else_parent_target_to_self_ref`,
+// so the else "it" binds to the source rather than an empty target list).
+#[test]
+fn repeat_offender() {
+    let (ir, lowered) = parse_two_layer(
+        "{2}{B}: If this creature is suspected, put a +1/+1 counter on it. Otherwise, suspect it. (A suspected creature has menace and can't block.)",
+        "Repeat Offender",
+        &["Creature"],
+        &["Human", "Assassin"],
+    );
+    insta::assert_json_snapshot!("repeat_offender_ir", &ir);
+    insta::assert_json_snapshot!("repeat_offender_lowered", &lowered);
+}
+
+// CR 608.2c: Bound → attach-to-conditional + event-context "that much" rebind
+// (`rewrite_else_event_context_to_stable`, so the else's "that much" reads the
+// if-branch's stable magnitude instead of a per-instruction 0).
+#[test]
+fn caustic_bronco() {
+    let (ir, lowered) = parse_two_layer(
+        "Whenever this creature attacks, reveal the top card of your library and put it into your hand. You lose life equal to that card's mana value if this creature isn't saddled. Otherwise, each opponent loses that much life.\nSaddle 3 (Tap any number of other creatures you control with total power 3 or more: This Mount becomes saddled until end of turn. Saddle only as a sorcery.)",
+        "Caustic Bronco",
+        &["Creature"],
+        &["Snake", "Horse", "Mount"],
+    );
+    insta::assert_json_snapshot!("caustic_bronco_ir", &ir);
+    insta::assert_json_snapshot!("caustic_bronco_lowered", &lowered);
+}
+
+// CR 608.2d + CR 101.4: Bound → opponent-may reward branch (no explicit
+// condition, but the "any player may" head sets `opponent_may_scope`, so
+// `has_optional_may_head` routes it Bound; the handler's `!attached` fallback
+// synthesizes the `Not(OptionalEffectPerformed)`-gated reward on the may-head).
+// The "If no one does, …" connector is one of the recognized otherwise forms.
+#[test]
+fn browbeat() {
+    let (ir, lowered) = parse_two_layer(
+        "Any player may have Browbeat deal 5 damage to them. If no one does, target player draws three cards.",
+        "Browbeat",
+        &["Sorcery"],
+        &[],
+    );
+    insta::assert_json_snapshot!("browbeat_ir", &ir);
+    insta::assert_json_snapshot!("browbeat_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
 // Triggers (various patterns)
 // ---------------------------------------------------------------------------
 

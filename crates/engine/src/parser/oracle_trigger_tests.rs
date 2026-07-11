@@ -17328,14 +17328,15 @@ fn trigger_copy_token_suffix_condition_attaches_otherwise() {
 ///
 /// Direct-IR construction tests the boundary-advance building block in
 /// isolation: clause 0 normal (`boundary: Comma`), clause 1
-/// `SpecialClause::Otherwise` (`boundary: Sentence`), clause 2 normal.
-/// With the bug, clause 2 inherits clause 0's `Comma` → `ContinuationStep`;
-/// with the fix it inherits clause 1's `Sentence` → `SequentialSibling`.
+/// `BranchOtherwise { kind: Bound }` (a no-op with no prior conditional,
+/// `boundary: Sentence`), clause 2 normal. With the bug, clause 2 inherits
+/// clause 0's `Comma` → `ContinuationStep`; with the fix it inherits clause 1's
+/// `Sentence` → `SequentialSibling`.
 #[test]
 fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
     use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
     use crate::parser::oracle_ir::effect_chain::{
-        ClauseDisposition, ClauseIrBuilder, EffectChainIr, SpecialClause,
+        ClauseDisposition, ClauseIrBuilder, EffectChainIr, OtherwiseKind,
     };
     use crate::types::ability::SubAbilityLink;
 
@@ -17343,18 +17344,8 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
         builder: &mut ClauseIrBuilder,
         effect: Effect,
         boundary: Option<ClauseBoundary>,
-        special: Option<SpecialClause>,
+        disposition: ClauseDisposition,
     ) {
-        let disposition = match special {
-            Some(action) => ClauseDisposition::Special {
-                action,
-                intrinsic: None,
-            },
-            None => ClauseDisposition::Emit {
-                followup: None,
-                intrinsic: None,
-            },
-        };
         builder
             .clause("", parsed_clause(effect), boundary, disposition)
             .push();
@@ -17364,8 +17355,13 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
         count: QuantityExpr::Fixed { value: 1 },
         target: TargetFilter::Controller,
     };
-    // `SpecialClause::Otherwise` is a silent no-op when no prior conditional
-    // def exists, so clause 0 needs no condition.
+    let emit = || ClauseDisposition::Emit {
+        followup: None,
+        intrinsic: None,
+    };
+    // A `BranchOtherwise { kind: Bound }` with no prior conditional def is a
+    // silent no-op (attaches nowhere) — the same boundary-advancing behavior the
+    // former `SpecialClause::Otherwise` had, so clause 0 needs no condition.
     let otherwise_def = Box::new(crate::types::ability::AbilityDefinition::new(
         AbilityKind::Spell,
         draw_one(),
@@ -17373,16 +17369,24 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
 
     let mut builder = ClauseIrBuilder::new("");
     // clause 0: normal, trailing boundary = Comma
-    push_clause(&mut builder, draw_one(), Some(ClauseBoundary::Comma), None);
-    // clause 1: SpecialClause::Otherwise, trailing boundary = Sentence
+    push_clause(
+        &mut builder,
+        draw_one(),
+        Some(ClauseBoundary::Comma),
+        emit(),
+    );
+    // clause 1: BranchOtherwise (no-op), trailing boundary = Sentence
     push_clause(
         &mut builder,
         draw_one(),
         Some(ClauseBoundary::Sentence),
-        Some(SpecialClause::Otherwise(otherwise_def)),
+        ClauseDisposition::BranchOtherwise {
+            else_def: otherwise_def,
+            kind: OtherwiseKind::Bound,
+        },
     );
     // clause 2: normal — must stamp sub_link from clause 1's Sentence
-    push_clause(&mut builder, draw_one(), None, None);
+    push_clause(&mut builder, draw_one(), None, emit());
     let ir = EffectChainIr {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
@@ -17407,6 +17411,88 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
         trailing.sub_link,
         SubAbilityLink::ContinuationStep,
         "regression guard: must NOT inherit clause 0's stale Comma boundary"
+    );
+}
+
+/// CR 608.2c: direct handler coverage for `ClauseDisposition::BranchOtherwise {
+/// kind: Fallback }`. No real card in the fixture corpus produces Fallback
+/// (0/568 — it is the degenerate strict-failure branch that fires only when the
+/// parser fails to recognize the antecedent condition), so this constructs the
+/// disposition directly to pin the verbatim-moved Fallback body: it self-emits an
+/// `Unimplemented { name: "otherwise" }` marker def followed by the else def.
+#[test]
+fn branch_otherwise_fallback_self_emits_unimplemented_marker_and_else() {
+    use crate::parser::oracle_ir::ast::{parsed_clause, ClauseBoundary};
+    use crate::parser::oracle_ir::effect_chain::{
+        ClauseDisposition, ClauseIrBuilder, EffectChainIr, OtherwiseKind,
+    };
+
+    let draw_one = || Effect::Draw {
+        count: QuantityExpr::Fixed { value: 1 },
+        target: TargetFilter::Controller,
+    };
+    let gain_life = || Effect::GainLife {
+        amount: QuantityExpr::Fixed { value: 2 },
+        player: TargetFilter::Controller,
+    };
+    let else_def = Box::new(crate::types::ability::AbilityDefinition::new(
+        AbilityKind::Spell,
+        gain_life(),
+    ));
+
+    let mut builder = ClauseIrBuilder::new("");
+    // clause 0: a normal emitted def (the "prior" clause).
+    builder
+        .clause(
+            "",
+            parsed_clause(draw_one()),
+            Some(ClauseBoundary::Sentence),
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    // clause 1: Fallback — no prior conditional, so self-emit marker + else.
+    builder
+        .clause(
+            "",
+            parsed_clause(draw_one()),
+            None,
+            ClauseDisposition::BranchOtherwise {
+                else_def,
+                kind: OtherwiseKind::Fallback,
+            },
+        )
+        .push();
+    let ir = EffectChainIr {
+        clauses: builder.finish(),
+        kind: AbilityKind::Spell,
+        chain_rounding: None,
+        actor: None,
+        repeat_until: None,
+    };
+
+    // Walk the lowered sub_ability chain and collect every effect.
+    let root = lower_effect_chain_ir(&ir);
+    let mut effects: Vec<&Effect> = Vec::new();
+    let mut cur = Some(&root);
+    while let Some(def) = cur {
+        effects.push(&def.effect);
+        cur = def.sub_ability.as_deref();
+    }
+    // Fallback self-emits the Unimplemented "otherwise" marker …
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Unimplemented { name, .. } if name == "otherwise"
+        )),
+        "Fallback must self-emit the Unimplemented 'otherwise' marker, chain: {effects:?}"
+    );
+    // … followed by the else def (GainLife).
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::GainLife { .. })),
+        "Fallback must emit the else def after the marker, chain: {effects:?}"
     );
 }
 

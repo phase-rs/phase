@@ -121,10 +121,6 @@ pub(crate) enum DoesTheSameSubject {
 pub(crate) enum SpecialClause {
     /// CR 118.9 + CR 119.4: Alternative-cost rider — fold cost onto previous CastFromZone.
     AltCostRider(AbilityCost),
-    /// CR 608.2c: "Otherwise, [effect]" — attach as else_ability on previous conditional.
-    Otherwise(Box<AbilityDefinition>),
-    /// CR 608.2c: "Otherwise" fallback — no conditional found, emit as Unimplemented + def.
-    OtherwiseFallback(Box<AbilityDefinition>),
     /// CR 608.2c: Dig-instead alternative — replace previous Dig with conditional alternative.
     DigInsteadAlt(Box<AbilityDefinition>),
     /// CR 608.2e: Generic instead clause — attach to previous def as sub_ability.
@@ -242,6 +238,15 @@ pub(crate) enum ClauseDisposition {
         rider: Box<AbilityDefinition>,
         kind: AbsorbKind,
     },
+    /// CR 608.2c: an "Otherwise, [effect]" else-branch. Promoted from
+    /// `SpecialClause::{Otherwise, OtherwiseFallback}` (U5-M2). `kind` carries the
+    /// PARSE-TIME determination of whether a prior conditional exists — do NOT
+    /// recompute it at lowering (parse-time and lower-time "prior conditional
+    /// present?" states could diverge and move output).
+    BranchOtherwise {
+        else_def: Box<AbilityDefinition>,
+        kind: OtherwiseKind,
+    },
     /// A special-case adjacency action that modifies an adjacent clause during
     /// lowering (folds the former `special: Option<SpecialClause>`). `intrinsic`
     /// carries the self-patch some special arms apply (lower.rs:1600).
@@ -268,6 +273,20 @@ pub(crate) enum AbsorbKind {
     DieExile,
     /// CR 608.2c + CR 701.19c: "dealt damage this way can't be regenerated" rider.
     CantBeRegenerated,
+}
+
+/// CR 608.2c: whether the "Otherwise" else-branch binds to a prior conditional or
+/// self-emits. The determination is made at PARSE time (whether a prior
+/// conditional / opponent-may head was found) and carried here — never recomputed
+/// at lowering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum OtherwiseKind {
+    /// A prior conditional def (or opponent-may head) was found at parse time:
+    /// attach the else-branch as its `else_ability` / synthesized reward.
+    Bound,
+    /// No prior conditional at parse time: self-emit (an Unimplemented "otherwise"
+    /// marker def followed by the else def).
+    Fallback,
 }
 
 /// Per-clause IR: captures everything about a single parsed chunk before chain assembly.
@@ -355,7 +374,9 @@ impl ClauseDisposition {
         match self {
             ClauseDisposition::Emit { intrinsic, .. }
             | ClauseDisposition::Special { intrinsic, .. } => intrinsic.as_ref(),
-            ClauseDisposition::Continue { .. } | ClauseDisposition::Absorb { .. } => None,
+            ClauseDisposition::Continue { .. }
+            | ClauseDisposition::Absorb { .. }
+            | ClauseDisposition::BranchOtherwise { .. } => None,
         }
     }
 
@@ -368,7 +389,9 @@ impl ClauseDisposition {
             | ClauseDisposition::Continue {
                 continuation: followup,
             } => followup.as_ref(),
-            ClauseDisposition::Special { .. } | ClauseDisposition::Absorb { .. } => None,
+            ClauseDisposition::Special { .. }
+            | ClauseDisposition::Absorb { .. }
+            | ClauseDisposition::BranchOtherwise { .. } => None,
         }
     }
 }
