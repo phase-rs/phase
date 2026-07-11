@@ -1929,12 +1929,12 @@ pub(crate) fn parse_static_line_inner(
         {
             let after = &tp.original[pos + verb_len..];
             let predicate = format!("{}{}", verb_prefix, after);
-            let predicate_lower = predicate.to_lowercase();
 
-            // CR 604.1: Strip suffix turn conditions —
-            // "has first strike during your turn" → condition + "has first strike"
-            let (effective_predicate, suffix_condition) =
-                strip_suffix_turn_condition(&predicate_lower);
+            // CR 604.1: Strip suffix turn conditions from the ORIGINAL-case
+            // predicate so a granted ability's serialized `description` keeps its
+            // printed case (issue #5599) — "has first strike during your turn" →
+            // condition + "has first strike".
+            let (effective_predicate, suffix_condition) = strip_suffix_turn_condition(&predicate);
 
             if let Some(mut def) =
                 parse_continuous_gets_has(&effective_predicate, TargetFilter::SelfRef, tp.original)

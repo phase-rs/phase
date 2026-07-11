@@ -9762,6 +9762,30 @@ fn tokens_you_control_grant_spans_all_token_permanents() {
     );
 }
 
+// Issue #5599: a granted ability's `description` is a serialized, user-visible
+// field. The compound-subject anthem path stripped its trailing turn condition
+// on the LOWERCASED predicate and emitted the lowercase buffer, so Brightcap
+// Badger's "{T}: Add {G}." rendered as "{t}: add {g}.". The description must keep
+// its printed case.
+#[test]
+fn compound_subject_granted_ability_description_keeps_original_case() {
+    let def =
+        parse_static_line("Each Fungus and Saproling you control has \"{T}: Add {G}.\"").unwrap();
+    let ContinuousModification::GrantAbility { definition } = def
+        .modifications
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("compound-subject anthem must grant the quoted ability")
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        definition.description.as_deref(),
+        Some("{T}: Add {G}."),
+        "granted-ability description must keep printed case, not the lowercased parse buffer"
+    );
+}
+
 // CR 702.95 + CR 613.1f: A soulbond pair grants a QUOTED activated/triggered
 // ability to both paired creatures — "As long as ~ is paired with another
 // creature, each of those creatures has "<ability>."". The granted ability's own

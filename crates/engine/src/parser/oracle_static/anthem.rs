@@ -307,9 +307,14 @@ pub(crate) fn parse_subject_continuous_static(text: &str) -> Option<StaticDefini
         return parse_continuous_gets_has(predicate, affected, text);
     }
 
-    // CR 604.1: Strip suffix turn conditions from predicate —
-    // "has first strike during your turn" → "has first strike" + DuringYourTurn
-    let (effective_predicate, suffix_condition) = strip_suffix_turn_condition(&pred_lower);
+    // CR 604.1: Strip suffix turn conditions from the ORIGINAL-case predicate
+    // (not `pred_lower`) — "has first strike during your turn" → "has first
+    // strike" + DuringYourTurn. The condition phrase is lowercase in the original
+    // too, so `strip_suffix_turn_condition` still matches, and the retained
+    // predicate keeps its printed case: a granted ability's serialized,
+    // user-visible `description` must read "{T}: Add {G}.", not "{t}: add {g}."
+    // (issue #5599, Brightcap Badger).
+    let (effective_predicate, suffix_condition) = strip_suffix_turn_condition(predicate);
 
     let modifications = parse_continuous_modifications(&effective_predicate);
     if !modifications.is_empty() {
