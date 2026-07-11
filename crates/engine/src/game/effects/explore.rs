@@ -228,11 +228,15 @@ pub fn resolve(
         })
         .unwrap_or(ability.source_id);
 
-    // CR 701.37a + CR 614.1a: Consult explore replacements (Twists and Turns,
-    // Topography Tracker, …) before the reveal/counter/land logic runs.
+    // CR 701.44a + CR 614.1a + CR 614.5: Consult explore replacements (Twists and
+    // Turns, Topography Tracker, …) before the reveal/counter/land logic runs.
+    // Seed the proposed event's applied set from the resolving ability so an
+    // explore produced by a doubling replacement's execute chain excludes the
+    // replacement that produced it (no self-invocation) while remaining open to
+    // other doublers (CR 616.1f). Empty for a first-time explore.
     let proposed = ProposedEvent::Explore {
         object_id: explorer_id,
-        applied: HashSet::new(),
+        applied: ability.replacement_applied.clone(),
     };
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(_) => {}
@@ -411,6 +415,351 @@ mod tests {
         ResolvedAbility::new(Effect::Explore, vec![], source_id, PlayerId(0))
     }
 
+    /// Build a creature carrying Topography Tracker's explore replacement:
+    /// "If a creature you control would explore, instead it explores, then it
+    /// explores again." (execute = Explore, sub_ability = Explore).
+    fn topography_replacement() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Explore)
+            .execute(
+                AbilityDefinition::new(AbilityKind::Spell, Effect::Explore)
+                    .sub_ability(AbilityDefinition::new(AbilityKind::Spell, Effect::Explore)),
+            )
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+    }
+
+    /// CR 614.5 + CR 701.44a (issue #5272): Topography Tracker doubles an
+    /// explore. The two explores must resolve SEQUENTIALLY through the
+    /// interactive pipeline — the first explore reveals a nonland and pauses on
+    /// its own DigChoice; the second explore resumes only AFTER that choice.
+    /// The naive back-to-back applier revealed the same top card twice (the
+    /// first DigChoice never moved it), granting two counters up front and
+    /// clobbering the first choice. This test locks correct sequencing.
+    #[test]
+    fn topography_double_explore_sequences_two_distinct_reveals() {
+        let mut state = GameState::new_two_player(42);
+
+        // Tracker carries the double-explore replacement.
+        let tracker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Topography Tracker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&tracker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&tracker)
+            .unwrap()
+            .replacement_definitions
+            .push(topography_replacement());
+
+        // The exploring creature.
+        let explorer = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Explorer".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&explorer)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Three DISTINCT nonlands on top (A, B, C) so both a re-reveal of the
+        // same top card AND a spurious self-re-double are detectable, with a land
+        // beneath to anchor the library top. Card C must stay untouched: the two
+        // explores consume A and B, and the producing replacement must NOT apply
+        // to its own output (CR 614.5), so C is never revealed.
+        let bolt_a = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Library,
+        );
+        let shock_b = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Shock".to_string(),
+            Zone::Library,
+        );
+        let spark_c = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(0),
+            "Spark".to_string(),
+            Zone::Library,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        for id in [bolt_a, shock_b, spark_c] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Instant);
+        }
+        state.players[0].library = vec![bolt_a, shock_b, spark_c, land].into();
+
+        let ability = make_explore_ability(explorer);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // First explore only: exactly ONE counter so far, paused on card A's
+        // DigChoice, with the second explore stashed as a continuation.
+        assert_eq!(
+            state.objects[&explorer]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1),
+            "only the first of the two explores should have resolved before the DigChoice"
+        );
+        match &state.waiting_for {
+            WaitingFor::DigChoice { cards, .. } => {
+                assert_eq!(
+                    cards.as_slice(),
+                    &[bolt_a],
+                    "first explore must reveal the current top card (A)"
+                );
+            }
+            other => panic!("expected DigChoice from first explore, got {other:?}"),
+        }
+        assert!(
+            state.pending_continuation.is_some(),
+            "the second explore must be stashed while the first waits on DigChoice"
+        );
+
+        // Resolve the first DigChoice: send card A to the graveyard so the
+        // second explore reveals a DIFFERENT card (B).
+        engine::apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] }).unwrap();
+
+        assert_eq!(
+            state.objects[&explorer]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(2),
+            "second explore should add another counter after the first choice resolves"
+        );
+        assert!(
+            state.players[0].graveyard.contains(&bolt_a),
+            "declined first-explore card A must be in the graveyard"
+        );
+        match &state.waiting_for {
+            WaitingFor::DigChoice { cards, .. } => {
+                assert_eq!(
+                    cards.as_slice(),
+                    &[shock_b],
+                    "second explore must reveal the NEW top card (B), not re-reveal A"
+                );
+            }
+            other => panic!("expected DigChoice from second explore, got {other:?}"),
+        }
+
+        // CR 614.5: resolving the second explore's DigChoice must TERMINATE the
+        // explore — the producing replacement cannot apply to its own output, so
+        // there is no third explore. If the second link had lost its applied-set
+        // exclusion and re-doubled, card C would be revealed here for a third
+        // counter and a fresh DigChoice.
+        engine::apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] }).unwrap();
+
+        assert_eq!(
+            state.objects[&explorer]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(2),
+            "exactly two explores must occur — the doubler must not re-apply to itself (CR 614.5)"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::DigChoice { .. }),
+            "the doubled explore must terminate, not spawn a third DigChoice"
+        );
+        assert_eq!(
+            state.players[0].library.front().copied(),
+            Some(spark_c),
+            "card C must be untouched on top — the doubler never explores a third time"
+        );
+    }
+
+    /// CR 616.1 + CR 701.44a (issue #5272): when a multi-creature explore
+    /// ("each creature you control explores") is doubled, one creature's two
+    /// explores must stay CONSECUTIVE — the next creature must not explore
+    /// between them. Models the `Explore(C1).sub(Explore(C2))` chain that
+    /// `resolve_single_explorer` builds (Hakbal of the Surging Soul), with
+    /// Topography Tracker doubling each explore. After C1's first DigChoice
+    /// resolves, C1 must already have its SECOND counter while C2 has none.
+    #[test]
+    fn doubled_explore_keeps_one_creatures_two_explores_consecutive() {
+        let mut state = GameState::new_two_player(42);
+
+        let tracker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Topography Tracker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&tracker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&tracker)
+            .unwrap()
+            .replacement_definitions
+            .push(topography_replacement());
+
+        let c1 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Battlefield,
+        );
+        let c2 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Second".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [c1, c2] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // Nonlands on top so each explore pauses on a DigChoice; a land anchors
+        // the bottom.
+        let mut lib = Vec::new();
+        for cid in 10..14 {
+            let card = create_object(
+                &mut state,
+                CardId(cid),
+                PlayerId(0),
+                format!("Nonland {cid}"),
+                Zone::Library,
+            );
+            state
+                .objects
+                .get_mut(&card)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Instant);
+            lib.push(card);
+        }
+        state.players[0].library = lib.into();
+
+        // Explore C1, then (as the printed next instruction) explore C2 — the
+        // shape `resolve_single_explorer` produces for a two-creature explore.
+        let second = ResolvedAbility::new(
+            Effect::Explore,
+            vec![TargetRef::Object(c2)],
+            c1,
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Explore,
+            vec![TargetRef::Object(c1)],
+            c1,
+            PlayerId(0),
+        )
+        .sub_ability(second);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // C1's first explore paused on its DigChoice; C1 has one counter, C2 none.
+        assert_eq!(
+            state.objects[&c1]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1),
+        );
+        assert_eq!(
+            state.objects[&c2].counters.get(&CounterType::Plus1Plus1),
+            None
+        );
+
+        // Resolve C1's first DigChoice. C1's SECOND explore must run next — NOT
+        // C2's — so C1 reaches two counters while C2 still has none.
+        engine::apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] }).unwrap();
+
+        assert_eq!(
+            state.objects[&c1]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(2),
+            "C1's two explores must be consecutive — C2 must not interleave between them"
+        );
+        assert_eq!(
+            state.objects[&c2].counters.get(&CounterType::Plus1Plus1),
+            None,
+            "C2 must not have explored until C1's doubled explore fully completes"
+        );
+
+        // Drain C1's second DigChoice: the appended C2 sub must now actually
+        // fire (its own doubled explore begins), proving the sub was queued
+        // AFTER C1's pair rather than dropped.
+        engine::apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] }).unwrap();
+        assert_eq!(
+            state.objects[&c1]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(2),
+            "C1 must not explore a third time after its pair completes"
+        );
+        assert_eq!(
+            state.objects[&c2]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1),
+            "C2's explore must run once C1's doubled explore has fully resolved"
+        );
+    }
+
     #[test]
     fn explore_scry_prelude_replacement_runs_before_explore() {
         let mut state = GameState::new_two_player(42);
@@ -485,13 +834,50 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
+        // CR 614.5 + CR 701.44a: "scry 1, THEN it explores" resolves in printed
+        // order through the interactive pipeline. The scry parks its choice FIRST;
+        // the explore is stashed and must not run yet (no counter, no reveal).
+        match &state.waiting_for {
+            WaitingFor::ScryChoice { player, cards } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(cards.as_slice(), &[top_card]);
+            }
+            other => panic!("expected the scry prelude to pause first, got {other:?}"),
+        }
         assert!(
+            !state.objects[&explorer]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "the explore must not run until the scry choice resolves"
+        );
+        assert!(
+            state.pending_continuation.is_some(),
+            "the explore link must be stashed while the scry waits for a choice"
+        );
+
+        // Keep the card on top; the stashed explore now runs and reveals it.
+        engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![top_card],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
             state.objects[&explorer]
                 .counters
-                .iter()
-                .any(|(ct, _)| *ct == CounterType::Plus1Plus1),
-            "replacement scry prelude must still leave the creature exploring (+1/+1 counter)"
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1),
+            "the scry prelude must still leave the creature exploring (+1/+1 counter)"
         );
+        match &state.waiting_for {
+            WaitingFor::DigChoice { cards, .. } => {
+                assert_eq!(cards.as_slice(), &[top_card]);
+            }
+            other => panic!("expected the explore's nonland DigChoice, got {other:?}"),
+        }
     }
 
     #[test]

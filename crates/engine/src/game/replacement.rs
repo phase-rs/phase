@@ -1941,10 +1941,37 @@ fn scry_applier(
 
 // --- 4d. Explore (Twists and Turns / Topography Tracker) ---
 
-// CR 701.37a + CR 614.1a: A creature is about to explore. Replacement
+// CR 701.44a + CR 614.1a: A creature is about to explore. Replacement
 // effects can modify the explore action (e.g., add a scry prelude or double explore).
 fn explore_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::Explore { .. })
+}
+
+/// CR 701.44a + CR 614.5: Retarget every explore/action link in a replacement's
+/// execute chain to the exploring object and carry the already-applied
+/// replacement set. The carried set makes each re-proposed explore exclude the
+/// replacement that produced it (CR 614.5 — a replacement effect cannot
+/// self-invoke) while still admitting other explore doublers (CR 616.1f). The
+/// scry prelude (Twists and Turns) keeps its own controller-scoped target; only
+/// explore/action links address the exploring object.
+fn stamp_explore_chain(
+    ability: &mut ResolvedAbility,
+    explorer: ObjectId,
+    applied: &HashSet<AppliedReplacementKey>,
+) {
+    ability.replacement_applied = applied.clone();
+    if !matches!(&ability.effect, Effect::Scry { .. }) {
+        ability.targets = vec![TargetRef::Object(explorer)];
+    }
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        stamp_explore_chain(sub, explorer, applied);
+    }
+    // Mirror `build_resolved_from_def`, which also populates `else_ability`, so a
+    // branching execute chain leaves no explore link with a stale target or an
+    // unseeded applied set.
+    if let Some(else_branch) = ability.else_ability.as_deref_mut() {
+        stamp_explore_chain(else_branch, explorer, applied);
+    }
 }
 
 fn explore_applier(
@@ -1968,36 +1995,23 @@ fn explore_applier(
         return ApplyResult::Modified(ProposedEvent::Explore { object_id, applied });
     };
 
-    use crate::game::ability_utils::build_resolved_from_def;
-    use crate::types::ability::TargetRef;
-
     let controller = source.controller;
-    let mut current = Some(execute.as_ref());
-    while let Some(def) = current {
-        match &*def.effect {
-            Effect::Scry { .. } => {
-                let ability = build_resolved_from_def(def, rid.source, controller);
-                let _ = crate::game::effects::scry::resolve(state, &ability, events);
-            }
-            Effect::Explore => {
-                let ability = ResolvedAbility::new(
-                    Effect::Explore,
-                    vec![TargetRef::Object(object_id)],
-                    rid.source,
-                    controller,
-                );
-                let _ = crate::game::effects::explore::resolve_explore_effect(
-                    state, &ability, object_id, events,
-                );
-            }
-            _ => {
-                let mut ability = build_resolved_from_def(def, rid.source, controller);
-                ability.targets = vec![TargetRef::Object(object_id)];
-                let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 1);
-            }
-        }
-        current = def.sub_ability.as_deref();
-    }
+
+    // CR 701.44a + CR 614.5 + CR 616.1f: Resolve the replacement's execute chain
+    // (Twists and Turns' "scry 1, then it explores"; Topography Tracker's "it
+    // explores, then it explores again") through the standard interactive
+    // continuation machinery instead of a straight-line loop. An intermediate
+    // scry, or a nonland explore's DigChoice, parks a player choice; the
+    // following link is stashed on `pending_continuation` and resumes only after
+    // that choice resolves — so the two explores reveal sequentially rather than
+    // both firing against the same still-unmoved top card. `stamp_explore_chain`
+    // carries the already-applied replacement set (which the pipeline marked with
+    // this rid before invoking the applier) onto every link, so a re-proposed
+    // explore excludes THIS replacement (no self-loop) while other doublers still
+    // apply (CR 616.1f).
+    let mut chain = build_resolved_from_def(&execute, rid.source, controller);
+    stamp_explore_chain(&mut chain, object_id, &applied);
+    let _ = crate::game::effects::resolve_ability_chain(state, &chain, events, 1);
 
     ApplyResult::Prevented
 }
@@ -6199,6 +6213,17 @@ fn apply_single_replacement(
             // generic Template stash here does not drop the deferred connive.
             let post_effect =
                 post_effect.filter(|_| !matches!(proposed, ProposedEvent::Connive { .. }));
+            // CR 701.44a + CR 614.5: The explore applier runs the entire
+            // replacement `execute` chain itself — Twists and Turns' "scry 1,
+            // then it explores", Topography Tracker's "it explores, then it
+            // explores again" — through the interactive continuation machinery
+            // and returns `Prevented` (mirroring connive). Stashing the same
+            // chain as a post-replacement continuation would run it a SECOND
+            // time when the drain fires, exploring again on the replacement's
+            // own source instead of the exploring permanent. The applier is the
+            // single authority for this event, so suppress the generic stash.
+            let post_effect =
+                post_effect.filter(|_| !matches!(proposed, ProposedEvent::Explore { .. }));
             let mut modifiers = event_modifiers_for_ability(ability, state, rid.source, &proposed);
             // CR 110.2a: A self-ETB controller override is carried directly on the
             // replacement definition (not derived from `execute`), parallel to the

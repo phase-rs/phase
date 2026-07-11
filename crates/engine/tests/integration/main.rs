@@ -735,6 +735,7 @@ mod esper_terra_saga_token_lore;
 mod everything_comes_to_dust_convoke_exile;
 mod exhaust_keyword_once_per_permanent;
 mod expensive_taste_look_and_play;
+mod explore_all_doubler_ordering;
 mod explore_all_sub_runs_once;
 mod explore_spell_3315;
 mod extinction_event_3270;

@@ -7974,6 +7974,34 @@ fn resolve_chain_body(
         {
             return Ok(());
         }
+        // CR 616.1 + CR 701.44a: An explore doubler ("…then it explores again")
+        // paused this explore, and its applier already installed the doubled
+        // second explore on `pending_continuation`. This node's own `sub_ability`
+        // — the `ExploreAll` walk to the NEXT creature (Hakbal of the Surging
+        // Soul) or a trailing rider — is a LATER instruction: a single creature's
+        // two explores stay consecutive, so no other creature may explore between
+        // them. Append the sub AFTER the installed second explore rather than
+        // prepending it ahead (the generic path below), which would interleave
+        // the next creature between the two halves. Guarded to `Effect::Explore`
+        // so it never disturbs effects (clash, PayCost) whose installed
+        // continuation IS their own sub_ability.
+        if continuation_installed_by_this_effect
+            && matches!(ability.effect, Effect::Explore)
+            && waits_for_resolution_choice(&state.waiting_for)
+        {
+            let mut sub_clone = sub.as_ref().clone();
+            if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
+                sub_clone.targets = ability.targets.clone();
+            }
+            apply_parent_chain_context(
+                &mut sub_clone,
+                ability,
+                effect_context_object.as_ref(),
+                state,
+            );
+            append_to_pending_continuation(state, Some(Box::new(sub_clone)));
+            return Ok(());
+        }
         // If resolve_effect just entered a player-choice state (Scry/Dig/Surveil),
         // save the sub-ability as a continuation to execute after the player responds,
         // rather than immediately processing it (which would bypass the UI).
