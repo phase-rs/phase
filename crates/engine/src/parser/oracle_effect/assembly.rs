@@ -219,9 +219,6 @@ struct Arena {
     order: Vec<NodeId>,
     /// Nodes popped out of `order` this clause, awaiting classification by `settle`.
     detached: Vec<NodeId>,
-    /// Did anything get pushed after the last detach? Distinguishes "popped and
-    /// replaced" (→ `Absorbed`) from "removed outright" (→ `Dropped`).
-    pushed_since_detach: bool,
 }
 
 impl Arena {
@@ -242,7 +239,6 @@ impl Arena {
             witness,
         });
         self.order.push(id);
-        self.pushed_since_detach = true;
         id
     }
 
@@ -263,7 +259,6 @@ impl Arena {
         self.detached.retain(|d| *d != id);
         self.nodes[id.0 as usize].status = NodeStatus::Live;
         self.order.push(id);
-        self.pushed_since_detach = true;
     }
 
     /// The id currently at top-level position `index`, if any.
@@ -296,7 +291,6 @@ impl Arena {
     fn remove_at(&mut self, index: usize) -> NodeId {
         let id = self.order.remove(index);
         self.detached.push(id);
-        self.pushed_since_detach = false;
         id
     }
 
@@ -322,7 +316,6 @@ impl Arena {
                 .pop()
                 .expect("order non-empty while longer than defs");
             self.detached.push(id);
-            self.pushed_since_detach = false;
         }
         while self.order.len() < defs.len() {
             // The node being created IS `defs[order.len()]` — stamp its witness at
@@ -334,29 +327,24 @@ impl Arena {
         }
     }
 
-    /// Classify anything detached this clause, then assert the mirror invariant.
+    /// Classify anything still detached at the end of a clause, then assert the
+    /// mirror invariant.
     ///
-    /// A handler that pops its antecedent and pushes a replacement (`DigAlt`,
-    /// `Instead`, `FoldSearchIntoElse`, `ModifyPrior::EntersTappedAttacking`)
-    /// nests the popped def under that replacement — so the detached nodes are
-    /// `Absorbed` into the new tail. If nothing was pushed, the node was removed
-    /// outright and we do NOT invent a parent for it.
+    /// Every handler that NESTS the def it detached now names the parent itself, via
+    /// `absorb` — `DigAlt`, `Instead`, `FoldSearchIntoElse` and
+    /// `ModifyPrior::EntersTappedAttacking` (which re-lives its def with `reinstate`
+    /// instead). So whatever is left here was removed from top-level with NO parent
+    /// to name, and is honestly `Dropped`.
+    ///
+    /// This used to infer the parent as `order.last()`. That inference was wrong at
+    /// `FoldSearchIntoElse`, whose intrinsic continuation pushes a node AFTER the real
+    /// parent — the arena recorded the continuation's node as parent of a def nested
+    /// somewhere else entirely. Emission order is not a parenthood oracle, so the
+    /// guess is gone rather than special-cased.
     fn settle(&mut self, defs: &[AbilityDefinition]) {
-        if !self.detached.is_empty() {
-            let parent = if self.pushed_since_detach {
-                self.order.last().copied()
-            } else {
-                None
-            };
-            let detached = std::mem::take(&mut self.detached);
-            for id in detached {
-                self.nodes[id.0 as usize].status = match parent {
-                    Some(into) => NodeStatus::Absorbed { into },
-                    None => NodeStatus::Dropped,
-                };
-            }
+        for id in std::mem::take(&mut self.detached) {
+            self.nodes[id.0 as usize].status = NodeStatus::Dropped;
         }
-        self.pushed_since_detach = false;
         self.assert_mirrors(defs);
     }
 
@@ -366,8 +354,8 @@ impl Arena {
     /// nothing left to check it against.
     fn live_root_index(&self, id: NodeId) -> Option<usize> {
         let mut cursor = id;
-        // Bounded: each hop moves strictly toward an older parent, and there are
-        // only `nodes.len()` of them.
+        // Bounded by the node count: a parent is always an EXISTING node, so a chain
+        // that has not terminated within `nodes.len()` hops must contain a cycle.
         for _ in 0..=self.nodes.len() {
             match self.node(cursor).status {
                 NodeStatus::Live => return self.order.iter().position(|o| *o == cursor),
@@ -375,7 +363,11 @@ impl Arena {
                 NodeStatus::Dropped => return None,
             }
         }
-        None
+        // A cycle looks unconstructible (`absorb` is only ever called with a parent
+        // that is Live at the time), but it must not FAIL QUIET: returning `None` here
+        // would make the absorbed-parenthood assert pass VACUOUSLY for this node —
+        // a self-inflicted false green of exactly the kind U6-0 exists to remove.
+        unreachable!("arena: `Absorbed` chain contains a cycle — parenthood is corrupt")
     }
 
     /// The arena's LIVE nodes correspond 1:1 to `defs` — *by identity*, not merely
@@ -462,6 +454,13 @@ impl Arena {
 
 /// Is a def with this witness anywhere in `def`'s tree? Walks the two slots a
 /// handler can nest an absorbed node into.
+///
+/// `AbilityDefinition` has a THIRD nested-def slot — `mode_abilities` — and it is
+/// excluded deliberately, not by oversight: assembly never writes it (verified; the
+/// parser only ever reads/iterates it), so no absorbed node can land there. If a
+/// future handler does nest into it, this walk will fail to find the node and the
+/// absorbed-parenthood assert goes RED — the safe direction, and the signal to add
+/// the slot here rather than a silent pass.
 fn def_tree_contains(def: &AbilityDefinition, witness: DefWitness) -> bool {
     def_witness(def) == witness
         || [def.sub_ability.as_deref(), def.else_ability.as_deref()]
@@ -1213,6 +1212,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // special-clause arms).
                 match replace_kind {
                     ReplaceMeaningKind::DigAlt(alt_def) => {
+                        // Identity: `new_def` genuinely IS new (it comes from the IR),
+                        // so it correctly gets a fresh id — this is the one absorbing
+                        // handler that does NOT `reinstate`. The popped def is nested
+                        // under it as `else_ability`, so it names that parent.
+                        let absorbed = env.arena.id_at(defs.len().wrapping_sub(1));
                         if let Some(last_def) = defs.pop() {
                             env.observe(&defs, None, NodeRole::Unknown);
                             let mut new_def = *alt_def.clone();
@@ -1223,6 +1227,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             new_def.else_ability = Some(Box::new(last_def));
                             defs.push(new_def);
                             env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
+                            let parent = env
+                                .arena
+                                .id_at(defs.len() - 1)
+                                .expect("the replacement def was just pushed");
+                            if let Some(absorbed) = absorbed {
+                                env.arena.absorb(absorbed, parent);
+                            }
                         }
                         true
                     }
@@ -1255,7 +1266,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         if bound.is_some() {
                             // Identity: the root is MOVED out of `defs` and back in —
                             // it keeps its NodeId (U6-C2 ruling). Capture before the take.
+                            // The TAIL defs (1..N) are nested into the root below, so
+                            // capture their ids too and name the root as their parent —
+                            // `settle` no longer infers one.
                             let root_id = env.arena.id_at(0);
+                            let tail_ids: Vec<NodeId> = env.arena.order[1..].to_vec();
                             let mut chain_defs = std::mem::take(&mut defs);
                             env.observe(&defs, None, NodeRole::Unknown);
                             let mut root = chain_defs.remove(0);
@@ -1281,6 +1296,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             defs.push(root);
                             if let Some(id) = root_id {
                                 env.arena.reinstate(id);
+                                // Each tail def was appended into the root's sub-spine
+                                // by `append_to_deepest_sub_ability`.
+                                for tail in tail_ids {
+                                    env.arena.absorb(tail, id);
+                                }
                             }
                             env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
                         }
@@ -2241,4 +2261,69 @@ fn rebind_condition_instead_damage_anaphor(
         return bind_anaphoric_damage_subject_keep_recipient(chain.effect.as_mut());
     }
     false
+}
+
+#[cfg(test)]
+mod arena_tests {
+    use super::*;
+
+    fn shuffle_def() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+        )
+    }
+
+    /// The mirror assert's IDENTITY check (`order[i]` names the def actually at
+    /// `defs[i]`) guards the mid-vector-removal defect — and that defect is LATENT on
+    /// today's card pool: both `FoldSearchIntoElse` removals happen to land on the
+    /// tail, where a tail pop coincidentally mirrors them correctly. So nothing in the
+    /// suite or the full-pool sweep has ever watched this assert go red, and a guard
+    /// nobody has seen fail is a guard nobody should trust.
+    ///
+    /// This drives the defect synthetically: remove `defs[1]`, then mirror it the way
+    /// the pre-fix code did — with `sync_len`'s TAIL pop. Note what stays perfectly
+    /// consistent: 3 defs and 3 nodes become 2 and 2. Every count lines up. The old
+    /// count-only assert accepted exactly this. Only IDENTITY diverges — `order[1]`
+    /// still names the def that was removed, not the one that shifted into its place.
+    #[test]
+    #[should_panic(expected = "order` names a different def than `defs` holds")]
+    fn tail_pop_mirroring_a_mid_vector_removal_is_caught() {
+        let mut defs = vec![shuffle_def(), shuffle_def(), shuffle_def()];
+        let mut arena = Arena::default();
+        arena.sync_len(&defs, None, NodeRole::Primary);
+        arena.assert_mirrors(&defs);
+
+        defs.remove(1); // MID-vector removal ...
+        arena.sync_len(&defs, None, NodeRole::Unknown); // ... mirrored by a TAIL pop.
+        arena.settle(&defs);
+    }
+
+    /// The green half of the pair. Without it, the `should_panic` above proves only
+    /// that the assert CAN fail — not that it DISCRIMINATES. `remove_at` models the
+    /// same removal correctly, and the same assert accepts it.
+    #[test]
+    fn remove_at_mirroring_a_mid_vector_removal_is_accepted() {
+        let mut defs = vec![shuffle_def(), shuffle_def(), shuffle_def()];
+        let mut arena = Arena::default();
+        arena.sync_len(&defs, None, NodeRole::Primary);
+
+        let absorbed = arena.remove_at(1); // the removal, MODELLED ...
+        let removed = defs.remove(1); // ... rather than approximated.
+        arena.sync_len(&defs, None, NodeRole::Unknown);
+
+        // Nest the removed def under the survivor, exactly as a folding handler does,
+        // and name that parent — then the parenthood assert has something true to find.
+        defs[0].else_ability = Some(Box::new(removed));
+        let parent = arena.id_at(0).expect("defs[0] is live");
+        arena.absorb(absorbed, parent);
+
+        arena.settle(&defs);
+        assert!(matches!(
+            arena.node(absorbed).status,
+            NodeStatus::Absorbed { into } if into == parent
+        ));
+    }
 }
