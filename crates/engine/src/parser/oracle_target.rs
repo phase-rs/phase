@@ -2676,20 +2676,27 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // collective type word and a per-object property suffix —
     // "creatures, each with power 1 or less" /
     // "creatures, each with base power or toughness 1 or less" (Angelic
-    // Aberration class; #967). Consuming the entire `, [space]each ` token
+    // Aberration class; #967) and the comma-less form "cards each with mana
+    // value X or less" (Dance of the Manse). Consuming the `[,] each ` token
     // normalizes the remaining input to the bare suffix form ("with …") so
     // that all downstream suffix parsers (power/toughness via CR 208,
     // mana-value via CR 202.3, counters via CR 122.1, keywords via CR 702)
     // receive the same input regardless of whether the Oracle text used the
-    // distributive linker or the comma-less phrasing.
-    if let Ok((rem, _)) = (
-        tag::<_, _, OracleError<'_>>(","),
-        opt(tag::<_, _, OracleError<'_>>(" ")),
-        tag::<_, _, OracleError<'_>>("each "),
-    )
-        .parse(&lower[pos..])
+    // comma linker, the comma-less linker, or plain "with …". The trailing
+    // `peek("with ")` restricts stripping to a genuine property suffix so a
+    // non-distributive "each" (e.g. "each player owns") is left intact.
     {
-        pos += lower[pos..].len() - rem.len();
+        let after_ws = lower[pos..].trim_start();
+        let ws = lower[pos..].len() - after_ws.len();
+        if let Ok((rem, _)) = (
+            opt((tag::<_, _, OracleError<'_>>(","), opt(space1))),
+            tag::<_, _, OracleError<'_>>("each "),
+            peek(tag::<_, _, OracleError<'_>>("with ")),
+        )
+            .parse(after_ws)
+        {
+            pos += ws + (after_ws.len() - rem.len());
+        }
     }
 
     // Check "with power N or less/greater" suffix
@@ -9051,6 +9058,38 @@ mod tests {
                 value: QuantityExpr::Fixed { value: 2 },
             }]))
         );
+    }
+
+    #[test]
+    fn comma_less_distributive_each_linker_preserves_mana_value_suffix() {
+        // Dance of the Manse: "... cards each with mana value X or less" — the
+        // distributive "each with" linker carries no comma, yet must still
+        // normalize to the bare "with mana value …" suffix. Also exercises the
+        // disjunctive (Or) form so the `Cmc` bound distributes onto every leg.
+        let (f, rest) = parse_target(
+            "up to x target artifact and/or non-aura enchantment cards each with mana value x or less",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = &f else {
+            panic!("expected Or target, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        for leg in filters {
+            let TargetFilter::Typed(tf) = leg else {
+                panic!("expected typed leg, got {leg:?}");
+            };
+            assert!(
+                tf.properties.contains(&FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                }),
+                "each Or leg must carry the mana-value bound: {tf:?}"
+            );
+        }
     }
 
     #[test]
