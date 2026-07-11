@@ -11,13 +11,13 @@
 
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::effect_chain::{
-    ClauseDisposition, EffectChainIr, OtherwiseKind, PriorModifier, ReplaceMeaningKind,
+    ClauseDisposition, ClauseId, EffectChainIr, OtherwiseKind, PriorModifier, ReplaceMeaningKind,
     ReplicateKind,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastFromZoneDriver,
-    ControllerRef, Effect, PlayerFilter, QuantityExpr, StaticCondition, SubAbilityLink,
-    TapStateChange, TargetFilter,
+    CastingPermission, ControllerRef, Effect, PlayerFilter, QuantityExpr, StaticCondition,
+    SubAbilityLink, TapStateChange, TargetFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -66,11 +66,179 @@ use super::{
     stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
 
+// ===========================================================================
+// AssemblyEnv (Plan 01 §6, U6-B1) — emit-time provenance + role registries
+// ===========================================================================
+//
+// WRITE-ONLY THIS INCREMENT. Nothing reads these registries yet; the handlers
+// still bind their antecedents positionally (`defs.last_mut()`, backward scans).
+// U6-C flips the consumers over. Keeping population and consumption in separate
+// commits means a bisect can never land on the bookkeeping.
+//
+// The shape here is dictated by the U6 `defs` audit:
+//
+//  * `origin` is `Option<ClauseId>`, NOT `ClauseId`. `apply_clause_continuation`
+//    pushes nodes of its own (`sequence.rs` — e.g. the `SearchDestination`
+//    `ChangeZone`), and those nodes belong to no clause. `FoldSearchIntoElse`
+//    binds to exactly such a node, which is why a `ClauseId`-only arena key is
+//    insufficient (audit §2). `origin: None` is that case, made concrete.
+//
+//  * Registries are recomputed against the CURRENT `defs` after every mutation
+//    region, because `defs` is a `Vec` that handlers `pop()` and `mem::take()`.
+//    Any index-keyed reference into it is invalidated by the next handler. That
+//    fragility is not incidental — it is the argument for U6-C's stable arena
+//    ids, and it is why these are recomputed rather than cached by index.
+//
+//  * These registries observe only TOP-LEVEL `defs` entries. Three of the real
+//    consumers (`attach_alt_cost_to_prior_cast_from_zone`,
+//    `attach_mana_retention_to_prior_mana`,
+//    `find_prev_play_from_exile_permission_mut`) recurse INTO `sub_ability`
+//    trees for the first node whose slot is still vacant (audit §6). They cannot
+//    be served by a top-level registry at all — that is the node-granularity
+//    decision U6-C must make first.
+
+/// How a node in `defs` came to exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeRole {
+    /// Emitted by a clause body on the normal (`Emit`) path.
+    Primary,
+    /// Built by a disposition handler out of a clause.
+    HandlerProduct,
+    /// Pushed by `apply_clause_continuation` — belongs to NO clause (audit §2).
+    ContinuationProduct,
+    /// Provenance lost because a continuation restructured `defs` in place
+    /// (e.g. the Birthing Ritual `DigFromAmong` rebuild). Recorded honestly
+    /// rather than guessed.
+    Unknown,
+}
+
+// Written every clause, read in U6-C when the handlers bind by antecedent.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+struct NodeProvenance {
+    /// `None` for continuation-pushed nodes — the audit's key finding.
+    origin: Option<ClauseId>,
+    role: NodeRole,
+}
+
+/// A registered antecedent: where it currently sits in `defs`, and where it came from.
+// Written every clause, read in U6-C when the handlers bind by antecedent.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+struct NodeRef {
+    index: usize,
+    provenance: NodeProvenance,
+}
+
+/// Emit-time facts about the chain assembled so far.
+//
+// Fields are populated but not yet read (U6-C consumes them); `dead_code` is
+// expected and intentional for exactly one increment.
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+struct AssemblyEnv {
+    /// Provenance parallel to `defs`, kept the same length by `observe`.
+    prov: Vec<NodeProvenance>,
+    /// "Look at the top N"-class antecedent (`Dig`/`Mill`/`RevealUntil`) — the
+    /// node `RestDestination` / `DigFromAmong` continuations scan backward for.
+    last_dig: Option<NodeRef>,
+    /// `Destroy`/`DestroyAll` — the `CantRegenerate` rider's antecedent.
+    last_destroy_like: Option<NodeRef>,
+    last_cast_from_zone: Option<NodeRef>,
+    last_mana: Option<NodeRef>,
+    last_play_from_exile: Option<NodeRef>,
+    /// A node whose `condition` is ACTUALLY set — see `refresh` for why this is
+    /// read off the built def and never off `ClauseIr::condition`.
+    last_conditional: Option<NodeRef>,
+    /// An "any player may" head (`optional_for`) — `BranchOtherwise`'s fallback antecedent.
+    last_optional_for: Option<NodeRef>,
+    /// The continuation-pushed search-destination `ChangeZone` that
+    /// `FoldSearchIntoElse` folds into its `else_ability`.
+    last_search_destination: Option<NodeRef>,
+}
+
+impl AssemblyEnv {
+    /// Record provenance for any nodes `defs` gained since the last call, then
+    /// recompute the registries against the current `defs`.
+    ///
+    /// `defs` only ever grows by push/extend or shrinks from the TAIL (`pop`) or
+    /// wholesale (`mem::take`), so truncating/extending `prov` to `defs.len()`
+    /// keeps the two aligned without tracking each op individually.
+    fn observe(&mut self, defs: &[AbilityDefinition], origin: Option<ClauseId>, role: NodeRole) {
+        self.prov.truncate(defs.len());
+        while self.prov.len() < defs.len() {
+            self.prov.push(NodeProvenance { origin, role });
+        }
+        self.refresh(defs);
+    }
+
+    /// Recompute the role registries. Last match wins — these are "the most
+    /// recent X", mirroring the backward scans they will eventually replace.
+    fn refresh(&mut self, defs: &[AbilityDefinition]) {
+        self.last_dig = None;
+        self.last_destroy_like = None;
+        self.last_cast_from_zone = None;
+        self.last_mana = None;
+        self.last_play_from_exile = None;
+        self.last_conditional = None;
+        self.last_optional_for = None;
+        self.last_search_destination = None;
+
+        for (index, def) in defs.iter().enumerate() {
+            let provenance = self.prov.get(index).copied().unwrap_or(NodeProvenance {
+                origin: None,
+                role: NodeRole::Unknown,
+            });
+            let node = NodeRef { index, provenance };
+
+            // CRITICAL (audit §5.1): register a conditional off the BUILT def's
+            // `condition`, never off `ClauseIr::condition`. The `Emit` path
+            // deliberately leaves `def.condition` unset for a `GenericEffect`
+            // whose condition was pushed down onto its `StaticDefinition`s (the
+            // `pushed_down.is_none()` guard below), and `BranchOtherwise`'s
+            // backward scan (`d.condition.is_some()`) intentionally skips those
+            // nodes. Reading the def mirrors that truth exactly; reading the IR
+            // would bind to a node the current scan does not.
+            if def.condition.is_some() {
+                self.last_conditional = Some(node);
+            }
+            if def.optional_for.is_some() {
+                self.last_optional_for = Some(node);
+            }
+            match &*def.effect {
+                Effect::Dig { .. } | Effect::Mill { .. } | Effect::RevealUntil { .. } => {
+                    self.last_dig = Some(node);
+                }
+                Effect::Destroy { .. } | Effect::DestroyAll { .. } => {
+                    self.last_destroy_like = Some(node);
+                }
+                Effect::CastFromZone { .. } => self.last_cast_from_zone = Some(node),
+                Effect::Mana { .. } => self.last_mana = Some(node),
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile { .. },
+                    ..
+                } => self.last_play_from_exile = Some(node),
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Hand,
+                    ..
+                } => self.last_search_destination = Some(node),
+                _ => {}
+            }
+        }
+    }
+}
+
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
 
     // ── Phase 1: ClauseIr → AbilityDefinition ──────────────────────────
     let mut defs: Vec<AbilityDefinition> = Vec::new();
+    // U6-B1: emit-time provenance + role registries. Populated below, consumed by
+    // nothing yet (U6-C). `observe` is called after every statement that changes
+    // `defs.len()` — a pop followed by a push inside one region would otherwise
+    // let the new node silently inherit the popped node's provenance.
+    let mut env = AssemblyEnv::default();
     // CR 608.2c: Boundary that followed the previous normal-path clause. Used to
     // stamp each clause's `sub_link` — a `Sentence` boundary before this clause
     // makes it a `SequentialSibling` (independent following instruction); a
@@ -87,6 +255,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // (formerly the absorbed `followup_continuation` path).
                 if let Some(continuation) = clause_ir.disposition.followup() {
                     apply_clause_continuation(&mut defs, continuation.clone(), kind);
+                    env.observe(&defs, None, NodeRole::ContinuationProduct);
                     apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
                 }
                 true
@@ -179,6 +348,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             },
                         ));
                         defs.push(*else_def.clone());
+                        env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
                     }
                 }
                 true
@@ -194,6 +364,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         attach_repeat_process_keywords(&mut defs, keywords)
                     }
                 }
+                env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
                 true
             } else if let ClauseDisposition::ModifyPrior { modifier } = &clause_ir.disposition {
                 // CR 608.2c: fold a field-level modification onto the prior emitted
@@ -216,6 +387,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             );
                             if can_patch {
                                 let mut patched = defs.pop().unwrap();
+                                env.observe(&defs, None, NodeRole::Unknown);
                                 match &mut *patched.effect {
                                     Effect::CopyTokenOf {
                                         enters_attacking,
@@ -278,6 +450,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                 patched.condition = clause_ir.condition.clone();
                                 patched.else_ability = Some(Box::new(original));
                                 defs.push(patched);
+                                env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
                             }
                         }
                     }
@@ -292,6 +465,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 match replace_kind {
                     ReplaceMeaningKind::DigAlt(alt_def) => {
                         if let Some(last_def) = defs.pop() {
+                            env.observe(&defs, None, NodeRole::Unknown);
                             let mut new_def = *alt_def.clone();
                             apply_where_x_ability_expression(
                                 &mut new_def,
@@ -299,6 +473,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             );
                             new_def.else_ability = Some(Box::new(last_def));
                             defs.push(new_def);
+                            env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
                         }
                         true
                     }
@@ -321,6 +496,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         // prior shape (empty tail → no `else_ability`).
                         if !defs.is_empty() {
                             let mut chain_defs = std::mem::take(&mut defs);
+                            env.observe(&defs, None, NodeRole::Unknown);
                             let mut root = chain_defs.remove(0);
                             for next in chain_defs {
                                 append_to_deepest_sub_ability(&mut root, Some(Box::new(next)));
@@ -342,6 +518,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             instead.else_ability = root.sub_ability.take();
                             root.sub_ability = Some(Box::new(instead));
                             defs.push(root);
+                            env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
                         }
                         true
                     }
@@ -390,12 +567,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     );
                     if trailing_is_search_destination {
                         def.else_ability = Some(Box::new(defs.pop().unwrap()));
+                        env.observe(&defs, None, NodeRole::Unknown);
                     }
                 }
                 defs.push(def);
+                env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
                 // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
                 if let Some(continuation) = intrinsic {
                     apply_clause_continuation(&mut defs, continuation.clone(), kind);
+                    env.observe(&defs, None, NodeRole::ContinuationProduct);
                 }
                 true
             } else if let ClauseDisposition::DrawnThisTurnFollowup { life_payment } =
@@ -491,6 +671,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // previous defs before building this clause's def (`Emit.followup`).
         if let Some(continuation) = clause_ir.disposition.followup() {
             apply_clause_continuation(&mut defs, continuation.clone(), kind);
+            env.observe(&defs, None, NodeRole::ContinuationProduct);
             apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
         }
 
@@ -888,11 +1069,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
 
         defs.extend(current_defs);
+        env.observe(&defs, Some(clause_ir.id), NodeRole::Primary);
 
         // Apply intrinsic continuation after extending defs with current clause's
         // defs (`Emit.intrinsic`).
         if let Some(continuation) = clause_ir.disposition.intrinsic() {
             apply_clause_continuation(&mut defs, continuation.clone(), kind);
+            env.observe(&defs, None, NodeRole::ContinuationProduct);
             apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
         }
 
