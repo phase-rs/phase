@@ -7,7 +7,14 @@
 #   0    all resources are fresh and reached updateStatus=ok with no in-flight build
 #   1    a resource is fresh and reached updateStatus=error with no in-flight build
 #   2    usage error
+#   3    cannot answer the question (Tilt not reachable, or Tilt watches a different
+#        checkout than this one). NOT a build failure -- never report it as one.
 #   124  --timeout elapsed before all resources settled
+#
+# 1 vs 3 is load-bearing: 1 means "your code is broken", 3 means "I could not find out".
+# Collapsing them is how a wrong-checkout or a stopped Tilt gets misread as a compile error,
+# which teaches callers to distrust the script -- and a distrusted freshness gate gets
+# bypassed, which restores the very false green this script exists to prevent.
 #
 # A resource must be both TERMINAL and FRESH before its status is believed.
 #
@@ -155,16 +162,48 @@ freshness() {
     ((${#prune[@]})) && prune+=(-o)
     prune+=(-path "$p")
   done < <(jq -r '.spec.ignores[]? | select((.patterns // []) | length == 0) | .basePath' <<< "$fw")
+
+  # Translate Tilt's ignore globs to `find` predicates -- but ONLY the shapes we can
+  # translate faithfully, and bail out loudly on the rest.
+  #
+  # `-name "${p##*/}"` is faithful for a basename glob matched at any depth (`**/*.tmp.*`
+  # -> `-name '*.tmp.*'`). It is NOT faithful for a directory glob: `target/**` reduces to
+  # `-name '**'`, which fnmatches EVERY file, prunes the entire watch root, and makes the
+  # scan report `fresh` unconditionally -- silently restoring the false green this whole
+  # script exists to prevent. One `ignore=` line in the Tiltfile could disarm it with no
+  # visible symptom, so an untranslatable pattern must fail CLOSED, not guess.
+  local base
   while IFS= read -r p; do
     [[ -z "$p" ]] && continue
+    base="${p##*/}"
+    # Reject a basename that is empty or only `*`s -- `target/**` reduces to `**`, and
+    # `-name '**'` fnmatches every file, pruning the whole tree.
+    if [[ -z "$base" || "$base" =~ ^\*+$ ]]; then
+      echo "tilt-wait: $r has ignore pattern '$p' that cannot be translated to a find" >&2
+      echo "tilt-wait: predicate without risking a match-everything prune; refusing to guess." >&2
+      echo unverifiable
+      return
+    fi
     ((${#prune[@]})) && prune+=(-o)
-    prune+=(-name "${p##*/}")
+    prune+=(-name "$base")
   done < <(jq -r '.spec.ignores[]? | .patterns[]?' <<< "$fw")
 
+  # A `find` failure must NOT read as "nothing changed". The old `|| true` swallowed the
+  # status into an empty string, which is indistinguishable from a clean scan -- it failed
+  # OPEN, toward green, in the one script whose whole job is to not lie green. Fail closed.
+  #
+  # `|| rc=$?` (not a bare assignment) is required: `set -e` is on, so an unguarded failing
+  # command substitution would abort the script before any status check could run.
+  local rc=0
   if ((${#prune[@]})); then
-    newer=$(find "${paths[@]}" \( "${prune[@]}" \) -prune -o -type f -newer "$start_ref" -print -quit 2>/dev/null || true)
+    newer=$(find "${paths[@]}" \( "${prune[@]}" \) -prune -o -type f -newer "$start_ref" -print -quit 2>/dev/null) || rc=$?
   else
-    newer=$(find "${paths[@]}" -type f -newer "$start_ref" -print -quit 2>/dev/null || true)
+    newer=$(find "${paths[@]}" -type f -newer "$start_ref" -print -quit 2>/dev/null) || rc=$?
+  fi
+  if ((rc != 0)); then
+    echo "tilt-wait: $r mtime scan failed (find rc=$rc); cannot establish freshness" >&2
+    echo unverifiable
+    return
   fi
 
   if [[ -n "$newer" ]]; then
@@ -181,7 +220,7 @@ while true; do
   for r in "${resources[@]}"; do
     if ! json=$(tilt get uiresource "$r" -o json 2>/dev/null); then
       echo "tilt-wait: failed to read resource '$r' (is Tilt running?)" >&2
-      exit 1
+      exit 3
     fi
     st=$(jq -r '.status.updateStatus // "unknown"' <<< "$json")
     current=$(jq -r '.status.currentBuild.spanID // "none"' <<< "$json")
@@ -198,7 +237,7 @@ while true; do
 
     case "$fresh" in
       foreign)
-        exit 1
+        exit 3
         ;;
       stale|never-built)
         # Any ok/error here describes code from before the change (or no code at all).
