@@ -9142,6 +9142,29 @@ fn parse_conjure_zone(lower: &str) -> Option<(Zone, &str)> {
         // Digital-only Alchemy conjures can also land in exile (e.g. a random card
         // conjured from a spellbook into exile with a play-permission rider).
         value(Zone::Exile, tag(" into exile")),
+        // Digital-only Alchemy conjures can slot a card into a random position among the
+        // top N cards of a library (e.g. "into the top five cards of your library at
+        // random"). The engine models conjure destinations at Zone granularity, so — like
+        // the plain "into your library" arm above, and matching the established
+        // "Some(Zone::Library) covers top-of-library variants" convention — these collapse
+        // to Zone::Library. `parse_number` consumes the count word; "your" and "each
+        // player's" libraries both map here.
+        value(
+            Zone::Library,
+            preceded(
+                tag::<_, _, OracleError<'_>>(" into the top "),
+                preceded(
+                    nom_primitives::parse_number,
+                    preceded(
+                        tag(" cards of "),
+                        alt((
+                            tag("your library at random"),
+                            tag("each player's library at random"),
+                        )),
+                    ),
+                ),
+            ),
+        ),
     ))
     .parse(lower)
     .ok()
