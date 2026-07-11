@@ -590,6 +590,17 @@ fn build_additive_type_continuous_clause(
     application: &SubjectApplication,
     predicate: &str,
 ) -> Option<ParsedEffectClause> {
+    // CR 707.9: A copy's `, except <body>` clause (Sarkhan, Soul Aflame — "become
+    // a copy of it until end of turn, except its name is ~ and it's legendary in
+    // addition to its other types") owns any "in addition to its other types"
+    // tail. That supertype belongs in the `BecomeCopy` additional_modifications
+    // produced by `become_copy_except`, not a standalone additive-type static —
+    // so decline here (letting the copy parser win) rather than let the scanned
+    // `is` inside "its name is ~" be read as this clause's copula verb.
+    let predicate_lower = predicate.to_lowercase();
+    if nom_primitives::split_once_on(&predicate_lower, ", except").is_ok() {
+        return None;
+    }
     let modifications = parse_additive_type_clause_modifications(predicate)?;
     let affected = static_affected_for_application(application);
 
