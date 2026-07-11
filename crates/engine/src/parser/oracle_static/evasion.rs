@@ -1989,39 +1989,10 @@ pub(crate) fn try_parse_compound_subtypes(
     extra_props: &[FilterProp],
     is_other: bool,
 ) -> Option<TargetFilter> {
-    let (left, right) = descriptor
-        .split_once(" and ") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .or_else(|| descriptor.split_once(" or "))?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-    let left_trimmed = left.trim();
-    let right_trimmed = right.trim();
-    if !is_capitalized_words(left_trimmed) || !is_capitalized_words(right_trimmed) {
-        return None;
-    }
-    let left_sub = parse_subtype(left_trimmed)
-        .map(|(c, _)| c)
-        .unwrap_or_else(|| left_trimmed.to_string());
-    let right_sub = parse_subtype(right_trimmed)
-        .map(|(c, _)| c)
-        .unwrap_or_else(|| right_trimmed.to_string());
-    // Inject extra_props and Another into each inner filter at construction time,
-    // because add_property does not recurse into TargetFilter::Or.
-    let mut all_props = extra_props.to_vec();
-    if is_other {
-        all_props.push(FilterProp::Another);
-    }
-    let filters = vec![
-        TargetFilter::Typed(
-            typed_filter_for_subtype(&left_sub)
-                .controller(ControllerRef::You)
-                .properties(all_props.clone()),
-        ),
-        TargetFilter::Typed(
-            typed_filter_for_subtype(&right_sub)
-                .controller(ControllerRef::You)
-                .properties(all_props),
-        ),
-    ];
-    Some(TargetFilter::Or { filters })
+    // CR 611.3a: Delegate to the generalized Oxford-comma subtype-list authority
+    // in `shared`, which handles any arity ("Demons, Devils, Imps, and
+    // Tieflings") rather than only the two-member "<A> and <B>" split.
+    parse_subtype_list_filter(descriptor, extra_props, is_other)
 }
 
 /// CR 510.1a + CR 613.11: The "assign[s] combat damage equal to <poss> toughness

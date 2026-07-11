@@ -3770,6 +3770,69 @@ fn scoped_subject_filter(
     TargetFilter::Typed(typed)
 }
 
+/// Parse one capitalized subtype word (alphabetic characters and hyphens,
+/// starting uppercase) — the atom of an Oxford-comma subtype list.
+fn parse_capitalized_subtype_word(input: &str) -> OracleResult<'_, &str> {
+    use nom::bytes::complete::take_while1;
+    use nom::combinator::verify;
+    verify(
+        take_while1(|c: char| c.is_alphabetic() || c == '-'),
+        |w: &str| w.chars().next().is_some_and(|c| c.is_uppercase()),
+    )
+    .parse(input)
+}
+
+/// CR 205.3m + CR 611.3a: Parse an Oxford-comma / conjunction subtype LIST
+/// subject — "<Subtype>, <Subtype>, ..., [and|or] <Subtype>" (Raphael, Fiendish
+/// Savior "Other Demons, Devils, Imps, and Tieflings you control"; Tiefling
+/// Outcasts) — into an `Or` of per-subtype creature filters. Generalizes the
+/// two-member compound to any arity: a `split_once(" and ")` split captured only
+/// the first and last member, silently dropping every middle comma-separated
+/// subtype. Requires two or more members and full consumption, so a non-list
+/// subject declines and falls through to the other subject parsers.
+pub(crate) fn parse_subtype_list_filter(
+    descriptor: &str,
+    extra_props: &[FilterProp],
+    is_other: bool,
+) -> Option<TargetFilter> {
+    use nom::multi::separated_list1;
+    // Separators longest-first so ", and "/", or " win over ", " and " and ".
+    let separator = alt((
+        tag::<_, _, OracleError<'_>>(", and "),
+        tag(", or "),
+        tag(", "),
+        tag(" and "),
+        tag(" or "),
+    ));
+    let (rest, words) = separated_list1(separator, parse_capitalized_subtype_word)
+        .parse(descriptor.trim())
+        .ok()?;
+    if !rest.trim().is_empty() || words.len() < 2 {
+        return None;
+    }
+    let mut all_props = extra_props.to_vec();
+    if is_other {
+        all_props.push(FilterProp::Another);
+    }
+    // CR 205.3m: normalize each plural member to its canonical singular subtype
+    // (Demons→Demon); an unrecognized capitalized word passes through unchanged,
+    // matching the prior two-member behavior.
+    let filters = words
+        .iter()
+        .map(|word| {
+            let subtype = parse_subtype(word)
+                .map(|(canonical, _)| canonical)
+                .unwrap_or_else(|| word.to_string());
+            TargetFilter::Typed(
+                typed_filter_for_subtype(&subtype)
+                    .controller(ControllerRef::You)
+                    .properties(all_props.clone()),
+            )
+        })
+        .collect();
+    Some(TargetFilter::Or { filters })
+}
+
 pub(crate) fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();

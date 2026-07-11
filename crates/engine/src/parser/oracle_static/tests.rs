@@ -3750,6 +3750,62 @@ fn static_bare_compound_tribal_subject_verdeloth() {
         .contains(&ContinuousModification::AddToughness { value: 1 }));
 }
 
+// CR 611.3a: Raphael, Fiendish Savior — a 4-member Oxford-comma tribal anthem
+// subject "Other Demons, Devils, Imps, and Tieflings you control" must OR ALL
+// FOUR subtype filters. The old two-member split captured only the first and
+// last member (Demon + Tiefling), silently dropping Devils and Imps.
+#[test]
+fn static_oxford_comma_subtype_list_captures_all_members() {
+    let def = parse_static_line(
+        "Other Demons, Devils, Imps, and Tieflings you control get +1/+1 and have lifelink.",
+    )
+    .unwrap();
+    let Some(TargetFilter::Or { filters }) = &def.affected else {
+        panic!("expected an Or of subtype filters, got {:?}", def.affected);
+    };
+    let subtypes: Vec<&str> = filters
+        .iter()
+        .filter_map(|f| match f {
+            TargetFilter::Typed(t) => t.get_subtype(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(subtypes, vec!["Demon", "Devil", "Imp", "Tiefling"]);
+    for f in filters {
+        let TargetFilter::Typed(t) = f else {
+            panic!("expected typed branch, got {f:?}");
+        };
+        assert_eq!(t.controller, Some(ControllerRef::You));
+        assert!(t.properties.contains(&FilterProp::Another));
+    }
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Lifelink
+        }));
+}
+
+#[test]
+fn parse_subtype_list_filter_arity_and_two_member_regression() {
+    // N-member list ORs every member (plurals normalized to canonical singular).
+    let TargetFilter::Or { filters } =
+        parse_subtype_list_filter("Demons, Devils, Imps, and Tieflings", &[], false)
+            .expect("four-member list must parse")
+    else {
+        panic!("expected Or");
+    };
+    assert_eq!(filters.len(), 4);
+    // Two-member "A and B" still parses on the generalized path (regression).
+    let TargetFilter::Or { filters } =
+        parse_subtype_list_filter("Elves and Goblins", &[], false).expect("two-member must parse")
+    else {
+        panic!("expected Or");
+    };
+    assert_eq!(filters.len(), 2);
+    // A single subtype is not a list.
+    assert!(parse_subtype_list_filter("Goblins", &[], false).is_none());
+}
+
 // Life and Limb — dual-subject reciprocal animation on its ACTUAL static text.
 // The subject "All Forests and all Saprolings" mixes a LAND subtype (Forest)
 // with a CREATURE subtype (Saproling); the predicate "1/1 green Saproling
