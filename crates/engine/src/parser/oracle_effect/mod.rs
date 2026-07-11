@@ -4973,32 +4973,27 @@ fn try_parse_choose_one_of_inline(
         return None;
     }
 
-    // CR 601.2d: The divided/distributed-damage target-count quantifier
-    // ("divided as you choose among one, two, or three targets") embeds a bare
-    // " or " inside the cardinality list "one, two, or three", NOT a disjunction
-    // of two imperative clauses. Splitting there hands the orphan tail
-    // ("three targets") back through the full effect→subject→static→imperative
-    // recognizer cascade as a trial parse; because that tail is not a standalone
-    // effect, the cascade re-enters this clause parser several levels deep, and
-    // the parser's large per-frame AST locals overflow small (~1-2 MB) thread
-    // stacks. The dedicated `try_parse_distribute_damage` handler
-    // (`oracle_effect::lower`) owns this whole clause and reads the count list
-    // via `strip_distribute_among_target_quantifier`, so skip the generic binary
-    // splitter for any distribution clause and let that handler claim it.
+    // CR 601.2d: A divided/distributed effect's target-count quantifier
+    // ("divided as you choose among one, two, or three targets"; "distribute
+    // three +1/+1 counters among one, two, or three target creatures") embeds a
+    // bare " or " inside the cardinality list "one, two, or three" (or "one or
+    // two"), NOT a disjunction of two imperative clauses. Splitting there hands
+    // the orphan tail ("three target creatures …") back through the full
+    // effect→subject→static→imperative recognizer cascade as a trial parse;
+    // because that tail is not a standalone effect, the cascade re-enters this
+    // clause parser several levels deep, and the parser's large per-frame AST
+    // locals overflow small (~1-2 MB) thread stacks.
     //
-    // The keyword set is owned by `lower::DISTRIBUTION_KEYWORDS` — the same set the
-    // handler bounds its quantity slice with. Both must agree: a phrasing the handler
-    // learned but this guard did not would parse there and still split here.
-    //
-    // KNOWN GAP (pre-existing on `main`, not introduced here): this keys on the
-    // distribution *verb*, but the hazard is the target-cardinality list. CR 601.2d
-    // covers dividing "damage or counters", and the counter templating ("Distribute
-    // three +1/+1 counters among one, two, or three target creatures") carries the
-    // same bare " or " and is still split. The durable fix keys the bail on the
-    // cardinality list (`lower::BOUNDED_TARGET_PHRASES`), covering both halves at
-    // once; and the underlying cause is that a failed trial parse re-enters the
-    // clause cascade with no depth bound. Both are tracked as follow-ups.
-    if lower::DISTRIBUTION_KEYWORDS
+    // CR 601.2d divides an effect "(such as damage OR counters)", so the bail
+    // keys on the target-CARDINALITY list — the axis shared by both halves —
+    // rather than on a distribution verb (which names only the damage half and
+    // left the ~32 counter-distribution cards, e.g. Ajani, Mentor of Heroes;
+    // Biogenic Upgrade; Abzan Charm, still splitting). `BOUNDED_TARGET_CARDINALITY_LISTS`
+    // is the same typed vocabulary the target-count layer strips via
+    // `strip_bounded_target_prefix`; it is the complete set of bare-" or "-bearing
+    // cardinality lists in the pool, so the divide/distribute handlers claim these
+    // clauses whole.
+    if lower::BOUNDED_TARGET_CARDINALITY_LISTS
         .iter()
         .any(|needle| nom_primitives::scan_contains(tp.lower, needle))
     {
@@ -7748,9 +7743,10 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
 
     // CR 601.2d: "deal N damage divided as you choose among [targets]" /
-    // "distributed among" / "divided evenly" → DealDamage with distribute.
+    // "divided evenly" → DealDamage with distribute. (The "distributed among"
+    // needle was removed: it matches 0 of 34,632 cards — no Magic card uses that
+    // templating — so it only guarded phrasing that does not exist.)
     if scan_contains_phrase(&lower, "divided as you choose among")
-        || scan_contains_phrase(&lower, "distributed among")
         || scan_contains_phrase(&lower, "divided evenly")
     {
         if let Some(clause) = try_parse_distribute_damage(&lower, text) {

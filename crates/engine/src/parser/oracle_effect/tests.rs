@@ -6892,6 +6892,31 @@ fn blazing_salvo_unless_have_deal_damage() {
     }
 }
 
+/// CR 601.2d (#5613): a counter-distribution clause's target-cardinality list
+/// ("one, two, or three target creatures") embeds a bare " or " that enumerates a
+/// target COUNT, not a disjunction of two clauses. The binary-choice splitter now
+/// bails on the cardinality list (previously it keyed only on the divided-DAMAGE
+/// verb, leaving ~32 counter cards to mis-split), so the distribute-counters
+/// handler claims the whole clause instead of the inline splitter bisecting it.
+#[test]
+fn distribute_counters_cardinality_list_is_not_binary_split() {
+    for text in [
+        "Distribute three +1/+1 counters among one, two, or three target creatures.",
+        "Distribute two +1/+1 counters among one or two target creatures.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(*def.effect, Effect::PutCounter { .. }),
+            "counter distribution must parse whole as PutCounter, got {:?} for {text:?}",
+            def.effect
+        );
+        assert!(
+            def.distribute.is_some(),
+            "the distribution unit must be captured, not lost to a binary split: {text:?}"
+        );
+    }
+}
+
 #[test]
 fn lava_blister_its_controller_unless_have_deal_damage() {
     let def = parse_effect_chain(

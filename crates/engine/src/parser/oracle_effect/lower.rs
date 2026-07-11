@@ -4964,6 +4964,19 @@ pub(super) const BOUNDED_TARGET_PHRASES: &[(&str, usize, usize)] = &[
     ("one, two, or three targets", 1, 3),
 ];
 
+/// CR 601.2d: The bare-`" or "`-bearing target-cardinality lists that appear in
+/// divided/distributed effects — dividing an effect "(such as damage or
+/// counters)" — where the `" or "` enumerates a target COUNT, never a
+/// disjunction of two clauses. This is the complete set measured against the
+/// full pool (`AtomicCards.json`, 34,632 cards); the `target` (no trailing `s`)
+/// matches both the bare `"… targets"` (divided damage) and `"… target
+/// <noun>"` (distributed counters) forms. `BOUNDED_TARGET_PHRASES` /
+/// `strip_bounded_target_prefix` consume the same lists at the target-count
+/// layer; the binary-choice splitter reuses this vocabulary to bail rather than
+/// keying on a distribution verb (which names only one half of the rule).
+pub(super) const BOUNDED_TARGET_CARDINALITY_LISTS: &[&str] =
+    &["one or two target", "one, two, or three target"];
+
 /// CR 115.1d + CR 601.2c: Strip exact target-count prefix before a targeted
 /// phrase. "two target creatures" and "X target creatures" both set the exact
 /// number of targets, unlike "up to X target creatures".
