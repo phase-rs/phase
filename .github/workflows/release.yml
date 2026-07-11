@@ -13,6 +13,14 @@ on:
 permissions:
   contents: write
 
+# Serialize per release tag, so a tag-push and a recovery dispatch for the same tag can
+# never build and publish it concurrently. Both triggers resolve to the same group: a push
+# has no `tag` input and carries the tag in ref_name; a dispatch passes it explicitly.
+# Never cancel-in-progress — a half-cancelled release is what leaves a tag stuck.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   resolve-release-ref:
     name: Resolve Release Ref
