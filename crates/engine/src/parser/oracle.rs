@@ -3009,15 +3009,43 @@ fn apply_etb_exile_ltb_return(
     }
 }
 
+/// CR 207.2c + CR 601.2f: Extract the per-target cost-increase clause,
+/// "[Strive — ]This spell costs {N} more to cast for each target beyond
+/// the first." Two surface forms exist for the identical CR 601.2f cost
+/// increase.
+///
+/// Labeled (~17 cards since Strive was introduced in 2014, e.g. Aerial
+/// Formation, Ajani's Presence, Twinflame): "Strive — This spell costs…".
+///
+/// Bare, no ability-word label (Fireball, Alpha 1993 — predates Strive by
+/// 21 years; Officious Interrogation, MKM 2024 — WotC printed this nine
+/// years after Strive existed and chose not to apply the label): "This
+/// spell costs…" with no em-dash prefix at all.
+///
+/// Try the labeled form first (unchanged behavior for existing Strive
+/// cards); on `None`, fall back to the same cost-pattern pipeline run
+/// directly on the un-stripped line. If a DIFFERENT ability word labels the
+/// line, the labeled branch's `ability_word != "strive"` guard still
+/// correctly returns `None` without ever reaching the bare fallback.
 fn parse_strive_cost_line(line: &str) -> Option<ManaCost> {
     let stripped = strip_reminder_text(line.trim());
-    let (ability_word, effect_text) = strip_ability_word_with_name(&stripped)?;
-    if ability_word != "strive" {
-        return None;
+
+    if let Some((ability_word, effect_text)) = strip_ability_word_with_name(&stripped) {
+        if ability_word != "strive" {
+            return None;
+        }
+        return parse_strive_cost_body(&effect_text);
     }
 
+    parse_strive_cost_body(&stripped)
+}
+
+/// Shared nom pipeline for the cost-increase clause body, used by both the
+/// labeled and bare entry points in `parse_strive_cost_line` so the two
+/// surface forms parse identically.
+fn parse_strive_cost_body(effect_text: &str) -> Option<ManaCost> {
     let effect_lower = effect_text.to_lowercase();
-    let ((), rest_original) = nom_on_lower(&effect_text, &effect_lower, |i| {
+    let ((), rest_original) = nom_on_lower(effect_text, &effect_lower, |i| {
         value((), tag("this spell costs ")).parse(i)
     })?;
     let (cost, rest_original) = parse_mana_symbols(rest_original)?;

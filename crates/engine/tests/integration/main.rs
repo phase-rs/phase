@@ -567,6 +567,7 @@ mod no_witnesses_most_creatures_investigate;
 mod ob_nixilis_captive_kingpin_life_loss;
 mod obeka_splitter_additional_phases;
 mod obliterate_regression;
+mod officious_interrogation_bare_strive_surcharge;
 mod old_growth_troll_return_as_aura;
 mod omo_queen_of_vesuva;
 mod oracle_parser;
