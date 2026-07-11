@@ -4049,11 +4049,20 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("remove {}", keyword_label(keyword))
         }
         ContinuousModification::GrantAbility { .. } => "grant ability".into(),
-        ContinuousModification::GrantAllActivatedAbilitiesOf { .. } => {
-            "grant all activated abilities of".into()
+        ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap } => {
+            // Blind spot (same class as #5492/#5495/#5501/#5507): this rendered
+            // only the bare label, swallowing `source`/`cap` with `..`, so a parser
+            // change to which permanents' abilities are granted showed as a removal
+            // with no compensating addition in the sticky. Expose the source filter
+            // (and cap only when set, so unqualified signatures stay byte-identical).
+            let mut s = format!("grant all activated abilities of {}", fmt_target(source));
+            if let Some(cap) = cap {
+                s.push_str(&format!(" (cap {cap:?})"));
+            }
+            s
         }
-        ContinuousModification::GrantAllTriggeredAbilitiesOf { .. } => {
-            "grant all triggered abilities of".into()
+        ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
+            format!("grant all triggered abilities of {}", fmt_target(source))
         }
         ContinuousModification::GrantTrigger { .. } => "grant trigger".into(),
         ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),
@@ -10474,6 +10483,41 @@ mod tests {
                 .iter()
                 .any(|k| k == "damage_source_filter"),
             "an absent damage_source_filter must not appear",
+        );
+    }
+
+    #[test]
+    fn grant_all_abilities_signature_exposes_source() {
+        // Same class as #5492/#5495/#5501/#5507: GrantAllActivatedAbilitiesOf /
+        // GrantAllTriggeredAbilitiesOf rendered only the bare label, swallowing their
+        // `source` filter with `..`, so a parser change to which permanents' abilities
+        // are granted showed as a removal with no compensating addition in the sticky.
+        use crate::types::ability::{ContinuousModification, TargetFilter};
+
+        let act = |source: TargetFilter| {
+            fmt_modification(&ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source,
+                cap: None,
+            })
+        };
+        let trg = |source: TargetFilter| {
+            fmt_modification(&ContinuousModification::GrantAllTriggeredAbilitiesOf { source })
+        };
+
+        // The source filter must appear in each signature ...
+        assert!(
+            act(TargetFilter::Controller).contains(&fmt_target(&TargetFilter::Controller)),
+            "activated-grant signature must expose its source filter",
+        );
+        assert!(
+            trg(TargetFilter::SelfRef).contains(&fmt_target(&TargetFilter::SelfRef)),
+            "triggered-grant signature must expose its source filter",
+        );
+        // ... so different source filters produce distinct signatures, not one bare label.
+        assert_ne!(
+            act(TargetFilter::Controller),
+            act(TargetFilter::SelfRef),
+            "different source filters must produce different activated-grant signatures",
         );
     }
 
