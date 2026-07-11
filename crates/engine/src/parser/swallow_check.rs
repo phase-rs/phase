@@ -3445,7 +3445,8 @@ pub(crate) fn check_cascade_diff(
     }
 
     if snap.repeat_for.is_some() && def.repeat_for.is_none() {
-        // CR 609.3: "for each X" / "twice" repeat counts are sometimes
+        // CR 608.2c: "for each X" / "twice" repeat counts (the instruction is
+        // followed as written, once per iteration) are sometimes
         // pushed onto a sub_ability instead of the def itself for
         // TargetOnly wrappers (line ~6411). Walk the sub_ability chain
         // before declaring loss.

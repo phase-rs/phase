@@ -417,7 +417,8 @@ pub(crate) fn parse_filter_scoped_cant_be_activated(
     )
 }
 
-/// CR 701.23 + CR 609.3: Parse CantSearchLibrary statics.
+/// CR 701.23 + CR 101.2: Parse CantSearchLibrary statics — a "can't search"
+/// continuous effect takes precedence over any effect directing a search.
 ///
 /// Supported Oracle classes:
 /// - "Spells and abilities <scope> can't cause their controller to search their
@@ -535,8 +536,9 @@ pub(crate) fn parse_restrict_search_to_top(
     )
 }
 
-/// CR 603.2 + CR 609.3: Parse "Triggered abilities <scope> can't cause you to
-/// sacrifice or exile <affected>." statics (The Master, Multiplied class).
+/// CR 603.2 + CR 101.2: Parse "Triggered abilities <scope> can't cause you to
+/// sacrifice or exile <affected>." statics (The Master, Multiplied class). The
+/// "can't" effect takes precedence over the triggered ability directing the action.
 ///
 /// Supported Oracle class:
 /// - "Triggered abilities you control can't cause you to sacrifice or exile

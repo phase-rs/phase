@@ -364,12 +364,15 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // The "of ..." infix between "abilities" and "can't be activated" blocks the contiguous
     // scan above; recognize the dispatched prefix separately so parse_static_line is reached.
     "activated abilities of ",
-    // CR 701.23 + CR 609.3: Ashiok-class search prohibition.
+    // CR 701.23 + CR 101.2: Ashiok-class search prohibition — a "can't search"
+    // effect takes precedence over any effect directing a search.
     "can't cause their controller to search their library",
-    // CR 603.2 + CR 609.3: The Master, Multiplied-class sacrifice/exile prohibition.
+    // CR 603.2 + CR 101.2: The Master, Multiplied-class sacrifice/exile prohibition —
+    // the "can't" effect takes precedence over the triggered ability directing it.
     "triggered abilities ",
     "can't cause you to sacrifice or exile",
-    // CR 701.23 + CR 609.3: Mindlock Orb-class search prohibition.
+    // CR 701.23 + CR 101.2: Mindlock Orb-class search prohibition — the "can't"
+    // effect takes precedence over any effect directing a search.
     "can't search libraries",
     "cannot search libraries",
     "may not search libraries",

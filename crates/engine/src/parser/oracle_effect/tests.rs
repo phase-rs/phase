@@ -9080,7 +9080,7 @@ fn tidus_combat_damage_trigger_draws_then_proliferates() {
 
 #[test]
 fn expand_the_sphere_difference_repeat_threads_onto_proliferate_sub() {
-    // CR 609.3: "If you put fewer than two lands onto the battlefield this
+    // CR 608.2c: "If you put fewer than two lands onto the battlefield this
     // way, proliferate a number of times equal to the difference." — the
     // leading comparison condition AND the difference-repeat count must
     // both thread onto the Proliferate sub-ability.
@@ -11170,7 +11170,7 @@ fn assassins_trophy_its_controller_may_search_chain() {
     );
 }
 
-/// CR 608.2c + CR 117.3a + CR 701.23a + CR 609.3 + CR 603.7: Winds of
+/// CR 608.2c + CR 117.3a + CR 701.23a + CR 603.7: Winds of
 /// Abandon — iterated subject-anchored search. The structure mirrors
 /// Assassin's Trophy but the search step carries `repeat_for:
 /// TrackedSetSize` so each exiled creature's controller searches their own
@@ -40858,7 +40858,7 @@ fn that_creatures_controller_faces_villainous_choice_uses_parent_controller_choo
     }
 }
 
-/// CR 120.1 + CR 202.3 + CR 609.3 (cluster 32, Class C — Ensnared by the
+/// CR 120.1 + CR 202.3 + CR 608.2c (cluster 32, Class C — Ensnared by the
 /// Mara): the branch-1 damage amount "the total mana value of those exiled
 /// cards" is an aggregate over the most recent chain tracked set — the cards
 /// the branch-head `ExileTop` published. It parses to

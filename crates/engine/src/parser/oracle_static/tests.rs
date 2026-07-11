@@ -10691,7 +10691,8 @@ fn static_legend_rule_commanders_you_control() {
 
 #[test]
 fn static_cant_cause_sacrifice_or_exile_creature_tokens() {
-    // CR 603.2 + CR 609.3: The Master, Multiplied.
+    // CR 603.2 + CR 101.2: The Master, Multiplied — the "can't" effect takes
+    // precedence over the triggered ability directing the sacrifice/exile.
     let def = parse_static_line(
         "Triggered abilities you control can't cause you to sacrifice or exile creature tokens you control.",
     )
@@ -22529,11 +22530,11 @@ fn cant_be_activated_sorcerous_spyglass_chosen_name_with_mana_exemption() {
     }
 }
 
-// --- CR 701.23 + CR 609.3: CantSearchLibrary (Ashiok class) ---
+// --- CR 701.23 + CR 101.2: CantSearchLibrary ("can't" beats "can"; Ashiok class) ---
 
 #[test]
 fn cant_search_library_ashiok() {
-    // CR 701.23 + CR 609.3: Ashiok, Dream Render — "Spells and abilities your
+    // CR 701.23 + CR 101.2: Ashiok, Dream Render — "Spells and abilities your
     // opponents control can't cause their controller to search their library."
     let def = parse_static_line(
             "Spells and abilities your opponents control can't cause their controller to search their library.",
@@ -22564,7 +22565,8 @@ fn cant_search_library_controller_variant() {
 
 #[test]
 fn cant_search_library_mindlock_orb_players() {
-    // CR 701.23 + CR 609.3: Mindlock Orb — blanket all-players search prohibition.
+    // CR 701.23 + CR 101.2: Mindlock Orb — blanket all-players search prohibition;
+    // the "can't" effect takes precedence over any effect directing a search.
     let def = parse_static_line("Players can't search libraries.")
         .expect("Mindlock Orb Oracle text should parse");
     assert_eq!(
@@ -22590,7 +22592,8 @@ fn cant_search_library_each_player_may_not_variant() {
 
 #[test]
 fn cant_search_library_opponents_form() {
-    // CR 701.23 + CR 609.3: opponent-scoped direct search prohibition.
+    // CR 701.23 + CR 101.2: opponent-scoped direct search prohibition — the "can't"
+    // effect takes precedence over any effect directing a search.
     let def = parse_static_line("Your opponents can't search libraries.")
         .expect("opponent-scoped direct search prohibition should parse");
     assert_eq!(

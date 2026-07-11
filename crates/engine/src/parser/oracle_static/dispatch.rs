@@ -2302,8 +2302,9 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "Spells and abilities <scope> can't cause their controller to search their library" ---
-    // CR 701.23 + CR 609.3: Ashiok, Dream Render's first static. Subject-scoped
-    // prohibition where `cause` identifies whose spells/abilities are muzzled.
+    // CR 701.23 + CR 101.2: Ashiok, Dream Render's first static. Subject-scoped
+    // prohibition — the "can't" effect takes precedence over any effect directing
+    // a search — where `cause` identifies whose spells/abilities are muzzled.
     if let Some(def) = parse_cant_search_library(&tp, &text) {
         return Some(def);
     }
@@ -2318,9 +2319,10 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "Triggered abilities <scope> can't cause you to sacrifice or exile <affected>" ---
-    // CR 603.2 + CR 609.3: The Master, Multiplied class. Subject-scoped prohibition
-    // where `cause` identifies whose triggered abilities are muzzled and `affected`
-    // identifies the protected objects.
+    // CR 603.2 + CR 101.2: The Master, Multiplied class. Subject-scoped prohibition
+    // — the "can't" effect takes precedence over the triggered ability directing the
+    // action — where `cause` identifies whose triggered abilities are muzzled and
+    // `affected` identifies the protected objects.
     if let Some(def) = parse_cant_cause_sacrifice_or_exile(&tp, &text) {
         return Some(def);
     }

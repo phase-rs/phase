@@ -11003,7 +11003,8 @@ fn investigate_twice_uses_repeat_for() {
         "first effect should be Investigate, got {:?}",
         def.effect,
     );
-    // CR 609.3: "twice" → repeat_for = Fixed(2), resolver handles repetition.
+    // CR 608.2c: "twice" → repeat_for = Fixed(2); the instruction is followed as
+    // written, once per iteration, and the resolver handles the repetition.
     assert_eq!(def.repeat_for, Some(QuantityExpr::Fixed { value: 2 }));
     assert!(def.sub_ability.is_none());
 }
@@ -11164,7 +11165,8 @@ fn investigate_three_times_uses_repeat_for() {
     use crate::parser::oracle_effect::parse_effect_chain;
     let def = parse_effect_chain("investigate three times", AbilityKind::Spell);
     assert!(matches!(*def.effect, Effect::Investigate));
-    // CR 609.3: "three times" → repeat_for = Fixed(3), not cloned sub_ability chain.
+    // CR 608.2c: "three times" → repeat_for = Fixed(3) — the instruction is followed
+    // as written, once per iteration — not a cloned sub_ability chain.
     assert_eq!(
         def.repeat_for,
         Some(QuantityExpr::Fixed { value: 3 }),

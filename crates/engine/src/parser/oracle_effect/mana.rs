@@ -3257,7 +3257,7 @@ mod tests {
         );
     }
 
-    /// CR 106.1 + CR 609.3 + CR 122.1: Coalition Relic — "add one mana of any
+    /// CR 106.1 + CR 608.2c + CR 122.1: Coalition Relic — "add one mana of any
     /// color for each charge counter removed this way". This is the AnyOneColor
     /// equivalent of the fixed-color "Add {R} for each X" pattern. Class also
     /// includes the Storage Counter cycle (Saprazzan Cove, Dwarven Hold, etc.).

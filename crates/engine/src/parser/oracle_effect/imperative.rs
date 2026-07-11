@@ -1312,10 +1312,10 @@ pub(super) fn parse_one_or_more_sacrifice(
     Some((count, target, min_count))
 }
 
-/// CR 701.21a + CR 609.3: "sacrifice all <filter>" carries a mandatory
-/// count equal to the eligible object pool. This lets the sacrifice resolver's
-/// existing mandatory-all fast path perform every legal sacrifice without a
-/// one-card special case.
+/// CR 701.21a: "sacrifice all <filter>" carries a mandatory count equal to the
+/// eligible object pool (`QuantityRef::ObjectCount` over the parsed filter).
+/// This lets the sacrifice resolver's existing mandatory-all fast path perform
+/// every legal sacrifice without a one-card special case.
 pub(super) fn parse_all_sacrifice<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
@@ -4708,7 +4708,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             // control gain that ability" clause can read the typed
             // `ChosenAttribute::Keyword` via
             // `ContinuousModification::AddChosenKeyword` at layer evaluation.
-            // CR 609.3 + CR 608.2d: a `DistinctFromSourceHistory` number choice
+            // CR 608.2d: a `DistinctFromSourceHistory` number choice
             // ("...that hasn't been chosen") must persist each committed value on
             // the source so successive resolutions exclude prior picks — an
             // already-chosen number is an illegal option (CR 608.2d). The same

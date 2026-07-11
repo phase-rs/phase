@@ -8134,7 +8134,7 @@ pub fn parse_you_control_or_returned_this_way_condition(
     ))
 }
 
-/// CR 121 + CR 608.2c + CR 609.3: Parse "you draw [one or more] card[s] this
+/// CR 121 + CR 608.2c: Parse "you draw [one or more] card[s] this
 /// way" — the active-voice draw-count gate (Transcendent Archaic: "you may draw
 /// X cards … If you draw one or more cards this way, discard two cards"). Reads
 /// the amount moved by the immediately preceding draw effect in the sub-ability

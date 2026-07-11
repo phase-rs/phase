@@ -4049,9 +4049,11 @@ fn counter_threshold_to_condition(
     }
 }
 
-/// CR 609.3: Compose a `QuantityExpr::Difference` from a two-operand quantity
+/// CR 608.2c: Compose a `QuantityExpr::Difference` from a two-operand quantity
 /// comparison condition — the unsigned magnitude gap between the operands, as
 /// referenced by "a number of times equal to the difference" repeat suffixes.
+/// "The difference" is an anaphoric back-reference to the operands the earlier
+/// condition text established (read the whole text, apply the rules of English).
 ///
 /// Class-general: any `AbilityCondition::QuantityCheck` yields the difference
 /// of its operands. Both `lhs` and `rhs` are already `QuantityExpr`, so they
@@ -7417,8 +7419,8 @@ mod tests {
 
     #[test]
     fn difference_expr_composes_unsigned_gap_from_quantity_check() {
-        // CR 609.3: a two-operand comparison yields the difference of its
-        // operands — class-general over any QuantityCheck.
+        // CR 608.2c: "the difference" back-references the two operands the earlier
+        // condition established — class-general over any QuantityCheck.
         let cond = AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::TrackedSetSize,

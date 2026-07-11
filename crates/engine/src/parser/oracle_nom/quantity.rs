@@ -3211,7 +3211,8 @@ pub(crate) fn parse_for_each_clause_ref_with_context<'a>(
     parse_for_each_clause_ref_with_they_controller(input, they_controller)
 }
 
-/// CR 608.2c + CR 609.3: Read the Runes — "for each card[s] drawn this way".
+/// CR 608.2c: Read the Runes — "for each card[s] drawn this way". The "this way"
+/// anaphor reads the count the preceding draw in the same effect established.
 fn parse_for_each_card_drawn_this_way(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = alt((tag("card drawn this way"), tag("cards drawn this way"))).parse(input)?;
     Ok((rest, QuantityRef::EventContextAmount))
@@ -4938,9 +4939,10 @@ mod tests {
         }
     }
 
-    /// CR 609.3 + CR 208.1: "the total power of the cards exiled this way"
-    /// reads the most recent chain tracked set (Stitcher Geralf), not the
-    /// linked-exile craft pool.
+    /// CR 608.2c + CR 208.1: the "this way" anaphor in "the total power of the
+    /// cards exiled this way" reads the most recent chain tracked set (Stitcher
+    /// Geralf) — the set the earlier text published — not the linked-exile craft
+    /// pool.
     #[test]
     fn parse_total_power_of_cards_exiled_this_way_is_tracked_set_aggregate() {
         use crate::types::ability::TrackedAnaphorSource;

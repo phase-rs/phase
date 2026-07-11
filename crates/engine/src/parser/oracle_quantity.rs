@@ -314,7 +314,7 @@ pub(crate) fn parse_quantity_ref_with_context(
     ))
     .parse(trimmed)
     {
-        // CR 608.2c + CR 609.3 + CR 107.3e: "the total <property> of those exiled
+        // CR 608.2c + CR 107.3e: "the total <property> of those exiled
         // cards" is an aggregate over the most recent chain tracked set, not over live
         // battlefield objects — the anaphor "those exiled cards" refers to the set
         // the preceding effect published (e.g. Ensnared by the Mara's `ExileTop`).
@@ -4842,7 +4842,7 @@ mod tests {
 
     #[test]
     fn cda_quantity_total_mana_value_of_those_exiled_cards_is_tracked_set_aggregate() {
-        // CR 609.3 + CR 202.3: the plural anaphor "those exiled cards" aggregates
+        // CR 608.2c + CR 202.3: the plural anaphor "those exiled cards" aggregates
         // over the most recent chain tracked set (the set the preceding effect
         // published), NOT over live battlefield/exile objects via a type filter.
         // Drives Ensnared by the Mara's "deals damage equal to the total mana
@@ -5963,8 +5963,9 @@ mod tests {
         );
     }
 
-    /// CR 604.3 + CR 609.3: Wernog's full repeat count "one plus the number of
-    /// opponents who investigated this way" composes the "N plus" Offset arm
+    /// CR 604.3 + CR 608.2c: Wernog's full repeat count "one plus the number of
+    /// opponents who investigated this way" — the "this way" anaphor reads back to
+    /// the same effect — composes the "N plus" Offset arm
     /// over the inner player-action count. Before the inner resolved, the whole
     /// phrase collapsed to an opaque `Variable`.
     #[test]
@@ -6886,7 +6887,7 @@ mod tests {
         }
     }
 
-    /// CR 608.2c + CR 609.3: Read the Runes — "for each card drawn this way"
+    /// CR 608.2c: Read the Runes — "for each card drawn this way"
     /// binds repeat count to the parent draw via `EventContextAmount`.
     #[test]
     fn card_drawn_this_way_uses_event_context_amount() {

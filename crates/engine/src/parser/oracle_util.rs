@@ -456,9 +456,10 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
 
-    // CR 609.3: "that many" / "that much" — chained-effect amount referring
-    // to the previous effect's count. Resolves to `EventContextAmount` (which
-    // falls back to `state.last_effect_count` for chained sub-ability
+    // CR 608.2c: "that many" / "that much" — an anaphoric back-reference to the
+    // previous effect's count (read the whole text and apply the rules of
+    // English). Resolves to `EventContextAmount` (which falls back to
+    // `state.last_effect_count` for chained sub-ability
     // continuations). Composes with the "twice"/"three times" multipliers
     // above so "twice that many cards" parses as Multiply{2, EventContextAmount}.
     if let Some(((), rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {

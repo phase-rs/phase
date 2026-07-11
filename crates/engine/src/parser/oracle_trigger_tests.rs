@@ -4591,7 +4591,8 @@ fn parse_ezio_damage_trigger_full_structure() {
     // Outer execute is the "you may pay {WUBRG}" cost.
     let execute = def.execute.as_ref().expect("execute must be Some");
 
-    // (c) Optional flag — the "you may" prefix on the cost (CR 609.3).
+    // (c) Optional flag — the "you may" prefix on the cost (CR 603.5: a triggered
+    // ability's "may" effect is optional; the choice is made when it resolves).
     assert!(
         execute.optional,
         "execute.optional must be true (the 'you may pay' wording)",
@@ -4712,7 +4713,8 @@ fn parse_ezio_damage_trigger_verbatim_oracle_text() {
 
     let execute = def.execute.as_ref().expect("execute must be Some");
 
-    // (b) Optional flag — the "you may pay" wording (CR 609.3).
+    // (b) Optional flag — the "you may pay" wording (CR 603.5: a triggered
+    // ability's "may" effect is optional; the choice is made when it resolves).
     assert!(
         execute.optional,
         "execute.optional must be true (the 'you may pay' wording)",

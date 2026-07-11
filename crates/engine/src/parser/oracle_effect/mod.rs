@@ -13110,7 +13110,7 @@ fn try_parse_proliferate_target(text: &str) -> Option<Effect> {
 ///   - `repeat_for: DistinctCounterKindsAmong { filter: ParentTarget }` — one
 ///     iteration per distinct counter kind already on the chosen permanent. The
 ///     `repeat_for` loop resolves the kind set against the inherited target and
-///     rebinds each tagged branch to the iterated kind (CR 609.3 + CR 608.2c).
+///     rebinds each tagged branch to the iterated kind (CR 608.2c).
 ///   - `Effect::ChooseOneOf { chooser: Controller, branches: [PutCounter,
 ///     RemoveCounter] }` — both branches act on `ParentTarget` (the same chosen
 ///     permanent) and are tagged `RebindToIteratedKind`, so each iteration's
@@ -20571,9 +20571,11 @@ fn parse_guess_proposition(body: &str) -> Option<GuessSubject> {
     })
 }
 
-/// CR 609.3: detect a trailing "...that hasn't been chosen" distinctness clause
-/// on a "choose a number" prompt. Returns `DistinctFromSourceHistory` when the
-/// committed value must differ from prior commits on the source, else
+/// CR 608.2d: detect a trailing "...that hasn't been chosen" distinctness clause
+/// on a "choose a number" prompt — a player can't choose an option that's illegal
+/// or impossible, and an already-chosen number is such an option. Returns
+/// `DistinctFromSourceHistory` when the committed value must differ from prior
+/// commits on the source, else
 /// `Repeatable`. `tail` is the text following the parsed number.
 fn parse_number_distinctness(tail: &str) -> NumberDistinctness {
     let tail = tail.trim_start();
@@ -20653,7 +20655,8 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         let and = parts.next();
         // Split the leading max digits from any trailing distinctness clause
         // ("...5 that hasn't been chosen") with a nom digit combinator so the
-        // clause is detected (CR 609.3), not silently dropped.
+        // clause is detected (CR 608.2d: a player can't choose an illegal or
+        // impossible option), not silently dropped.
         let max_token = parts.next().unwrap_or("");
         let (max, tail) = match nom::character::complete::digit1::<_, ()>(max_token) {
             Ok((rest_after, digits)) => (digits.parse::<u8>().unwrap_or(20), rest_after),
@@ -22330,7 +22333,7 @@ fn quantity_expr_references_controller_life_gained(expr: &QuantityExpr) -> bool 
     }
 }
 
-/// CR 609.3 + CR 119.3: "distribute up to that many ..." on end-step life-gain
+/// CR 608.2c + CR 119.3: "distribute up to that many ..." on end-step life-gain
 /// triggers anaphorizes "that many" to life gained this turn, not
 /// `EventContextAmount` (which has no scalar on a phase trigger).
 pub(crate) fn rewrite_gained_life_that_many_distribution_refs(def: &mut AbilityDefinition) {
@@ -26068,7 +26071,7 @@ pub(crate) fn parse_effect_chain_ir(
 
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
         let (text_no_qty, mut multi_target) = strip_any_number_quantifier(text_no_temporal);
-        // CR 121.1 + CR 609.3: "draw cards equal to the difference" — anaphoric draw
+        // CR 121.1 + CR 608.2c: "draw cards equal to the difference" — anaphoric draw
         // count. When a leading QuantityCheck condition establishes two operands (e.g.
         // "if you have fewer than seven cards in hand"), "the difference" draws the
         // unsigned gap between them. Resolved here, in scope of both operands, to
@@ -26088,7 +26091,7 @@ pub(crate) fn parse_effect_chain_ir(
                 None
             }
         });
-        // CR 119.3 + CR 609.3: "they lose life equal to the difference" — when a
+        // CR 119.3 + CR 608.2c: "they lose life equal to the difference" — when a
         // leading QuantityCheck condition bounds life lost (Lolth emblem: "if that
         // player lost less than 8 life this turn"), the loss amount is the unsigned
         // gap between the threshold and life lost this turn.
