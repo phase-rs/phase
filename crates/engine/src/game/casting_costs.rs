@@ -9008,6 +9008,10 @@ pub fn finalize_mana_payment(
             );
         }
 
+        // CR 601.2g + CR 601.2h: the mana window (CR 601.2g) opens before costs are
+        // paid (CR 601.2h), so a non-mana additional cost such as Tinker's "sacrifice
+        // an artifact" is deferred past it. Its pre-payment checks therefore run here,
+        // before any mana leaves the pool, and the sacrifice itself is paid at commit.
         let pre_payment_checks = if pending.deferred_sacrificed_permanents.is_empty() {
             None
         } else {
@@ -9030,6 +9034,10 @@ pub fn finalize_mana_payment(
             return Ok(waiting_for);
         }
 
+        // CR 601.2f: snapshot the pool BEFORE `pay_spell_mana_before_deferred_sacrifice`
+        // spends it. The distribute branch below infers X from `pool_before - pool_after`,
+        // and on the deferred-sacrifice route the mana is already gone by then, so reading
+        // the pool inside that branch would infer X = 0.
         let pool_before_for_distribution = pending.distribute.as_ref().map(|_| {
             state
                 .players
@@ -9290,6 +9298,10 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             );
         }
 
+        // CR 601.2g + CR 601.2h: the mana window (CR 601.2g) opens before costs are
+        // paid (CR 601.2h), so a non-mana additional cost such as Tinker's "sacrifice
+        // an artifact" is deferred past it. Its pre-payment checks therefore run here,
+        // before any mana leaves the pool, and the sacrifice itself is paid at commit.
         let pre_payment_checks = if pending.deferred_sacrificed_permanents.is_empty() {
             None
         } else {
@@ -9312,6 +9324,10 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             return Ok(waiting_for);
         }
 
+        // CR 601.2f: snapshot the pool BEFORE `pay_spell_mana_before_deferred_sacrifice`
+        // spends it. The distribute branch below infers X from `pool_before - pool_after`,
+        // and on the deferred-sacrifice route the mana is already gone by then, so reading
+        // the pool inside that branch would infer X = 0.
         let pool_before_for_distribution = pending.distribute.as_ref().map(|_| {
             state
                 .players
