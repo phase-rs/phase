@@ -3079,7 +3079,6 @@ fn parse_strive_cost_body(effect_text: &str) -> Option<ManaCost> {
 ///
 /// This replaces the former category-ordered `parsed_abilities_to_doc_ir` on
 /// every non-Class path. `whole_document` spans survive only in the Class shim.
-#[allow(dead_code)] // wired by the dispatch-loop/preprocessor cutover in this unit.
 struct DocEmitter<'a> {
     builder: OracleDocBuilder,
     lines: &'a [&'a str],
@@ -3102,7 +3101,6 @@ struct DocEmitter<'a> {
     last_static: Option<StaticDefinition>,
 }
 
-#[allow(dead_code)] // wired by the dispatch-loop/preprocessor cutover in this unit.
 impl<'a> DocEmitter<'a> {
     fn new(lines: &'a [&'a str]) -> Self {
         let mut line_start = Vec::with_capacity(lines.len());
@@ -3245,21 +3243,6 @@ impl<'a> DocEmitter<'a> {
     }
     fn modal_at(&mut self, line: usize, m: ModalChoice) {
         self.emit_at(line, OracleNodeIr::Modal(m));
-    }
-
-    /// A card-data (MTGJSON) keyword that has NO printed source line: a zero-width
-    /// Exact span anchored at `(0, 0, 0)`-bytes, ordinal drawn from the SAME
-    /// `next_ordinal_for_line(0)` authority so multiple card-data keywords keep
-    /// their emission order. `whole_document` is deliberately NOT used — it must
-    /// remain a reliable Class-shim-only marker. The empty fragment is honest: a
-    /// zero-width span covers no text.
-    fn card_data_keyword(&mut self, kw: Keyword) {
-        let ordinal = self.builder.next_ordinal_for_line(0);
-        let span = OracleSourceSpan::exact(0, 0, 0, 0, ordinal);
-        let slot = self.builder.begin_item(span, Some(""));
-        self.builder
-            .emit(slot, OracleNodeIr::Keyword(kw))
-            .expect("distinct ordinals keep zero-width card-data keyword keys distinct");
     }
 
     /// Remove and return the most recently emitted spell item — the typed
