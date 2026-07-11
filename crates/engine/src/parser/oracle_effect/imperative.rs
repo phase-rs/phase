@@ -48,7 +48,7 @@ use crate::types::zones::Zone;
 use super::super::oracle_target::{
     parse_anaphoric_target_ref, parse_event_context_ref, parse_fight_target, parse_mass_type_union,
     parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase,
-    parse_word_bounded, resolve_pronoun_target, TargetSyntax,
+    parse_word_bounded, resolve_pronoun_target, resolve_singular_exiled_card_target, TargetSyntax,
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
@@ -4853,6 +4853,41 @@ pub(super) fn parse_utility_imperative_ast(
                         target: TargetFilter::TriggeringSource,
                         retarget,
                     });
+                }
+                // CR 608.2k: an exile-cost anaphor ("exile a card, then copy the
+                // exiled card") disambiguates via `CostPaidObject`, not this
+                // exile-producer binding — guard so that path (handled
+                // elsewhere) is never shadowed here.
+                if ctx.current_ability_exile_cost_zone.is_none() {
+                    if let Ok((rem_lower, _)) =
+                        tag::<_, _, OracleError<'_>>("the exiled card").parse(rest_lower)
+                    {
+                        let rem = &rest[rest.len() - rem_lower.len()..];
+                        let retarget =
+                            if super::sequence::recognize_copy_retarget_clause(rem.trim()) {
+                                CopyRetargetPermission::MayChooseNewTargets
+                            } else {
+                                #[cfg(debug_assertions)]
+                                assert_no_compound_remainder(rem, text);
+                                CopyRetargetPermission::KeepOriginalTargets
+                            };
+                        // CR 406.6 + CR 607.2a + CR 707.10: "copy the exiled
+                        // card" — when no earlier clause in this SAME chain
+                        // exiled a card, the referenced exile happened in an
+                        // earlier, separately-resolved ability (ETB Imprint,
+                        // e.g. Isochron Scepter), so bind durably via
+                        // `ExiledBySource` rather than the ephemeral
+                        // chain-local `TrackedSet{0}` sentinel.
+                        return Some(UtilityImperativeAst::Copy {
+                            target: resolve_singular_exiled_card_target(
+                                ctx.chain_has_prior_exile_producer,
+                                TargetFilter::TrackedSet {
+                                    id: crate::types::identifiers::TrackedSetId(0),
+                                },
+                            ),
+                            retarget,
+                        });
+                    }
                 }
                 let (target, _rem) = if let Some((target, rem_lower)) =
                     parse_copy_stack_ability_target(rest_lower)

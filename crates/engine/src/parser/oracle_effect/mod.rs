@@ -81,7 +81,8 @@ use super::oracle_quantity::{
 use super::oracle_target::{
     parse_definite_parent_reference, parse_event_context_ref, parse_fight_target, parse_target,
     parse_target_with_ctx, parse_target_with_disjunctive_restriction, parse_target_with_syntax,
-    parse_type_phrase, parse_type_phrase_with_ctx, TargetSyntax,
+    parse_type_phrase, parse_type_phrase_with_ctx, resolve_singular_exiled_card_target,
+    TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, has_unconsumed_conditional, parse_count_expr, parse_creature_subtype,
@@ -13437,7 +13438,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // grant carrying the any-type concession on the grant, NOT a bare
     // SpendManaAsAnyColor static (which the catch-all below would degrade to,
     // dropping the cast). Must run before that catch-all.
-    if let Some(effect) = try_parse_cast_target_from_graveyard_any_mana(text) {
+    if let Some(effect) = try_parse_cast_target_from_graveyard_any_mana(text, ctx) {
         return parsed_clause(effect);
     }
 
@@ -19377,7 +19378,7 @@ fn parse_cast_copies_count_prefix(input: &str) -> (&str, Option<QuantityExpr>) {
 ///    without paying its mana cost" — target is built from `parse_type_phrase` +
 ///    origin-zone inference. CR 118.9 + CR 601.2a + CR 120.3.
 /// 3. Bare — fallback `TargetFilter::Any`.
-fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
+fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     type E<'a> = OracleError<'a>;
 
     // CR 117.3a: Optional "you may " is peeled by `clause_shell` for generic
@@ -19442,7 +19443,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     // Branch 1: anaphoric forms. Order longer-first ("one of those cards"
     // before "those cards") so the prefix-match doesn't shadow the longer
     // anaphor.
-    if alt((
+    if let Ok((_, matched_anaphor)) = alt((
         tag::<_, _, E>("one of those cards"),
         tag("the exiled card"),
         tag("those cards"),
@@ -19454,7 +19455,6 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
         tag("it"),
     ))
     .parse(rest)
-    .is_ok()
     {
         let (_, dur) = strip_trailing_duration(lower);
         let duration = dur.or_else(|| {
@@ -19492,8 +19492,27 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
         } else {
             crate::types::ability::CastFromZoneDriver::LingeringPermission
         };
+        // CR 406.6 + CR 607.2a + CR 608.2c: a singular "the exiled card"
+        // anaphor binds durably to `ExiledBySource` when no earlier clause in
+        // this SAME chain produced the exile (e.g. Windbrisk Heights /
+        // Mosswort Bridge Hideaway — the exile happened in an earlier,
+        // separately-resolved ETB); otherwise it keeps `ParentTarget`
+        // (Creative Technique later widens `ParentTarget` to `TrackedSet{0}`
+        // via the `needs_tracked_set` pass; Discover the Impossible's
+        // same-chain `Dig`-to-exile keeps `ParentTarget` as-is). All other
+        // anaphors in this branch are unaffected.
+        let target = if matched_anaphor == "the exiled card"
+            && ctx.current_ability_exile_cost_zone.is_none()
+        {
+            resolve_singular_exiled_card_target(
+                ctx.chain_has_prior_exile_producer,
+                TargetFilter::ParentTarget,
+            )
+        } else {
+            TargetFilter::ParentTarget
+        };
         return Some(Effect::CastFromZone {
-            target: TargetFilter::ParentTarget,
+            target,
             without_paying_mana_cost: without_paying,
             mode,
             cast_transformed: false,
@@ -19759,7 +19778,7 @@ fn during_resolution_for_filter_cast_clause(
 /// `Owned{ControllerRef::TriggeringPlayer}` so in a 3+ player game the cast is
 /// restricted to THAT player's graveyard — never any opponent's. "a graveyard"
 /// (Quistis) carries no owner constraint (own graveyard in practice).
-fn try_parse_cast_target_from_graveyard_any_mana(text: &str) -> Option<Effect> {
+fn try_parse_cast_target_from_graveyard_any_mana(text: &str, ctx: &ParseContext) -> Option<Effect> {
     type E<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
     let trimmed = lower.trim().trim_end_matches('.');
@@ -19789,7 +19808,7 @@ fn try_parse_cast_target_from_graveyard_any_mana(text: &str) -> Option<Effect> {
         return None;
     }
 
-    let mut effect = try_parse_cast_effect(head)?;
+    let mut effect = try_parse_cast_effect(head, ctx)?;
     let Effect::CastFromZone {
         mana_spend_permission,
         target,
@@ -20339,7 +20358,7 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     }
 
     // CR 601.2a + CR 118.9: "cast it/that card without paying its mana cost"
-    if let Some(effect) = try_parse_cast_effect(tp.lower) {
+    if let Some(effect) = try_parse_cast_effect(tp.lower, ctx) {
         return parsed_clause(effect);
     }
 
@@ -21403,6 +21422,93 @@ fn is_exile_effect(effect: &Effect) -> bool {
         Effect::CreateDelayedTrigger { effect: inner, .. } => is_exile_effect(&inner.effect),
         _ => false,
     }
+}
+
+/// CR 406.6 + CR 607.2a: Exhaustive predicate over every exile-producer
+/// effect shape recognized by the parser — used to gate
+/// `ParseContext::chain_has_prior_exile_producer` so a singular "the exiled
+/// card" anaphor in a LATER clause of the SAME chain keeps binding to that
+/// same-chain exile (`TrackedSet{0}` / `ParentTarget`), while an anaphor with
+/// NO prior same-chain exile producer binds durably to
+/// `TargetFilter::ExiledBySource` instead (a cross-resolution linked-ability
+/// reference — CR 607.1). Exhaustive over every exile-producer effect shape:
+/// `is_exile_effect`'s `ChangeZone`/`ChangeZoneAll`-to-`Exile`/`ExileTop`
+/// shapes, `Dig` with an exile destination (Discover the Impossible),
+/// `ExileFromTopUntil` (Ryan Sinclair), `ForEachCategoryExile` to
+/// `Zone::Exile`, `HeistExile`, `ExileHaunting`,
+/// `ExileResolvingSpellInsteadOfGraveyard`, and `RevealUntil` whose matched
+/// card is kept in exile (`kept_destination: Zone::Exile`).
+///
+/// KNOWN FOLLOW-UPS (deliberately out of scope for the #4792 fix, separately
+/// tracked — this PR's corpus scan did NOT cover them):
+/// - Saruman of Many Colors: a same-chain plain-targeted `ChangeZone{Exile}`
+///   then copy that parses fine here (kept at `TrackedSet{0}`) but has a
+///   SEPARATE runtime root cause (targeted exile-dest `ChangeZone` never
+///   publishes a tracked set) — needs its own narrow parser refinement + tests.
+/// - Watcher for Tomorrow: "put the exiled card" is a `ChangeZoneAll` LTB
+///   emission site, a THIRD anaphor location this helper's caller does not yet
+///   route through `resolve_singular_exiled_card_target`.
+fn chain_clause_is_exile_producer(effect: &Effect) -> bool {
+    is_exile_effect(effect)
+        || matches!(
+            effect,
+            Effect::Dig {
+                destination: Some(Zone::Exile),
+                ..
+            }
+        )
+        || matches!(effect, Effect::ExileFromTopUntil { .. })
+        || matches!(
+            effect,
+            Effect::ForEachCategoryExile {
+                zone: Zone::Exile,
+                ..
+            }
+        )
+        || matches!(effect, Effect::HeistExile)
+        || matches!(effect, Effect::ExileHaunting { .. })
+        || matches!(effect, Effect::ExileResolvingSpellInsteadOfGraveyard)
+        || matches!(
+            effect,
+            Effect::RevealUntil {
+                kept_destination: Zone::Exile,
+                ..
+            }
+        )
+}
+
+/// CR 406.6 + CR 607.2a + CR 702.75a: `ClauseIr`-level wrapper around
+/// `chain_clause_is_exile_producer`. Deliberately does NOT filter on
+/// `!absorbed_by_followup` the way `any_prior_publishes` (the sibling
+/// tracked-set-anaphor gate) does. A Hideaway-shaped "exile one of them face
+/// down" chunk parses to its own standalone exile-shaped raw effect
+/// (`ChangeZone { destination: Exile, target: ParentTarget }`) — CR 406.6's
+/// exile genuinely happened in that clause's text — but it is also marked
+/// `absorbed_by_followup: true` because a `ContinuationAst::ExileOneOfThemFaceDown`
+/// marker on this SAME clause later rewrites the PRECEDING `Dig` into the
+/// exile-producing form and discards this raw `ChangeZone` during the LATER
+/// lowering pass (see "Continuation recognition — store on ClauseIr,
+/// application moves to lowering" above). `chain_has_prior_exile_producer` is
+/// seeded during the earlier per-chunk PARSE pass, so an `!absorbed_by_followup`
+/// filter here would incorrectly discard this clause's still-genuine exile
+/// evidence (Discover the Impossible would otherwise wrongly flip to
+/// `ExiledBySource`). The `followup_continuation`/`intrinsic_continuation`
+/// marker checks are additional defense-in-depth for any future continuation
+/// shape whose OWN raw per-chunk effect is not itself exile-shaped.
+fn clause_ir_is_exile_producer(clause: &ClauseIr) -> bool {
+    chain_clause_is_exile_producer(&clause.parsed.effect)
+        || matches!(
+            clause.followup_continuation,
+            Some(
+                ContinuationAst::ExileOneOfThemFaceDown | ContinuationAst::ExileLookedAtCard { .. }
+            )
+        )
+        || matches!(
+            clause.intrinsic_continuation,
+            Some(
+                ContinuationAst::ExileOneOfThemFaceDown | ContinuationAst::ExileLookedAtCard { .. }
+            )
+        )
 }
 
 fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
@@ -25925,6 +26031,13 @@ pub(crate) fn parse_effect_chain_ir(
             // disambiguates to `CostPaidObject` (Jhoira of the Ghitu).
             current_ability_exile_cost_zone: ctx.current_ability_exile_cost_zone,
             parent_target_available,
+            // CR 406.6 + CR 607.2a: whether an EARLIER clause in this same
+            // chain already produces an exile, so a later singular "the
+            // exiled card" anaphor keeps its same-chain binding instead of
+            // falling back to the durable `ExiledBySource` cross-resolution
+            // binding. Mirrors the `!absorbed_by_followup` filter used by
+            // `chain_prior_referent_is_created_token`/`any_prior_publishes`.
+            chain_has_prior_exile_producer: clauses.iter().any(clause_ir_is_exile_producer),
             // CR 608.2c: bind a bare "it" in this chunk's counter/anaphor to the
             // token created by an earlier clause when that token is the chain's
             // most-recent object referent (Esper Terra's "put up to three lore

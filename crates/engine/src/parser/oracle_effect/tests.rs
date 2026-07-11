@@ -41710,6 +41710,87 @@ fn where_x_rewrites_tracked_set_filtered_change_zone_keldon_flamesage() {
     );
 }
 
+/// Find the `TargetFilter` of the first `Effect::CastFromZone` reachable from
+/// `ability` via `sub_ability`/`else_ability`/`mode_abilities`.
+fn find_cast_from_zone_target(ability: &AbilityDefinition) -> Option<&TargetFilter> {
+    if let Effect::CastFromZone { target, .. } = ability.effect.as_ref() {
+        return Some(target);
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .and_then(find_cast_from_zone_target)
+        .or_else(|| {
+            ability
+                .else_ability
+                .as_deref()
+                .and_then(find_cast_from_zone_target)
+        })
+        .or_else(|| {
+            ability
+                .mode_abilities
+                .iter()
+                .find_map(find_cast_from_zone_target)
+        })
+}
+
+/// CR 406.6 + CR 607.2a anti-regression guard (issue #4792 Blocker 1): a
+/// singular "the exiled card" anaphor must keep binding to the SAME-CHAIN
+/// `TrackedSet{0}` sentinel — not durable `ExiledBySource` — when an earlier
+/// clause in the SAME resolution chain already produced the exile. Keldon
+/// Flamesage's "look at the top X ... exile ... You may cast the exiled
+/// card" is entirely one chain (one triggered ability, one resolution), so
+/// `chain_has_prior_exile_producer` must gate `resolve_singular_exiled_card_target`
+/// back to its pre-existing `TrackedSet{0}` binding.
+#[test]
+fn keldon_flamesage_cast_target_stays_tracked_set_after_exiled_by_source_fix() {
+    let parsed = parse_oracle_text(
+        "Enlist\nWhenever this creature attacks, look at the top X cards of your library, where X is this creature's power. You may exile an instant or sorcery card with mana value X or less from among them. Put the rest on the bottom of your library in a random order. You may cast the exiled card without paying its mana cost.",
+        "Keldon Flamesage",
+        &["Enlist".to_string()],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Shaman".to_string()],
+    );
+    let target = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find_map(find_cast_from_zone_target);
+    assert!(
+        matches!(
+            target,
+            Some(TargetFilter::TrackedSet { id }) if id.0 == 0
+        ),
+        "Keldon Flamesage's same-chain exile must keep CastFromZone{{TrackedSet(0)}}, got {target:?}"
+    );
+}
+
+/// CR 406.6 + CR 607.2a anti-regression guard (issue #4792 Blocker 1,
+/// continuation-timing case): Discover the Impossible's "Look at the top
+/// five ... Exile one of them face down ... You may cast the exiled card"
+/// is ALSO entirely one chain (one resolving spell), even though the
+/// Hideaway-shaped "exile one of them face down" clause is recognized via a
+/// `ContinuationAst` marker rather than its own raw exile-shaped effect
+/// surviving to the final lowered tree. `chain_has_prior_exile_producer`
+/// must still detect that same-chain exile and keep the cast anaphor at
+/// `ParentTarget` — never widen it to `ExiledBySource`.
+#[test]
+fn discover_the_impossible_cast_target_stays_parent_target_after_exiled_by_source_fix() {
+    let parsed = parse_oracle_text(
+        "Look at the top five cards of your library. Exile one of them face down and put the rest on the bottom of your library in a random order. You may cast the exiled card without paying its mana cost if it's an instant spell with mana value 2 or less. If you don't, put that card into your hand.",
+        "Discover the Impossible",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let target = parsed.abilities.iter().find_map(find_cast_from_zone_target);
+    assert!(
+        matches!(target, Some(TargetFilter::ParentTarget)),
+        "Discover the Impossible's same-chain exile (via the ExileOneOfThemFaceDown \
+         continuation) must keep CastFromZone{{ParentTarget}}, got {target:?}"
+    );
+}
+
 /// CR 111.2 + CR 608.2d: Reef Worm creates a single cascading Fish token that
 /// carries a quoted death-triggered ability; it is NOT a modal token choice.
 /// Before the quote-aware splitter, the inner ", create …" severed the clause
