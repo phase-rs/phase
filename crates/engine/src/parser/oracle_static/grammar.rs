@@ -298,6 +298,14 @@ pub(crate) fn typed_filter_for_subtype(subtype: &str) -> TypedFilter {
             .push(FilterProp::HasSupertype { value: supertype });
         return filter;
     }
+    // CR 302.6 + CR 508.4a: a bare battlefield-status adjective ("Untapped",
+    // "Tapped", "Attacking", …) used as a whole creature descriptor names a status
+    // the creature HAS, not a creature subtype — resolve it to a typed FilterProp
+    // instead of fabricating a zero-match `Subtype("Untapped")` (Builder's
+    // Blessing / Castle "Untapped creatures you control get +0/+2").
+    if let Some(filter) = bare_status_creature_filter(subtype) {
+        return filter;
+    }
     if let Some(core_type) = infer_core_type_for_subtype(subtype) {
         let type_filter = match core_type {
             crate::types::card_type::CoreType::Artifact => TypeFilter::Artifact,
@@ -309,6 +317,19 @@ pub(crate) fn typed_filter_for_subtype(subtype: &str) -> TypedFilter {
     } else {
         TypedFilter::creature().subtype(subtype.to_string())
     }
+}
+
+/// CR 302.6 + CR 508.4a: Recognize a bare battlefield-status adjective
+/// ("untapped", "tapped", "attacking", "blocking", "transformed", "suspected")
+/// used as a whole creature descriptor and resolve it to a creature filter
+/// carrying the matching `FilterProp`. Reuses the `parse_combat_status_prefix`
+/// allowlist (appending a space to satisfy its prefix-boundary rule, then
+/// requiring the whole word be consumed) so "Untapped creatures you control"
+/// filters on `FilterProp::Untapped` rather than a zero-match `Subtype("Untapped")`.
+fn bare_status_creature_filter(descriptor: &str) -> Option<TypedFilter> {
+    let with_space = format!("{} ", descriptor.to_lowercase());
+    let (prop, consumed) = crate::parser::oracle_target::parse_combat_status_prefix(&with_space)?;
+    (consumed == with_space.len()).then(|| TypedFilter::creature().properties(vec![prop]))
 }
 
 /// CR 205.4a: Peel a leading supertype word off a compound "<supertype>

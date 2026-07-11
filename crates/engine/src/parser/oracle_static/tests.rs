@@ -13473,6 +13473,68 @@ fn typed_filter_for_subtype_peels_leading_supertype() {
     );
 }
 
+// CR 302.6 + CR 508.4a: a bare battlefield-status adjective ("Untapped"/"Tapped")
+// used as a whole creature descriptor names a status the creature HAS, not a
+// creature subtype. The single subtype-filter authority must resolve it to a
+// typed FilterProp instead of fabricating a zero-match Subtype("Untapped").
+#[test]
+fn typed_filter_for_subtype_resolves_bare_status_adjective() {
+    let untapped = typed_filter_for_subtype("Untapped");
+    assert!(
+        untapped.get_subtype().is_none(),
+        "must not fabricate a subtype"
+    );
+    assert!(untapped.type_filters.contains(&TypeFilter::Creature));
+    assert!(untapped.properties.contains(&FilterProp::Untapped));
+
+    let tapped = typed_filter_for_subtype("Tapped");
+    assert!(tapped.properties.contains(&FilterProp::Tapped));
+
+    // Regression: a real subtype whose name is not a status word is unchanged.
+    let goblin = typed_filter_for_subtype("Goblin");
+    assert_eq!(goblin.get_subtype(), Some("Goblin"));
+    assert!(
+        !goblin
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Tapped | FilterProp::Untapped)),
+        "plain subtype must not gain a status prop, got {:?}",
+        goblin.properties
+    );
+}
+
+#[test]
+fn untapped_creatures_you_control_anthem_uses_status_prop() {
+    // Builder's Blessing / Castle — "Untapped creatures you control get +0/+2."
+    let def = parse_static_line("Untapped creatures you control get +0/+2.").unwrap();
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected typed affected filter, got {:?}", def.affected);
+    };
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert!(
+        tf.get_subtype().is_none(),
+        "must not fabricate Subtype(\"Untapped\")"
+    );
+    assert!(tf.properties.contains(&FilterProp::Untapped));
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 2 }));
+}
+
+// Regression: "Other tapped creatures you control" must carry BOTH the status
+// prop and the Other exclusion (Saryth, the Viper's Fang; Augusta).
+#[test]
+fn other_tapped_creatures_you_control_keeps_status_and_another() {
+    let def = parse_static_line("Other tapped creatures you control have vigilance.").unwrap();
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected typed affected filter, got {:?}", def.affected);
+    };
+    assert!(tf.properties.contains(&FilterProp::Tapped));
+    assert!(tf.properties.contains(&FilterProp::Another));
+    assert!(tf.get_subtype().is_none());
+}
+
 #[test]
 fn static_jodah_anthem_affected_filter_uses_legendary_supertype() {
     // CR 205.4a + CR 613.4c: Jodah, the Unifier's anthem affects
