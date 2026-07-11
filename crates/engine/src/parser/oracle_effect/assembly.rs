@@ -173,6 +173,40 @@ enum NodeStatus {
 struct ArenaNode {
     prov: NodeProvenance,
     status: NodeStatus,
+    /// Identity witness, stamped ONCE at birth — see [`def_witness`].
+    witness: DefWitness,
+}
+
+/// A def's identity, as something `assert_mirrors` can actually compare against
+/// `defs` — the heap address of its boxed `Effect`.
+///
+/// This is the only witness available that is invariant under exactly the
+/// operations assembly performs on a def that SURVIVES, and variant under the one
+/// that creates a new def:
+///
+///  * `Vec::remove` / `pop` / `push` / `mem::take` move the `AbilityDefinition`
+///    struct, but never the pointee of its `Box<Effect>`.
+///  * The in-place effect rewrites (`*previous.effect = Effect::ExileTop { .. }`,
+///    `sequence.rs`) overwrite the pointee's CONTENTS, not its address — so a
+///    witness survives them, exactly as `NodeId` claims identity does.
+///  * A genuinely new def (`AbilityDefinition::new`) allocates a new `Box`, so it
+///    gets a new witness — which is the correct outcome: it also gets a new id.
+///
+/// It is stamped when the node is created and NEVER re-stamped. Re-deriving it
+/// from `defs` on every `observe` would make the mirror assert compare `defs`
+/// against itself — a tautology, which is the defect this exists to remove.
+///
+/// The one way an address could lie is ABA: a def is dropped, its `Box` freed, and
+/// a later def allocated at the same address. It cannot produce a false green here,
+/// because the asserts only ever compare witnesses of defs that are still ALIVE —
+/// a node in `order` (its def is in `defs`) or an `Absorbed` node (its def was
+/// MOVED into a parent's `sub_ability`/`else_ability`, so its `Box` is not freed).
+/// A `Dropped` node's witness is never compared against anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DefWitness(usize);
+
+fn def_witness(def: &AbilityDefinition) -> DefWitness {
+    DefWitness(std::ptr::from_ref(&*def.effect) as usize)
 }
 
 /// Stable-id mirror of `defs`. `order` is the live top-level sequence; it is the
@@ -195,11 +229,17 @@ impl Arena {
         &self.nodes[id.0 as usize]
     }
 
-    fn push_new(&mut self, origin: Option<ClauseId>, role: NodeRole) -> NodeId {
+    fn push_new(
+        &mut self,
+        origin: Option<ClauseId>,
+        role: NodeRole,
+        witness: DefWitness,
+    ) -> NodeId {
         let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(ArenaNode {
             prov: NodeProvenance { origin, role },
             status: NodeStatus::Live,
+            witness,
         });
         self.order.push(id);
         self.pushed_since_detach = true;
@@ -231,11 +271,52 @@ impl Arena {
         self.order.get(index).copied()
     }
 
+    /// Provenance of the node currently at top-level `index` — the SINGLE store.
+    ///
+    /// There used to be a SECOND, positional one (`AssemblyEnv::prov`), kept in step
+    /// by `observe` with `truncate` + re-push. `reinstate` preserved identity in the
+    /// arena's store — but `refresh`, which builds ALL role membership, read the
+    /// POSITIONAL one. So the identity machinery was faithfully maintaining a store
+    /// that role membership never consulted, and the two silently disagreed after
+    /// any move: `Instead` re-stamped `prov[0]` with the OVERRIDE clause's id while
+    /// the arena still (correctly) held clause 0's. Keying provenance to identity in
+    /// one place removes the disagreement CLASS, not just its instances.
+    fn prov_at(&self, index: usize) -> Option<NodeProvenance> {
+        self.order.get(index).map(|id| self.node(*id).prov)
+    }
+
+    /// Mirror a MID-VECTOR removal (`defs.remove(index)`).
+    ///
+    /// `sync_len` can only shrink from the TAIL — it `pop()`s `order`, and `observe`
+    /// documents that precondition in its own doc comment. Mirroring a mid-vector
+    /// `defs.remove(i)` with a tail pop keeps `order.len()` exactly right while
+    /// detaching the WRONG node and silently renaming every node from `i` onward.
+    /// A removal is a different operation from a truncation, so it gets its own
+    /// primitive rather than being approximated by one.
+    fn remove_at(&mut self, index: usize) -> NodeId {
+        let id = self.order.remove(index);
+        self.detached.push(id);
+        self.pushed_since_detach = false;
+        id
+    }
+
+    /// Record that `id` was nested INTO `parent` by the handler that moved it.
+    ///
+    /// `settle` otherwise INFERS the parent as `order.last()`. That inference holds
+    /// only when the handler pushes its replacement and nothing else. A handler that
+    /// ALSO runs an intrinsic continuation pushes a node after the real parent, and
+    /// the inference then names the continuation's node. A site that knows its parent
+    /// states it; emission order is not a parenthood oracle.
+    fn absorb(&mut self, id: NodeId, parent: NodeId) {
+        self.detached.retain(|d| *d != id);
+        self.nodes[id.0 as usize].status = NodeStatus::Absorbed { into: parent };
+    }
+
     /// Mirror a `defs` length change we cannot hook from inside (helper-driven
     /// pushes in `apply_clause_continuation` / `attach_repeat_process_keywords`,
     /// and every handler pop). Ids are issued, never recycled.
-    fn sync_len(&mut self, defs_len: usize, origin: Option<ClauseId>, role: NodeRole) {
-        while self.order.len() > defs_len {
+    fn sync_len(&mut self, defs: &[AbilityDefinition], origin: Option<ClauseId>, role: NodeRole) {
+        while self.order.len() > defs.len() {
             let id = self
                 .order
                 .pop()
@@ -243,8 +324,13 @@ impl Arena {
             self.detached.push(id);
             self.pushed_since_detach = false;
         }
-        while self.order.len() < defs_len {
-            self.push_new(origin, role);
+        while self.order.len() < defs.len() {
+            // The node being created IS `defs[order.len()]` — stamp its witness at
+            // birth, from the def it actually mirrors. Never re-stamp an existing
+            // node: a witness re-derived from `defs` would make `assert_mirrors`
+            // compare `defs` against itself.
+            let witness = def_witness(&defs[self.order.len()]);
+            self.push_new(origin, role, witness);
         }
     }
 
@@ -255,7 +341,7 @@ impl Arena {
     /// nests the popped def under that replacement — so the detached nodes are
     /// `Absorbed` into the new tail. If nothing was pushed, the node was removed
     /// outright and we do NOT invent a parent for it.
-    fn settle(&mut self, defs_len: usize) {
+    fn settle(&mut self, defs: &[AbilityDefinition]) {
         if !self.detached.is_empty() {
             let parent = if self.pushed_since_detach {
                 self.order.last().copied()
@@ -271,18 +357,47 @@ impl Arena {
             }
         }
         self.pushed_since_detach = false;
-        self.assert_mirrors(defs_len);
+        self.assert_mirrors(defs);
     }
 
-    /// C1's whole point: the arena's LIVE nodes correspond 1:1 to `defs`.
+    /// Follow an `Absorbed` chain up to the LIVE top-level node that still holds
+    /// this node in its tree, and return that node's index in `defs`. `None` when
+    /// the chain ends in a `Dropped` node — the def left the output, so there is
+    /// nothing left to check it against.
+    fn live_root_index(&self, id: NodeId) -> Option<usize> {
+        let mut cursor = id;
+        // Bounded: each hop moves strictly toward an older parent, and there are
+        // only `nodes.len()` of them.
+        for _ in 0..=self.nodes.len() {
+            match self.node(cursor).status {
+                NodeStatus::Live => return self.order.iter().position(|o| *o == cursor),
+                NodeStatus::Absorbed { into } => cursor = into,
+                NodeStatus::Dropped => return None,
+            }
+        }
+        None
+    }
+
+    /// The arena's LIVE nodes correspond 1:1 to `defs` — *by identity*, not merely
+    /// by count.
     ///
-    /// `debug_assert` so it is free in release but active in the entire test
-    /// suite and the corpus sweep. A divergence here is a finding, not a nit —
+    /// `debug_assert` so it is free in release but active in the entire test suite
+    /// and the full-pool corpus sweep. A divergence here is a finding, not a nit:
     /// it means the arena does not model what assembly actually does.
-    fn assert_mirrors(&self, defs_len: usize) {
+    ///
+    /// **Why this takes `&[AbilityDefinition]` and not `defs_len`.** The four count
+    /// and status asserts below are all maintained by the same two writes that
+    /// establish them (`sync_len` reconciles `order.len()` TO `defs_len`, then the
+    /// assert compares them; `settle` drains `detached`, then asserts it is empty).
+    /// They cannot fail by construction — they prove the assert is *wired*, never
+    /// that it can *discriminate a wrong model*. Two real modelling defects shipped
+    /// underneath them. The two asserts that follow compare the arena against
+    /// `defs` and against the output tree, so a wrong model has something to be
+    /// wrong ABOUT.
+    fn assert_mirrors(&self, defs: &[AbilityDefinition]) {
         debug_assert_eq!(
             self.order.len(),
-            defs_len,
+            defs.len(),
             "arena/defs divergence: live node count != defs len"
         );
         debug_assert!(
@@ -303,7 +418,48 @@ impl Arena {
             }),
             "arena/defs divergence: Live status and `order` membership disagree"
         );
+
+        // IDENTITY, not count: `order[i]` must still name the def that is ACTUALLY
+        // at `defs[i]`. A `defs` mutation mirrored by the WRONG arena op — a
+        // mid-vector `Vec::remove` mirrored by `sync_len`'s tail `pop` — keeps every
+        // count above perfectly balanced while silently renaming every node from the
+        // removal point on. This is the assert that notices.
+        debug_assert!(
+            self.order
+                .iter()
+                .zip(defs)
+                .all(|(id, def)| self.node(*id).witness == def_witness(def)),
+            "arena/defs divergence: `order` names a different def than `defs` holds \
+             at that index — a `defs` mutation was mirrored by the wrong arena op"
+        );
+
+        // `Absorbed { into }` is a CLAIM about the output tree, and the claim is
+        // checkable: the absorbed def must actually BE somewhere inside the tree of
+        // the node it names. `settle` INFERS that parent from emission order
+        // (`order.last()`), which is a guess — a handler that pushes anything AFTER
+        // its real parent (an intrinsic continuation, say) makes the guess wrong.
+        // This is the assert that catches an inferred parent being the wrong one.
+        debug_assert!(
+            self.nodes.iter().all(|n| match n.status {
+                NodeStatus::Absorbed { into } => self
+                    .live_root_index(into)
+                    .is_none_or(|i| def_tree_contains(&defs[i], n.witness)),
+                NodeStatus::Live | NodeStatus::Dropped => true,
+            }),
+            "arena/defs divergence: an `Absorbed {{ into }}` node is not anywhere \
+             inside the tree of the parent it names — the parent was inferred, wrongly"
+        );
     }
+}
+
+/// Is a def with this witness anywhere in `def`'s tree? Walks the two slots a
+/// handler can nest an absorbed node into.
+fn def_tree_contains(def: &AbilityDefinition, witness: DefWitness) -> bool {
+    def_witness(def) == witness
+        || [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|child| def_tree_contains(child, witness))
 }
 
 /// Emit-time facts about the chain assembled so far.
@@ -313,10 +469,9 @@ impl Arena {
 #[allow(dead_code)]
 #[derive(Debug, Default)]
 pub(super) struct AssemblyEnv {
-    /// U6-C1 dual-run arena. Maintained in lockstep with `defs`, read by nothing.
+    /// U6-C1 arena. Maintained in lockstep with `defs`, and the SINGLE authority for
+    /// node identity and provenance — see `Arena::prov_at`.
     arena: Arena,
-    /// Provenance parallel to `defs`, kept the same length by `observe`.
-    prov: Vec<NodeProvenance>,
     /// "Look at the top N"-class antecedent (`Dig`/`Mill`/`RevealUntil`) — the
     /// node `RestDestination` / `DigFromAmong` continuations scan backward for.
     last_dig: Option<NodeRef>,
@@ -518,25 +673,20 @@ impl AssemblyEnv {
         self.arena.id_at(index)
     }
 
-    /// Record provenance for any nodes `defs` gained since the last call, then
-    /// recompute the registries against the current `defs`.
+    /// Mirror any length change `defs` has undergone since the last call into the
+    /// arena, then recompute the registries against the current `defs`.
     ///
-    /// `defs` only ever grows by push/extend or shrinks from the TAIL (`pop`) or
-    /// wholesale (`mem::take`), so truncating/extending `prov` to `defs.len()`
-    /// keeps the two aligned without tracking each op individually.
+    /// Handles growth (push/extend) and TAIL shrink (`pop`, `mem::take`). A
+    /// MID-VECTOR `defs.remove(i)` is NOT a length change this can mirror — the
+    /// caller must announce it with `Arena::remove_at` first, which is why that is a
+    /// separate primitive rather than something inferred from a length delta.
     pub(super) fn observe(
         &mut self,
         defs: &[AbilityDefinition],
         origin: Option<ClauseId>,
         role: NodeRole,
     ) {
-        // U6-C1: mirror the same length change into the arena. Same call sites,
-        // same discipline (after EVERY statement that changes `defs.len()`).
-        self.arena.sync_len(defs.len(), origin, role);
-        self.prov.truncate(defs.len());
-        while self.prov.len() < defs.len() {
-            self.prov.push(NodeProvenance { origin, role });
-        }
+        self.arena.sync_len(defs, origin, role);
         self.refresh(defs);
     }
 
@@ -560,10 +710,13 @@ impl AssemblyEnv {
         self.face_down_profile_nodes.clear();
 
         for (index, def) in defs.iter().enumerate() {
-            let provenance = self.prov.get(index).copied().unwrap_or(NodeProvenance {
-                origin: None,
-                role: NodeRole::Unknown,
-            });
+            // Provenance comes from the arena, keyed by IDENTITY — so a def that was
+            // moved (`Instead`'s root, `EntersTappedAttacking`'s patched def) keeps
+            // the provenance it was born with, and role membership below is computed
+            // from the truth `reinstate` has been preserving all along.
+            let provenance = self.arena.prov_at(index).expect(
+                "`observe` syncs `order` to `defs` before `refresh`, so every index is live",
+            );
             let node = NodeRef { index, provenance };
 
             // CRITICAL (audit §5.1): register a conditional off the BUILT def's
@@ -1157,12 +1310,40 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     None,
                     OnMiss::Ignore,
                 );
-                if let Some(bound_index) = bound {
+                let absorbed = if let Some(bound_index) = bound {
+                    // `bound_index` is wherever the destination node sits — the selector
+                    // is `last_cached(&search_destination_nodes)`, which is under no
+                    // obligation to return the tail. So this is a MID-VECTOR removal and
+                    // is announced as one: `observe`/`sync_len` can only mirror a TAIL
+                    // shrink, and would otherwise detach the LAST node while `defs`
+                    // dropped THIS one, renaming every node from here on.
+                    //
+                    // Measured: on the full ~35k-face pool this fold fires twice, and
+                    // both are currently tail removals — so the tail-pop mirror happened
+                    // to agree, and the divergence is latent rather than live. It is
+                    // fixed structurally anyway: correctness here must not rest on a
+                    // coincidence about today's card pool.
+                    let id = env.arena.remove_at(bound_index);
                     def.else_ability = Some(Box::new(defs.remove(bound_index)));
                     env.observe(&defs, None, NodeRole::Unknown);
-                }
+                    Some(id)
+                } else {
+                    None
+                };
                 defs.push(def);
                 env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
+                if let Some(absorbed) = absorbed {
+                    // Name the parent EXPLICITLY. `settle` would infer it as
+                    // `order.last()`, but the intrinsic continuation below pushes the
+                    // NEW search-destination node AFTER this def — so the inference
+                    // names the continuation's node as parent of a def that is in fact
+                    // nested in THIS def's `else_ability`.
+                    let parent = env
+                        .arena
+                        .id_at(defs.len() - 1)
+                        .expect("the def carrying the folded `else_ability` was just pushed");
+                    env.arena.absorb(absorbed, parent);
+                }
                 // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
                 if let Some(continuation) = intrinsic {
                     apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
@@ -1207,7 +1388,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             prev_boundary = clause_ir.boundary;
             // U6-C1: classify anything this handler detached, then assert the
             // arena's live nodes still mirror `defs` 1:1.
-            env.arena.settle(defs.len());
+            env.arena.settle(&defs);
             continue;
         }
 
@@ -1690,7 +1871,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // AFTER the special clause, not the stale one that preceded it.
         prev_boundary = clause_ir.boundary;
         // U6-C1: same settle + mirror assertion on the normal (`Emit`) path.
-        env.arena.settle(defs.len());
+        env.arena.settle(&defs);
     }
 
     // ── Phase 2: Post-loop assembly (unchanged) ────────────────────────
