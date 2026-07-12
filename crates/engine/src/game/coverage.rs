@@ -8739,6 +8739,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("can't be blocked")
             }
             StaticMode::CantBeBlockedBy { .. } => effective_lower.contains("can't be blocked"),
+            // CR 509.1b: CantBeBlockedUnlessAllBlock — "can't be blocked" anchor
+            // (Tromokratis). The "unless all creatures" clause is validated by
+            // parser tests.
+            StaticMode::CantBeBlockedUnlessAllBlock => effective_lower.contains("can't be blocked"),
             // CR 502.3: Smoke / Damping Field / Winter Orb max-untap cap. Anchor
             // on the verb phrase; the type filter half is the reused TargetFilter
             // and is validated by parser tests.
@@ -13154,6 +13158,31 @@ mod tests {
         assert!(
             gaps.is_empty(),
             "Data-carrying combat statics should be fully supported, but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 509.1b: CantBeBlockedUnlessAllBlock is a nullary registry-keyed
+    /// static enforced by combat.rs declare-blockers validation (Tromokratis).
+    #[test]
+    fn cant_be_blocked_unless_all_block_has_no_coverage_gap() {
+        let mut face = make_face();
+        face.oracle_text = Some(
+            "Tromokratis can't be blocked unless all creatures defending player controls block it."
+                .to_string(),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::CantBeBlockedUnlessAllBlock)
+                .affected(TargetFilter::SelfRef)
+                .description(
+                    "Tromokratis can't be blocked unless all creatures defending player controls block it.".to_string(),
+                ),
+        );
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "CantBeBlockedUnlessAllBlock should be fully supported, but got gaps: {:?}",
             gaps
         );
     }

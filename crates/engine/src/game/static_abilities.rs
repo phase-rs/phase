@@ -127,6 +127,10 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
 
     // CR 509.1b: CantBeBlocked — creature cannot be blocked.
     registry.insert(StaticMode::CantBeBlocked, handle_cant_be_blocked);
+    // CR 509.1b: CantBeBlockedUnlessAllBlock — creature can't be blocked unless
+    // all creatures defending player controls block it (Tromokratis). Runtime
+    // enforcement is in combat.rs declare-blockers validation.
+    registry.insert(StaticMode::CantBeBlockedUnlessAllBlock, handle_rule_mod);
     // CR 702.16: Protection prevents targeting, blocking, damage, and attachment.
     registry.insert(StaticMode::Protection, handle_protection);
 
