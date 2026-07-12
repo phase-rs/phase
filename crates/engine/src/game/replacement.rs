@@ -16360,8 +16360,9 @@ mod tests {
             "UnlessYourTurn shield should match on opponent's turn"
         );
     }
-    /// #5652 (CR 614.1a): a self-scoped damage shield must fire only for damage
-    /// dealt TO its own object, never for damage the object DEALS. Swans of Bryn
+    /// #5652 (CR 615.1): a prevention effect is a "shield around whatever it's
+    /// affecting" — a self-scoped shield must fire only for damage dealt TO its
+    /// own object, never for damage the object DEALS. Swans of Bryn
     /// Argoll blocks: the attacker's damage to Swans is prevented (draw rider
     /// fires), but Swans' combat damage to the attacker must LAND. Before the
     /// parser fix Swans' shield had `valid_card: None`, so it also prevented the

@@ -8355,21 +8355,27 @@ fn parse_damage_to_self_instead_followup(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     let total_len = norm_lower.len();
-    let ((effect_start, effect_len, is_self), rest) = nom_on_lower(normalized, norm_lower, |i| {
-        let (i, _) = tag("if damage would be dealt to ").parse(i)?;
-        // CR 614.1a + CR 615.1a: "~" is the source's own object (a self-scoped
-        // shield); "you" is the controller (a player-scoped shield). They must
-        // not resolve identically — a self shield that leaves the recipient
-        // scope unset wrongly replaces damage the source DEALS, not just damage
-        // dealt TO it (#5652).
-        let (i, is_self) = alt((value(true, tag("~")), value(false, tag("you")))).parse(i)?;
-        let (i, _) = tag(", ").parse(i)?;
-        let effect_start = total_len - i.len();
-        let (i, effect) = take_until::<_, _, OracleError<'_>>(" instead").parse(i)?;
-        let (i, _) = tag(" instead").parse(i)?;
-        let (i, _) = opt(char('.')).parse(i)?;
-        Ok((i, (effect_start, effect.len(), is_self)))
-    })?;
+    let ((effect_start, effect_len, recipient_scope), rest) =
+        nom_on_lower(normalized, norm_lower, |i| {
+            let (i, _) = tag("if damage would be dealt to ").parse(i)?;
+            // CR 614.1: a replacement effect is a "shield" around whatever it's
+            // affecting. "~" is the source's own object (self-scoped → scope to
+            // `SelfRef`); "you" is the controller (a player-scoped shield, not an
+            // object filter → no `valid_card`). They must not resolve identically:
+            // a self shield left with no recipient scope wrongly replaces damage
+            // the source DEALS, not just damage dealt TO it (#5652).
+            let (i, recipient_scope) = alt((
+                value(Some(TargetFilter::SelfRef), tag("~")),
+                value(Option::<TargetFilter>::None, tag("you")),
+            ))
+            .parse(i)?;
+            let (i, _) = tag(", ").parse(i)?;
+            let effect_start = total_len - i.len();
+            let (i, effect) = take_until::<_, _, OracleError<'_>>(" instead").parse(i)?;
+            let (i, _) = tag(" instead").parse(i)?;
+            let (i, _) = opt(char('.')).parse(i)?;
+            Ok((i, (effect_start, effect.len(), recipient_scope)))
+        })?;
     let effect_text = normalized.get(effect_start..effect_start + effect_len)?;
 
     // CR 614.1a impossibility rider: "... <effect> instead. If you can't,
@@ -8409,14 +8415,15 @@ fn parse_damage_to_self_instead_followup(
         .prevention_shield(PreventionAmount::All)
         .execute(followup)
         .description(original_text.to_string());
-    if is_self {
-        // CR 614.1a + CR 615.1a: scope the shield to damage dealt TO the source's
-        // own object. The runtime applies `valid_card` against the damage
-        // recipient (`ProposedEvent::Damage::affected_object_id`), so `SelfRef`
-        // fires only when the source itself is the recipient — not when it deals
-        // damage. Without this, Phytohydra/Lichenthrope-class shields also
-        // replace the source's own combat damage (#5652).
-        def = def.valid_card(TargetFilter::SelfRef);
+    if let Some(scope) = recipient_scope {
+        // CR 614.1: scope the replacement to damage dealt TO the source's own
+        // object (the "shield around whatever it's affecting"). The runtime
+        // applies `valid_card` against the damage recipient
+        // (`ProposedEvent::Damage::affected_object_id`), so `SelfRef` fires only
+        // when the source itself is the recipient — not when it deals damage.
+        // Without this, Phytohydra/Lichenthrope-class shields also replace the
+        // source's own combat damage (#5652).
+        def = def.valid_card(scope);
     }
     Some(def)
 }
@@ -8652,12 +8659,13 @@ fn parse_damage_prevention_replacement(
     // class of bug.
     let valid_card_filter: Option<TargetFilter> = if nom_primitives::scan_contains(working_lower, "dealt to ~")
             || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
-            // CR 614.1a: Active-voice self-recipient form — "If a source would
+            // CR 615.1: Active-voice self-recipient form — "If a source would
             // deal damage to ~, prevent that damage ..." (Swans of Bryn Argoll —
-            // #5652). The passive "dealt to ~" scan above misses it because the
-            // recipient trails the verb; `~` is still the source card, so the
-            // shield is self-scoped. Without `SelfRef` `valid_card` stays None
-            // and the shield also prevents damage the source DEALS (Swans
+            // #5652). A prevention effect is a "shield around whatever it's
+            // affecting"; here that is `~`, the source card. The passive "dealt
+            // to ~" scan above misses the active-voice phrasing because the
+            // recipient trails the verb. Without `SelfRef` `valid_card` stays
+            // None and the shield also prevents damage the source DEALS (Swans
             // prevented its own combat damage and drew off it).
             || nom_primitives::scan_contains(working_lower, "deal damage to ~")
             // CR 615.1a: Subject-first self-recipient form — "If ~ would be dealt
@@ -18851,9 +18859,10 @@ mod snapshot_tests {
             "external-subject entry must not match the self controller-override arm"
         );
     }
-    /// #5652 (CR 614.1a): a self-scoped damage shield ("If [a source would deal]
-    /// damage to ~, <prevent / X instead>") must scope to damage dealt TO the
-    /// source's own object via `valid_card: SelfRef`. Without it the shield
+    /// #5652 (CR 614.1 / CR 615.1): a self-scoped damage shield ("If [a source
+    /// would deal] damage to ~, <prevent / X instead>") is a "shield around
+    /// whatever it's affecting" — it must scope to damage dealt TO the source's
+    /// own object via `valid_card: SelfRef`. Without it the shield
     /// leaves the recipient scope unset and also replaces damage the source
     /// DEALS. Covers the passive "instead" form (Phytohydra) and the active-voice
     /// prevention form (Swans of Bryn Argoll); the player-scoped "to you" form
