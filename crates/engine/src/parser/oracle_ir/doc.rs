@@ -1280,7 +1280,6 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::AddTargetReplacement { .. } => {}
         Effect::AddRestriction { .. } => {}
         Effect::ReduceNextSpellCost { .. } => {}
-        Effect::ReduceActivatedAbilityCost { .. } => {}
         Effect::GrantNextSpellAbility { .. } => {}
         Effect::AddPendingETBCounters { .. } => {}
         Effect::PayCost { .. } => {}

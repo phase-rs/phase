@@ -2810,13 +2810,6 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::ChooseDamageSource {
             source_filter: target,
         }
-        // CR 602.2: The Dining Car's transient activation-cost reduction scopes by
-        // `source_filter`, walked for a nested frozen event-context tag like every
-        // single-filter effect.
-        | Effect::ReduceActivatedAbilityCost {
-            source_filter: target,
-            ..
-        }
         | Effect::ReturnAsAura {
             enchant_filter: target,
             ..
@@ -5054,7 +5047,6 @@ fn rw_effect(
         Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
-        | Effect::ReduceActivatedAbilityCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::CreateEmblem { .. }
         | Effect::CreateDamageReplacement { .. }

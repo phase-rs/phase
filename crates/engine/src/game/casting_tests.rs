@@ -9432,14 +9432,16 @@ fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
     );
 }
 
-/// Helper: an artifact permanent with a pure `{2}` generic-mana activated ability
-/// (no tap/sacrifice, so affordability is a clean function of available mana).
+/// Helper: an artifact permanent with a pure `{generic_cost}` generic-mana
+/// activated ability (no tap/sacrifice, so affordability is a clean function of
+/// the controller's mana pool).
 fn make_artifact_with_generic_ability(
     state: &mut GameState,
     card_id: CardId,
     owner: PlayerId,
     name: &str,
     is_token: bool,
+    generic_cost: u32,
 ) -> ObjectId {
     let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
     let obj = state.objects.get_mut(&id).unwrap();
@@ -9454,24 +9456,29 @@ fn make_artifact_with_generic_ability(
             },
         )
         .cost(AbilityCost::Mana {
-            cost: ManaCost::generic(2),
+            cost: ManaCost::generic(generic_cost),
         }),
     );
     id
 }
 
-/// CR 611.2 + CR 602.2 + CR 514.2: RUNTIME PROOF of The Dining Car's transient
-/// activation-cost reduction. A `PendingActivationCostReduction` scoped to
-/// "artifact tokens you control" reduces a controlled artifact TOKEN's activated
-/// ability by {2}, but leaves a controlled artifact NONTOKEN and an OPPONENT's
-/// artifact token untouched — then the reduction is cleared at cleanup. The same
-/// `apply_static_activated_ability_cost_reduction` authority the AI's affordability
-/// check routes through is exercised via `can_activate_ability_now`.
+/// CR 611.2 + CR 601.2f + CR 118.7 + CR 514.2: RUNTIME PROOF of The Dining Car's
+/// transient activation-cost reduction, exercised through the REAL mechanism.
+/// Resolving the exact `Effect::GenericEffect` the parser emits installs a
+/// `Duration::UntilEndOfTurn` continuous `ReduceAbilityCost` effect, and the
+/// single cost authority (`apply_static_activated_ability_cost_reduction`, which
+/// the AI's affordability check routes through) reads it off the transient
+/// continuous effect — the same authority that applies printed battlefield
+/// `ReduceAbilityCost` statics. Proves: a controlled artifact TOKEN is
+/// discounted; a controlled NONTOKEN and an OPPONENT's token are not; the
+/// discount applies EXACTLY ONCE (a `{3}` token reduces to `{1}`, not `{0}` — a
+/// double-apply via layer grafting would floor it); and it ends when the
+/// continuous effect is pruned at cleanup.
 #[test]
 fn transient_activation_cost_reduction_hits_only_controlled_artifact_tokens() {
     let mut state = setup_game_at_main_phase();
 
-    // FilterContext anchor for the reduction (The Dining Car itself).
+    // The Dining Car itself — the reduction's source/anchor.
     let dining_car = create_object(
         &mut state,
         CardId(800),
@@ -9480,32 +9487,86 @@ fn transient_activation_cost_reduction_hits_only_controlled_artifact_tokens() {
         Zone::Battlefield,
     );
 
-    let controlled_token =
-        make_artifact_with_generic_ability(&mut state, CardId(801), PlayerId(0), "Token A", true);
-    let controlled_nontoken =
-        make_artifact_with_generic_ability(&mut state, CardId(802), PlayerId(0), "Nontoken", false);
-    let opponent_token =
-        make_artifact_with_generic_ability(&mut state, CardId(803), PlayerId(1), "Opp Token", true);
-
-    // The chaos reduction: activated abilities of artifact tokens P0 controls cost
-    // {2} less this turn.
-    state.pending_activation_cost_reductions.push(
-        crate::types::game_state::PendingActivationCostReduction {
-            controller: PlayerId(0),
-            source_id: dining_car,
-            amount: 2,
-            source_filter: TargetFilter::Typed(TypedFilter {
-                type_filters: vec![TypeFilter::Artifact],
-                controller: Some(ControllerRef::You),
-                properties: vec![FilterProp::Token],
-            }),
-        },
+    let controlled_token = make_artifact_with_generic_ability(
+        &mut state,
+        CardId(801),
+        PlayerId(0),
+        "Token A",
+        true,
+        2,
+    );
+    // A {3}-cost controlled token — reduces to {1}, not {0}, so it proves the
+    // discount is applied EXACTLY ONCE (guards against a layer graft double-apply).
+    let controlled_token_three = make_artifact_with_generic_ability(
+        &mut state,
+        CardId(804),
+        PlayerId(0),
+        "Token B",
+        true,
+        3,
+    );
+    let controlled_nontoken = make_artifact_with_generic_ability(
+        &mut state,
+        CardId(802),
+        PlayerId(0),
+        "Nontoken",
+        false,
+        2,
+    );
+    let opponent_token = make_artifact_with_generic_ability(
+        &mut state,
+        CardId(803),
+        PlayerId(1),
+        "Opp Token",
+        true,
+        2,
     );
 
-    // P0 has ZERO mana: only the reduced (cost 2→0) controlled token is affordable.
+    // Resolve the exact GenericEffect the parser emits for the chaos body
+    // "activated abilities of artifact tokens you control cost {2} less to
+    // activate": a Duration::UntilEndOfTurn continuous ReduceAbilityCost carried
+    // as an AddStaticMode modification with the source filter in `affected`.
+    let reduce_mode = StaticMode::ReduceAbilityCost {
+        mode: crate::types::statics::CostModifyMode::Reduce,
+        keyword: "activated".to_string(),
+        amount: 2,
+        minimum_mana: None,
+        dynamic_count: None,
+        exemption: crate::types::statics::ActivationExemption::None,
+        activator: None,
+    };
+    let source_filter = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Artifact],
+        controller: Some(ControllerRef::You),
+        properties: vec![FilterProp::Token],
+    });
+    let effect = Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::new(reduce_mode.clone())
+            .affected(source_filter)
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: reduce_mode,
+            }])],
+        duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
+        target: None,
+    };
+    let ability =
+        crate::types::ability::ResolvedAbility::new(effect, vec![], dining_car, PlayerId(0));
+    let mut events = Vec::new();
+    crate::game::effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
+    // A full layer flush proves the reduction is NOT grafted onto objects (the
+    // layers skip), so the cost hook applies it exactly once — the {3}-token
+    // assertion below would fail (reduce to {0}) if grafting double-applied it.
+    crate::game::layers::flush_layers(&mut state);
+
+    // P0 has ZERO mana. `can_activate_ability_now`'s 4th arg is the ability index,
+    // not available mana — affordability reads the controller's actual pool.
     assert!(
         can_activate_ability_now(&state, PlayerId(0), controlled_token, 0),
         "controlled artifact token's {{2}} cost is reduced to {{0}}, affordable with no mana",
+    );
+    assert!(
+        !can_activate_ability_now(&state, PlayerId(0), controlled_token_three, 0),
+        "single-apply: {{3}} reduces to {{1}} (needs 1 mana), NOT {{0}} — a double-apply would floor it",
     );
     assert!(
         !can_activate_ability_now(&state, PlayerId(0), controlled_nontoken, 0),
@@ -9517,19 +9578,25 @@ fn transient_activation_cost_reduction_hits_only_controlled_artifact_tokens() {
         "opponent's artifact token is not controlled by the reduction's 'you' → not reduced",
     );
 
-    // Sanity: with {2} available the unreduced nontoken IS affordable — proving the
-    // earlier `false` was a cost gate, not an unrelated legality gate.
-    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+    // With exactly {1} mana the {3}-token reduced to {1} is affordable — positive
+    // proof the discount is exactly {2}.
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
     assert!(
-        can_activate_ability_now(&state, PlayerId(0), controlled_nontoken, 0),
-        "with {{2}} mana the unreduced nontoken ability is affordable",
+        can_activate_ability_now(&state, PlayerId(0), controlled_token_three, 0),
+        "the {{3}} token reduced to {{1}} is affordable with {{1}} mana",
     );
 
-    // CR 514.2: the "this turn" reduction ends at cleanup (start_next_turn clears it).
-    crate::game::turns::start_next_turn(&mut state, &mut Vec::new());
+    // CR 514.2: the continuous "this turn" reduction is pruned at cleanup, and the
+    // controlled token returns to full {2} cost — unaffordable with the {1} mana
+    // now in the pool (it WAS affordable at {0} mana while the reduction held).
+    crate::game::layers::prune_end_of_turn_effects(&mut state);
     assert!(
-        state.pending_activation_cost_reductions.is_empty(),
-        "the 'this turn' activation-cost reduction must be cleared at cleanup",
+        !transient_reduce_ability_cost_present(&state),
+        "the UntilEndOfTurn ReduceAbilityCost continuous effect must be pruned at cleanup",
+    );
+    assert!(
+        !can_activate_ability_now(&state, PlayerId(0), controlled_token, 0),
+        "after cleanup the reduction is gone → the token's {{2}} cost is unaffordable with {{1}} mana",
     );
 }
 

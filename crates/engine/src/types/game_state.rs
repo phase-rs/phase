@@ -423,24 +423,6 @@ pub struct PendingSpellCostReduction {
     pub spell_filter: Option<TargetFilter>,
 }
 
-/// CR 602.2 + CR 601.2f + CR 514.2: A turn-scoped reduction to the activation cost
-/// of activated abilities whose SOURCE permanent matches `source_filter`. Created
-/// by `Effect::ReduceActivatedAbilityCost` (The Dining Car's chaos ability); read by
-/// every activation this turn; cleared at cleanup. Distinct from
-/// `PendingSpellCostReduction` (spell casts, next-spell one-shot) — activations are
-/// CR 602, not CR 601, and this reduction is not consumed on use.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingActivationCostReduction {
-    /// Reference "you" for `source_filter`'s `ControllerRef::You`.
-    pub controller: PlayerId,
-    /// `FilterContext` anchor (`from_source_with_controller`).
-    pub source_id: ObjectId,
-    /// Generic mana reduction amount.
-    pub amount: u32,
-    /// Which source permanents' activated abilities are reduced.
-    pub source_filter: TargetFilter,
-}
-
 /// CR 601.2f: Describes a one-shot modification applied to the next qualifying spell a player
 /// casts. Created by effects like "the next spell you cast this turn has convoke" or "the next
 /// creature spell you cast this turn can't be countered."
@@ -7715,11 +7697,6 @@ pub struct GameState {
     /// Consumed when the player casts their next qualifying spell.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_spell_cost_reductions: Vec<PendingSpellCostReduction>,
-    /// CR 602.2 + CR 514.2: Turn-scoped reductions to the activation cost of
-    /// activated abilities whose source permanent matches `source_filter`. Read by
-    /// every matching activation this turn; cleared at cleanup (not consumed on use).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_activation_cost_reductions: Vec<PendingActivationCostReduction>,
     /// CR 601.2f: One-shot ability modifiers for the next spell cast.
     /// Consumed when the player casts their next qualifying spell.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -9648,7 +9625,6 @@ impl GameState {
             creature_types_dealt_combat_damage_this_turn: im::HashSet::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
             pending_spell_cost_reductions: Vec::new(),
-            pending_activation_cost_reductions: Vec::new(),
             pending_next_spell_modifiers: Vec::new(),
             pending_etb_counters: Vec::new(),
             modal_modes_chosen_this_turn: HashSet::new(),
@@ -10945,8 +10921,6 @@ impl PartialEq for GameState {
             && self.creature_types_dealt_combat_damage_this_turn
                 == other.creature_types_dealt_combat_damage_this_turn
             && self.pending_spell_cost_reductions == other.pending_spell_cost_reductions
-            && self.pending_activation_cost_reductions
-                == other.pending_activation_cost_reductions
             && self.pending_next_spell_modifiers == other.pending_next_spell_modifiers
             && self.pending_etb_counters == other.pending_etb_counters
             && self.modal_modes_chosen_this_turn == other.modal_modes_chosen_this_turn

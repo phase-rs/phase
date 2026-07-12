@@ -16165,12 +16165,15 @@ fn apply_static_activated_ability_cost_reduction(
     player: PlayerId,
     source_id: ObjectId,
 ) {
-    // CR 604.1: O(1) presence gate — nothing to do unless a printed
-    // ReduceAbilityCost static (CR 611.3) OR a resolution-generated transient
-    // reduction (CR 611.2 — The Dining Car's chaos ability, held in
-    // `pending_activation_cost_reductions`) is present.
+    // CR 604.1: presence gate — nothing to do unless a printed ReduceAbilityCost
+    // static (CR 611.3) OR a duration-scoped continuous ReduceAbilityCost effect
+    // (CR 611.2 — The Dining Car's transient chaos discount) is present. The O(1)
+    // `static_mode_presence` index covers only battlefield/command-zone printed
+    // statics, so the transient authority needs its own small TCE scan — the same
+    // split gate `visibility::viewer_may_look_at_face_down` uses for the
+    // duration-bound `MayLookAtFaceDown` permission.
     let has_static = static_kind_present(state, StaticModeKind::ReduceAbilityCost);
-    let has_transient = !state.pending_activation_cost_reductions.is_empty();
+    let has_transient = transient_reduce_ability_cost_present(state);
     if !has_static && !has_transient {
         return;
     }
@@ -16198,118 +16201,179 @@ fn apply_static_activated_ability_cost_reduction(
     // `&`) before the loop mutates it.
     let ability_is_loyalty = crate::types::ability::is_loyalty_ability_cost(cost);
 
+    // CR 611.3 + CR 601.2f: printed battlefield/command-zone `ReduceAbilityCost`
+    // statics (Training Grounds, Suppression Field, Zirda, Agatha, …).
     for (static_source, def) in super::functioning_abilities::battlefield_active_statics(state) {
-        let StaticMode::ReduceAbilityCost {
-            mode,
-            keyword,
-            amount,
-            minimum_mana,
-            dynamic_count,
-            exemption,
-            activator,
-        } = &def.mode
-        else {
-            continue;
-        };
-        // CR 601.2f + CR 606.1: match the "activated" blanket arm, a tag-keyed
-        // keyword (power-up, exhaust, …), or the "loyalty" arm against a loyalty
-        // ability's cost.
-        let keyword_matches = keyword == "activated"
-            || Some(keyword.as_str()) == active_keyword
-            || (keyword == "loyalty" && ability_is_loyalty);
-        if !keyword_matches || *amount == 0 {
+        if !matches!(def.mode, StaticMode::ReduceAbilityCost { .. }) {
             continue;
         }
-        // CR 605.1a: a mana ability bypasses a "unless they're mana abilities"
-        // adjustment (Suppression Field's tax, Zirda's discount).
-        if *exemption == ActivationExemption::ManaAbilities && ability_is_mana {
-            continue;
-        }
-        // CR 602.2: an activator-scoped static ("abilities you activate" — Zirda,
-        // the Dawnwaker; Fluctuator) keys off WHO is activating the ability,
-        // evaluated relative to the static's controller — NOT who controls the
-        // ability's source. Reuse the activator-permission predicate with the
-        // static's controller as the reference point so "you" resolves to the
-        // static controller. An ability on a permanent this player doesn't control
-        // (activatable via `activator_filter`) is still discounted when they
-        // activate it, and an ability on a permanent they DO control but activated
-        // by someone else is not. `None` leaves the source/global scope untouched.
-        if let Some(activator) = activator {
-            if !player_may_begin_activating(
-                state,
-                player,
-                static_source.controller,
-                Some(activator),
-            ) {
-                continue;
-            }
-        }
-        if def.affected.as_ref().is_some_and(|filter| {
-            !super::filter::matches_target_filter(
-                state,
-                source_id,
-                filter,
-                &super::filter::FilterContext::from_source(state, static_source.id),
-            )
-        }) {
-            continue;
-        }
-        // CR 601.2f + CR 208.1 + CR 113.7: When `dynamic_count` is present the
-        // per-unit `amount` is multiplied by the resolved quantity (Agatha of
-        // the Vile Cauldron: amount 1 × ~'s power). Resolve against the static's
-        // own source so "~'s power" reads Agatha's post-layer power. Mirrors the
-        // dynamic-count multiply in `keywords::apply_ability_cost_reduction`.
-        let multiplier = dynamic_count.as_ref().map_or(1u32, |qty_ref| {
-            let expr = crate::types::ability::QuantityExpr::Ref {
-                qty: qty_ref.clone(),
-            };
-            super::quantity::resolve_quantity(
-                state,
-                &expr,
-                static_source.controller,
-                static_source.id,
-            )
-            .max(0) as u32
-        });
-        let effective = amount.saturating_mul(multiplier);
-        // CR 118.7: Apply the adjustment in the static's direction. `Reduce`
-        // subtracts generic mana (honoring the optional one-mana floor);
-        // `Raise` adds generic mana (Skyseer's Chariot). `Minimum` is not
-        // emitted for activated-ability statics and is treated as a no-op.
-        match mode {
-            CostModifyMode::Reduce => {
-                reduce_generic_in_cost_with_minimum_mana(
-                    cost,
-                    effective,
-                    minimum_mana.unwrap_or(0),
-                );
-            }
-            CostModifyMode::Raise => increase_generic_in_cost(cost, effective),
-            CostModifyMode::Minimum => {}
-        }
+        // CR 604.1 + CR 109.5: "you control" in the affected filter anchors on the
+        // static's current controller, read live from the battlefield object.
+        let ctx = super::filter::FilterContext::from_source(state, static_source.id);
+        apply_one_reduce_ability_cost(
+            state,
+            cost,
+            source_id,
+            player,
+            active_keyword,
+            ability_is_mana,
+            ability_is_loyalty,
+            &def.mode,
+            def.affected.as_ref(),
+            static_source.id,
+            static_source.controller,
+            &ctx,
+        );
     }
 
-    // CR 611.2 + CR 602.2: resolution-generated, turn-scoped reductions
-    // (`Effect::ReduceActivatedAbilityCost` — The Dining Car's chaos ability).
-    // These live in `pending_activation_cost_reductions` (not a printed static) and
-    // are applied here so the single cost authority (CR 601.2f) stays intact.
-    // Cleared at cleanup (CR 514.2).
-    for reduction in &state.pending_activation_cost_reductions {
-        if reduction.amount == 0 {
-            continue;
+    // CR 611.2 + CR 118.7: duration-scoped continuous `ReduceAbilityCost` effects
+    // (The Dining Car's transient "activated abilities of <X> cost {N} less this
+    // turn"). Installed by a resolving ability as a `GenericEffect` and read here,
+    // off the TCE, through the SAME per-static authority as battlefield statics —
+    // there is no parallel reduction pathway. The `UntilEndOfTurn` duration expires
+    // the effect at cleanup (CR 514.2), so no explicit clear is needed. CR 611.2c:
+    // the affected set is dynamic (re-evaluated each activation), so a token
+    // created later this turn is still discounted.
+    for tce in &state.transient_continuous_effects {
+        for modification in &tce.modifications {
+            let ContinuousModification::AddStaticMode {
+                mode: reduce_mode @ StaticMode::ReduceAbilityCost { .. },
+            } = modification
+            else {
+                continue;
+            };
+            // CR 608.2c + CR 109.5: "you control" is latched to the installing
+            // player captured on the TCE, not the source's current controller.
+            let ctx = super::filter::FilterContext::from_source_with_controller(
+                tce.source_id,
+                tce.controller,
+            );
+            apply_one_reduce_ability_cost(
+                state,
+                cost,
+                source_id,
+                player,
+                active_keyword,
+                ability_is_mana,
+                ability_is_loyalty,
+                reduce_mode,
+                Some(&tce.affected),
+                tce.source_id,
+                tce.controller,
+                &ctx,
+            );
         }
-        // CR 602.2: scope by the reduction's `source_filter` against the ability's
-        // SOURCE permanent, anchoring "you control" on the reduction's controller.
-        let ctx = super::filter::FilterContext::from_source_with_controller(
-            reduction.source_id,
-            reduction.controller,
-        );
-        if !super::filter::matches_target_filter(state, source_id, &reduction.source_filter, &ctx) {
-            continue;
+    }
+}
+
+/// CR 604.1: presence gate for the transient (duration-scoped) `ReduceAbilityCost`
+/// authority. The O(1) `static_mode_presence` index tracks only battlefield /
+/// command-zone printed statics, never TCE-borne `AddStaticMode` modes, so this
+/// small scan of `transient_continuous_effects` is the gate for the transient
+/// side — mirroring the split presence gate in
+/// `visibility::viewer_may_look_at_face_down`.
+fn transient_reduce_ability_cost_present(state: &GameState) -> bool {
+    state.transient_continuous_effects.iter().any(|tce| {
+        tce.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::ReduceAbilityCost { .. },
+                }
+            )
+        })
+    })
+}
+
+/// CR 601.2f + CR 118.7 + CR 605.1a + CR 606.1: Apply ONE `ReduceAbilityCost`
+/// static to the activating ability's `cost`. The single authority for both a
+/// printed battlefield static (Training Grounds) and a duration-scoped continuous
+/// effect (The Dining Car's transient chaos discount), so both apply through
+/// identical keyword-match, mana-exemption, activator-scope, source-filter, and
+/// dynamic-count logic. `reduce_mode` must be a `StaticMode::ReduceAbilityCost`;
+/// `affected` is its source-scope filter (evaluated against the ability's SOURCE
+/// permanent via `filter_ctx`); `static_source_id`/`static_controller` anchor the
+/// dynamic-count resolution and the activator-permission check.
+#[allow(clippy::too_many_arguments)]
+fn apply_one_reduce_ability_cost(
+    state: &GameState,
+    cost: &mut AbilityCost,
+    ability_source_id: ObjectId,
+    player: PlayerId,
+    active_keyword: Option<&'static str>,
+    ability_is_mana: bool,
+    ability_is_loyalty: bool,
+    reduce_mode: &StaticMode,
+    affected: Option<&TargetFilter>,
+    static_source_id: ObjectId,
+    static_controller: PlayerId,
+    filter_ctx: &super::filter::FilterContext,
+) {
+    let StaticMode::ReduceAbilityCost {
+        mode,
+        keyword,
+        amount,
+        minimum_mana,
+        dynamic_count,
+        exemption,
+        activator,
+    } = reduce_mode
+    else {
+        return;
+    };
+    // CR 601.2f + CR 606.1: match the "activated" blanket arm, a tag-keyed keyword
+    // (power-up, exhaust, …), or the "loyalty" arm against a loyalty ability's cost.
+    let keyword_matches = keyword == "activated"
+        || Some(keyword.as_str()) == active_keyword
+        || (keyword == "loyalty" && ability_is_loyalty);
+    if !keyword_matches || *amount == 0 {
+        return;
+    }
+    // CR 605.1a: a mana ability bypasses a "unless they're mana abilities"
+    // adjustment (Suppression Field's tax, Zirda's discount).
+    if *exemption == ActivationExemption::ManaAbilities && ability_is_mana {
+        return;
+    }
+    // CR 602.2: an activator-scoped static ("abilities you activate" — Zirda, the
+    // Dawnwaker; Fluctuator) keys off WHO is activating the ability, evaluated
+    // relative to the static's controller — NOT who controls the ability's source.
+    // Reuse the activator-permission predicate with the static's controller as the
+    // reference point so "you" resolves to the static controller. `None` leaves the
+    // source/global scope untouched.
+    if let Some(activator) = activator {
+        if !player_may_begin_activating(state, player, static_controller, Some(activator)) {
+            return;
         }
-        // CR 118.7a: subtract generic mana; The Dining Car specifies no one-mana
-        // floor, so the floor is 0.
-        reduce_generic_in_cost_with_minimum_mana(cost, reduction.amount, 0);
+    }
+    // CR 602.2: scope by the source filter against the ability's SOURCE permanent.
+    if affected.is_some_and(|filter| {
+        !super::filter::matches_target_filter(state, ability_source_id, filter, filter_ctx)
+    }) {
+        return;
+    }
+    // CR 601.2f + CR 208.1 + CR 113.7: When `dynamic_count` is present the per-unit
+    // `amount` is multiplied by the resolved quantity (Agatha of the Vile Cauldron:
+    // amount 1 × ~'s power). Resolve against the static's own source so "~'s power"
+    // reads the source's post-layer power. Mirrors the dynamic-count multiply in
+    // `keywords::apply_ability_cost_reduction`.
+    let multiplier = dynamic_count.as_ref().map_or(1u32, |qty_ref| {
+        let expr = crate::types::ability::QuantityExpr::Ref {
+            qty: qty_ref.clone(),
+        };
+        super::quantity::resolve_quantity(state, &expr, static_controller, static_source_id).max(0)
+            as u32
+    });
+    let effective = amount.saturating_mul(multiplier);
+    // CR 118.7: Apply the adjustment in the static's direction. `Reduce` subtracts
+    // generic mana (honoring the optional one-mana floor); `Raise` adds generic
+    // mana (Skyseer's Chariot). `Minimum` is not emitted for activated-ability
+    // statics and is treated as a no-op.
+    match mode {
+        CostModifyMode::Reduce => {
+            reduce_generic_in_cost_with_minimum_mana(cost, effective, minimum_mana.unwrap_or(0));
+        }
+        CostModifyMode::Raise => increase_generic_in_cost(cost, effective),
+        CostModifyMode::Minimum => {}
     }
 }
 

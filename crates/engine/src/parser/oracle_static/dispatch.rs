@@ -2921,8 +2921,9 @@ pub(crate) fn parse_static_line_inner(
     if let Some(((amount_n, is_x, mode, subject_filter, dynamic_count, keyword), _)) =
         nom_on_lower(tp.original, tp.lower, |i| {
             // CR 601.2f + CR 606.1: shared grammar head (also used by the transient
-            // `Effect::ReduceActivatedAbilityCost` form) — "<activated|loyalty>
-            // abilities of <subject> cost {N|X} <less|more> to activate".
+            // this-turn form, which lowers to a `GenericEffect` carrying this same
+            // `ReduceAbilityCost` static) — "<activated|loyalty> abilities of
+            // <subject> cost {N|X} <less|more> to activate".
             let (i, (keyword, subject, amount_n, is_x, mode)) =
                 super::cost_mod::parse_activated_ability_cost_head(i)?;
             // CR 208.1 + CR 113.7: optional dynamic referent for `{X}`

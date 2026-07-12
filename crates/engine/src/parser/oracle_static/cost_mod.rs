@@ -100,7 +100,9 @@ pub(crate) fn parse_action_cost_reduction(text: &str, lower: &str) -> Option<Sta
 /// positioned immediately after "activate", so the static caller can continue with
 /// `opt(parse_where_x_is_self_stat)` and the transient-effect caller can ignore the
 /// tail. Single authority for both the permanent-static form (dispatch.rs) and the
-/// transient-effect form (`Effect::ReduceActivatedAbilityCost`, oracle_effect).
+/// transient (this-turn) form, which lowers to a `GenericEffect` carrying the same
+/// `StaticMode::ReduceAbilityCost` for a `Duration::UntilEndOfTurn` (oracle_effect,
+/// The Dining Car's chaos body).
 /// The input must already be lowercase (mana braces are case-stable: `{2}`, `{x}`).
 pub(crate) fn parse_activated_ability_cost_head(
     i: &str,

@@ -5598,7 +5598,6 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
-        | Effect::ReduceActivatedAbilityCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::AddPendingEntersModifications { .. }

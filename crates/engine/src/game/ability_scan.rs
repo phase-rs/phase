@@ -1006,10 +1006,6 @@ fn scan_effect(x: &Effect) -> Axes {
         Effect::CreateDelayedTrigger { .. } => Axes::CONSERVATIVE,
         Effect::AddTargetReplacement { .. } => Axes::CONSERVATIVE,
         Effect::AddRestriction { .. } => Axes::CONSERVATIVE,
-        Effect::ReduceActivatedAbilityCost {
-            source_filter,
-            amount: _,
-        } => scan_target_filter(source_filter),
         Effect::ReduceNextSpellCost {
             spell_filter,
             amount: _,
@@ -4251,7 +4247,6 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
-        | Effect::ReduceActivatedAbilityCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::AddPendingEntersModifications { .. }

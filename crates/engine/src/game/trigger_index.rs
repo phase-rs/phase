@@ -819,7 +819,6 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::AddTargetReplacement
         | EffectKind::AddRestriction
         | EffectKind::ReduceNextSpellCost
-        | EffectKind::ReduceActivatedAbilityCost
         | EffectKind::GrantNextSpellAbility
         | EffectKind::AddPendingETBCounters
         | EffectKind::AddPendingEntersModifications

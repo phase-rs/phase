@@ -43,7 +43,7 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerCounterKind;
-use crate::types::statics::{CostModifyMode, StaticMode};
+use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
@@ -58,23 +58,37 @@ use super::super::oracle_util::{
     starts_with_possessive, TextPair,
 };
 
-/// CR 611.2 + CR 602.1: Parse the transient (this-turn) activated-ability
-/// cost-reduction effect — "activated abilities of <subject> cost {N} less to
-/// activate [this turn]" (The Dining Car's chaos ability). Reuses the shared
-/// static grammar head `parse_activated_ability_cost_head`, so the static
-/// (Training Grounds) and transient forms share one authority.
+/// CR 611.2 + CR 601.2f + CR 118.7: Parse the transient (this-turn)
+/// activated-ability cost-reduction effect — "activated abilities of <subject>
+/// cost {N} less to activate [this turn]" (The Dining Car's chaos ability).
 ///
-/// Only the fixed-amount, `Reduce`, `"activated"` transient case has a real
-/// driver today; loyalty / `Raise` / variable-`{X}` transient wordings are left
-/// unparsed (→ `Unimplemented`) rather than emitting a speculative effect.
+/// This lowers to the SAME `StaticMode::ReduceAbilityCost` the printed static
+/// (Training Grounds) produces, wrapped in a `GenericEffect` that installs it as
+/// a `Duration::UntilEndOfTurn` continuous effect (CR 611.2). There is no
+/// separate transient cost-reduction pathway: the cost hook
+/// (`casting::reduce_activated_ability_cost`, the single CR 601.2f/CR 118.5 cost
+/// authority) reads this duration-scoped continuous effect right alongside
+/// battlefield statics. The reduction rides as an `AddStaticMode` modification —
+/// mirroring the `MayLookAtFaceDown` duration-bound permission (Lumbering
+/// Laundry) — so `effect.rs::register_transient_effect` keeps the `affected`
+/// source filter intact on the TCE (dynamic per CR 611.2c: a rules-modifying
+/// effect's affected set is re-evaluated each activation, so tokens created
+/// later this turn are still covered) and `layers.rs` does NOT graft it onto
+/// individual objects.
+///
+/// Reuses the shared static grammar head `parse_activated_ability_cost_head`, so
+/// the static and transient forms share one authority. Only the fixed-amount,
+/// `Reduce`, `"activated"` transient case has a real driver today; loyalty /
+/// `Raise` / variable-`{X}` transient wordings are left unparsed (→
+/// `Unimplemented`) rather than emitting a speculative effect.
 ///
 /// The static/transient separation is a DISPATCH-SITE invariant, not a textual
 /// one: a standalone printed line (Training Grounds) is claimed by
 /// `parse_static_line` before `parse_imperative_effect` ever runs, so this arm
 /// only fires for a trigger's effect body. The turn scope is enforced by the
-/// cleanup clear of `pending_activation_cost_reductions` (CR 514.2), never by
-/// text keyed here (the "this turn" is already stripped into an
-/// `UntilEndOfTurn` duration upstream before the body reaches this parser).
+/// `UntilEndOfTurn` duration (CR 514.2 cleanup expires the continuous effect),
+/// never by text keyed here (the "this turn" is already stripped upstream before
+/// the body reaches this parser).
 pub(crate) fn try_parse_activated_ability_cost_reduction_effect(
     tp: TextPair,
     ctx: &mut ParseContext,
@@ -86,9 +100,30 @@ pub(crate) fn try_parse_activated_ability_cost_reduction_effect(
     }
     // "artifact tokens you control" → Typed[Artifact, You, FilterProp::Token].
     let (source_filter, _after) = parse_type_phrase_with_ctx(subject, ctx);
-    Some(Effect::ReduceActivatedAbilityCost {
+    // CR 601.2f + CR 118.7: identical shape to Training Grounds' printed static
+    // (dispatch.rs). `keyword: "activated"` matches every activated ability;
+    // `exemption`/`activator`/`minimum_mana`/`dynamic_count` carry no clause on
+    // any known transient reducer, so they take the static's defaults.
+    let reduce_mode = StaticMode::ReduceAbilityCost {
+        mode: CostModifyMode::Reduce,
+        keyword: "activated".to_string(),
         amount,
-        source_filter,
+        minimum_mana: None,
+        dynamic_count: None,
+        exemption: ActivationExemption::None,
+        activator: None,
+    };
+    // CR 611.2c: The reduction rides as an `AddStaticMode` modification (read off
+    // the TCE by the cost hook), with the source filter in `affected`. `target:
+    // None` + `duration: UntilEndOfTurn` = a battlefield-wide, this-turn effect.
+    Some(Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::new(reduce_mode.clone())
+            .affected(source_filter)
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: reduce_mode,
+            }])],
+        duration: Some(Duration::UntilEndOfTurn),
+        target: None,
     })
 }
 
