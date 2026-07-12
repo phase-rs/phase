@@ -208,7 +208,23 @@ def reads_event_context_amount(count: object) -> bool:
     return any(d.get("type") == "EventContextAmount" for d in walk(count))
 
 
-def classify_scope(repl: dict) -> str:
+# The only `quantity_modification` values this classifier has been taught to
+# reason about. `Prevent` cancels the event outright and says nothing about
+# instruction-vs-individual scope, so it falls through to the execute-shape rule
+# (and both pool cards carrying it -- Living Conundrum, Possessed Portal -- have
+# singular antecedents and classify IndividualDraw, which is correct).
+#
+# Every OTHER variant (`Times`, `Half`, `Plus`, `Minus`, ...) modifies the COUNT.
+# On a Draw row that is a CR 121.2a instruction-count modifier by definition, and
+# the execute-shape rule below would silently call it IndividualDraw -- wrong.
+KNOWN_QUANTITY_MODIFICATIONS = {"Prevent"}
+
+
+class ClassificationError(Exception):
+    """The classifier met a shape it was never taught. Refuse to guess."""
+
+
+def classify_scope(card: str, repl: dict) -> str:
     """The `DrawReplacementScope` this definition must be assigned.
 
     CR 121.2a: an instruction to draw multiple cards can be modified by
@@ -218,7 +234,28 @@ def classify_scope(repl: dict) -> str:
     prevention, Notion-Thief-class substitution, the Words runtime shields)
     replaces one individual draw: CR 121.2, "cards may only be drawn one at a
     time".
+
+    A count-modifying `quantity_modification` would ALSO be `InstructionCount`,
+    and this function does not classify one -- it refuses. No card in the pool
+    carries one on a Draw row today, so any rule written for it would ship with
+    zero validating cases, and an unvalidated rule in a gate that a human is
+    invited to trust is exactly where a wrong answer hides. Better to stop and
+    make someone look: that is what an exact-match gate is FOR.
     """
+    qm = repl.get("quantity_modification")
+    if isinstance(qm, dict):
+        qm = qm.get("type")
+    if qm is not None and qm not in KNOWN_QUANTITY_MODIFICATIONS:
+        raise ClassificationError(
+            f"{card}: Draw replacement carries quantity_modification `{qm}`, which "
+            f"this classifier has never seen.\n"
+            f"A count-modifying quantity_modification is a CR 121.2a instruction-count "
+            f"modifier and must be classified InstructionCount -- but no pool card has "
+            f"exercised that path, so the rule is unwritten rather than wrong.\n"
+            f"Decide the scope for this row deliberately, teach it to classify_scope() "
+            f"(and to KNOWN_QUANTITY_MODIFICATIONS), then re-freeze."
+        )
+
     effect = ((repl.get("execute") or {}).get("effect")) or {}
     if effect.get("type") == "Draw" and reads_event_context_amount(effect.get("count")):
         return "InstructionCount"
@@ -252,7 +289,7 @@ def corpus_rows(export: dict) -> list[tuple[str, ...]]:
                     str(qm or "none"),
                     effect.get("type", "none") if execute else "none",
                     "nested-draw" if nested_draw else "-",
-                    classify_scope(repl),
+                    classify_scope(card, repl),
                 )
             )
     return sorted(rows)
@@ -360,7 +397,11 @@ def main() -> int:
             )
             return 2
         export = json.loads(args.card_data.read_text(encoding="utf-8"))
-        rows = corpus_rows(export)
+        try:
+            rows = corpus_rows(export)
+        except ClassificationError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 3
         baseline_path, header, kind = CORPUS_BASELINE, CORPUS_HEADER, "corpus"
         refreeze = "scripts/draw_replacement_census.py --corpus --write"
 

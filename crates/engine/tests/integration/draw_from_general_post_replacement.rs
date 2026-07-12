@@ -112,7 +112,7 @@ fn advance_to_declare_blockers(runner: &mut GameRunner) {
 /// by `apply_pending_post_replacement_effect`, which runs `Effect::Draw` as a
 /// general (non-draw-owned) post-replacement continuation.
 ///
-/// # This test pins a KNOWN BUG. Read before "fixing" it.
+/// # This test pins a KNOWN BUG (issue #5652). Read before "fixing" it.
 ///
 /// Swans' Oracle text scopes its shield to damage dealt **to this creature**.
 /// `DamageTargetFilter` has no variant that can express that (`CreatureOnly`,
@@ -127,7 +127,8 @@ fn advance_to_declare_blockers(runner: &mut GameRunner) {
 /// Plan 03's job is to rewrite the draw-delivery seam **without changing
 /// observable behaviour** — a pin that encoded the fix would fail for the entire
 /// rewrite and tell us nothing. When the scoping bug is fixed, this test SHOULD
-/// go red; flip the two marked assertions then, and delete this section.
+/// go red; flip the two marked assertions then, and delete this section. The
+/// fix lands under issue #5652.
 ///
 /// What the test pins that is genuinely correct, and that the rewrite must keep:
 ///   * **who draws** — P1, the *source's* controller, for the damage dealt to
@@ -208,7 +209,7 @@ fn swans_prevented_damage_draws_that_many_for_the_sources_controller() {
         "Swans (4/3) survives — the 3 damage was prevented, not merely sub-lethal"
     );
 
-    // ── BUG-PIN (see the "KNOWN BUG" section on this test) ────────────────────
+    // ── BUG-PIN — issue #5652 (see the "KNOWN BUG" section on this test) ──────
     // Swans' shield has `damage_target_filter: None`, so it is not scoped to
     // damage dealt TO Swans. It also intercepts the 4 damage Swans DEALS to the
     // blocker: the blocker takes none, and the rider draws for that damage's
@@ -220,15 +221,15 @@ fn swans_prevented_damage_draws_that_many_for_the_sources_controller() {
     assert_eq!(
         outcome.hand_drawn(P0),
         4,
-        "BUG-PIN: P0 draws 4 because Swans' unscoped shield also prevents the \
-         damage Swans deals. Correct value is 0 — Swans is not the source's \
-         controller for any damage dealt TO it."
+        "BUG-PIN (#5652): P0 draws 4 because Swans' unscoped shield also prevents \
+         the damage Swans deals. Correct value is 0 — Swans is not the source's \
+         controller for any damage dealt TO it. Fixing #5652 flips this to 0."
     );
     assert_eq!(
         runner.state().objects[&blocker].damage_marked,
         0,
-        "BUG-PIN: the blocker takes 0 of Swans' 4 damage because the unscoped \
-         shield prevented it. Correct value is 4."
+        "BUG-PIN (#5652): the blocker takes 0 of Swans' 4 damage because the \
+         unscoped shield prevented it. Correct value is 4. Fixing #5652 flips this."
     );
 }
 
@@ -341,7 +342,8 @@ fn nefarious_lich_case(db: &CardDatabase) {
 /// production-reachable. Anyone rewriting `apply_pending_post_replacement_effect`
 /// should know that its `Resolved` arm is, for draws, currently dead in practice.
 ///
-/// The BUG-PIN assertions below encode today's (wrong) zeroes. Fixing the
+/// The BUG-PIN assertions below encode today's (wrong) zeroes (issue #5658).
+/// Fixing the
 /// `sub_link` classification SHOULD turn them red — at which point this test
 /// becomes the real `Resolved`->`Draw` pin, and the two marked values become 3.
 #[test]
@@ -369,21 +371,22 @@ fn new_way_forward_prevents_damage_but_its_draw_rider_never_fires() {
         "New Way Forward prevents the chosen source's damage: P1 takes none"
     );
 
-    // ── BUG-PIN: the CR 615.5 rider never fires. ──
+    // ── BUG-PIN — issue #5658: the CR 615.5 rider never fires. ──
     // CORRECT: p0_life_delta == -3 (New Way Forward deals the prevented amount
     // back to the source's controller) and p1_library_delta == -3 (P1 draws that
     // many). Both are 0 because the rider parsed as `SequentialSibling` and was
     // never installed as the shield's `runtime_execute`.
     assert_eq!(
         shielded.p0_life_delta, 0,
-        "BUG-PIN: the rider does not deal the prevented damage back to the \
-         source's controller. Correct value is -3."
+        "BUG-PIN (#5658): the rider does not deal the prevented damage back to \
+         the source's controller. Correct value is -3. Fixing #5658 flips this."
     );
     assert_eq!(
         shielded.p1_library_delta, 0,
-        "BUG-PIN: the rider does not draw. Correct value is -3 — and this is the \
-         `Resolved`->`Effect::Draw` edge, which therefore has NO working \
-         production witness today."
+        "BUG-PIN (#5658): the rider does not draw. Correct value is -3 — and this \
+         is the `Resolved`->`Effect::Draw` edge, which therefore has NO working \
+         production witness today. Fixing #5658 makes this test the real \
+         Resolved->Draw pin."
     );
 }
 
