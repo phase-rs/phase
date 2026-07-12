@@ -3904,9 +3904,9 @@ fn detect_duration_this_turn(
     // (l) CR 614.6: a `DamageDone` replacement event scopes to a single resolution; the
     //     "this turn" is implicit in the spell-level replacement lifetime.
     //     `ReplacementEvent` is EXTERNALLY tagged, so it is key-anchored.
-    if evidence.any_at::<ReplacementEvent>(&["event"], |e| {
-        matches!(e, ReplacementEvent::DamageDone)
-    }) {
+    if evidence
+        .any_at::<ReplacementEvent>(&["event"], |e| matches!(e, ReplacementEvent::DamageDone))
+    {
         return;
     }
     // (m) CR 601.2 + CR 604.1: per-turn limit statics ARE the enforcement window; the
