@@ -2669,12 +2669,12 @@ fn parse_clone_replacement(
     // unchanged, so battlefield/other clones (whose suffix begins ", except …")
     // are untouched.
     let mut suffix = suffix;
-    if let TargetFilter::Typed(ref mut tf) = filter {
-        if let Some((prop, consumed)) =
-            super::oracle_target::parse_zone_changed_this_turn_suffix(suffix, Some(source_zone))
-        {
+    if let Some((prop, consumed)) =
+        super::oracle_target::parse_zone_changed_this_turn_suffix(suffix, Some(source_zone))
+    {
+        suffix = &suffix[consumed..];
+        if let TargetFilter::Typed(ref mut tf) = filter {
             tf.properties.push(prop);
-            suffix = &suffix[consumed..];
         }
     }
 
