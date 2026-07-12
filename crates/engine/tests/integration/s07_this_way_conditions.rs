@@ -15,7 +15,7 @@
 //!
 //! CR ANCHORS: CR 608.2c ("this way" scopes to the current resolution;
 //! "if you control a …" battlefield-presence gate) + CR 400.7 (moved-object
-//! reference) + CR 609.3 (tracked-set / previous-effect amount).
+//! reference) + CR 608.2c (tracked-set / previous-effect amount).
 
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;

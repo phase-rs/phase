@@ -4233,7 +4233,7 @@ fn apply_action(
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
-        // CR 609.3: Player decided whether to perform an optional effect ("You may X").
+        // CR 608.2d: Player decided whether to perform an optional effect ("You may X").
         (WaitingFor::OptionalEffectChoice { .. }, GameAction::DecideOptionalEffect { accept }) => {
             engine_payment_choices::handle_optional_effect_choice(state, accept, &mut events)?
         }

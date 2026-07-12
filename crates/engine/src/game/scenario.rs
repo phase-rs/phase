@@ -1846,7 +1846,7 @@ impl<'a> SpellCast<'a> {
     }
 
     /// Accept optional ("you may") effects/costs during resolution
-    /// (CR 609.3 / CR 601.2f). Mirrors [`AbilityActivation::accept_optional`].
+    /// (CR 608.2d / CR 601.2f). Mirrors [`AbilityActivation::accept_optional`].
     pub fn accept_optional(mut self) -> Self {
         self.optional = OptionalPolicy::Accept;
         self
@@ -2658,7 +2658,7 @@ impl<'a> AbilityActivation<'a> {
     }
 
     /// Decline optional ("you may") effects/costs during resolution
-    /// (CR 609.3 / CR 601.2f). This is already the default; provided for
+    /// (CR 608.2d / CR 601.2f). This is already the default; provided for
     /// explicitness at call sites.
     pub fn decline_optional(mut self) -> Self {
         self.optional = OptionalPolicy::Decline;
@@ -2666,7 +2666,7 @@ impl<'a> AbilityActivation<'a> {
     }
 
     /// Accept optional ("you may") effects/costs during resolution
-    /// (CR 609.3 / CR 601.2f). Mirrors [`SpellCast`]'s decline default with an
+    /// (CR 608.2d / CR 601.2f). Mirrors [`SpellCast`]'s decline default with an
     /// opt-in accept, for abilities whose payoff is gated behind a "you may".
     pub fn accept_optional(mut self) -> Self {
         self.optional = OptionalPolicy::Accept;
@@ -2872,7 +2872,7 @@ pub enum SearchPolicy {
 }
 
 /// What the resolution driver does at an optional "you may" decision
-/// (`OptionalEffectChoice` per CR 609.3, `OptionalCostChoice` per CR 601.2f).
+/// (`OptionalEffectChoice` per CR 608.2d, `OptionalCostChoice` per CR 601.2f).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptionalPolicy {
     /// Accept the optional effect / pay the optional cost.
@@ -3068,7 +3068,7 @@ fn drive_resolution(
                     )?;
                 }
             },
-            // CR 609.3: accept or decline an optional ("you may") effect.
+            // CR 608.2d: accept or decline an optional ("you may") effect.
             WaitingFor::OptionalEffectChoice { .. } => {
                 let accept = matches!(policy.optional, OptionalPolicy::Accept);
                 act_collect(

@@ -6475,7 +6475,7 @@ pub(super) fn parse_followup_continuation_ast(
         // explicit "put it onto the battlefield" chunk in the same sentence is
         // a paraphrase and must be absorbed to avoid a duplicate ChangeZone.
         //
-        // CR 701.23i + CR 609.3: Iterated-search variants (Winds of Abandon class)
+        // CR 701.23i + CR 608.2c: Iterated-search variants (Winds of Abandon class)
         // surface a plural subject ("those players put those cards onto the
         // battlefield tapped") because the search step has `repeat_for:
         // TrackedSetSize`. The compound has already been folded by the

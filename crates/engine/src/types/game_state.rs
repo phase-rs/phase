@@ -1083,7 +1083,7 @@ impl PendingContinuation {
     }
 }
 
-/// CR 609.3 + CR 109.5: Resume state for a `repeat_for` iteration loop paused
+/// CR 608.2c + CR 109.5: Resume state for a `repeat_for` iteration loop paused
 /// when the inner effect entered an interactive `WaitingFor` state.
 ///
 /// When `resolve_ability_chain` is executing the iteration loop for a
@@ -7740,7 +7740,7 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_continuation_attach_host: Option<AttachTarget>,
 
-    /// CR 609.3 + CR 109.5: Pending `repeat_for` iteration loop paused mid-flight
+    /// CR 608.2c + CR 109.5: Pending `repeat_for` iteration loop paused mid-flight
     /// because the inner effect entered an interactive `WaitingFor` state.
     /// Drained by `drain_pending_continuation` AFTER `pending_continuation`,
     /// so the per-iteration chain (e.g., the SearchLibrary's
@@ -8145,7 +8145,7 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub player_actions_this_way: HashSet<(PlayerId, PlayerActionKind)>,
 
-    /// CR 609.3: Numeric result from the preceding effect in a sub_ability chain.
+    /// CR 608.2c: Numeric result from the preceding effect in a sub_ability chain.
     /// Set after resolve_effect for effects producing a numeric result (life loss,
     /// damage, counter removal). Read by QuantityRef::PreviousEffectAmount.
     #[serde(default, skip_serializing_if = "Option::is_none")]

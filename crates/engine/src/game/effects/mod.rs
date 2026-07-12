@@ -718,7 +718,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if !waits_for_resolution_choice(&state.waiting_for) {
         vote::drain_pending_vote_ballot_iteration(state, events);
     }
-    // CR 609.3 + CR 109.5: After the per-iteration chain drains, drive any
+    // CR 608.2c + CR 109.5: After the per-iteration chain drains, drive any
     // remaining `repeat_for` iterations. Each resumed iteration may itself
     // pause and re-stash via the loop in `resolve_ability_chain`, producing a
     // chain of resumed iterations until the loop completes.
@@ -1099,7 +1099,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
     }
 }
 
-/// CR 609.3 + CR 109.5: Resume a paused `repeat_for` loop. Each iteration
+/// CR 608.2c + CR 109.5: Resume a paused `repeat_for` loop. Each iteration
 /// may itself pause (re-stashing into `pending_repeat_iteration`); the outer
 /// driver in `drain_pending_continuation` re-enters this on the next choice
 /// resolution. If an iteration completes synchronously and a further
@@ -1138,7 +1138,7 @@ fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEv
             } else {
                 &ability
             };
-            // CR 609.3 + CR 109.5: Drive the FULL chain (parent effect +
+            // CR 608.2c + CR 109.5: Drive the FULL chain (parent effect +
             // sub_ability + line-1660 continuation wiring) for each resumed
             // iteration, mirroring iteration 0's path. Calling `resolve_effect`
             // here would skip the sub_ability stash, so e.g. Winds of Abandon's
@@ -1152,7 +1152,7 @@ fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEv
             // otherwise reset. The resumed iteration is logically continuing the
             // outer chain, not starting a fresh top-level resolution.
             let _ = resolve_ability_chain(state, iter_effective, events, 1);
-            // CR 609.3: Iteration may transition to a player-choice state OR
+            // CR 608.2c: Iteration may transition to a player-choice state OR
             // synchronously install a `pending_continuation` (e.g. when the
             // sub_ability chain wires itself for later drain). Either signals
             // that this iteration is not yet fully resolved — re-stash the
@@ -2336,7 +2336,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             true
         }
         Some(AbilityCondition::Not { .. }) => false,
-        // CR 609.3: An `IfYouDo` sub-ability is a valid decline branch when it
+        // CR 608.2d: An `IfYouDo` sub-ability is a valid decline branch when it
         // carries an alternative for the "you didn't" case — either as an
         // explicit `else_ability` ("If you do X. Otherwise Y.") OR as a nested
         // `sub_ability` whose own condition is the `Not`-wrapped performed gate
@@ -3557,7 +3557,7 @@ fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
             ..
         } | Effect::ChooseFromZone { .. }
     ) || effect_references_tracked_set(&ability.effect)
-        // CR 608.2c + CR 609.3: `repeat_for` is a loop-count quantity on the
+        // CR 608.2c: `repeat_for` is a loop-count quantity on the
         // ResolvedAbility, not inside Effect — e.g. "for each nonland card
         // discarded this way, create a token" uses `repeat_for: TrackedSetSize`.
         // Without this check, the forced-discard path (no WaitingFor pause)
@@ -4812,7 +4812,7 @@ fn finish_repeated_optional_payment(
     Ok(())
 }
 
-/// CR 608.2c + CR 609.3: True when a counted repeat loop must wrap scoped
+/// CR 608.2c: True when a counted repeat loop must wrap scoped
 /// and/or unless-pay instructions (Torment of Hailfire — "Repeat X times.
 /// Each opponent loses 3 life unless …"). The repeat count is the outermost
 /// process; `player_scope` and `unless_pay` resolve inside each iteration.
@@ -4823,7 +4823,7 @@ fn repeat_for_outermost_with_scope_or_unless(ability: &ResolvedAbility) -> bool 
         && (ability.player_scope.is_some() || ability.unless_pay.is_some())
 }
 
-/// CR 609.3: Drive a `repeat_for` loop whose iterations each run the full
+/// CR 608.2c: Drive a `repeat_for` loop whose iterations each run the full
 /// `resolve_chain_body` (scoped fan-out + unless-pay + effect) with
 /// `repeat_for` cleared so the inner pass does not re-enter this driver.
 fn drive_repeat_for_outermost(
@@ -5090,7 +5090,7 @@ pub(crate) fn resolve_player_for_context_ref(
 }
 
 /// CR 117.3a: Determine which player receives the "may" prompt for an optional
-/// effect. Most optional effects go to the caster (CR 609.3). Subject-anchored
+/// effect. Most optional effects go to the caster (CR 608.2d). Subject-anchored
 /// optional effects — "its controller may search their library" (Assassin's
 /// Trophy, Path to Exile, Ghost Quarter, Oblation, …) — route the prompt to the
 /// acting subject (the target permanent's controller). This mirrors the
@@ -6865,7 +6865,7 @@ fn resolve_chain_body(
         }
     }
 
-    // CR 117.3a + CR 609.3: "You may" effects prompt the acting player before
+    // CR 608.2d: "You may" effects prompt the acting player before
     // execution. For subject-anchored optional effects ("its controller may
     // search their library" — Assassin's Trophy), the acting player is the
     // resolved subject (the target permanent's controller), NOT the caster.
@@ -7235,7 +7235,7 @@ fn resolve_chain_body(
                     _ => Vec::new(),
                 };
 
-            // CR 609.3 + CR 608.2: Execute the effect N times when repeat_for is
+            // CR 608.2c: Execute the effect N times when repeat_for is
             // set. A `member_driven` ObjectCount loop takes its count from the
             // snapshotted members (resolved against `effective`), keeping count and
             // bindings in lockstep even when the set is empty.
@@ -7358,7 +7358,7 @@ fn resolve_chain_body(
                 } else {
                     let _ = resolve_effect(state, iter_effective, events);
                 }
-                // CR 609.3 + CR 109.5: When the inner effect enters an
+                // CR 608.2c + CR 109.5: When the inner effect enters an
                 // interactive WaitingFor (e.g. SearchChoice), stash the
                 // remaining iterations so `drain_pending_continuation` can
                 // resume the loop after the player choice (and its chained
@@ -7368,7 +7368,7 @@ fn resolve_chain_body(
                 if state.waiting_for != initial_waiting_for {
                     let next_iteration = iteration + 1;
                     if next_iteration < iterations {
-                        // CR 609.3 + CR 109.5: Each resumed iteration must run
+                        // CR 608.2c + CR 109.5: Each resumed iteration must run
                         // through the FULL chain (parent effect + sub_ability)
                         // exactly the way iteration 0 just did. The drain path
                         // re-enters via `resolve_ability_chain`, which goes
@@ -7415,7 +7415,7 @@ fn resolve_chain_body(
         } // end shares_quality_failed else
     }
 
-    // CR 609.3: Extract the numeric result emitted by this parent effect for
+    // CR 608.2c: Extract the numeric result emitted by this parent effect for
     // `QuantityRef::PreviousEffectAmount` / `EventContextAmount` in sub-abilities.
     // The event class is selected by the parent `Effect` so unrelated numeric
     // side effects from the same resolution are not mixed together: damage to a
@@ -15147,7 +15147,7 @@ mod tests {
 
     #[test]
     fn repeat_for_draws_multiple_cards() {
-        // CR 609.3: repeat_for = Fixed(3) with Draw(1) should draw 3 cards
+        // CR 608.2c: repeat_for = Fixed(3) with Draw(1) should draw 3 cards
         let mut state = GameState::new_two_player(42);
         for i in 0..5 {
             crate::game::zones::create_object(
@@ -15180,7 +15180,7 @@ mod tests {
         );
     }
 
-    /// CR 609.3 + CR 701.34a: Engine e2e for Expand the Sphere's swallowed
+    /// CR 608.2c + CR 701.34a: Engine e2e for Expand the Sphere's swallowed
     /// proliferate sub-ability (swallowed-clause plan unit 7e).
     ///
     /// The parser threads `repeat_for: Difference { Ref(TrackedSetSize),
@@ -15271,7 +15271,7 @@ mod tests {
 
     #[test]
     fn expand_the_sphere_two_lands_proliferates_zero_times() {
-        // CR 609.3: 2 lands put this way → difference |2 - 2| = 0 →
+        // CR 608.2c: 2 lands put this way → difference |2 - 2| = 0 →
         // proliferate zero times → the counter total stays at 1.
         assert_eq!(run_expand_the_sphere_proliferate(2), 1);
     }
@@ -15491,7 +15491,7 @@ mod tests {
         }
     }
 
-    /// CR 609.3 + CR 109.5: End-to-end iteration resumption — overloaded Winds
+    /// CR 608.2c + CR 109.5: End-to-end iteration resumption — overloaded Winds
     /// of Abandon shape across two distinct opponent controllers. After the
     /// FIRST iteration's SearchChoice is resolved (P1 picks a basic land), the
     /// loop must resume and prompt the SECOND opponent (P2) for their own
@@ -15753,7 +15753,7 @@ mod tests {
         )));
     }
 
-    /// CR 609.3 + CR 109.5 + CR 701.23i: End-to-end Winds of Abandon shape —
+    /// CR 608.2c + CR 109.5 + CR 701.23i: End-to-end Winds of Abandon shape —
     /// the resumed iteration MUST run its full sub_ability chain
     /// (put-onto-battlefield + shuffle), not just the SearchLibrary effect.
     /// Without preserving `sub_ability` on the resumed `pending_repeat_iteration`,
@@ -16151,7 +16151,7 @@ mod tests {
         );
     }
 
-    /// CR 609.3 + CR 109.5: Direct unit test of the synchronous-continuation
+    /// CR 608.2c + CR 109.5: Direct unit test of the synchronous-continuation
     /// re-stash predicate inside `drain_pending_repeat_iteration`. Constructs
     /// a multi-iteration resume whose iterations install a `pending_continuation`
     /// without changing `waiting_for`, then verifies the drain detects the
