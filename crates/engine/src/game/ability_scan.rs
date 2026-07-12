@@ -2173,6 +2173,7 @@ fn scan_ability_condition(x: &AbilityCondition) -> Axes {
         AbilityCondition::AlternativeManaCostPaid => Axes::NONE,
         AbilityCondition::EffectOutcome { signal: _ } => Axes::NONE,
         AbilityCondition::EventOutcomeWon => Axes::NONE,
+        AbilityCondition::CoinFlipOutcome { result: _ } => Axes::NONE,
         AbilityCondition::WhenYouDo => Axes::NONE,
         AbilityCondition::CastFromZone { zone: _ } => Axes::NONE,
         AbilityCondition::CastDuringPhase { phases: _ } => Axes::NONE,

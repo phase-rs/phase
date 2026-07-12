@@ -8,7 +8,9 @@ use crate::types::ability::{
     AbilityDefinition, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCoinFlip, PendingCoinFlipKind, WaitingFor};
+use crate::types::game_state::{
+    GameState, PendingCoinFlip, PendingCoinFlipKind, ResolutionCoinFlip, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -77,6 +79,13 @@ fn flip_through_replacement(
         let won = results[0];
         events.push(GameEvent::CoinFlipped {
             player_id: player,
+            won,
+        });
+        // CR 705.2: record the flipper's result so a `WhileCondition` loop gate
+        // ("if you lose the flip, repeat this process") can read it after the
+        // resolution's tail runs. Overwrite-on-produce, mirroring reveal tracking.
+        state.resolution_coin_flip = Some(ResolutionCoinFlip {
+            flipper: player,
             won,
         });
         CoinFlipOutcome::Resolved(won)
@@ -450,6 +459,9 @@ pub fn resume_after_keep(
         player_id: flipper,
         won,
     });
+    // CR 705.2: record the kept flip's result for the flipper (not the source's
+    // controller) so a `WhileCondition` loop gate reads the surviving flip.
+    state.resolution_coin_flip = Some(ResolutionCoinFlip { flipper, won });
 
     let effect_kind = match kind {
         PendingCoinFlipKind::Single => EffectKind::FlipCoin,
@@ -1557,6 +1569,103 @@ mod tests {
                 }
             ),
             "missing FlipCoins flipper must default to Controller, got {legacy_n:?}"
+        );
+    }
+
+    /// CR 705.2: resolving a single flip records the flipper's result in
+    /// `state.resolution_coin_flip` so a downstream `WhileCondition` loop gate
+    /// can read it. The recorded result must agree with the emitted `CoinFlipped`.
+    #[test]
+    fn flip_records_resolution_coin_flip() {
+        use crate::types::ability::TargetFilter;
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let recorded = state
+            .resolution_coin_flip
+            .expect("flip must record resolution_coin_flip");
+        assert_eq!(recorded.flipper, PlayerId(0), "flipper is the controller");
+        let event_won = events.iter().find_map(|e| match e {
+            GameEvent::CoinFlipped { won, .. } => Some(*won),
+            _ => None,
+        });
+        assert_eq!(
+            Some(recorded.won),
+            event_won,
+            "recorded result must match the CoinFlipped event"
+        );
+    }
+
+    /// CR 705.2 + CR 608.2c: end-to-end runtime proof of the new primitive — a
+    /// bare-flip body under `WhileCondition { CoinFlipOutcome{Lost} }` re-follows
+    /// the process while the controller keeps losing and STOPS the instant a flip
+    /// is won. Deterministic regardless of seed: the loop only continues on a
+    /// loss, so it must terminate on a win and the final flip is a win. Mirrors
+    /// the `flip_coin_until_lose` termination assertion (inverted polarity).
+    #[test]
+    fn while_condition_lost_flip_loops_until_win() {
+        use crate::types::ability::{
+            AbilityCondition, CoinFlipResult, RepeatContinuation, TargetFilter,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.repeat_until = Some(RepeatContinuation::WhileCondition {
+            condition: Box::new(AbilityCondition::CoinFlipOutcome {
+                result: CoinFlipResult::Lost,
+            }),
+            max_iterations: None,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let flips: Vec<bool> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::CoinFlipped { won, .. } => Some(*won),
+                _ => None,
+            })
+            .collect();
+        assert!(!flips.is_empty(), "at least one flip must occur");
+        // Every flip before the last must be a loss (the loop's continue gate).
+        assert!(
+            flips[..flips.len() - 1].iter().all(|won| !won),
+            "all non-final flips must be losses, got {flips:?}"
+        );
+        // The loop only stops on a win, so the final flip is a win.
+        assert_eq!(
+            flips.last(),
+            Some(&true),
+            "the loop must terminate on a won flip, got {flips:?}"
+        );
+        assert_eq!(
+            state.resolution_coin_flip,
+            Some(ResolutionCoinFlip {
+                flipper: PlayerId(0),
+                won: true,
+            }),
+            "final resolution flip is the winning flip for the controller"
         );
     }
 }

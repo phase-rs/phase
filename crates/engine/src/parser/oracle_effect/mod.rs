@@ -23194,11 +23194,21 @@ fn try_parse_repeat_process_directive(
     // predicates ("then if an opponent controls more lands than you") fall through
     // to the general inner-condition path.
     let (condition, body) = {
-        let (card_type, rest) = strip_card_type_conditional(text);
-        if card_type.is_some() {
-            (card_type, rest)
+        // CR 705.2 + CR 608.2c: "if you {win|lose} the flip, repeat this process"
+        // reads the process's own coin flip (`CoinFlipOutcome`), so the flip
+        // stripper runs FIRST. It is body-gated: if the trailing body is not
+        // "repeat this process", this whole function returns None and the chunk
+        // falls through to the inline coin-flip fold (Krark / Desperate Gambit).
+        let (flip, rest) = strip_coin_flip_conditional(text);
+        if flip.is_some() {
+            (flip, rest)
         } else {
-            strip_leading_general_conditional(text, ctx)
+            let (card_type, rest) = strip_card_type_conditional(text);
+            if card_type.is_some() {
+                (card_type, rest)
+            } else {
+                strip_leading_general_conditional(text, ctx)
+            }
         }
     };
 
