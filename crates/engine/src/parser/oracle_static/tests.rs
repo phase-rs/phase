@@ -1469,6 +1469,117 @@ fn dual_gated_attached_subject_defers_from_self_ref_splitter() {
     }
 }
 
+/// CR 202.3 + CR 601.2f (#5606): The Scarlet Witch — "Instant and sorcery spells
+/// you cast with mana value 4 or greater cost {N} less" restricts the reduction
+/// to instant/sorcery spells of mana value ≥ 4. Before the fix, the trailing
+/// mana-value gate sat after the "spells you cast" infix and blocked the type
+/// trims, so `spell_filter` came out `null` and EVERY spell was reduced (the
+/// reported bug). The gate now folds into `And{ Or{Instant,Sorcery}, Cmc ≥ 4 }`.
+#[test]
+fn cost_mod_mana_value_gate_instant_sorcery_ge() {
+    let def = parse_static_line(
+        "Instant and sorcery spells you cast with mana value 4 or greater cost {1} less to cast.",
+    )
+    .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        panic!("expected ModifyCost, got {:?}", def.mode);
+    };
+    let filter = spell_filter
+        .as_ref()
+        .expect("spell_filter must not be null (#5606)");
+    let TargetFilter::And { filters } = filter else {
+        panic!("expected And{{type, mana-value}}, got {filter:?}");
+    };
+    assert!(
+        filters
+            .iter()
+            .any(|f| matches!(f, TargetFilter::Or { filters: or } if or.len() == 2)),
+        "missing instant/sorcery type restriction: {filters:?}"
+    );
+    assert!(
+        filters.iter().any(|f| matches!(f,
+            TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(p,
+                FilterProp::Cmc { comparator: Comparator::GE, value: QuantityExpr::Fixed { value: 4 } })))),
+        "missing Cmc >= 4 gate: {filters:?}"
+    );
+}
+
+/// CR 202.3 (#5606): single-type + "mana value N or less" gate folds the Cmc prop
+/// directly onto the typed filter (no `And` wrapper needed for a single `Typed`).
+#[test]
+fn cost_mod_mana_value_gate_single_type_le() {
+    let def = parse_static_line(
+        "Creature spells you cast with mana value 3 or less cost {1} less to cast.",
+    )
+    .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        panic!("expected ModifyCost, got {:?}", def.mode);
+    };
+    let Some(TargetFilter::Typed(tf)) = spell_filter.as_ref() else {
+        panic!("expected Typed(Creature + Cmc), got {spell_filter:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "creature type restriction lost: {tf:?}"
+    );
+    assert!(
+        tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 3 }
+            }
+        )),
+        "missing Cmc <= 3 gate: {tf:?}"
+    );
+}
+
+/// CR 202.3 (#5606): a bare (type-less) mana-value gate — "spells you cast with
+/// mana value 5 or greater" — yields a card filter carrying just the Cmc prop.
+#[test]
+fn cost_mod_mana_value_gate_bare_no_type() {
+    let def =
+        parse_static_line("Spells you cast with mana value 5 or greater cost {2} less to cast.")
+            .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        panic!("expected ModifyCost, got {:?}", def.mode);
+    };
+    let Some(TargetFilter::Typed(tf)) = spell_filter.as_ref() else {
+        panic!("expected Typed(card + Cmc), got {spell_filter:?}");
+    };
+    assert!(
+        tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 5 }
+            }
+        )),
+        "missing Cmc >= 5 gate: {tf:?}"
+    );
+}
+
+/// Regression (#5606): an "Instant and sorcery spells you cast cost {N} less"
+/// line with NO mana-value gate is unchanged — no spurious Cmc prop is added
+/// (Goblin Electromancer class).
+#[test]
+fn cost_mod_no_mana_value_gate_unchanged() {
+    let def = parse_static_line("Instant and sorcery spells you cast cost {1} less to cast.")
+        .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        panic!("expected ModifyCost, got {:?}", def.mode);
+    };
+    assert!(
+        matches!(spell_filter.as_ref(), Some(TargetFilter::Or { filters }) if filters.len() == 2),
+        "expected bare Or{{Instant,Sorcery}} with no Cmc, got {spell_filter:?}"
+    );
+    // No mana-value prop anywhere in the filter.
+    assert!(
+        !format!("{spell_filter:?}").contains("Cmc"),
+        "unexpected Cmc gate on a card with no mana-value qualifier: {spell_filter:?}"
+    );
+}
+
 /// CR 508.1c + CR 509.1b: Grant + dual-gated restrictions emit the pump grant
 /// plus both gated combat statics on the enchanted/equipped host.
 #[test]
