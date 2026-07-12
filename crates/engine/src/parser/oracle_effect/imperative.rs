@@ -19580,4 +19580,64 @@ mod tests {
             other => panic!("expected AssembleContraptions, got {other:?}"),
         }
     }
+
+    /// #5649 review (matthewevans): the `Fixed`-count arm of
+    /// `parse_exile_count_from_your_graveyard` fixes 8 of the 9 affected cards
+    /// (Aegis Sculptor / Bloodcurdler / Egon / Insatiable Frugivore / Kroxa /
+    /// Emeritus / Ultimecia — "exile <N> cards from your graveyard"), while the
+    /// "that many" arm covers Nefarious Lich. Pin both arms AND the negative that
+    /// the possessive "your graveyard" anchor keeps the top-of-library impulse
+    /// idiom (owned by `parse_dynamic_count_phrase`) untouched.
+    #[test]
+    fn exile_count_from_your_graveyard_binds_fixed_and_dynamic_counts() {
+        // Fixed-count arm — the eight numeric cards.
+        assert_eq!(
+            parse_exile_count_from_your_graveyard("two cards from your graveyard"),
+            Some(QuantityExpr::Fixed { value: 2 })
+        );
+        assert_eq!(
+            parse_exile_count_from_your_graveyard("eight cards from your graveyard"),
+            Some(QuantityExpr::Fixed { value: 8 })
+        );
+        // Dynamic arm — Nefarious Lich.
+        assert_eq!(
+            parse_exile_count_from_your_graveyard("that many cards from your graveyard"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            })
+        );
+        // Negatives: the possessive "your graveyard" anchor must never capture the
+        // top-of-library impulse idiom.
+        assert_eq!(
+            parse_exile_count_from_your_graveyard("the top two cards of your library"),
+            None
+        );
+        assert_eq!(
+            parse_exile_count_from_your_graveyard("two cards from the top of your library"),
+            None
+        );
+
+        // End-to-end: a fixed graveyard exile rides the clause's `MultiTargetSpec`.
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "exile two cards from your graveyard",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    origin: Some(crate::types::zones::Zone::Graveyard),
+                    destination: crate::types::zones::Zone::Exile,
+                    ..
+                }
+            ),
+            "expected a graveyard->exile ChangeZone, got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 })),
+            "the count must ride the clause MultiTargetSpec as exact(Fixed {{ 2 }})"
+        );
+    }
 }
