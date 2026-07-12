@@ -407,6 +407,48 @@ Sideboard
 });
 
 describe('detectAndParseDeck', () => {
+  it('parses Forge .dck files with metadata, printing data, foil suffixes, and sections', () => {
+    const content = `[metadata]
+Name=Bloodlines
+[Main]
+1 Anje, Maid of Dishonor|VOW|[309]
+1 Olivia Voldaren+|SLD|[1264]
+2 Swamp|JMP|[60]|#{markedColors=B}
+[Sideboard]
+1 Bloodtracker|LCC|[186]
+[Commander]
+1 Edgar Markov|INR|[328]`;
+
+    const result = detectAndParseDeck(content);
+
+    expect(result.main).toEqual([
+      {
+        count: 1,
+        name: 'Anje, Maid of Dishonor',
+        sourcePrinting: { setCode: 'vow', collectorNumber: '309' },
+      },
+      {
+        count: 1,
+        name: 'Olivia Voldaren',
+        sourcePrinting: { setCode: 'sld', collectorNumber: '1264' },
+      },
+      {
+        count: 2,
+        name: 'Swamp',
+        sourcePrinting: { setCode: 'jmp', collectorNumber: '60' },
+      },
+    ]);
+    expect(result.sideboard).toEqual([
+      {
+        count: 1,
+        name: 'Bloodtracker',
+        sourcePrinting: { setCode: 'lcc', collectorNumber: '186' },
+      },
+    ]);
+    expect(result.commander).toEqual(['Edgar Markov']);
+    expect(deriveImportedDeckName(content, result)).toBe('Bloodlines');
+  });
+
   it('auto-detects MTGA format and parses correctly', () => {
     const mtgaContent = '4 Lightning Bolt (FDN) 123\n2 Counterspell (MKM) 56';
     const result = detectAndParseDeck(mtgaContent);

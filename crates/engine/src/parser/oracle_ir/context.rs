@@ -123,6 +123,22 @@ pub(crate) struct ParseContext {
     /// parsing leaves this false so bare "it" defaults to SelfRef instead of
     /// inventing a parent target.
     pub parent_target_available: bool,
+    /// CR 608.2c + CR 406.6 + CR 607.2a: Whether the current effect-chain
+    /// chunk has an EARLIER clause (in the SAME resolution chain) that
+    /// produces an exile — a `ChangeZone`/`ChangeZoneAll` to `Zone::Exile`,
+    /// `ExileTop`, `Dig { destination: Some(Zone::Exile), .. }`,
+    /// `ExileFromTopUntil`, or any other exile-producer shape recognized by
+    /// `chain_clause_is_exile_producer`. When true, a singular "the exiled
+    /// card" anaphor in a LATER clause of this chain refers to that
+    /// same-chain exile and keeps its pre-existing same-chain binding
+    /// (`TrackedSet{0}` / `ParentTarget`). When false, the referenced exile
+    /// happened in an earlier, SEPARATELY-RESOLVED ability (e.g. an ETB
+    /// Imprint or synthesized Hideaway ETB), so the anaphor must bind
+    /// durably via `TargetFilter::ExiledBySource` (CR 607.1 linked
+    /// abilities) instead. Seeded per top-level `parse_effect_chain_ir` call
+    /// from the chain-local clause accumulator; defaults `false` via
+    /// `derive(Default)` so standalone clause parsing is unaffected.
+    pub chain_has_prior_exile_producer: bool,
     /// CR 608.2c: The current effect-chain chunk's MOST-RECENT prior object
     /// referent is a just-created token (Token/CopyTokenOf/Populate), so a bare
     /// "it" anaphor in this chunk binds to that token (`TargetFilter::LastCreated`)

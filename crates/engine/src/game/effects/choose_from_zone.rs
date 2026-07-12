@@ -13,7 +13,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-/// CR 700.2: Choose card(s) from a tracked set — player selects from exiled/revealed cards.
+/// CR 608.2d: Choose card(s) from a tracked set — player selects from exiled/revealed cards.
 /// The available cards come from the most recent tracked set recorded by the parent effect
 /// (e.g., ChangeZone to exile). The `chooser` field determines whether the controller or
 /// an opponent makes the selection.
@@ -76,7 +76,8 @@ pub fn resolve(
         filter.as_ref(),
     )?;
 
-    // CR 700.2: If there are no objects to choose from, skip the choice.
+    // CR 608.2d: If there are no objects to choose from, skip the choice
+    // (a player can't choose an option that's illegal or impossible).
     if cards.is_empty() || count == 0 {
         state.last_choose_from_zone_found_nothing = true;
         events.push(GameEvent::EffectResolved {
@@ -88,7 +89,7 @@ pub fn resolve(
 
     let clamped_count = count.min(cards.len());
 
-    // CR 700.2: Determine who makes the choice.
+    // CR 608.2d: Determine who makes the choice.
     let choosing_player = resolve_chooser(state, ability, chooser);
 
     // CR 608.2: An ability's resolution is a single ongoing process. This
@@ -843,7 +844,7 @@ fn object_ids_in_player_zone(state: &GameState, player: PlayerId, zone: Zone) ->
     }
 }
 
-/// CR 700.2: Resolve the `Chooser` enum to an actual `PlayerId`.
+/// CR 608.2c-e: Resolve the `Chooser` enum to an actual `PlayerId`.
 /// For `Opponent`, first checks ability targets for a pre-targeted opponent player
 /// (handles "target opponent chooses"), then falls back to the first opponent in APNAP order.
 fn resolve_chooser(state: &GameState, ability: &ResolvedAbility, chooser: Chooser) -> PlayerId {

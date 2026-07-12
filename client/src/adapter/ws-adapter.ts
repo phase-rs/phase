@@ -1,5 +1,6 @@
 import type {
   EngineAdapter,
+  EngineSnapshot,
   GameAction,
   GameEvent,
   GameLogEntry,
@@ -9,7 +10,7 @@ import type {
   PlayerId,
   SubmitResult,
 } from "./types";
-import { AdapterError, AdapterErrorCode } from "./types";
+import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
@@ -90,7 +91,9 @@ export type WsAdapterEvent =
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
   | { type: "reconnected" }
   | { type: "reconnectFailed" }
-  | { type: "stateChanged"; state: GameState; events: GameEvent[]; legalResult: LegalActionsResult; logEntries?: GameLogEntry[] }
+  /** The engine pair travels as one `EngineSnapshot` — see the P2P adapter's
+   *  `stateChanged` for why the halves must stay inseparable. */
+  | { type: "stateChanged"; snapshot: EngineSnapshot; events: GameEvent[]; logEntries?: GameLogEntry[] }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
   | { type: "conceded"; player: PlayerId }
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number }
@@ -116,9 +119,14 @@ function playerNamesFromWire(names: string[]): Record<number, string> {
  */
 export class WebSocketAdapter implements EngineAdapter {
   private ws: WebSocket | null = null;
-  private gameState: GameState | null = null;
+  /**
+   * The single cached engine pair, rebuilt (and re-stamped) once per inbound
+   * state-bearing message. `getState`/`getLegalActions` both read from THIS
+   * object, so they can no longer straddle two updates. The WebSocket delivers
+   * server messages in order, so stamping on arrival reproduces engine order.
+   */
+  private snapshot: EngineSnapshot | null = null;
   private _playerId: PlayerId | null = null;
-  private _legalActions: LegalActionsResult = { actions: [], autoPassRecommended: false };
   private playerToken: string | null = null;
   private _gameCode: string | null = null;
   private pendingResolve: ((result: SubmitResult) => void) | null = null;
@@ -334,7 +342,7 @@ export class WebSocketAdapter implements EngineAdapter {
         );
         this.initResolve = null;
         this.initReject = null;
-      } else if (this.gameState !== null || this.playerToken !== null) {
+      } else if (this.snapshot !== null || this.playerToken !== null) {
         this.attemptReconnect();
       }
     };
@@ -377,10 +385,10 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   async getState(): Promise<GameState> {
-    if (!this.gameState) {
+    if (!this.snapshot) {
       throw new AdapterError("WS_ERROR", "No game state available", false);
     }
-    return this.gameState;
+    return this.snapshot.state;
   }
 
   getAiAction(_difficulty: string, _playerId: number): GameAction | null {
@@ -388,7 +396,21 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
-    return this._legalActions;
+    return this.snapshot?.legalResult ?? EMPTY_LEGAL_ACTIONS;
+  }
+
+  async getSnapshot(): Promise<EngineSnapshot> {
+    if (!this.snapshot) {
+      throw new AdapterError("WS_ERROR", "No game state available", false);
+    }
+    return this.snapshot;
+  }
+
+  /** Rebuild the cached pair from an inbound state-bearing message, stamping
+   *  it with a fresh globally-monotonic seq at arrival. */
+  private cacheSnapshot(state: GameState, legalResult: LegalActionsResult): EngineSnapshot {
+    this.snapshot = { state, legalResult, seq: nextSnapshotSeq() };
+    return this.snapshot;
   }
 
   restoreState(_state: GameState): void {
@@ -457,7 +479,7 @@ export class WebSocketAdapter implements EngineAdapter {
       this.ws.close();
       this.ws = null;
     }
-    this.gameState = null;
+    this.snapshot = null;
     this._playerId = null;
     this.playerToken = null;
     this._gameCode = null;
@@ -629,14 +651,16 @@ export class WebSocketAdapter implements EngineAdapter {
             opponentName: data.opponent_name,
           });
         }
-        this.gameState = { ...data.state, derived: data.derived ?? data.state.derived };
+        const startedSnapshot = this.cacheSnapshot(
+          { ...data.state, derived: data.derived ?? data.state.derived },
+          {
+            actions: data.legal_actions ?? [],
+            autoPassRecommended: data.auto_pass_recommended ?? false,
+            spellCosts: data.spell_costs,
+            legalActionsByObject: data.legal_actions_by_object,
+          },
+        );
         this._playerId = data.your_player;
-        this._legalActions = {
-          actions: data.legal_actions ?? [],
-          autoPassRecommended: data.auto_pass_recommended ?? false,
-          spellCosts: data.spell_costs,
-          legalActionsByObject: data.legal_actions_by_object,
-        };
         // Joiners receive their player_token here (hosts get it via GameCreated).
         // Set _gameCode from joinGameCode if not already set (host sets it via GameCreated).
         if (!this._gameCode && this.joinGameCode) {
@@ -666,8 +690,10 @@ export class WebSocketAdapter implements EngineAdapter {
           this.initReject = null;
         } else {
           // Reconnect path — no initResolve pending, so emit state change
-          // so GameProvider's event listener populates the store.
-          this.emit({ type: "stateChanged", state: data.state, events: [], legalResult: this._legalActions });
+          // so GameProvider's event listener populates the store. Emits the
+          // cached snapshot, which carries the derived-attached state (this
+          // emit previously sent the raw `data.state`, dropping `derived`).
+          this.emit({ type: "stateChanged", snapshot: startedSnapshot, events: [] });
         }
         break;
       }
@@ -678,13 +704,15 @@ export class WebSocketAdapter implements EngineAdapter {
         // components (e.g. CommanderDamage) can read them via gameState.derived
         // without a separate subscription path. See
         // crates/engine/src/game/derived_views.rs.
-        this.gameState = { ...data.state, derived: data.derived ?? data.state.derived };
-        this._legalActions = {
-          actions: data.legal_actions ?? [],
-          autoPassRecommended: data.auto_pass_recommended ?? false,
-          spellCosts: data.spell_costs,
-          legalActionsByObject: data.legal_actions_by_object,
-        };
+        const updateSnapshot = this.cacheSnapshot(
+          { ...data.state, derived: data.derived ?? data.state.derived },
+          {
+            actions: data.legal_actions ?? [],
+            autoPassRecommended: data.auto_pass_recommended ?? false,
+            spellCosts: data.spell_costs,
+            legalActionsByObject: data.legal_actions_by_object,
+          },
+        );
         if (this.pendingResolve) {
           this.emit({ type: "actionPendingChanged", pending: false });
           this.pendingResolve({ events: data.events, log_entries: data.log_entries });
@@ -693,9 +721,8 @@ export class WebSocketAdapter implements EngineAdapter {
         } else {
           this.emit({
             type: "stateChanged",
-            state: data.state,
+            snapshot: updateSnapshot,
             events: data.events,
-            legalResult: this._legalActions,
             logEntries: data.log_entries,
           });
         }

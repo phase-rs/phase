@@ -23,7 +23,7 @@ use super::ability_utils::build_resolved_from_def_with_targets;
 use super::effects;
 use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
-use super::effects::draw::{apply_draw_after_replacement, resume_multi_draw};
+use super::effects::draw::apply_draw_after_replacement;
 use super::effects::life::{
     apply_life_gain_after_replacement, apply_life_loss_after_replacement,
     drain_pending_life_total_assignment,
@@ -249,7 +249,7 @@ pub(super) fn handle_replacement_choice(
                     zone_change_object_id = Some(object_id);
                 }
                 event @ ProposedEvent::TokenEntry { entry_ref, .. } => {
-                    if state.post_replacement_continuation.is_some() {
+                    if state.has_post_replacement_drain() {
                         if let Some(waiting_for) = apply_pending_post_replacement_effect(
                             state,
                             Some(entry_ref),
@@ -388,19 +388,17 @@ pub(super) fn handle_replacement_choice(
                 // drain below runs the chain (Choose → RevealUntil).
                 draw @ ProposedEvent::Draw { player_id, .. } => {
                     let drawn_count = apply_draw_after_replacement(state, draw, events);
-                    // CR 121.6b + CR 609.3: this Draw arm resolves the ONE unit
-                    // that was paused (the choice just answered) — it does NOT
-                    // go through `resume_multi_draw`'s own closure, so its
-                    // actually-drawn count is never folded into the running
-                    // total unless done here explicitly. Fold it into the
-                    // stashed `PendingMultiDraw.accumulated` (if this player has
-                    // one in flight) BEFORE the drain below reads it, so the
-                    // eventual `state.last_effect_count` commit includes every
-                    // unit of the original instruction — not just the units
-                    // `resume_multi_draw` itself executed without pausing.
-                    if let Some(pending) = state.pending_multi_draw.as_mut() {
-                        if pending.player == player_id {
-                            pending.accumulated += drawn_count;
+                    // CR 121.6b + CR 608.2c: this Draw arm settles the ONE unit
+                    // that was paused (the choice just answered) — it does not go
+                    // through the sequence driver's own delivery closure, so its
+                    // actually-drawn count is folded into the active instruction's
+                    // frame here, BEFORE the drain below resumes that frame. Without
+                    // this the eventual `last_effect_count` commit would omit every
+                    // unit that paused, and a chained "discard that many" would read
+                    // short.
+                    if let Some(frame) = state.draw_sequences.active_mut() {
+                        if frame.player == player_id {
+                            frame.accumulated += drawn_count;
                         }
                     }
                     // CR 805.4b: if this resumed draw IS the front of the
@@ -651,7 +649,7 @@ pub(super) fn handle_replacement_choice(
                 replacement_ctx = Some(ctx);
             }
 
-            if state.post_replacement_continuation.is_some() {
+            if state.has_post_replacement_drain() {
                 // CR 614.12a + CR 614.1c: For ZoneChange events the post-effect
                 // resolves against the zone-changing object, not the replacement
                 // source — drop the source slot so it doesn't leak into an
@@ -664,7 +662,7 @@ pub(super) fn handle_replacement_choice(
                 // Abundance's controller, not `ObjectId(0)` / active_player.
                 let is_zone_change = zone_change_object_id.is_some();
                 if is_zone_change {
-                    state.post_replacement_source = None;
+                    state.clear_post_replacement_source();
                 }
                 if let Some(next_waiting_for) = apply_pending_post_replacement_effect(
                     state,
@@ -695,30 +693,22 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
-            // CR 121.6b: a multi-card draw (`Effect::Draw{count: N}`, N > 1)
-            // paused mid-sequence because a per-unit replacement (Dredge,
-            // Notion Thief, Hullbreacher, a count-doubling static, etc.) needed
-            // this choice. The just-resolved unit was applied above (Draw arm);
-            // drain the remaining units via `resume_multi_draw`, which
-            // internally re-parks `pending_multi_draw` and sets
-            // `state.waiting_for` (via `draw_through_replacement`) if the next
-            // unit surfaces its own choice — an arbitrary number of sequential
-            // re-pauses compose correctly since each drain call re-reads
-            // whatever the previous one stashed.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_multi_draw.is_some()
-            {
-                if let Some(pending) = state.pending_multi_draw.take() {
-                    let _ = resume_multi_draw(
-                        state,
-                        pending.player,
-                        pending.remaining,
-                        pending.accumulated,
-                        events,
-                    );
-                }
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
+            // CR 121.6b: a draw instruction (`Effect::Draw{count: N}`) paused
+            // mid-sequence because a per-unit replacement (Dredge, Notion Thief,
+            // Hullbreacher, a count-doubling static, etc.) needed this choice. The
+            // just-resolved unit was settled above (Draw arm); resume the frame to
+            // drive its remaining units. `resume_draw_sequence` leaves the frame
+            // parked and sets `state.waiting_for` (via `draw_through_replacement`)
+            // if the next unit surfaces its own choice, so an arbitrary number of
+            // sequential re-pauses compose — each resume re-addresses the same
+            // frame by ID.
+            if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(frame_id) = state.draw_sequences.active().map(|f| f.frame_id) {
+                    let _ =
+                        crate::game::effects::draw::resume_draw_sequence(state, frame_id, events);
+                    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                        waiting_for = state.waiting_for.clone();
+                    }
                 }
             }
 
@@ -1585,8 +1575,6 @@ pub(crate) fn apply_pending_post_replacement_effect(
     event: Option<ReplacementEvent>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    let source = state.post_replacement_source.take().or(object_id);
-    let replacement_applied = std::mem::take(&mut state.post_replacement_applied);
     // CR 614.12a (approximation): sacrifice prompt fires after ZoneChange completes,
     // matching Siege/Tribute precedent. A strict reading of 614.12a says the choice
     // is made *before* the permanent enters, but the engine's pipeline applies the
@@ -1594,10 +1582,26 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // observable behavior is equivalent for as-enters sacrifice/counter mechanics
     // (Devour, Siege protector, Tribute) where the choice doesn't gate entry.
     //
-    // CR 614.12a + CR 615.5: Single dispatch on the unified continuation slot.
-    // `Resolved` carries captured targets (prevention follow-ups); `Template`
-    // is an AST that resolves against `source` for ETB / Optional accept.
-    let waiting_for = match state.post_replacement_continuation.take() {
+    // CR 615.5 + CR 616.1g: Resident-top dispatch. `begin_dispatch` takes the
+    // continuation and marks the drain `Dispatching` WITHOUT removing it, so:
+    //   * a nested `has_post_replacement_drain()` taken while the effect runs sees
+    //     no ready work and cannot re-drain this one (the old slot was likewise
+    //     empty at this point — the continuation had been moved out of it), and
+    //   * the effect can still read this drain's event context (CR 615.5), which is
+    //     how `PostReplacementSourceController` resolves "the source's controller
+    //     draws cards" for Swans of Bryn Argoll.
+    // The drain is popped after the dispatch returns.
+    //
+    // `Resolved` carries captured targets (prevention follow-ups); `Template` is an
+    // AST that resolves against `source` for ETB / Optional accept.
+    let source = state.post_replacement_source().or(object_id);
+    let replacement_applied = state
+        .post_replacement_drains
+        .resident_mut()
+        .map(|drain| std::mem::take(&mut drain.applied))
+        .unwrap_or_default();
+
+    let waiting_for = match state.post_replacement_drains.begin_dispatch() {
         Some(PostReplacementContinuation::Resolved(resolved)) => {
             apply_post_replacement_resolved_effect(state, &resolved, replacement_applied, events)
         }
@@ -1612,6 +1616,10 @@ pub(crate) fn apply_pending_post_replacement_effect(
         ),
         None => None,
     };
+    // The dispatch is over: retire the drain, taking its event context with it.
+    // This replaces the hand-clearing of `post_replacement_event_source` /
+    // `_event_target` that used to sit below.
+    state.post_replacement_drains.finish_dispatch();
     // NOTE: the inherited token-choice applied seed is intentionally NOT cleared
     // here. This drain runs for EVERY replacement continuation — including a
     // nested one that pauses inside an outer token-choice ChooseOneOf (issue
@@ -1621,8 +1629,6 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // seed is owned and cleared by the originating ChooseOneOf's completion
     // (effects/choose_one_of.rs), which is the only frame that can correctly
     // detect "the token-choice continuation has fully drained."
-    state.post_replacement_event_source = None;
-    state.post_replacement_event_target = None;
     // CR 614.12a + CR 707.9: When the post-effect pauses on `CopyTargetChoice`,
     // the entering object's battlefield-entry `ZoneChanged` event is already
     // in `events` (emitted by the prior `move_to_zone`). `BecomeCopy` and its
@@ -2064,6 +2070,7 @@ mod tests {
         );
         shield_obj.replacement_definitions.push(
             ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
                 .mode(ReplacementMode::Optional { decline: None })
                 .description("Draw Shield".to_string()),
         );
@@ -3644,12 +3651,16 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
             },
         );
-        state.post_replacement_continuation = Some(
+        state.install_ready_continuation(
             crate::types::ability::PostReplacementContinuation::Template(Box::new(
                 draw_continuation,
             )),
         );
-        state.post_replacement_source = Some(jinnie_source);
+        state
+            .post_replacement_drains
+            .resident_mut()
+            .expect("a drain must be resident")
+            .source = Some(jinnie_source);
 
         let mut events = Vec::new();
         let waiting_for = apply_pending_post_replacement_effect(
@@ -4290,8 +4301,7 @@ mod tests {
                 target: None,
             },
         );
-        state.post_replacement_continuation =
-            Some(PostReplacementContinuation::Template(Box::new(template)));
+        state.install_ready_continuation(PostReplacementContinuation::Template(Box::new(template)));
 
         let mut events = Vec::new();
         let waiting = apply_pending_post_replacement_effect(
@@ -4304,7 +4314,7 @@ mod tests {
 
         // Resolved cleanly — no follow-up WaitingFor and slot drained.
         assert!(waiting.is_none(), "Template path resolved without prompt");
-        assert!(state.post_replacement_continuation.is_none());
+        assert!(!state.has_post_replacement_drain());
         // Source's controller (P0) lost 2 life.
         assert_eq!(state.players[0].life, initial_life - 2);
     }
@@ -4347,8 +4357,7 @@ mod tests {
                 destination: Zone::Graveyard,
             },
         );
-        state.post_replacement_continuation =
-            Some(PostReplacementContinuation::Template(Box::new(template)));
+        state.install_ready_continuation(PostReplacementContinuation::Template(Box::new(template)));
 
         let mut events = Vec::new();
         let waiting = apply_pending_post_replacement_effect(
@@ -4393,8 +4402,7 @@ mod tests {
             source,
             PlayerId(1),
         );
-        state.post_replacement_continuation =
-            Some(PostReplacementContinuation::Resolved(Box::new(resolved)));
+        state.install_ready_continuation(PostReplacementContinuation::Resolved(Box::new(resolved)));
 
         let mut events = Vec::new();
         let waiting = apply_pending_post_replacement_effect(
@@ -4406,7 +4414,7 @@ mod tests {
         );
 
         assert!(waiting.is_none(), "Resolved path resolved without prompt");
-        assert!(state.post_replacement_continuation.is_none());
+        assert!(!state.has_post_replacement_drain());
         // Resolved ability's own controller (P1) lost 3 life.
         assert_eq!(state.players[1].life, initial_life - 3);
     }
@@ -4428,11 +4436,11 @@ mod tests {
         );
         // Simulate legacy deserialization: only the legacy slot is populated.
         state.legacy_post_replacement_effect = Some(Box::new(template.clone()));
-        assert!(state.post_replacement_continuation.is_none());
+        assert!(!state.has_post_replacement_drain());
 
         state.migrate_post_replacement_continuation();
 
-        match state.post_replacement_continuation {
+        match state.post_replacement_continuation() {
             Some(PostReplacementContinuation::Template(ref def)) => {
                 assert_eq!(**def, template);
             }
@@ -4579,7 +4587,7 @@ mod tests {
 
         state.migrate_post_replacement_continuation();
 
-        match state.post_replacement_continuation {
+        match state.post_replacement_continuation() {
             Some(PostReplacementContinuation::Resolved(ref boxed)) => {
                 assert_eq!(**boxed, resolved);
             }
@@ -4603,9 +4611,9 @@ mod tests {
                 target: None,
             },
         );
-        state.post_replacement_continuation = Some(PostReplacementContinuation::Template(
-            Box::new(new_template.clone()),
-        ));
+        state.install_ready_continuation(PostReplacementContinuation::Template(Box::new(
+            new_template.clone(),
+        )));
         // Legacy slots also populated (corrupted/hybrid input).
         state.legacy_post_replacement_effect = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
@@ -4618,7 +4626,7 @@ mod tests {
 
         state.migrate_post_replacement_continuation();
 
-        match state.post_replacement_continuation {
+        match state.post_replacement_continuation() {
             Some(PostReplacementContinuation::Template(ref def)) => {
                 assert_eq!(**def, new_template);
             }
@@ -4933,7 +4941,7 @@ mod tests {
         // continuation (the ChooseOneOf execute).
         crate::game::zones::move_to_zone(&mut state, object_id, to, &mut events);
         assert!(
-            state.post_replacement_continuation.is_some(),
+            state.has_post_replacement_drain(),
             "ChooseOneOf execute must stash a post-replacement continuation"
         );
         let waiting = apply_pending_post_replacement_effect(

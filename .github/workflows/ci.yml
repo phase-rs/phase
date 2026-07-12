@@ -67,8 +67,12 @@ jobs:
         run: ./scripts/check-skill-doc.sh
 
       - name: Engine authority gate
-        # Diff-based gate: new engine code must use single-authority helpers
-        # (keyword queries via game/keywords.rs) instead of raw state pokes.
+        # (A) Diff-based: new engine code must use single-authority helpers
+        #     (keyword queries via game/keywords.rs) instead of raw state pokes.
+        # (B) Full-tree: gameplay zone changes must go through zone_pipeline,
+        #     not the raw movers / zone containers / `GameObject::zone =`.
+        #     Ratchets against scripts/zone-authority-baseline.txt, which may
+        #     only shrink as the Plan 03 tranches migrate each site.
         run: |
           BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
@@ -144,6 +148,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Parse-diff reads both parents of GitHub's synthetic PR merge commit.
+          fetch-depth: 2
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -266,6 +273,21 @@ jobs:
         if: steps.gates-cache.outputs.cache-hit != 'true'
         run: cargo run --profile tool --features cli --bin card-data-validate -- data/card-data.json
 
+      - name: Draw replacement corpus freeze (Plan 03 / CR 121.2)
+        # Every `ReplacementEvent::Draw` definition must declare whether it
+        # modifies the draw *instruction* count (CR 121.2a) or replaces one
+        # *individual* draw (CR 121.2). Scope is assigned at construction and is
+        # not recoverable afterwards, so the corpus that carries one — and the
+        # scope each row must get — is frozen against a committed baseline.
+        #
+        # This lives in the card-data job, not the Rust lint job, because it
+        # reads the generated (gitignored) export. It runs UNCONDITIONALLY, with
+        # no gates-cache guard: that cache is keyed on MTGJSON + engine sources
+        # and does NOT hash scripts/**, so a PR that edited only the baseline
+        # would hit the cache, skip the check, and report a false green. The
+        # export is present either way (generated above or restored by cardgen).
+        run: python3 scripts/draw_replacement_census.py --corpus --check
+
       - name: Card support coverage report
         # Skipped on a gates-cache hit — coverage-data.json and
         # coverage-summary.json are restored from it, and both are deterministic
@@ -321,10 +343,10 @@ jobs:
         continue-on-error: true
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PAYLOAD_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          echo "$PR_NUMBER" > pr-number.txt
           # Derive the baseline from the ACTUAL main commit this CI merge commit
           # was built on — its non-head parent — NOT the webhook payload's
           # base.sha. The payload value freezes at event-creation time, but the
@@ -336,16 +358,13 @@ jobs:
           # #4303: a one-card autotap fix whose comment listed 25 unrelated
           # cards). Reading the base off the merge commit's parent keeps both
           # sides in lockstep no matter how stale (or main-merged) the PR is.
-          if git rev-parse --verify HEAD^2 >/dev/null 2>&1; then
-            P1="$(git rev-parse HEAD^1)"
-            P2="$(git rev-parse HEAD^2)"
-            # Parent order is not contractual across GitHub's merge-ref build, so
-            # pick whichever parent is NOT the PR head as the base (main) side.
-            if [ "$P1" = "$HEAD_SHA" ]; then BASE_SHA="$P2"; else BASE_SHA="$P1"; fi
-          else
-            # Unmergeable PR (no synthetic merge commit) — nothing to pin to;
-            # fall back to the payload base.sha.
-            BASE_SHA="$PAYLOAD_BASE_SHA"
+          if ! BASE_SHA="$(./scripts/parse-diff-base.sh "$HEAD_SHA")"; then
+            # An unmergeable PR has no synthetic merge parent. A shallow or
+            # missing parent is never licensed to use the frozen webhook base:
+            # that would bill intervening main changes to this PR.
+            printf '<!-- coverage-parse-diff -->\n### Parse changes introduced by this PR\n\n_Baseline pending — no synthetic merge parent is available for PR head `%s`._\n' "$HEAD_SHA" > parse-diff.md
+            echo "produced=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           BASE_HASH="$(./scripts/engine-source-hash.sh "$BASE_SHA")"
@@ -355,7 +374,6 @@ jobs:
             echo "produced=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "$PR_NUMBER" > pr-number.txt
           URL="https://data.phase-rs.dev/parse-baselines/coverage-data-${BASE_HASH}.json"
           if curl -fsSL --retry 3 --retry-delay 2 "$URL" -o coverage-base.json; then
             cargo run --profile tool --features cli --bin coverage-parse-diff -- \

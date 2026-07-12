@@ -64,6 +64,7 @@ use super::oracle_ir::doc::{
     OracleDocBuilder, OracleDocIr, OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan,
     OracleUnitSource, PrintedAbilityIndex, PrintedTriggerIndex,
 };
+use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
@@ -2629,7 +2630,13 @@ fn parse_flash_cleanup_sacrifice_casting_option(
 /// `ParsedAbilities` stays category-grouped because it is the runtime-facing
 /// type; only *within*-category order and explicit cross-item relations are
 /// semantic after lowering.
-pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
+///
+/// Takes `ir` by `&mut` so the swallow audit — whose input is the assembled
+/// result, and which therefore cannot run before the fold — can still emit into
+/// `OracleDocIr.diagnostics`. That keeps the doc IR the single warning channel
+/// (`OracleDocIr.diagnostics` → `ParsedAbilities.parse_warnings`) rather than
+/// letting the audit direct-append to `parse_warnings` behind the doc's back.
+pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     let mut result = ParsedAbilities {
         abilities: Vec::new(),
         triggers: Vec::new(),
@@ -2712,7 +2719,6 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
             }
         }
     }
-    result.parse_warnings = ir.diagnostics.clone();
 
     // ---- Cross-item document relation application (CR 607.2d) -----------------
     // `ir.relations` were recovered at parse time by pairing producer/consumer
@@ -2742,32 +2748,45 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
     // the swallow audit against the parsed result so any unrepresented clause
-    // surfaces as a parse_warning. Post-relocation the audit runs after `finish()`
-    // has sealed `OracleDocIr.diagnostics`, so its warnings DIRECT-APPEND to
-    // `result.parse_warnings` (card-data parity holds — both routes end in
-    // `parse_warnings`, same order: loop diagnostics then swallow diagnostics).
-    // `OracleDocIr.diagnostics` no longer carries swallow warnings until Plan 02
-    // re-homes the audit — see ISSUES.md #17. Source text is the original
-    // (un-normalized) `ir.source_text`, matching today's swallow input.
-    let mut swallow_diags = Vec::new();
-    // Draft-time "draft matters" lines (CR 905) are intentionally consumed as
-    // no-ops; their "you may"/"if you do"/"as long as" markers would otherwise be
-    // reported as swallowed clauses. Strip them before the audit; constructed-play
-    // lines on the same card remain and are still checked.
-    let swallow_text;
-    let swallow_input: &str = if ir.source_text.lines().any(is_draft_matters_sentence) {
-        swallow_text = ir
-            .source_text
-            .lines()
-            .filter(|line| !is_draft_matters_sentence(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        &swallow_text
-    } else {
-        &ir.source_text
+    // surfaces as a parse_warning. The audit's INPUT is the assembled `result`, so
+    // it cannot run before the fold; its OUTPUT nonetheless belongs in the doc's
+    // one warning channel, so it emits into `ir.diagnostics` (the reason this
+    // function borrows `ir` mutably). `parse_warnings` is then assigned ONCE, from
+    // that channel, at the end — no direct-append behind the doc's back.
+    //
+    // The audit is now PER ITEM: each item's own source fragment supplies the
+    // expectation and its own lowered definitions — resolved through the id tracks
+    // below — supply the evidence. It therefore takes the items and the tracks
+    // rather than the whole card's text. The draft-matters (CR 905) filter that used
+    // to strip lines from the whole-card text moves inside as a per-item skip.
+    //
+    // The tracks are sound to zip here: of the four relation passes above, three are
+    // length-preserving and `apply_linked_choice_etb_counter` removes from
+    // `result.replacements` and `replacement_ids` at the same index. This is also
+    // exactly why the audit stays HERE, post-relation: a pre-lowering audit is blind
+    // to relation-synthesized semantics (that pass *synthesizes a replacement*), so
+    // the false-positive wave U1 bounded to 31 faces would be caused, not avoided.
+    //
+    // Emitted into a local vec and appended, rather than passing `&mut
+    // ir.diagnostics` directly: the audit reads `ir.items` and writes the
+    // diagnostics channel, and those are two borrows of the same `ir`. Appending
+    // preserves the ordering the channel guarantees (parse-time diagnostics first,
+    // then swallow findings).
+    let tracks = ItemIdTracks {
+        abilities: &ability_ids,
+        triggers: &trigger_ids,
+        statics: &static_ids,
+        replacements: &replacement_ids,
     };
-    super::swallow_check::check_swallowed_clauses(swallow_input, &result, &mut swallow_diags);
-    result.parse_warnings.extend(swallow_diags);
+    let mut swallow_diagnostics = Vec::new();
+    super::swallow_check::check_swallowed_clauses(
+        &ir.items,
+        &ir.source_text,
+        &result,
+        &tracks,
+        &mut swallow_diagnostics,
+    );
+    ir.diagnostics.append(&mut swallow_diagnostics);
     // ---------------------------------------------------------------------------
 
     // CR 607.1 + CR 610.3: Two-trigger exile-return synthesis (Journey to
@@ -2778,6 +2797,13 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
     // former `synthesize`/`bind` passes ran (the audit reads `result` first).
     apply_etb_exile_ltb_return(&mut result, &ir.relations, &trigger_ids);
     apply_active_player_punisher(&mut result, &ir.relations, &ability_ids);
+
+    // The doc IR's diagnostics channel is the single source of parse warnings.
+    // Assigned once, here, so it carries BOTH the parse-time diagnostics sealed by
+    // `finish()` and the swallow-audit diagnostics emitted above, in that order.
+    // None of the relation passes touch `parse_warnings`, so this placement is
+    // equivalent to assigning before them.
+    result.parse_warnings = ir.diagnostics.clone();
     result
 }
 
@@ -2890,6 +2916,28 @@ fn sub_ability_is_continuity_exemption(sub: Option<&AbilityDefinition>) -> bool 
     parse_continuity_exemption_clause(text.trim()).is_ok_and(|(rest, ())| rest.trim().is_empty())
 }
 
+// KNOWN GAP (Total War, tracked as a separate follow-up): this recognizer
+// covers only Siren's Call's "ignore this effect for each creature ... didn't
+// control continuously since the beginning of the turn" phrasing. Total War
+// carries the SAME CR 302.6 + CR 508.1a continuity exemption, but through a
+// DIFFERENT shape:
+//   - it is a triggered ability ("Whenever a player attacks with one or more
+//     creatures ..."), NOT an `ActivePlayerPunisher` delayed trigger, so it
+//     never reaches `apply_active_player_punisher`, the only caller of
+//     `sub_ability_is_continuity_exemption` above; and
+//   - it phrases the exemption as "except for creatures the player hasn't
+//     controlled continuously ...", which the "ignore this effect for each
+//     creature ..." tag below does not match.
+// As a result Total War's continuity exemption is currently silently dropped —
+// its DestroyAll filter parses only as [Untapped, Not(AttackedThisTurn)] with
+// no `ControlledContinuouslySinceTurnBegan` restriction and no `Unimplemented`
+// marker. This is a distinct dropped-modifier root cause (NOT the player-scope
+// bug fixed alongside it in `condition_introduces_attacking_player`) and is
+// intentionally left unfixed here. Fixing it means recognizing the "except for
+// <continuity>" clause on the triggered-ability DestroyAll effect body and
+// attaching `FilterProp::ControlledContinuouslySinceTurnBegan` — either by
+// generalizing this recognizer's phrasing or adding a sibling on the effect
+// parse path.
 fn parse_continuity_exemption_clause(i: &str) -> OracleResult<'_, ()> {
     let (i, _) = tag::<_, _, OracleError<'_>>("ignore this effect for each creature").parse(i)?;
     // Optional subject anaphor: " the player" / " that player" / "".
@@ -3077,8 +3125,10 @@ fn parse_strive_cost_body(effect_text: &str) -> Option<ManaCost> {
 /// surface, so the source-order guarantee is a property of this one type rather
 /// than of 90 hand-written call sites.
 ///
-/// This replaces the former category-ordered `parsed_abilities_to_doc_ir` on
-/// every non-Class path. `whole_document` spans survive only in the Class shim.
+/// This is the single emission authority for EVERY path — the dispatch loop and
+/// every preprocessor, Class included. The category-ordered
+/// `parsed_abilities_to_doc_ir` façade it replaced is gone, and with it the last
+/// producer of whole-document spans.
 struct DocEmitter<'a> {
     builder: OracleDocBuilder,
     lines: &'a [&'a str],
@@ -3377,14 +3427,26 @@ pub(crate) fn parse_oracle_ir(
     let mut strive_cost_line: Option<usize> = None;
     let mut modal_line: Option<usize> = None;
 
-    // CR 716: Class cards use the whole-document shim (unit 6 unifies the path).
-    // HOISTED above the saga/attraction/level/spacecraft pre-loop blocks so the
-    // shim can never drop a pre-emitted builder item — the emitter is provably
-    // empty at this early return.
+    // CR 716: Class cards are a preprocessor like any other — they emit through
+    // `DocEmitter` at their printed source line. HOISTED above the
+    // saga/attraction/level/spacecraft pre-loop blocks so the early return can
+    // never drop a pre-emitted builder item: the emitter is provably empty here.
+    //
+    // `parse_class_oracle_text` returns items already in printed source order, so
+    // no sort is needed — the builder keys them by span anyway. Emission is via the
+    // `emit_at` primitive rather than the typed `*_at` helpers because this branch
+    // returns immediately: the `last_trigger`/`last_static` mirrors those helpers
+    // maintain exist solely for the dispatch loop's mid-loop readers, and no
+    // dispatch loop runs on a Class card.
     if subtypes.iter().any(|s| s == "Class") {
-        let class_result =
-            parse_class_oracle_text(&lines, card_name, mtgjson_keyword_names, result);
-        let doc = parsed_abilities_to_doc_ir(class_result, oracle_text, card_name, &mut ctx);
+        for (line, node) in parse_class_oracle_text(&lines, card_name, mtgjson_keyword_names) {
+            emitter.emit_at(line, node);
+        }
+        // `oracle_text` (the ORIGINAL, un-normalized text), not `oracle_text_owned`
+        // — matching the main path's `finish` below. `OracleDocIr.source_text` is
+        // the swallow audit's input, so normalizing it here would change which
+        // clauses the audit sees.
+        let doc = emitter.finish(oracle_text, card_name, std::mem::take(&mut ctx.diagnostics));
         return finalize_document_relations(doc, types);
     }
 
@@ -5536,8 +5598,7 @@ pub(crate) fn parse_oracle_ir(
 
     // Emit the four order-agnostic SINGLETONS (held on `result` for mid-loop
     // read-back/merge/dedup) as Exact items at their captured source line, then
-    // finish — producing items already in Oracle source order. `whole_document`
-    // survives only in the Class shim, which returned earlier.
+    // finish — producing items already in Oracle source order.
     if let Some(modal) = result.modal {
         emitter.modal_at(modal_line.unwrap_or(0), modal);
     }
@@ -5677,82 +5738,6 @@ fn parse_activated_ability_definition(
     (def, effect_text)
 }
 
-/// Convert a `ParsedAbilities` into an `OracleDocIr` using `PreLowered*` variants.
-///
-/// UNIT-3B DEBT — this is the document façade, and it is still category-ordered.
-/// It runs *after* lowering and therefore has no access to the line cursor, so it
-/// cannot recover an exact source position for any item. Every item is emitted
-/// with `OracleSourceSpan::whole_document` (a true containing span, not a minimal
-/// one) and a distinct `ordinal_within_span` that reproduces today's category
-/// emission order exactly. Lowered output is therefore byte-identical.
-///
-/// Unit 3b moves emission into `parse_oracle_ir`'s dispatch loop, where the exact
-/// line/byte range is in hand; this function is deleted there (removal gate 5).
-///
-/// Routing through `OracleDocBuilder` now — rather than pushing a bare `Vec` — is
-/// what makes item identity, the CR 707.9a printed-slot counters, and the span
-/// invariants have a single authority before that move.
-fn parsed_abilities_to_doc_ir(
-    result: ParsedAbilities,
-    oracle_text: &str,
-    card_name: &str,
-    ctx: &mut ParseContext,
-) -> OracleDocIr {
-    let mut builder = OracleDocBuilder::new();
-    let mut ordinal: u32 = 0;
-
-    // One helper, so the ordinal can never be advanced without emitting, and an
-    // emission can never reuse an ordinal. Both are builder-rejected anyway; this
-    // makes the pairing structural.
-    let mut emit = |builder: &mut OracleDocBuilder, node: OracleNodeIr| {
-        let span = OracleSourceSpan::whole_document(oracle_text, ordinal);
-        ordinal += 1;
-        // `None`: a whole-document span cannot honestly name a fragment — the only
-        // text it covers is the entire card. Unit 3b supplies `Some(line)` with an
-        // `Exact` span. `emit` rejects any other combination.
-        let slot = builder.begin_item(span, None);
-        builder
-            .emit(slot, node)
-            .expect("whole-document spans carry distinct ordinals, so emit cannot reject");
-    };
-
-    for def in result.abilities {
-        emit(&mut builder, OracleNodeIr::PreLoweredSpell(def));
-    }
-    for def in result.triggers {
-        emit(&mut builder, OracleNodeIr::PreLoweredTrigger(def));
-    }
-    for def in result.statics {
-        emit(&mut builder, OracleNodeIr::PreLoweredStatic(def));
-    }
-    for def in result.replacements {
-        emit(&mut builder, OracleNodeIr::PreLoweredReplacement(def));
-    }
-    for kw in result.extracted_keywords {
-        emit(&mut builder, OracleNodeIr::Keyword(kw));
-    }
-    if let Some(modal) = result.modal {
-        emit(&mut builder, OracleNodeIr::Modal(modal));
-    }
-    if let Some(cost) = result.additional_cost {
-        emit(&mut builder, OracleNodeIr::AdditionalCost(cost));
-    }
-    for restriction in result.casting_restrictions {
-        emit(&mut builder, OracleNodeIr::CastingRestriction(restriction));
-    }
-    for option in result.casting_options {
-        emit(&mut builder, OracleNodeIr::CastingOption(option));
-    }
-    if let Some(condition) = result.solve_condition {
-        emit(&mut builder, OracleNodeIr::SolveCondition(condition));
-    }
-    if let Some(cost) = result.strive_cost {
-        emit(&mut builder, OracleNodeIr::StriveCost(cost));
-    }
-
-    builder.finish(oracle_text, card_name, std::mem::take(&mut ctx.diagnostics))
-}
-
 /// Parse Oracle text into structured ability definitions.
 ///
 /// This is the public API entry point — a thin wrapper around [`parse_oracle_ir`]
@@ -5770,14 +5755,14 @@ pub fn parse_oracle_text(
     types: &[String],
     subtypes: &[String],
 ) -> ParsedAbilities {
-    let ir = parse_oracle_ir(
+    let mut ir = parse_oracle_ir(
         oracle_text,
         card_name,
         mtgjson_keyword_names,
         types,
         subtypes,
     );
-    let mut parsed = lower_oracle_ir(&ir);
+    let mut parsed = lower_oracle_ir(&mut ir);
     scrub_granting_placeholder_descriptions(&mut parsed);
     parsed
 }

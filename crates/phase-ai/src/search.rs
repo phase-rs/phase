@@ -2371,7 +2371,7 @@ pub(crate) fn deterministic_choice(
         }
     }
 
-    // CR 700.2: ChooseFromZoneChoice — select cards from a tracked set.
+    // CR 608.2d: ChooseFromZoneChoice — select cards from a tracked set.
     if let WaitingFor::ChooseFromZoneChoice {
         cards,
         count,

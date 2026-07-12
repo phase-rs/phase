@@ -30,8 +30,8 @@ use nom::Parser;
 use crate::parser::oracle_nom::error::OracleError;
 use crate::parser::oracle_nom::primitives::parse_number;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, PileSource, PlayerScope, QuantityExpr, TargetFilter,
-    TypeFilter, TypedFilter, VoterScope,
+    AbilityDefinition, AbilityKind, ControllerRef, Effect, PileSource, PlayerScope, QuantityExpr,
+    TargetFilter, TypeFilter, TypedFilter, VoterScope,
 };
 use crate::types::zones::{EtbTapState, Zone};
 
@@ -340,6 +340,162 @@ fn make_change_zone_effect(destination: Zone) -> Effect {
     }
 }
 
+/// CR 700.3 + CR 608.2c: Mid-chain pile-separation recognizer for the
+/// "An opponent separates those cards into two piles. Put all cards from
+/// the pile of your choice onto the battlefield under your control and
+/// the rest into their owners' graveyards." shape (Boneyard Parley).
+///
+/// Called from the chunk loop in `parse_effect_chain_ir` when a chunk
+/// starts with "an opponent separates". Takes the joined text from that
+/// chunk onward and returns a synthesized `AbilityDefinition` wrapping
+/// `Effect::SeparateIntoPiles { pile_source: ExiledThisWay, .. }`.
+pub(crate) fn try_parse_mid_chain_opponent_separates(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    // Sentence 1: "An opponent separates those cards into two piles."
+    let (rest, partition_subject) = parse_opponent_separates_sentence(text)?;
+    // Sentence 2: pile disposition — must parse the Boneyard Parley shape
+    // ("Put all cards from the pile of your choice onto the battlefield
+    // under your control and the rest into their owners' graveyards.")
+    // as well as the simpler Fact-or-Fiction-like shapes.
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    // Try the extended disposition (Boneyard Parley shape) first.
+    if let Some((chosen_effect, unchosen_effect)) = parse_exiled_pile_disposition(rest, kind) {
+        return Some(AbilityDefinition::new(
+            kind,
+            Effect::SeparateIntoPiles {
+                partition_subject,
+                object_filter: TargetFilter::Any,
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect: Box::new(chosen_effect),
+                pile_source: PileSource::ExiledThisWay,
+                unchosen_pile_effect: Some(Box::new(unchosen_effect)),
+            },
+        ));
+    }
+    // Fall back to the standard "Put one pile into your [zone] and the
+    // other into your [zone]." disposition (shared with Fact or Fiction).
+    if let Some((chosen_zone, unchosen_zone)) = parse_pile_disposition_sentence(rest) {
+        let chosen_pile_effect = Box::new(AbilityDefinition::new(
+            kind,
+            make_change_zone_effect(chosen_zone),
+        ));
+        let unchosen_pile_effect = Some(Box::new(AbilityDefinition::new(
+            kind,
+            make_change_zone_effect(unchosen_zone),
+        )));
+        return Some(AbilityDefinition::new(
+            kind,
+            Effect::SeparateIntoPiles {
+                partition_subject,
+                object_filter: TargetFilter::Any,
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect,
+                pile_source: PileSource::ExiledThisWay,
+                unchosen_pile_effect,
+            },
+        ));
+    }
+    None
+}
+
+/// CR 700.3 + CR 608.2c: Parse the Boneyard Parley disposition:
+/// "Put all cards from the pile of your choice onto the battlefield under
+/// your control and the rest into their owners' graveyards."
+///
+/// Returns (chosen_pile_effect, unchosen_pile_effect) as `AbilityDefinition`s.
+fn parse_exiled_pile_disposition(
+    input: &str,
+    kind: AbilityKind,
+) -> Option<(AbilityDefinition, AbilityDefinition)> {
+    // "Put all cards from the pile of your choice onto the battlefield
+    //  under your control and the rest into their owners' graveyards."
+    let res: nom::IResult<&str, (), OracleError<'_>> = value(
+        (),
+        alt((
+            tag_no_case("put all cards from the pile of your choice "),
+            tag_no_case("put the cards in the pile of your choice "),
+            tag_no_case("put the pile of your choice "),
+        )),
+    )
+    .parse(input);
+    let (rest, ()) = res.ok()?;
+
+    // Parse chosen destination directly to (Zone, Option<ControllerRef>).
+    let res: nom::IResult<&str, (Zone, Option<ControllerRef>), OracleError<'_>> = alt((
+        value(
+            (Zone::Battlefield, Some(ControllerRef::You)),
+            tag_no_case("onto the battlefield under your control"),
+        ),
+        value((Zone::Hand, None), tag_no_case("into your hand")),
+        value((Zone::Graveyard, None), tag_no_case("into your graveyard")),
+    ))
+    .parse(rest);
+    let (rest, (chosen_zone, chosen_enters_under)) = res.ok()?;
+
+    // Consume " and the rest " or " and put the rest "
+    let res: nom::IResult<&str, (), OracleError<'_>> = value(
+        (),
+        alt((
+            tag_no_case(" and the rest "),
+            tag_no_case(" and put the rest "),
+            tag_no_case(". put the rest "),
+        )),
+    )
+    .parse(rest);
+    let (rest, ()) = res.ok()?;
+
+    // Parse unchosen destination.
+    let res: nom::IResult<&str, Zone, OracleError<'_>> = alt((
+        value(
+            Zone::Graveyard,
+            tag_no_case("into their owners' graveyards"),
+        ),
+        value(Zone::Graveyard, tag_no_case("into their owner's graveyard")),
+        value(Zone::Graveyard, tag_no_case("into your graveyard")),
+        value(Zone::Hand, tag_no_case("into your hand")),
+        value(Zone::Exile, tag_no_case("into exile")),
+    ))
+    .parse(rest);
+    let (rest, unchosen_zone) = res.ok()?;
+
+    // Only allow trailing period/whitespace.
+    let rest = rest.trim_start_matches('.');
+    let rest = rest.trim();
+    if !rest.is_empty() {
+        return None;
+    }
+
+    // Build chosen pile sub-effect.
+    let chosen_effect = AbilityDefinition::new(
+        kind,
+        Effect::ChangeZone {
+            origin: None,
+            destination: chosen_zone,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: chosen_enters_under,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    );
+
+    // Build unchosen pile sub-effect.
+    let unchosen_effect = AbilityDefinition::new(kind, make_change_zone_effect(unchosen_zone));
+
+    Some((chosen_effect, unchosen_effect))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,5 +617,73 @@ mod tests {
     fn rejects_non_pile_body() {
         let text = "Destroy target creature. Draw a card.";
         assert!(parse_separate_into_piles(text, AbilityKind::Spell).is_none());
+    }
+
+    /// CR 700.3 + CR 608.2c: Boneyard Parley mid-chain shape parses to
+    /// `SeparateIntoPiles` with `ExiledThisWay` source, battlefield chosen
+    /// destination (under your control), and graveyard unchosen destination.
+    #[test]
+    fn parses_boneyard_parley_mid_chain() {
+        let text = "An opponent separates those cards into two piles. \
+                    Put all cards from the pile of your choice onto the battlefield \
+                    under your control and the rest into their owners' graveyards.";
+        let def = try_parse_mid_chain_opponent_separates(text, AbilityKind::Spell)
+            .expect("Boneyard Parley mid-chain parses");
+        match &*def.effect {
+            Effect::SeparateIntoPiles {
+                partition_subject,
+                chooser,
+                chosen_pile_effect,
+                pile_source,
+                unchosen_pile_effect,
+                ..
+            } => {
+                assert!(
+                    matches!(partition_subject, VoterScope::AnOpponent),
+                    "expected AnOpponent, got {partition_subject:?}"
+                );
+                assert!(matches!(chooser, PlayerScope::Controller));
+                assert!(
+                    matches!(pile_source, PileSource::ExiledThisWay),
+                    "expected ExiledThisWay, got {pile_source:?}"
+                );
+                assert!(
+                    matches!(
+                        &*chosen_pile_effect.effect,
+                        Effect::ChangeZone {
+                            destination: Zone::Battlefield,
+                            target: TargetFilter::ParentTarget,
+                            enters_under: Some(ControllerRef::You),
+                            ..
+                        }
+                    ),
+                    "expected ChangeZone to Battlefield under your control, got {:?}",
+                    chosen_pile_effect.effect
+                );
+                let unchosen = unchosen_pile_effect
+                    .as_ref()
+                    .expect("unchosen_pile_effect should be Some");
+                assert!(
+                    matches!(
+                        &*unchosen.effect,
+                        Effect::ChangeZone {
+                            destination: Zone::Graveyard,
+                            target: TargetFilter::ParentTarget,
+                            ..
+                        }
+                    ),
+                    "expected ChangeZone to Graveyard, got {:?}",
+                    unchosen.effect
+                );
+            }
+            other => panic!("expected SeparateIntoPiles, got {other:?}"),
+        }
+    }
+
+    /// Mid-chain parser returns None for non-matching text.
+    #[test]
+    fn mid_chain_rejects_non_matching() {
+        let text = "Destroy target creature.";
+        assert!(try_parse_mid_chain_opponent_separates(text, AbilityKind::Spell).is_none());
     }
 }

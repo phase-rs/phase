@@ -808,6 +808,36 @@ fn condition_introduces_defending_player(cond_lower: &str) -> bool {
     false
 }
 
+/// CR 508.1 + CR 603.2c: "Whenever a player attacks with [N or more] creatures,
+/// ... that player ..." introduces the ATTACKING player (TriggeringPlayer) as the
+/// relative-player anaphor for a trailing "that player"/"that player controls"
+/// clause (Total War). Mirrors the any-player actor arm of
+/// `try_parse_attack_with_n_creatures` — the "you attack"/"another player
+/// attacks"/"an opponent attacks" forms fix the actor statically (no dynamic
+/// per-trigger player for "that player" to bind to; no in-corpus card phrases
+/// those forms with a trailing "that player" anaphor), so only the bare
+/// "a player attacks with" head-noun form needs this scope.
+fn condition_introduces_attacking_player(cond_lower: &str) -> bool {
+    // Walk word boundaries — the actor phrase may be preceded by "whenever"/"when".
+    let mut remaining = cond_lower;
+    while !remaining.is_empty() {
+        if tag::<_, _, OracleError<'_>>("a player attacks with")
+            .parse(remaining)
+            .is_ok()
+        {
+            return true;
+        }
+        // structural: not dispatch — advance to the next word boundary so the
+        // nom tag above is retried at every word position (mirrors
+        // `condition_introduces_defending_player`).
+        remaining = match remaining.find(' ') {
+            Some(i) => remaining[i + 1..].trim_start(),
+            None => "",
+        };
+    }
+    false
+}
+
 fn condition_introduces_target_player(cond_lower: &str) -> bool {
     /// CR 120.3: "deals [combat] damage to a player" — damage dealt to a player
     /// causes that player to lose life (CR 120.3a) and introduces the damaged
@@ -949,6 +979,11 @@ pub(crate) fn relative_player_scope_for_condition(cond_lower: &str) -> Option<Co
         // in combat), not TargetPlayer (which requires a player target to be
         // bound at runtime).
         Some(ControllerRef::DefendingPlayer)
+    } else if condition_introduces_attacking_player(cond_lower) {
+        // CR 508.1 + CR 603.2c: the attacking player is the triggering-event
+        // player for "that player" anaphors in the effect body (Total War:
+        // "...destroy all untapped non-Wall creatures that player controls...").
+        Some(ControllerRef::TriggeringPlayer)
     } else if condition_introduces_target_player(cond_lower) {
         Some(ControllerRef::TargetPlayer)
     } else if condition_introduces_chosen_player_phase(cond_lower) {

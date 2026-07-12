@@ -31,10 +31,10 @@ use crate::types::ability::{
     AttackSubject, CastingPermission, Comparator, ConjureSource, ContinuousModification,
     ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
     FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission, MultiTargetSpec,
-    ObjectScope, PlayPermissionInvalidation, PlayerFilter, PreventionAmount, PreventionScope,
-    PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
+    QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -1056,20 +1056,6 @@ fn parse_until_next_same_source_exile_invalidation(input: &str) -> OracleResult<
     Ok((input, ()))
 }
 
-pub(super) fn is_until_next_same_source_exile_rider(clause: &ClauseIr) -> bool {
-    let lower = clause
-        .source
-        .fragment()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    nom_on_lower(
-        clause.source.fragment().unwrap_or_default().trim(),
-        lower.trim(),
-        |i| all_consuming(parse_until_next_same_source_exile_invalidation).parse(i),
-    )
-    .is_some()
-}
-
 /// Walk the previous def and its `sub_ability` chain for a `PlayFromExile`
 /// permission. The grant produced by the compound "exile … and may play that
 /// card" chain (Lightstall Inquisitor) lands as a sibling def during the lower
@@ -1124,22 +1110,6 @@ pub(super) fn attach_land_enters_tapped_to_previous_play_from_exile(
         return false;
     };
     *land_enter_tapped = EtbTapState::Tapped;
-    true
-}
-
-pub(super) fn attach_until_next_same_source_exile_to_previous_play_from_exile(
-    defs: &mut [AbilityDefinition],
-) -> bool {
-    let Some(CastingPermission::PlayFromExile {
-        duration,
-        invalidation,
-        ..
-    }) = find_prev_play_from_exile_permission_mut(defs)
-    else {
-        return false;
-    };
-    *duration = Duration::Permanent;
-    *invalidation = Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource);
     true
 }
 
@@ -1645,25 +1615,53 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
 /// CR 122.1 + CR 614.1c: "If a Hero enters this way, it enters with an
 /// additional +1/+1 counter on it" riders on a parent battlefield zone change
 /// are entry replacement properties, not post-move `PutCounter` subs.
-/// CR 608.2c: Malamet Battle Glyph / Longstalk Brawl / Duel for Dominance —
-/// "Choose target creature you control and target creature you don't control. …
-/// put a +1/+1 counter on [the you-control creature]. Then those creatures fight
-/// each other." Chain descent propagates only the most-recent (opponent) target
-/// to later nodes, so the counter's `ParentTarget` anaphor — and any
-/// entered-this-turn condition subject — would bind the OPPONENT's creature. When
-/// the chain declares >= 2 `TargetOnly` object slots, re-key each
-/// `PutCounter{ParentTarget}` to `ParentTargetSlot { index: 0 }` (the
-/// first-declared you-control creature — `try_parse_two_targets` emits it first)
-/// and bind that node's `TargetMatchesFilter` condition to the same slot 0.
-/// Scoped to `PutCounter` (excludes Tail Swipe's `Pump`) and only rekeys a
-/// `ParentTarget` counter (measured: exactly these 3 cards; 0 cards already use
-/// `ParentTargetSlot`). Longstalk's `AdditionalCostPaid` and Duel's count gate
-/// are not `TargetMatchesFilter`, so their conditions stay node-local. Consumes
-/// increment-A's `ParentTargetSlot` counter resolver + `subject_slot` eval.
+/// CR 608.2c + CR 611.2c: the two-target fight class — "Choose target creature
+/// you control and target creature you don't control. … [buff the you-control
+/// creature]. Then those creatures fight each other." (Malamet Battle Glyph,
+/// Longstalk Brawl, Duel for Dominance, Tail Swipe, Joust, Blizzard Brawl, #4751).
+/// Chain descent propagates only the most-recent (opponent) target to later
+/// nodes, so the buff's back-reference to "the creature you control" — and any
+/// entered-this-turn condition subject — would bind the OPPONENT's creature (or,
+/// for `Pump`/`GenericEffect`, an unscoped whole-board target). When the chain
+/// declares >= 2 `TargetOnly` object slots, re-key the buff to
+/// `ParentTargetSlot { index: 0 }` (the first-declared you-control creature —
+/// `try_parse_two_targets` emits it first) and bind a `PutCounter`'s
+/// `TargetMatchesFilter` condition to the same slot 0. Covers every buff shape
+/// the class uses: `PutCounter{ParentTarget}` (counter cards),
+/// `Pump{Any|ParentTarget}` (Tail Swipe / Joust), and a SelfRef-affected
+/// `GenericEffect{target:None}` (Blizzard's "gets +N/+M and gains <keyword>").
+/// Longstalk's `AdditionalCostPaid` and Duel's count gate are not
+/// `TargetMatchesFilter`, so their conditions stay node-local. The reciprocal
+/// "those creatures fight each other" object is `ParentTarget` by design
+/// (`parse_fight_target`), so the fight itself needs no rekey.
 pub(super) fn rewrite_two_target_counter_chain(def: &mut AbilityDefinition) {
-    if count_typed_target_only_slots(def) >= 2 {
+    // CR 611.2c + CR 701.14a: gate on the class's ACTUAL signature — a chain that
+    // both declares >= 2 typed target slots AND contains an `Effect::Fight`. The
+    // slot count alone is a proxy for "two-target declaration"; it says nothing
+    // about a fight, so on its own it would let the widened `Pump`/`GenericEffect`
+    // rekey fire on any future >= 2-target chain that happens to route an unscoped
+    // buff here. Requiring the `Fight` node makes the guard encode the two-target
+    // FIGHT class the function is named for, so the rekey is safe by construction
+    // rather than by the current pool happening not to trip it (matthewevans
+    // review, #4751). All six class cards (Malamet Battle Glyph, Longstalk Brawl,
+    // Duel for Dominance, Tail Swipe, Joust, Blizzard Brawl) carry "those
+    // creatures fight each other" as a later node in the same chain.
+    if count_typed_target_only_slots(def) >= 2 && chain_contains_fight(def) {
         rekey_counter_slot_in_chain(def);
     }
+}
+
+/// True if this definition or any node reachable through its `sub_ability` /
+/// `else_ability` chain is an `Effect::Fight` (CR 701.14a). The two-target fight
+/// class always emits the fight as a later node in the same chain, so a linear
+/// descent suffices.
+fn chain_contains_fight(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::Fight { .. })
+        || def.sub_ability.as_deref().is_some_and(chain_contains_fight)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_contains_fight)
 }
 
 fn count_typed_target_only_slots(def: &AbilityDefinition) -> usize {
@@ -1684,15 +1682,46 @@ fn count_typed_target_only_slots(def: &AbilityDefinition) -> usize {
 }
 
 fn rekey_counter_slot_in_chain(def: &mut AbilityDefinition) {
-    let rekeyed = if let Effect::PutCounter { target, .. } = &mut *def.effect {
-        if matches!(target, TargetFilter::ParentTarget) {
+    let rekeyed = match &mut *def.effect {
+        // CR 608.2c: "put a +1/+1 counter on [the you-control creature]" — the
+        // `ParentTarget`/"it" anaphor must bind slot 0 (Malamet / Longstalk /
+        // Duel), not the most-recent opponent target.
+        Effect::PutCounter { target, .. } if matches!(target, TargetFilter::ParentTarget) => {
             *target = TargetFilter::ParentTargetSlot { index: 0 };
             true
-        } else {
-            false
         }
-    } else {
-        false
+        // CR 611.2c + CR 608.2c: "the creature you control gets +N/+N" — the
+        // definite back-reference (Tail Swipe / Joust / Blizzard Brawl, #4751)
+        // resolves to slot 0 (the first-declared you-control creature), not the
+        // whole battlefield. Only the two-target fight chain routes a `Pump`
+        // through here (guarded by `count_typed_target_only_slots >= 2`), where an
+        // unscoped `Any`/`ParentTarget` target is always that back-reference.
+        Effect::Pump { target, .. }
+            if matches!(target, TargetFilter::Any | TargetFilter::ParentTarget) =>
+        {
+            *target = TargetFilter::ParentTargetSlot { index: 0 };
+            true
+        }
+        // CR 611.2c + CR 613: "the creature you control gets +N/+M and gains
+        // <keyword>" lowers to a `GenericEffect` whose per-target static applies
+        // to `SelfRef` (the effect's own target). Blizzard Brawl leaves that
+        // target unwired (`None`); bind it to slot 0 so the buff lands on the
+        // first-declared you-control creature, not nowhere. Guarded on a
+        // SelfRef-affected static so a global anthem (`affected: Typed(...)`,
+        // `target: None`) is never captured.
+        Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } if target.is_none()
+            && static_abilities
+                .iter()
+                .any(|s| matches!(s.affected, Some(TargetFilter::SelfRef))) =>
+        {
+            *target = Some(TargetFilter::ParentTargetSlot { index: 0 });
+            true
+        }
+        _ => false,
     };
     if rekeyed {
         // CR 608.2c: the counter node's own condition ("if the creature you
@@ -2244,88 +2273,6 @@ fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 608.2c + CR 122.6 + CR 614.1c: Fractal Harness class — sentence
-/// splitting lowers token creation and a sibling `PutCounter` targeting
-/// `SelfRef` (the ETB source). Preserve `Token -> PutCounter -> Attach` as
-/// separate instructions; rebind anaphoric targets to `LastCreated`.
-pub(super) fn rewire_cross_sentence_token_counter_attach(def: &mut AbilityDefinition) {
-    if !matches!(&*def.effect, Effect::Token { .. }) {
-        return;
-    }
-    let Some(put_box) = def.sub_ability.take() else {
-        return;
-    };
-    let mut put_sub = *put_box;
-    if put_sub.sub_link != SubAbilityLink::SequentialSibling {
-        def.sub_ability = Some(Box::new(put_sub));
-        return;
-    }
-    let Effect::PutCounter { target, .. } = put_sub.effect.as_ref() else {
-        def.sub_ability = Some(Box::new(put_sub));
-        return;
-    };
-    if !matches!(target, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
-        def.sub_ability = Some(Box::new(put_sub));
-        return;
-    }
-    let attach_sub = match put_sub.sub_ability.take() {
-        Some(sub) if matches!(&*sub.effect, Effect::Attach { .. }) => sub,
-        other => {
-            put_sub.sub_ability = other;
-            def.sub_ability = Some(Box::new(put_sub));
-            return;
-        }
-    };
-
-    if let Effect::PutCounter { target, .. } = &mut *put_sub.effect {
-        *target = TargetFilter::LastCreated;
-    }
-    put_sub.sub_link = SubAbilityLink::ContinuationStep;
-
-    let mut attach_sub = *attach_sub;
-    attach_sub.sub_link = SubAbilityLink::ContinuationStep;
-    rewrite_parent_target_to_last_created(&mut attach_sub.effect);
-
-    put_sub.sub_ability = Some(Box::new(attach_sub));
-    def.sub_ability = Some(Box::new(put_sub));
-}
-
-/// CR 608.2c + CR 301.5b: Token creation followed by a sibling `Attach`
-/// ("create a Kor Soldier token. You may attach an Equipment you control to
-/// it") — the bare-"it" host anaphor must target `LastCreated`, not the
-/// source object or parent trigger subject (the token-creating effect has no
-/// parent target slot).
-pub(super) fn rewire_token_attach_sibling(def: &mut AbilityDefinition) {
-    // Walk the whole sub-ability chain: the token + bare-Attach pair is not
-    // always at the root. Field-Tested Frying Pan ("create a Food token, then
-    // create a 1/1 white Halfling creature token and attach this Equipment to
-    // it") nests the Attach under the *second* token, so a root-only check would
-    // miss it and leave "it" bound to ParentTarget/TriggeringSource (which has no
-    // referent here) instead of the just-created token.
-    let mut node: Option<&mut AbilityDefinition> = Some(def);
-    while let Some(current) = node {
-        if matches!(&*current.effect, Effect::Token { .. }) {
-            if let Some(sub) = current.sub_ability.as_mut() {
-                // Token → PutCounter → Attach is owned by
-                // `rewire_cross_sentence_token_counter_attach`.
-                if !matches!(&*sub.effect, Effect::PutCounter { .. }) {
-                    if let Effect::Attach { target, .. } = sub.effect.as_mut() {
-                        if matches!(
-                            target,
-                            TargetFilter::SelfRef
-                                | TargetFilter::ParentTarget
-                                | TargetFilter::TriggeringSource
-                        ) {
-                            *target = TargetFilter::LastCreated;
-                        }
-                    }
-                }
-            }
-        }
-        node = current.sub_ability.as_deref_mut();
-    }
-}
-
 /// CR 111.3 + CR 702.6a: Intrinsic token statics (Equipment tokens with Equip,
 /// Urza's Saga Construct-style explicit permanent grants) belong on the token's
 /// own `static_abilities`. Transient resolution-time grants — keyword pumps and
@@ -2563,6 +2510,59 @@ fn definition_contains_choose_damage_source(def: &AbilityDefinition) -> bool {
             .is_some_and(definition_contains_choose_damage_source)
 }
 
+/// CR 609.7a + CR 608.2c (#5601): A resolution chain that chose a damage source
+/// but whose head `Effect::ChooseDamageSource` was flattened away during
+/// lowering still leaves a bound `ChosenDamageSource` anaphor in whichever
+/// branch spelled the source out. Desperate Gambit ("Choose a source you
+/// control and flip a coin. … the next time *that source* would deal damage …,
+/// it deals double … . … the next time *it* would deal damage …, prevent that
+/// damage.") lowers the head choice to a bare target selection, so the win
+/// branch's `CreateDamageReplacement { source_filter: ChosenDamageSource }` is
+/// the only surviving marker of the chosen-source context. That surviving
+/// binding is the signal that a *sibling* bare-"it" prevention/replacement in
+/// the SAME chain co-refers with the chosen source (the two "it"s share one
+/// antecedent, CR 608.2c) and must be threaded too. Detecting it lets the
+/// existing `SelfRef` → `ChosenDamageSource` rewrite fire even though the head
+/// no longer matches [`definition_contains_choose_damage_source`].
+fn definition_contains_chosen_damage_source_binding(def: &AbilityDefinition) -> bool {
+    fn effect_binds_chosen(effect: &Effect) -> bool {
+        match effect {
+            Effect::CreateDamageReplacement { source_filter, .. } => {
+                matches!(source_filter, Some(TargetFilter::ChosenDamageSource { .. }))
+            }
+            Effect::PreventDamage {
+                damage_source_filter,
+                ..
+            } => matches!(
+                damage_source_filter,
+                Some(TargetFilter::ChosenDamageSource { .. })
+            ),
+            Effect::FlipCoin {
+                win_effect,
+                lose_effect,
+                ..
+            } => {
+                win_effect
+                    .as_deref()
+                    .is_some_and(definition_contains_chosen_damage_source_binding)
+                    || lose_effect
+                        .as_deref()
+                        .is_some_and(definition_contains_chosen_damage_source_binding)
+            }
+            _ => false,
+        }
+    }
+    effect_binds_chosen(&def.effect)
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(definition_contains_chosen_damage_source_binding)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(definition_contains_chosen_damage_source_binding)
+}
+
 /// CR 609.7a + CR 608.2c: When a resolution chain begins with
 /// `ChooseDamageSource`, bare "it" in a coin-flip one-shot prevention branch
 /// co-refers with the chosen source — rewrite `SelfRef` to `ChosenDamageSource`.
@@ -2606,7 +2606,14 @@ fn rewrite_oneshot_selfref_to_chosen_in_def(def: &mut AbilityDefinition) {
 }
 
 pub(super) fn thread_chosen_damage_source_into_oneshot_effects(defs: &mut [AbilityDefinition]) {
-    if !defs.iter().any(definition_contains_choose_damage_source) {
+    // CR 609.7a (#5601): fire when either the head `ChooseDamageSource` survives
+    // OR a `ChosenDamageSource` anaphor was already bound in a branch (the head
+    // was flattened during lowering, Desperate Gambit) — both prove the chain
+    // chose a damage source, so a sibling bare-"it" `SelfRef` must be threaded.
+    if !defs.iter().any(|def| {
+        definition_contains_choose_damage_source(def)
+            || definition_contains_chosen_damage_source_binding(def)
+    }) {
         return;
     }
     for def in defs.iter_mut() {
@@ -3416,7 +3423,7 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         return (None, text.to_string());
     }
 
-    // CR 700.2 + CR 701.21a + CR 608.2c: "for each player, you choose …" (Tragic
+    // CR 608.2c + CR 608.2d + CR 701.21a: "for each player, you choose …" (Tragic
     // Arrogance → CategoryChooserScope::ControllerForAll) and "for each player,
     // choose … in that player's graveyard/zone" (Breach the Multiverse →
     // ChooseFromZone { zone_owner: EachPlayer }) have DEDICATED dispatchers that
@@ -4888,9 +4895,28 @@ pub(super) fn extract_switch_pt_multi_target(text: &str) -> Option<MultiTargetSp
 
 pub(super) fn extract_double_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
-    let (_, target_text) = preceded(
-        tag::<_, _, OracleError<'_>>("double the number of each kind of counter on "),
-        rest,
+    // CR 701.10e (#5247): "double the number of <descriptor> counter(s) on
+    // <target>" — the descriptor is either "each kind of" or a TYPED counter
+    // ("+1/+1 counters", "charge counters", …). Consume the descriptor up to the
+    // "counter(s) on " that introduces the target, so a typed counter surfaces
+    // the same `MultiTargetSpec` as the "each kind of" form. Without this, Kinetic
+    // Ooze ("double the number of +1/+1 counters on any number of other target
+    // creatures") drops its "any number of … target creatures" bound and binds a
+    // single required target — the ETB then panics with "Unused selected target
+    // slots" (p0). The singular "counter on" arm preserves the "each kind of
+    // counter on" form unchanged.
+    let (target_text, _) = preceded(
+        tag::<_, _, OracleError<'_>>("double the number of "),
+        alt((
+            (
+                take_until::<_, _, OracleError<'_>>(" counters on "),
+                tag(" counters on "),
+            ),
+            (
+                take_until::<_, _, OracleError<'_>>(" counter on "),
+                tag(" counter on "),
+            ),
+        )),
     )
     .parse(lower.as_str())
     .ok()?;
@@ -4959,10 +4985,20 @@ const MULTI_TARGET_VERBS: &[&str] = &[
     "exile", "tap", "untap", "goad", "detain", "return", "destroy", "choose",
 ];
 
-pub(super) const BOUNDED_TARGET_PHRASES: &[(&str, usize, usize)] = &[
-    ("one or two targets", 1, 2),
-    ("one, two, or three targets", 1, 3),
-];
+/// CR 115.1d + CR 601.2d: The bounded target-cardinality lists. The stem carries
+/// the bare `" or "` that enumerates a target COUNT, never a disjunction of two
+/// clauses; each list carries its `(min, max)` count bounds. This is the single
+/// authority for the vocabulary — the complete set measured against the full
+/// pool (`AtomicCards.json`, 34,632 cards). Every consumer composes the trailing
+/// noun it needs off the stem (`" targets"`, `" target "`, `" target"`) rather
+/// than re-spelling the list, so a future cardinality ("one, two, three, or
+/// four …") is added here once. Consumers: `strip_bounded_targets_placeholder`,
+/// `strip_bounded_target_prefix`, `subject::…each-of`, `oracle_target`'s
+/// bare-count target arm, and the binary-choice splitter's divide/distribute
+/// bail (which keys on this cardinality axis — shared by CR 601.2d's "damage or
+/// counters" halves — rather than on a distribution verb).
+pub(crate) const BOUNDED_TARGET_CARDINALITIES: &[(&str, usize, usize)] =
+    &[("one or two", 1, 2), ("one, two, or three", 1, 3)];
 
 /// CR 115.1d + CR 601.2c: Strip exact target-count prefix before a targeted
 /// phrase. "two target creatures" and "X target creatures" both set the exact
@@ -5005,8 +5041,10 @@ fn parse_exact_target_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> 
 /// Returns the unconsumed remainder and a bounded `MultiTargetSpec` with min ≥ 1.
 fn strip_bounded_targets_placeholder(text: &str) -> Option<(&str, MultiTargetSpec)> {
     let lower = text.to_ascii_lowercase();
-    for &(phrase, min, max) in BOUNDED_TARGET_PHRASES {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
+    for &(stem, min, max) in BOUNDED_TARGET_CARDINALITIES {
+        if let Ok((rest, _)) =
+            (tag::<_, _, OracleError<'_>>(stem), tag(" targets")).parse(lower.as_str())
+        {
             let consumed = lower.len() - rest.len();
             return Some((
                 text[consumed..].trim_start(),
@@ -5022,11 +5060,10 @@ fn strip_bounded_targets_placeholder(text: &str) -> Option<(&str, MultiTargetSpe
 /// players").
 fn strip_bounded_target_prefix(text: &str) -> Option<(&str, MultiTargetSpec)> {
     let lower = text.to_ascii_lowercase();
-    for (prefix, min, max) in [
-        ("one or two target ", 1usize, 2usize),
-        ("one, two, or three target ", 1, 3),
-    ] {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(lower.as_str()) {
+    for &(stem, min, max) in BOUNDED_TARGET_CARDINALITIES {
+        if let Ok((rest, _)) =
+            (tag::<_, _, OracleError<'_>>(stem), tag(" target ")).parse(lower.as_str())
+        {
             let consumed = lower.len() - rest.len();
             return Some((
                 text[consumed..].trim_start(),
@@ -5761,6 +5798,22 @@ fn multi_target_for_distribute_among(distribution_amount: &QuantityExpr) -> Mult
     MultiTargetSpec::bounded_expr(min, inner.clone())
 }
 
+/// CR 601.2d: The keywords that introduce a divided/distributed *damage* effect.
+/// Single authority for the "is this a distribution clause?" membership test —
+/// extend here, never inline at a call site.
+///
+/// One caller: `try_parse_distribute_damage` bounds its Pattern-B quantity slice
+/// with this set. (The binary-choice splitter `try_parse_choose_one_of_inline`
+/// formerly also consulted it to bail, but that coupling — and the set-drift
+/// hazard it warned about — is gone: the splitter now keys its bail on the
+/// target-cardinality list `BOUNDED_TARGET_CARDINALITIES`, the axis CR 601.2d
+/// shares across both its "damage or counters" halves. That axis guards the
+/// counter-distribution templating ("Distribute three +1/+1 counters among one,
+/// two, or three target creatures") this damage-verb set never could, so the two
+/// no longer need to agree.)
+pub(super) const DISTRIBUTION_KEYWORDS: [&str; 2] =
+    ["divided as you choose among", "divided evenly"];
+
 /// CR 601.2d: Parse "deal N damage divided as you choose among [targets]" and
 /// "deal N damage distributed among [targets]" → Effect::DealDamage with distribute flag.
 ///
@@ -5808,18 +5861,14 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
         // as in Pattern A.
         let after_prefix_offset = after_tp.lower.len() - after_prefix.len();
         let (_, rest) = after_tp.split_at(after_prefix_offset);
-        let qty_end = [
-            "divided as you choose among",
-            "distributed among",
-            "divided evenly",
-        ]
-        .iter()
-        // allow-noncombinator: structural slice bound, not parsing dispatch — locate
-        // the earliest distribution keyword so `parse_cda_quantity` receives only the
-        // quantity phrase. The dispatch on *which* distribution kind applies is done
-        // by the `distribute_kind` combinator block below; this only bounds the slice.
-        .filter_map(|kw| rest.lower.find(kw))
-        .min()?;
+        let qty_end = DISTRIBUTION_KEYWORDS
+            .iter()
+            // allow-noncombinator: structural slice bound, not parsing dispatch — locate
+            // the earliest distribution keyword so `parse_cda_quantity` receives only the
+            // quantity phrase. The dispatch on *which* distribution kind applies is done
+            // by the `distribute_kind` combinator block below; this only bounds the slice.
+            .filter_map(|kw| rest.lower.find(kw))
+            .min()?;
         let qty_text = rest.lower[..qty_end].trim();
         let qty = parse_cda_quantity(qty_text)?;
         (qty, rest)
@@ -8062,6 +8111,7 @@ fn apply_where_x_to_ability_cost(cost: &mut AbilityCost, where_x_expression: Opt
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
         | AbilityCost::Blight { .. }

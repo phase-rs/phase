@@ -21,6 +21,9 @@ pub fn finalize_rules_state(state: &mut GameState) {
     // post-replacement-continuation slot fold. Idempotent on already-migrated
     // states; cheap on every other invocation.
     state.migrate_post_replacement_continuation();
+    // CR 121.2: Backward-compat for the single-slot `pending_multi_draw` →
+    // `draw_sequences` stack conversion. Idempotent on already-migrated states.
+    state.migrate_pending_multi_draw();
     normalize_legacy_attach_waiting_for(state);
     sync_priority_player_from_waiting_for(state);
     flush_layers(state);

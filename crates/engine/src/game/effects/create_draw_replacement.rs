@@ -53,7 +53,10 @@ pub fn resolve(
 
     // CR 614.1a + CR 113.7a: anchor the installing controller at resolution
     // time so the shield outlives the source permanent's zone/controller.
-    let mut shield = ReplacementDefinition::new(ReplacementEvent::Draw);
+    // CR 121.6b: a runtime shield substitutes ONE individual card draw ("the next
+    // time you would draw a card this turn, ... instead"), not the instruction count.
+    let mut shield = ReplacementDefinition::new(ReplacementEvent::Draw)
+        .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
     shield.runtime_execute = Some(Box::new(substitute));
     shield.consume_on_apply = true; // CR 614.6: one-shot ("the next time").
     shield.expiry = Some(RestrictionExpiry::EndOfTurn); // CR 514.2: "this turn".

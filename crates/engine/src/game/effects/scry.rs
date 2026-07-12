@@ -48,7 +48,7 @@ pub fn resolve(
             // `effects::draw::draw_through_replacement` — scry's own propose
             // event variant means we can't use that helper directly, but the
             // CR-mandated drain is identical.
-            if state.post_replacement_continuation.is_some() {
+            if state.has_post_replacement_drain() {
                 let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                     state, None, None, None, events,
                 );

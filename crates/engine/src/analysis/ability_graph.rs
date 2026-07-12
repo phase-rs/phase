@@ -1539,6 +1539,7 @@ fn fold_cost(acc: &mut NodeAcc, cost: &AbilityCost) {
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
         | AbilityCost::Reveal { .. }

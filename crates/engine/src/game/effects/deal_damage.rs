@@ -392,7 +392,7 @@ pub(crate) fn apply_damage_to_target(
             // prevention riders fire once post-batch in `combat_damage.rs`
             // against the aggregate prevented amount. Firing inline here would
             // re-fire the rider once per attacker against a fragmented count.
-            if !is_combat && state.post_replacement_continuation.is_some() {
+            if !is_combat && state.has_post_replacement_drain() {
                 // CR 615.5 + CR 609.7: leave `post_replacement_event_source`
                 // populated for the call so `TargetFilter::PostReplacementSourceController`
                 // can resolve against the prevented event's damage source. Clear
@@ -1372,7 +1372,7 @@ fn resolve_each_target_power_damage(
             ReplacementResult::Prevented => {
                 // CR 615.5: A prevention rider (e.g. "for each 1 damage prevented
                 // this way") resolves immediately afterward for non-combat damage.
-                if state.post_replacement_continuation.is_some() {
+                if state.has_post_replacement_drain() {
                     let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                         state, None, None, None, events,
                     );
@@ -2331,7 +2331,7 @@ pub fn resolve_each_source_deals_damage(
                 // CR 615.5: fire any prevention rider (e.g. Phyrexian Hydra
                 // "-1/-1 counter for each 1 damage prevented") inline so it
                 // resolves "immediately afterward" as the rule requires.
-                if state.post_replacement_continuation.is_some() {
+                if state.has_post_replacement_drain() {
                     let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                         state, None, None, None, events,
                     );

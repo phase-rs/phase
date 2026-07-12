@@ -258,6 +258,11 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // Watchdog). Runtime enforcement is in morph::turn_face_up. Not
             // registry-keyed.
             | StaticMode::CantBeTurnedFaceUp
+            // CR 122.1d + CR 101.2: CountersCantBeRemoved carries the
+            // `CounterType` axis (Fear of Sleep Paralysis = Stun). Runtime
+            // enforcement is in turns.rs::counter_removal_blocked. Not
+            // registry-keyed.
+            | StaticMode::CountersCantBeRemoved { .. }
     )
 }
 
@@ -4449,6 +4454,38 @@ fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
     // Modal abilities
     for mode_ability in &def.mode_abilities {
         children.push(build_ability_item(mode_ability));
+    }
+
+    // CR 705.2 (#5601): coin-flip branch effects are embedded `AbilityDefinition`s
+    // (not `sub_ability` links), so — like the sub-ability / else / modal chains
+    // above — recurse into them here. Without this the win/lose branch parse
+    // signatures are swallowed by the bare `("win"/"lose", "yes")` presence
+    // markers in `effect_details`, making a real parser change inside a branch
+    // (e.g. Desperate Gambit's lose-branch `damage_source_filter` flipping
+    // `SelfRef` → `ChosenDamageSource`) invisible to the coverage parse-diff.
+    // Same swallowed-structure class as #5492/#5495/#5501.
+    match &*def.effect {
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(win) = win_effect {
+                children.push(build_ability_item(win));
+            }
+            if let Some(lose) = lose_effect {
+                children.push(build_ability_item(lose));
+            }
+        }
+        Effect::FlipCoinUntilLose { win_effect } => {
+            children.push(build_ability_item(win_effect));
+        }
+        _ => {}
     }
 
     ParsedItem {
@@ -8739,6 +8776,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("can't be blocked")
             }
             StaticMode::CantBeBlockedBy { .. } => effective_lower.contains("can't be blocked"),
+            // CR 509.1b: CantBeBlockedUnlessAllBlock — "can't be blocked" anchor
+            // (Tromokratis). The "unless all creatures" clause is validated by
+            // parser tests.
+            StaticMode::CantBeBlockedUnlessAllBlock => effective_lower.contains("can't be blocked"),
             // CR 502.3: Smoke / Damping Field / Winter Orb max-untap cap. Anchor
             // on the verb phrase; the type filter half is the reused TargetFilter
             // and is validated by parser tests.
@@ -10498,6 +10539,48 @@ mod tests {
         );
     }
 
+    /// #5601 (same swallowed-structure class as #5492/#5495/#5501): a parser
+    /// change INSIDE a coin-flip branch — e.g. Desperate Gambit's lose-branch
+    /// `damage_source_filter` flipping `SelfRef` → `ChosenDamageSource` — must be
+    /// visible to the coverage parse-diff. The FlipCoin branch effects are
+    /// embedded `AbilityDefinition`s (not `sub_ability` links), so
+    /// `build_ability_item` must recurse into `win_effect`/`lose_effect` rather
+    /// than emit only the bare `("lose", "yes")` presence marker — otherwise the
+    /// change is swallowed and the sticky reports a false "No card-parse changes".
+    #[test]
+    fn flip_coin_branch_effects_are_exposed_in_parse_details() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind};
+
+        let lose = Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                prevention_duration: None,
+            },
+        ));
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: Some(lose),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let item = build_ability_item(&def);
+        assert!(
+            item.children
+                .iter()
+                .any(|c| c.details.iter().any(|(k, _)| k == "damage_source_filter")),
+            "FlipCoin lose-branch damage_source_filter must be exposed as a child \
+             parse detail; got children {:#?}",
+            item.children
+        );
+    }
+
     #[test]
     fn grant_all_abilities_signature_exposes_source() {
         // Same class as #5492/#5495/#5501/#5507: GrantAllActivatedAbilitiesOf /
@@ -11122,9 +11205,10 @@ mod tests {
     #[test]
     fn card_face_with_replacement_decline_unimplemented_is_detected() {
         let mut face = make_face();
-        face.replacements
-            .push(ReplacementDefinition::new(ReplacementEvent::Draw).mode(
-                ReplacementMode::Optional {
+        face.replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+                .mode(ReplacementMode::Optional {
                     decline: Some(Box::new(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::Unimplemented {
@@ -11132,8 +11216,8 @@ mod tests {
                             description: None,
                         },
                     ))),
-                },
-            ));
+                }),
+        );
 
         assert!(card_face_has_unimplemented_parts(&face));
     }
@@ -13154,6 +13238,31 @@ mod tests {
         assert!(
             gaps.is_empty(),
             "Data-carrying combat statics should be fully supported, but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 509.1b: CantBeBlockedUnlessAllBlock is a nullary registry-keyed
+    /// static enforced by combat.rs declare-blockers validation (Tromokratis).
+    #[test]
+    fn cant_be_blocked_unless_all_block_has_no_coverage_gap() {
+        let mut face = make_face();
+        face.oracle_text = Some(
+            "Tromokratis can't be blocked unless all creatures defending player controls block it."
+                .to_string(),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::CantBeBlockedUnlessAllBlock)
+                .affected(TargetFilter::SelfRef)
+                .description(
+                    "Tromokratis can't be blocked unless all creatures defending player controls block it.".to_string(),
+                ),
+        );
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "CantBeBlockedUnlessAllBlock should be fully supported, but got gaps: {:?}",
             gaps
         );
     }

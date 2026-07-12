@@ -35,13 +35,15 @@ use crate::types::events::{ClashResult, PlayerActionKind};
 // Supporting types
 // ---------------------------------------------------------------------------
 
-/// CR 700.2: Who makes a choice during an effect's resolution.
+/// CR 608.2c-e: Who makes a choice during an effect's resolution (controller by
+/// default per CR 608.2c; opponent/APNAP ordering per CR 608.2e). Not CR 700.2 —
+/// that defines *modal* choices (picking a bulleted mode), a distinct concept.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Chooser {
     /// The controller of the spell/ability makes the choice.
     #[default]
     Controller,
-    /// An opponent of the controller makes the choice (CR 700.2).
+    /// An opponent of the controller makes the choice (CR 608.2e).
     /// In 2-player, the single opponent. In multiplayer, controller chooses which opponent.
     Opponent,
 }
@@ -5806,7 +5808,7 @@ pub enum AttackScope {
 #[serde(tag = "type")]
 pub enum PlayerFilter {
     /// The controller of the effect or quantity.
-    /// CR 700.2a: the default chooser for any modal/effect player reference.
+    /// CR 608.2c: the controller is the default player for any effect/quantity reference.
     #[default]
     Controller,
     /// All opponents of the controller.
@@ -7765,6 +7767,15 @@ pub enum AbilityCost {
     /// CR 701.3d: Unattach this Equipment from the object it is equipping.
     /// Used by activated costs such as Sunforger's "Unattach this Equipment".
     Unattach,
+    /// CR 701.3d + CR 608.2k: Unattach `count` attachments matching `filter`
+    /// from the source host as a cost; the detached object stays on the
+    /// battlefield and becomes this ability's cost-referent (Captain America's
+    /// "Unattach an Equipment from ~" → "that Equipment's mana value"). Distinct
+    /// from the unit `Unattach` (which detaches the source Equipment itself).
+    UnattachFrom {
+        filter: TargetFilter,
+        count: u32,
+    },
     Mill {
         count: u32,
     },
@@ -7945,6 +7956,7 @@ impl AbilityCost {
             | AbilityCost::PaySpeed { .. }
             | AbilityCost::ReturnToHand { .. }
             | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
             | AbilityCost::Blight { .. }
@@ -8029,6 +8041,7 @@ impl AbilityCost {
             AbilityCost::PaySpeed { .. } => vec![CostCategory::PaysSpeed],
             AbilityCost::ReturnToHand { .. } => vec![CostCategory::ReturnsToHand],
             AbilityCost::Unattach => vec![CostCategory::Unattaches],
+            AbilityCost::UnattachFrom { .. } => vec![CostCategory::Unattaches],
             AbilityCost::Mill { .. } => vec![CostCategory::Mills],
             AbilityCost::Exert => vec![CostCategory::Exerts],
             AbilityCost::Blight { .. } => vec![CostCategory::PutsCounters],
@@ -8133,6 +8146,7 @@ impl AbilityCost {
             | AbilityCost::PaySpeed { .. }
             | AbilityCost::ReturnToHand { .. }
             | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
             | AbilityCost::Blight { .. }
@@ -11405,7 +11419,7 @@ pub enum Effect {
     /// Building block for impulse draw, cascade, hideaway, and similar exile-then-select patterns.
     /// The selection is from the tracked set of the parent effect's result, falling back to
     /// direct zone contents for wordings like "choose a card in your hand."
-    /// CR 700.2: The `chooser` field determines who makes the selection.
+    /// CR 608.2d: The `chooser` field determines who makes the selection.
     ChooseFromZone {
         /// How many cards to choose.
         #[serde(default = "default_one")]
@@ -11467,7 +11481,7 @@ pub enum Effect {
     ForEachCategory {
         /// CR 105.1 / CR 205.2a: Which fixed category's members are iterated.
         category: IterationCategory,
-        /// CR 700.2: Who makes each per-member choice when multiple candidates
+        /// CR 608.2d: Who makes each per-member choice when multiple candidates
         /// exist. Controller by default.
         #[serde(default)]
         chooser: Chooser,
@@ -12771,6 +12785,10 @@ pub enum PileSource {
     /// Objects are revealed from the top of the controller's library
     /// (Fact or Fiction shape). `count` is the number of cards to reveal.
     RevealedFromLibraryTop { count: u32 },
+    /// Objects were exiled earlier in the same resolution chain
+    /// (Boneyard Parley shape). The eligible set is derived from
+    /// `linked_exile_cards_for_source` keyed on the ability's source.
+    ExiledThisWay,
 }
 
 /// Default pile source is Battlefield (backward-compatible with Make an Example).
@@ -18445,6 +18463,36 @@ pub enum CombatDamageScope {
     NoncombatOnly,
 }
 
+/// CR 121.2 + CR 616.1g: Which stage of a draw a `ReplacementEvent::Draw`
+/// definition applies at.
+///
+/// CR 121.2 makes "draw N cards" two distinct things: the *instruction*, and the N
+/// *individual card draws* it performs. CR 121.2a says an instruction "can be
+/// modified by replacement effects that refer to the number of cards drawn. This
+/// modification occurs before considering any of the individual card draws. See
+/// rule 616.1g." A definition watches exactly one of those, and conflating them is
+/// the CR 121.2a divergence this axis exists to close.
+///
+/// This is a restriction on the *definition* — a sibling of `combat_scope`,
+/// `destination_zone` and `damage_target_filter`, evaluated in the same matcher —
+/// not a property of the event. Which stage an event is currently at is the
+/// event's business, and is a separate type.
+///
+/// Required exactly when `ReplacementDefinition::event` is `Draw`, and forbidden
+/// otherwise; checkable by `ReplacementDefinition::validate_draw_scope`, and enforced
+/// across the full corpus by `scripts/draw_replacement_census.py`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DrawReplacementScope {
+    /// Modifies the draw *instruction*'s count before any individual draw happens
+    /// (CR 121.2a). Quantum Riddler — "if you would draw one or more cards, you
+    /// draw that many cards plus one instead" — is the only card in the pool that
+    /// does this.
+    InstructionCount,
+    /// Replaces or prevents a single individual card draw (CR 121.6b). Dredge,
+    /// Notion Thief, Hullbreacher, and the runtime "you can't draw" shields.
+    IndividualDraw,
+}
+
 /// CR 614.1a: Which player(s) a replacement effect applies to, scoped relative
 /// to the replacement source player. For permanents/spells this is the source's
 /// controller; for cards outside the battlefield/stack, CR 109.4 + CR 108.4a
@@ -18548,6 +18596,17 @@ pub struct ReplacementDefinition {
     /// None = all damage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combat_scope: Option<CombatDamageScope>,
+    /// CR 121.2 + CR 616.1g: which stage of a draw this definition watches — the
+    /// instruction's count, or one individual card draw. See
+    /// [`DrawReplacementScope`].
+    ///
+    /// `Some` exactly when `event` is `Draw`, `None` otherwise; declared at
+    /// construction and never inferred later. Checkable by
+    /// [`ReplacementDefinition::validate_draw_scope`]; the enforcing authority is the
+    /// corpus census gate (`scripts/draw_replacement_census.py`), which cross-checks
+    /// every declared scope against an independently derived one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_scope: Option<DrawReplacementScope>,
     /// Shield type for one-shot replacement effects that expire at cleanup.
     #[serde(default, skip_serializing_if = "ShieldKind::is_none")]
     pub shield_kind: ShieldKind,
@@ -18677,11 +18736,59 @@ impl ReplacementDefinition {
         }
     }
 
+    /// CR 121.2 + CR 616.1g: declare which draw stage this definition watches.
+    ///
+    /// Chainable, so a `Draw` producer reads `ReplacementDefinition::new(Draw)
+    /// .draw_scope(IndividualDraw)`. The scope is declared at construction and
+    /// never inferred later — inferring it from the `execute` shape is exactly the
+    /// CR 121.2a conflation this axis exists to prevent.
+    pub fn draw_scope(mut self, scope: DrawReplacementScope) -> Self {
+        self.draw_scope = Some(scope);
+        self
+    }
+
+    /// CR 121.2: `draw_scope` is `Some` exactly when `event` is `Draw`.
+    ///
+    /// A `Draw` definition with no scope would have to have one guessed for it at
+    /// match time; a non-`Draw` definition with a scope is a category error. Both
+    /// are construction bugs, so this returns the offending definition's problem
+    /// rather than silently defaulting.
+    /// `DrawCards` is treated as a draw event here, not as a non-draw one. It is a
+    /// dead registry alias (zero producers, zero corpus rows) slated for removal,
+    /// but while it exists it names a draw, and `draw_replacement_census.py` scans
+    /// `event in ("Draw", "DrawCards")`. Having the validator forbid a scope on a
+    /// variant the census demands one for would be a contradiction between the two
+    /// authorities, so they agree: both treat it as a draw.
+    pub fn validate_draw_scope(&self) -> Result<(), String> {
+        let is_draw_event = matches!(
+            self.event,
+            ReplacementEvent::Draw | ReplacementEvent::DrawCards
+        );
+        match (is_draw_event, &self.draw_scope) {
+            (true, None) => Err(format!(
+                "{:?} definition has no draw_scope (CR 121.2: a definition must declare \
+                 whether it modifies the instruction's count or replaces one individual \
+                 draw). description={:?}",
+                self.event, self.description
+            )),
+            (false, Some(scope)) => Err(format!(
+                "non-Draw replacement ({:?}) carries draw_scope {scope:?} — draw_scope is \
+                 meaningless outside CR 121.2",
+                self.event
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// Create a new replacement definition with only the required event field.
     /// All optional fields default to `None`/`Mandatory`.
+    ///
+    /// A `Draw` event REQUIRES a follow-up `.draw_scope(...)` (CR 121.2); see
+    /// [`Self::validate_draw_scope`].
     pub fn new(event: ReplacementEvent) -> Self {
         Self {
             event,
+            draw_scope: None,
             execute: None,
             runtime_execute: None,
             mode: ReplacementMode::Mandatory,

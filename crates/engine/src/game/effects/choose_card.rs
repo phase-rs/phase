@@ -2,7 +2,7 @@ use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
-/// CR 700.2: Choose — player makes a choice from available options.
+/// CR 608.2d: Choose — player makes a choice from available options.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,

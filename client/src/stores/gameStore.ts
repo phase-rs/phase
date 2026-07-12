@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import type {
   EngineAdapter,
+  EngineSnapshot,
   FormatConfig,
   GameAction,
   GameEvent,
@@ -135,7 +136,31 @@ interface GameStoreState {
    * p2p). Consumed by telemetry `game_end` to classify `winner_kind`.
    */
   aiSeatIds: PlayerId[];
+  /**
+   * `EngineSnapshot.seq` of the most recently committed engine pair — the gate
+   * `commitEngineSnapshot` uses to drop commits derived from an older engine
+   * version than one already applied. Transient (never persisted); returns to 0
+   * with the rest of `initialState` on `reset`.
+   */
+  lastCommittedSeq: number;
 }
+
+/**
+ * Fields written exclusively by `commitEngineSnapshot` from the snapshot's own
+ * contents. `extraState` structurally EXCLUDES them: were they writable there,
+ * a caller could smuggle an ungated pair field past the revision gate and
+ * reintroduce exactly the mixed-epoch commit this authority exists to prevent.
+ * `lastCommittedSeq` (the gate counter itself) is excluded for the same reason.
+ */
+type CommitExtraState = Partial<Omit<GameStoreState,
+  | "gameState"
+  | "waitingFor"
+  | "legalActions"
+  | "autoPassRecommended"
+  | "spellCosts"
+  | "legalActionsByObject"
+  | "stuckDiagnostic"
+  | "lastCommittedSeq">>;
 
 interface GameStoreActions {
   initGame: (
@@ -160,9 +185,52 @@ interface GameStoreActions {
   undo: () => Promise<void>;
   reset: () => void;
   setAdapter: (adapter: EngineAdapter) => void;
-  setGameState: (state: GameState) => void;
-  setWaitingFor: (waitingFor: WaitingFor | null) => void;
-  setLegalActions: (actions: GameAction[]) => void;
+  /**
+   * THE single writer of the live-game engine pair (`gameState`, `waitingFor`,
+   * and every `legalResultState(...)` field). Every live-game commit — local
+   * dispatch, remote update, batch resolve, init, resume, undo, restore —
+   * routes through here.
+   *
+   * Revision gate: the pair is applied iff `snapshot.seq >= lastCommittedSeq`,
+   * so a commit derived from an OLDER engine version can never clobber a newer
+   * one already applied. (Equal seq arises only from two reads of the same
+   * cached wire snapshot, whose pairs are byte-identical, so `>=` is idempotent
+   * and lets a remote update and a local read of that snapshot coexist.)
+   * Returns false when the pair was dropped as stale.
+   *
+   * Events, log entries, and undo checkpoints are applied ALWAYS, even for a
+   * dropped pair: history is ordered by arrival, not by engine epoch, and a
+   * checkpoint is a pre-action state that stays valid whichever pair wins.
+   *
+   * Known residue (documented, not fixed here): because history applies
+   * unconditionally, a leftover cross-match commit can append game-1 entries
+   * into game-2's histories after its pair is correctly dropped. Strictly less
+   * wrong than the pre-fix behavior, where the whole stale pair clobbered.
+   *
+   * Documented exemptions from this authority (all write outside a live game,
+   * or are immediately superseded by a newest-by-construction commit):
+   * `replayStore` timeline scrubbing, the GameOver-only `waitingFor` writes in
+   * `GamePage`, `sessionCleanup`'s session-boundary prompt clear, and the
+   * teardown clears in `GameProvider`/`disposeMatchAdapter`.
+   */
+  commitEngineSnapshot: (
+    snapshot: EngineSnapshot,
+    opts?: {
+      /** Replaces `events`; appended to `eventHistory`. Applied even when the pair is dropped. */
+      events?: GameEvent[];
+      /** Seq-stamped and appended to `logHistory`. Applied even when the pair is dropped. */
+      logEntries?: GameLogEntry[];
+      /** Undo checkpoints. Applied even when the pair is dropped. */
+      stateHistory?: GameState[];
+      /**
+       * Site-specific fields applied in the SAME `set()` — but only when the
+       * pair commit is accepted, and after the base commit + history handling,
+       * so init/resume/restore sites can atomically reset or seed history
+       * fields alongside their pair.
+       */
+      extraState?: CommitExtraState;
+    },
+  ) => boolean;
   setGameMode: (mode: GameMode) => void;
   setLobbyProgress: (progress: { joined: number; total: number } | null) => void;
   setResolutionProgress: (progress: { resolved: number; total: number } | null) => void;
@@ -195,11 +263,58 @@ const initialState: GameStoreState = {
   isResolvingAll: false,
   startingContest: null,
   aiSeatIds: [],
+  lastCommittedSeq: 0,
 };
 
 export const useGameStore = create<GameStore>()(
   subscribeWithSelector((set, get) => ({
     ...initialState,
+
+    commitEngineSnapshot: (snapshot, opts) => {
+      // Decide the gate BEFORE `set`, so the updater stays a pure reducer.
+      // Safe: `get()` → `set()` runs synchronously with no `await` between, so
+      // no other commit can land in the window.
+      const accepted = snapshot.seq >= get().lastCommittedSeq;
+
+      set((prev) => {
+        // Seq-stamp incoming log entries against the CURRENT counter.
+        let nextLogSeq = prev.nextLogSeq;
+        const stampedLogEntries = (opts?.logEntries ?? []).map((entry) => ({
+          ...entry,
+          seq: nextLogSeq++,
+        }));
+
+        return {
+          // 1. The engine pair — gated.
+          ...(accepted
+            ? {
+                gameState: snapshot.state,
+                waitingFor: snapshot.state.waiting_for,
+                ...legalResultState(snapshot.legalResult),
+                lastCommittedSeq: snapshot.seq,
+              }
+            : {}),
+          // 2. History — ordered by arrival, so applied unconditionally.
+          ...(opts?.events
+            ? {
+                events: opts.events,
+                eventHistory: [...prev.eventHistory, ...opts.events].slice(-1000),
+              }
+            : {}),
+          ...(opts?.logEntries
+            ? {
+                logHistory: [...prev.logHistory, ...stampedLogEntries].slice(-2000),
+                nextLogSeq,
+              }
+            : {}),
+          ...(opts?.stateHistory ? { stateHistory: opts.stateHistory } : {}),
+          // 3. Site-specific fields last, so an init/resume/restore reset wins
+          //    over the history append above.
+          ...(accepted ? opts?.extraState : undefined),
+        };
+      });
+      return accepted;
+    },
 
     initGame: async (gameId, adapter, deckData, formatConfig, playerCount, matchConfig, firstPlayer) => {
       // Clear the display-only stack-pacing tracker so a fast-churning end to a
@@ -208,8 +323,11 @@ export const useGameStore = create<GameStore>()(
       resetStackThroughput();
       await adapter.initialize();
       const initResult = await adapter.initializeGame(deckData, formatConfig, playerCount, matchConfig, firstPlayer);
-      const state = await adapter.getState();
-      const legalResult = await adapter.getLegalActions();
+      // Fetched AFTER the engine is initialized, so this snapshot is
+      // newest-by-construction under the global counter — it always passes the
+      // gate, and it drops any leftover in-flight commit from a prior match.
+      const snapshot = await adapter.getSnapshot();
+      const state = snapshot.state;
       const initLogEntries = (initResult.log_entries ?? []).map((entry, i) => ({
         ...entry,
         seq: i,
@@ -230,19 +348,18 @@ export const useGameStore = create<GameStore>()(
             startingPlayer: state.current_starting_player ?? state.active_player,
           }
         : null;
-      set({
-        gameId,
-        adapter,
-        gameState: state,
-        waitingFor: state.waiting_for,
-        ...legalResultState(legalResult),
-        events: [],
-        eventHistory: [],
-        logHistory: initLogEntries,
-        nextLogSeq: initLogEntries.length,
-        stateHistory: [],
-        turnCheckpoints: [],
-        startingContest,
+      get().commitEngineSnapshot(snapshot, {
+        extraState: {
+          gameId,
+          adapter,
+          events: [],
+          eventHistory: [],
+          logHistory: initLogEntries,
+          nextLogSeq: initLogEntries.length,
+          stateHistory: [],
+          turnCheckpoints: [],
+          startingContest,
+        },
       });
       saveGame(gameId, state);
     },
@@ -253,21 +370,20 @@ export const useGameStore = create<GameStore>()(
       resetStackThroughput();
       await adapter.initialize();
       await adapter.restoreState(savedState);
-      const state = await adapter.getState();
-      const legalResult = await adapter.getLegalActions();
+      // Post-restore fetch — newest-by-construction, so it always passes the gate.
+      const snapshot = await adapter.getSnapshot();
       const savedCheckpoints = await loadCheckpoints(gameId);
-      set({
-        gameId,
-        adapter,
-        gameState: state,
-        waitingFor: state.waiting_for,
-        ...legalResultState(legalResult),
-        events: [],
-        eventHistory: [],
-        logHistory: [],
-        nextLogSeq: 0,
-        stateHistory: [],
-        turnCheckpoints: savedCheckpoints,
+      get().commitEngineSnapshot(snapshot, {
+        extraState: {
+          gameId,
+          adapter,
+          events: [],
+          eventHistory: [],
+          logHistory: [],
+          nextLogSeq: 0,
+          stateHistory: [],
+          turnCheckpoints: savedCheckpoints,
+        },
       });
     },
 
@@ -280,20 +396,20 @@ export const useGameStore = create<GameStore>()(
       // is to pull the state out and seed the store. No stateHistory
       // (multiplayer = no undo); no checkpoints (P2P never saved them).
       await adapter.initialize();
-      const state = await adapter.getState();
-      const legalResult = await adapter.getLegalActions();
-      set({
-        gameId,
-        adapter,
-        gameState: state,
-        waitingFor: state.waiting_for,
-        ...legalResultState(legalResult),
-        events: [],
-        eventHistory: [],
-        logHistory: [],
-        nextLogSeq: 0,
-        stateHistory: [],
-        turnCheckpoints: [],
+      // Fetched after that `initialize()` (which is what restored the engine, per
+      // the note above), so the snapshot is newest-by-construction.
+      const snapshot = await adapter.getSnapshot();
+      get().commitEngineSnapshot(snapshot, {
+        extraState: {
+          gameId,
+          adapter,
+          events: [],
+          eventHistory: [],
+          logHistory: [],
+          nextLogSeq: 0,
+          stateHistory: [],
+          turnCheckpoints: [],
+        },
       });
     },
 
@@ -321,34 +437,21 @@ export const useGameStore = create<GameStore>()(
       // The engine rejects the action if this doesn't match the authorized
       // submitter — never trust the UI to route actions to the right seat.
       const result = await adapter.submitAction(submittedAction, getPlayerId());
-      const newState = await adapter.getState();
-      const legalResult = await adapter.getLegalActions();
+      // ONE atomic pair — a separate getState()/getLegalActions() pair could
+      // straddle an engine advance and commit a mismatched state/actions pair.
+      const snapshot = await adapter.getSnapshot();
 
-      set((prev) => {
-        const newHistory = shouldSaveHistory
-          ? [...prev.stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
-          : prev.stateHistory;
-
-        // Assign monotonic sequence numbers to new log entries
-        let seq = prev.nextLogSeq;
-        const newLogEntries = (result.log_entries ?? []).map((entry) => ({
-          ...entry,
-          seq: seq++,
-        }));
-
-        return {
-          gameState: newState,
-          events: result.events,
-          eventHistory: [...prev.eventHistory, ...result.events].slice(-1000),
-          logHistory: [...prev.logHistory, ...newLogEntries].slice(-2000),
-          nextLogSeq: seq,
-          waitingFor: newState.waiting_for,
-          ...legalResultState(legalResult),
-          stateHistory: newHistory,
-        };
+      // Read-then-commit with no `await` between, so no other commit interleaves.
+      const stateHistory = shouldSaveHistory
+        ? [...get().stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
+        : undefined;
+      get().commitEngineSnapshot(snapshot, {
+        events: result.events,
+        logEntries: result.log_entries ?? [],
+        stateHistory,
       });
 
-      if (gameId) saveGame(gameId, newState);
+      if (gameId) saveGame(gameId, snapshot.state);
 
       return result.events;
     },
@@ -362,14 +465,16 @@ export const useGameStore = create<GameStore>()(
 
       // Sync WASM engine state with the restored client state
       await adapter.restoreState(previous);
-      const legalResult = await adapter.getLegalActions();
+      // Commit the snapshot's OWN state, not `previous`: post-restore the engine
+      // is the source of truth, and taking both halves from one snapshot is what
+      // keeps the pair coherent. Newest-by-construction, so it passes the gate.
+      const snapshot = await adapter.getSnapshot();
 
-      set({
-        gameState: previous,
-        waitingFor: previous.waiting_for,
-        ...legalResultState(legalResult),
-        events: [],
-        stateHistory: stateHistory.slice(0, -1),
+      get().commitEngineSnapshot(snapshot, {
+        extraState: {
+          events: [],
+          stateHistory: stateHistory.slice(0, -1),
+        },
       });
     },
 
@@ -383,18 +488,6 @@ export const useGameStore = create<GameStore>()(
 
     setAdapter: (adapter) => {
       set({ adapter });
-    },
-
-    setGameState: (state) => {
-      set({ gameState: state });
-    },
-
-    setWaitingFor: (waitingFor) => {
-      set({ waitingFor });
-    },
-
-    setLegalActions: (actions) => {
-      set({ legalActions: actions });
     },
 
     setGameMode: (mode) => {

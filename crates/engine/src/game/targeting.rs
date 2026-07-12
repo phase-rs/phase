@@ -1162,11 +1162,11 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         // resolution. Returns `None` if invoked outside the post-replacement
         // window — caller should never reach this filter from elsewhere.
         TargetFilter::PostReplacementSourceController => {
-            let source_obj_id = state.post_replacement_event_source?;
+            let source_obj_id = state.post_replacement_event_source()?;
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))
         }
-        TargetFilter::PostReplacementDamageTarget => state.post_replacement_event_target.clone(),
+        TargetFilter::PostReplacementDamageTarget => state.post_replacement_event_target().cloned(),
         // CR 108.3 + CR 400.3 + CR 615.5: Owner of the prevented event's damage
         // recipient ("that creature's owner shuffles it into their library").
         // Mirrors `PostReplacementSourceController`'s player-projection but reads
@@ -1174,7 +1174,7 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         // slot / controller (CR 109.4). Routed here to the recipient's owner's
         // library by CR 400.3.
         TargetFilter::PostReplacementDamageTargetOwner => {
-            match &state.post_replacement_event_target {
+            match state.post_replacement_event_target() {
                 Some(TargetRef::Object(id)) => {
                     state.objects.get(id).map(|o| TargetRef::Player(o.owner))
                 }
@@ -2314,7 +2314,9 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{Comparator, ContinuousModification, Duration, QuantityExpr};
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::CastingVariant;
+    use crate::types::game_state::{
+        CastingVariant, DrainStatus, PostReplacementDrain, ResidentDrainPolicy,
+    };
     use crate::types::identifiers::CardId;
     use crate::types::keywords::{HexproofFilter, ProtectionTarget};
     use crate::types::mana::ManaColor;
@@ -2389,7 +2391,19 @@ mod tests {
         let (mut state, c0, _c1) = setup_with_creatures();
         // c0 is controlled by P0 — pretend it's the prevented damage source
         // and the prevention shield (e.g. Swans) is controlled by P1.
-        state.post_replacement_event_source = Some(c0);
+        // `Dispatching`, not `Ready`: production reads this filter from inside a
+        // running continuation, whose own work has already been taken out of the
+        // drain but whose prevented-event context is still readable (CR 615.5).
+        state.post_replacement_drains.install(
+            PostReplacementDrain {
+                status: DrainStatus::Dispatching,
+                source: None,
+                applied: HashSet::new(),
+                event_source: Some(c0),
+                event_target: None,
+            },
+            ResidentDrainPolicy::Replace,
+        );
         let result = resolve_event_context_target(
             &state,
             &TargetFilter::PostReplacementSourceController,
@@ -2404,7 +2418,7 @@ mod tests {
         // Outside that window the slot is `None` and the filter should return
         // `None`, letting callers fall back to controller / target_player.
         let (state, _c0, _c1) = setup_with_creatures();
-        assert!(state.post_replacement_event_source.is_none());
+        assert!(state.post_replacement_event_source().is_none());
         let result = resolve_event_context_target(
             &state,
             &TargetFilter::PostReplacementSourceController,
@@ -2425,7 +2439,17 @@ mod tests {
         // would return P0 and fail this assertion.
         let (mut state, _c0, c1) = setup_with_creatures();
         state.objects.get_mut(&c1).unwrap().controller = PlayerId(0);
-        state.post_replacement_event_target = Some(TargetRef::Object(c1));
+        // `Dispatching` for the same reason as the sibling test above.
+        state.post_replacement_drains.install(
+            PostReplacementDrain {
+                status: DrainStatus::Dispatching,
+                source: None,
+                applied: HashSet::new(),
+                event_target: Some(TargetRef::Object(c1)),
+                event_source: None,
+            },
+            ResidentDrainPolicy::Replace,
+        );
         let result = resolve_event_context_target(
             &state,
             &TargetFilter::PostReplacementDamageTargetOwner,
@@ -2438,7 +2462,7 @@ mod tests {
     fn post_replacement_damage_target_owner_returns_none_when_slot_empty() {
         // Defensive: only resolves inside the post-replacement window.
         let (state, _c0, _c1) = setup_with_creatures();
-        assert!(state.post_replacement_event_target.is_none());
+        assert!(state.post_replacement_event_target().is_none());
         let result = resolve_event_context_target(
             &state,
             &TargetFilter::PostReplacementDamageTargetOwner,

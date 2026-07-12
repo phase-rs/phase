@@ -242,6 +242,160 @@ fn the_kingpin_of_crime_full_card_has_no_unimplemented() {
     }
 }
 
+/// CR 601.2c + CR 611.2c (#4751, Tail Swipe / Joust / Blizzard Brawl): the
+/// two-target fight class — "Choose target creature you control and target
+/// creature you don't control. [buff the you-control creature]. Then those
+/// creatures fight each other." — must NOT drop the second target. The buff verb
+/// ("gets +1/+1") lives in a LATER sentence, so `starts_target_continuous_clause`
+/// previously scanned across the period and mis-split the two-target declaration
+/// at its "and", leaving `Effect::unimplemented("target", "target creature you
+/// don't control")`. Both target slots must survive AND the buff must bind slot 0
+/// (the you-control creature), not the whole board.
+#[test]
+fn two_target_fight_pump_keeps_both_slots_and_buffs_slot_zero() {
+    fn collect(ability: &AbilityDefinition, out: &mut Vec<Effect>) {
+        out.push((*ability.effect).clone());
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            collect(sub, out);
+        }
+        if let Some(els) = ability.else_ability.as_deref() {
+            collect(els, out);
+        }
+    }
+
+    for (text, ty) in [
+        (
+            "Choose target creature you control and target creature you don't control. \
+             If you cast this spell during your main phase, the creature you control gets \
+             +1/+1 until end of turn. Then those creatures fight each other.",
+            "Sorcery",
+        ),
+        (
+            "Choose target creature you control and target creature you don't control. \
+             The creature you control gets +2/+1 until end of turn if it's a Knight. \
+             Then those creatures fight each other.",
+            "Sorcery",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, "Fight Card", &[], &[ty.to_string()], &[]);
+        let ability = parsed
+            .abilities
+            .first()
+            .unwrap_or_else(|| panic!("expected a spell ability for: {text}"));
+        assert!(
+            !ability_chain_has_unimplemented(ability),
+            "two-target fight chain dropped a slot to Unimplemented: {ability:#?}"
+        );
+
+        let mut effects = Vec::new();
+        collect(ability, &mut effects);
+
+        // Both target slots announced: you-control (A) and you-don't-control (B).
+        let controllers: Vec<Option<ControllerRef>> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(tf),
+                } => Some(tf.controller.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            controllers.contains(&Some(ControllerRef::You)),
+            "missing the you-control target slot: {controllers:?}"
+        );
+        assert!(
+            controllers
+                .iter()
+                .any(|c| matches!(c, Some(ControllerRef::Opponent))),
+            "missing the opponent target slot: {controllers:?}"
+        );
+
+        // CR 611.2c: the "the creature you control gets +N/+M" buff binds slot 0,
+        // never an unscoped `Any`/`ParentTarget` whole-board target.
+        let pump_target = effects.iter().find_map(|e| match e {
+            Effect::Pump { target, .. } => Some(target.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            pump_target,
+            Some(TargetFilter::ParentTargetSlot { index: 0 }),
+            "the pump must buff the first-declared you-control creature (slot 0)"
+        );
+    }
+}
+
+/// #4751 review (matthewevans): part 1's sentence-bounding drops only a STRAY
+/// `Effect::unimplemented("you")` head from Life at Stake — it does NOT remove a
+/// functional chooser. "You and target creature's controller each secretly
+/// choose a number" is unimplemented on BOTH `main` and this branch: the real
+/// mechanic is a `Choose { NumberRange }` (with the exile + lose-life tail),
+/// byte-identical either way. On `main` the leading "You" was split off its "and"
+/// by a coincidental " loses " in a LATER sentence into a bare
+/// `Unimplemented { name: "you", description: "You" }`; bounding the verb scan to
+/// the first sentence stops that coincidental split, so the chain now heads at
+/// the real `Choose` node instead of the stray "you" fragment. This pins that the
+/// card's actual choose-a-number mechanic survives (no regression) — the
+/// controller was never a *parsed* chooser to lose (that stays a pre-existing gap
+/// on both, orthogonal to this PR).
+#[test]
+fn life_at_stake_keeps_choose_mechanic_and_drops_only_the_stray_you_stub() {
+    use crate::types::ability::ChoiceType;
+
+    fn collect(a: &AbilityDefinition, out: &mut Vec<Effect>) {
+        out.push((*a.effect).clone());
+        if let Some(s) = a.sub_ability.as_deref() {
+            collect(s, out);
+        }
+        if let Some(e) = a.else_ability.as_deref() {
+            collect(e, out);
+        }
+    }
+
+    let text = "You and target creature's controller each secretly choose a number 0 or greater. \
+         Then, reveal the chosen numbers. If your number was highest or tied for the highest, \
+         exile that creature. Each player who chose the highest number loses that much life.";
+    let parsed = parse_oracle_text(text, "Life at Stake", &[], &["Instant".to_string()], &[]);
+    let ability = parsed.abilities.first().expect("expected a spell ability");
+
+    // The real mechanic — Choose a number — heads the chain (not a stray
+    // `Unimplemented("you")` fragment).
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::NumberRange { .. },
+                ..
+            }
+        ),
+        "Life at Stake must head at a NumberRange Choose, not a stray you-stub; got {:#?}",
+        ability.effect
+    );
+
+    let mut effects = Vec::new();
+    collect(ability, &mut effects);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        )),
+        "the exile-the-creature tail must survive: {effects:#?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::LoseLife { .. })),
+        "the lose-life tail must survive: {effects:#?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { name, .. } if name == "you")),
+        "the stray Unimplemented(\"you\") head must be gone: {effects:#?}"
+    );
+}
+
 /// Recursively walk an ability chain (root effect + `sub_ability` + `else_ability`)
 /// for any `Effect::Unimplemented` node — the coverage-gap sentinel the one-shot
 /// effect pipeline emits when a clause matches no combinator.
@@ -6892,6 +7046,51 @@ fn blazing_salvo_unless_have_deal_damage() {
     }
 }
 
+/// CR 601.2d (#5613): a divided/distributed cardinality-list clause's bare " or "
+/// ("… among one, two, or three target creatures") is a target-COUNT enumerator.
+/// Before this fix the binary-choice splitter split there and trial-parsed the
+/// orphan tail back through the effect→subject→static→imperative cascade. That
+/// trial parse FAILS and is discarded, so the final parse OUTPUT is identical on
+/// `main` (the pool coverage-parse-diff shows zero card changes) — but it
+/// re-enters the clause parser several frames deep. The regression is stack
+/// DEPTH, not output, so this asserts it on a bounded-stack thread.
+///
+/// Peak stack for this parse (full `parse_oracle_text` pipeline, measured):
+/// ~3.5 MiB on `main` (the wasted trial parse) vs ~1.4 MiB with the guard. A
+/// 2.5 MiB stack thus survives here (~1.1 MiB headroom) and overflows on `main`
+/// (~1 MiB margin): reintroducing the wasted trial parse overflows this thread's
+/// guard page and aborts the test binary — so the test *fails when the fix is
+/// reverted* (AI-CONTRIBUTOR.md §5(i)). The in-thread asserts additionally pin
+/// the parse OUTPUT (`PutCounter` + a captured distribution).
+#[test]
+fn distribute_cardinality_clause_parses_within_a_bounded_stack() {
+    let handle = std::thread::Builder::new()
+        .stack_size(2_621_440) // 2.5 MiB — mid-gap between the ~1.4 / ~3.5 MiB floors
+        .spawn(|| {
+            let parsed = parse_oracle_text(
+                "Distribute three +1/+1 counters among one, two, or three target creatures.",
+                "Bounded Stack Test",
+                &[],
+                &["Sorcery".to_string()],
+                &[],
+            );
+            let def = parsed.abilities.first().expect("expected a spell ability");
+            assert!(
+                matches!(*def.effect, Effect::PutCounter { .. }),
+                "counter distribution must parse whole as PutCounter, got {:?}",
+                def.effect
+            );
+            assert!(
+                def.distribute.is_some(),
+                "distribution unit must be captured"
+            );
+        })
+        .expect("spawn bounded-stack parse thread");
+    handle
+        .join()
+        .expect("parsing the cardinality clause must not overflow a 2.5 MiB stack");
+}
+
 #[test]
 fn lava_blister_its_controller_unless_have_deal_damage() {
     let def = parse_effect_chain(
@@ -8660,6 +8859,74 @@ fn return_leading_their_hand_all_exiled_with_source() {
             ..
         }
     ));
+}
+
+/// CR 406.6 + CR 607.1/607.2a (#5577): Watcher for Tomorrow's Hideaway
+/// leaves-the-battlefield trigger — "put the exiled card into its owner's hand"
+/// — references the card THIS source exiled in a SEPARATE, earlier resolution
+/// (its ETB Hideaway). The LTB chain has no exile producer, so the singular "the
+/// exiled card" anaphor in the `ChangeZoneAll` "put" clause must bind durably to
+/// `ExiledBySource` (resolved at runtime via `exile_links`), not the chain-local
+/// `TrackedSet(0)` sentinel that is empty at LTB time. Third emission site of the
+/// #5571 cross-resolution fix (after the Copy verb and `try_parse_cast_effect`).
+#[test]
+fn hideaway_ltb_put_exiled_card_binds_exiled_by_source() {
+    let parsed = parse_oracle_text(
+        "Hideaway 4 (When this creature enters, look at the top four cards of your library, exile one face down, then put the rest on the bottom in a random order.)\n\
+         This creature enters tapped.\n\
+         When this creature leaves the battlefield, put the exiled card into its owner's hand.",
+        "Watcher for Tomorrow",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Wizard".to_string()],
+    );
+    let ltb = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("Watcher must have an LTB execute chain");
+    assert!(
+        matches!(
+            &*ltb.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::ExiledBySource,
+                ..
+            }
+        ),
+        "cross-resolution LTB 'put the exiled card' must bind ExiledBySource, got {:?}",
+        ltb.effect
+    );
+}
+
+/// Regression guard for the #5577 fix: a SAME-chain exile-then-put keeps the
+/// chain-local `TrackedSet(0)` binding (the helper returns `same_chain_binding`
+/// when `chain_has_prior_exile_producer` is set), so it must NOT flip to
+/// `ExiledBySource`.
+#[test]
+fn same_chain_put_exiled_card_keeps_tracked_set() {
+    let def = parse_effect_chain(
+        "Exile the top card of your library. Put the exiled card into your hand.",
+        AbilityKind::Spell,
+    );
+    // Walk the chain to the ChangeZoneAll "put" node.
+    fn find_put(def: &AbilityDefinition) -> Option<&TargetFilter> {
+        if let Effect::ChangeZoneAll {
+            destination: Zone::Hand,
+            target,
+            ..
+        } = &*def.effect
+        {
+            return Some(target);
+        }
+        def.sub_ability.as_deref().and_then(find_put)
+    }
+    let target = find_put(&def).expect("expected a ChangeZoneAll into hand");
+    assert!(
+        matches!(target, TargetFilter::TrackedSet { .. }),
+        "same-chain 'put the exiled card' must keep TrackedSet(0), got {target:?}"
+    );
 }
 
 #[test]
@@ -32879,6 +33146,69 @@ fn conjure_named_into_exile() {
 }
 
 #[test]
+fn conjure_named_into_top_n_library_at_random() {
+    // "into the top N cards of your library at random" is a positional library slot; the
+    // engine models conjure destinations at Zone granularity, so it maps to Library (like
+    // the plain "into your library" wording).
+    let e = parse_effect(
+        "conjure a card named Sanguine Bond into the top fifteen cards of your library at random",
+    );
+    match e {
+        Effect::Conjure {
+            destination, cards, ..
+        } => {
+            assert_eq!(destination, Zone::Library);
+            assert_eq!(cards.len(), 1);
+        }
+        other => panic!("expected Conjure, got: {other:?}"),
+    }
+}
+
+#[test]
+fn conjure_named_into_top_n_each_players_library_at_random() {
+    // "each player's library" (a shared-library slot) also maps to the Library zone.
+    let e = parse_effect(
+        "conjure three cards named Sunscorched Desert into the top ten cards of each player's library at random",
+    );
+    match e {
+        Effect::Conjure { destination, .. } => assert_eq!(destination, Zone::Library),
+        other => panic!("expected Conjure, got: {other:?}"),
+    }
+}
+
+#[test]
+fn conjure_random_from_spellbook_into_top_n_library_at_random() {
+    // The top-N-library destination composes with the random draft-from-spellbook wording,
+    // which parses to DraftFromSpellbook (random) rather than Conjure.
+    let e = parse_effect(
+        "conjure a random card from the Slivers Spellbook into the top five cards of your library at random",
+    );
+    match e {
+        Effect::DraftFromSpellbook {
+            destination,
+            random,
+            ..
+        } => {
+            assert_eq!(destination, Zone::Library);
+            assert!(random);
+        }
+        other => panic!("expected DraftFromSpellbook, got: {other:?}"),
+    }
+}
+
+#[test]
+fn conjure_duplicate_into_top_n_library_at_random() {
+    // The top-N-library destination composes with the "conjure a duplicate of <ref>" wording.
+    let e = parse_effect(
+        "conjure a duplicate of that card into the top five cards of your library at random",
+    );
+    match e {
+        Effect::Conjure { destination, .. } => assert_eq!(destination, Zone::Library),
+        other => panic!("expected Conjure, got: {other:?}"),
+    }
+}
+
+#[test]
 fn conjure_random_from_spellbook_into_exile() {
     // The exile destination composes with the random draft-from-spellbook wording.
     let e = parse_effect("conjure a random card from ~'s spellbook into exile");
@@ -35277,7 +35607,7 @@ fn kindred_dominance_excludes_chosen_creature_type() {
 }
 
 // ------------------------------------------------------------------
-// CR 700.2 + CR 608.2d: ChooseOneOf inline binary-choice regression.
+// CR 608.2d: ChooseOneOf inline binary-choice regression.
 // ------------------------------------------------------------------
 
 /// Highway Robbery's spell text "You may discard a card or sacrifice a
@@ -41707,6 +42037,87 @@ fn where_x_rewrites_tracked_set_filtered_change_zone_keldon_flamesage() {
             .any(ability_tree_has_rewritten_change_zone_tracked_filter),
         "expected Keldon Flamesage tracked-set ChangeZone filter to bind where-X, got {:?}",
         parsed.triggers
+    );
+}
+
+/// Find the `TargetFilter` of the first `Effect::CastFromZone` reachable from
+/// `ability` via `sub_ability`/`else_ability`/`mode_abilities`.
+fn find_cast_from_zone_target(ability: &AbilityDefinition) -> Option<&TargetFilter> {
+    if let Effect::CastFromZone { target, .. } = ability.effect.as_ref() {
+        return Some(target);
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .and_then(find_cast_from_zone_target)
+        .or_else(|| {
+            ability
+                .else_ability
+                .as_deref()
+                .and_then(find_cast_from_zone_target)
+        })
+        .or_else(|| {
+            ability
+                .mode_abilities
+                .iter()
+                .find_map(find_cast_from_zone_target)
+        })
+}
+
+/// CR 406.6 + CR 607.2a anti-regression guard (issue #4792 Blocker 1): a
+/// singular "the exiled card" anaphor must keep binding to the SAME-CHAIN
+/// `TrackedSet{0}` sentinel — not durable `ExiledBySource` — when an earlier
+/// clause in the SAME resolution chain already produced the exile. Keldon
+/// Flamesage's "look at the top X ... exile ... You may cast the exiled
+/// card" is entirely one chain (one triggered ability, one resolution), so
+/// `chain_has_prior_exile_producer` must gate `resolve_singular_exiled_card_target`
+/// back to its pre-existing `TrackedSet{0}` binding.
+#[test]
+fn keldon_flamesage_cast_target_stays_tracked_set_after_exiled_by_source_fix() {
+    let parsed = parse_oracle_text(
+        "Enlist\nWhenever this creature attacks, look at the top X cards of your library, where X is this creature's power. You may exile an instant or sorcery card with mana value X or less from among them. Put the rest on the bottom of your library in a random order. You may cast the exiled card without paying its mana cost.",
+        "Keldon Flamesage",
+        &["Enlist".to_string()],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Shaman".to_string()],
+    );
+    let target = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find_map(find_cast_from_zone_target);
+    assert!(
+        matches!(
+            target,
+            Some(TargetFilter::TrackedSet { id }) if id.0 == 0
+        ),
+        "Keldon Flamesage's same-chain exile must keep CastFromZone{{TrackedSet(0)}}, got {target:?}"
+    );
+}
+
+/// CR 406.6 + CR 607.2a anti-regression guard (issue #4792 Blocker 1,
+/// continuation-timing case): Discover the Impossible's "Look at the top
+/// five ... Exile one of them face down ... You may cast the exiled card"
+/// is ALSO entirely one chain (one resolving spell), even though the
+/// Hideaway-shaped "exile one of them face down" clause is recognized via a
+/// `ContinuationAst` marker rather than its own raw exile-shaped effect
+/// surviving to the final lowered tree. `chain_has_prior_exile_producer`
+/// must still detect that same-chain exile and keep the cast anaphor at
+/// `ParentTarget` — never widen it to `ExiledBySource`.
+#[test]
+fn discover_the_impossible_cast_target_stays_parent_target_after_exiled_by_source_fix() {
+    let parsed = parse_oracle_text(
+        "Look at the top five cards of your library. Exile one of them face down and put the rest on the bottom of your library in a random order. You may cast the exiled card without paying its mana cost if it's an instant spell with mana value 2 or less. If you don't, put that card into your hand.",
+        "Discover the Impossible",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let target = parsed.abilities.iter().find_map(find_cast_from_zone_target);
+    assert!(
+        matches!(target, Some(TargetFilter::ParentTarget)),
+        "Discover the Impossible's same-chain exile (via the ExileOneOfThemFaceDown \
+         continuation) must keep CastFromZone{{ParentTarget}}, got {target:?}"
     );
 }
 
