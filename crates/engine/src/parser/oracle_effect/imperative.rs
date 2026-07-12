@@ -4872,18 +4872,24 @@ pub(super) fn parse_utility_imperative_ast(
                                 CopyRetargetPermission::KeepOriginalTargets
                             };
                         // CR 406.6 + CR 607.2a + CR 707.10: "copy the exiled
-                        // card" — when no earlier clause in this SAME chain
-                        // exiled a card, the referenced exile happened in an
-                        // earlier, separately-resolved ability (ETB Imprint,
-                        // e.g. Isochron Scepter), so bind durably via
-                        // `ExiledBySource` rather than the ephemeral
-                        // chain-local `TrackedSet{0}` sentinel.
+                        // card" binds durably via `ExiledBySource` in BOTH
+                        // exile-source cases. Cross-resolution (ETB Imprint,
+                        // e.g. Isochron Scepter) always did. Same-chain (#5576
+                        // Saruman of Many Colors: "exile target … card … Copy
+                        // the exiled card") must too: a plain-targeted
+                        // `ChangeZone{Exile}` never publishes a chain-local
+                        // `TrackedSet`, so the old `TrackedSet{0}` sentinel
+                        // resolved to nothing and `copy_source_from_tracked_set`
+                        // fell back to a global scan, copying the wrong card.
+                        // Binding to `ExiledBySource` makes the exile a linked
+                        // consumer (`should_track_exiled_by_source`), publishing
+                        // the `ExileLink` that `copy_source_from_exiled_by_source`
+                        // reads. The distinct CastFromZone "cast the exiled card"
+                        // sites keep their own same-chain bindings.
                         return Some(UtilityImperativeAst::Copy {
                             target: resolve_singular_exiled_card_target(
                                 ctx.chain_has_prior_exile_producer,
-                                TargetFilter::TrackedSet {
-                                    id: crate::types::identifiers::TrackedSetId(0),
-                                },
+                                TargetFilter::ExiledBySource,
                             ),
                             retarget,
                         });

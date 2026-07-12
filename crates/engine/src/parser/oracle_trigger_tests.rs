@@ -23556,3 +23556,69 @@ fn self_power_counter_on_source_keeps_source_scope() {
         );
     }
 }
+
+/// #5576 (Saruman of Many Colors): the same-chain "exile target … card …
+/// **Copy the exiled card**" reference must bind the copy to
+/// `TargetFilter::ExiledBySource`, not the chain-local `TrackedSet(0)`
+/// sentinel. A plain-targeted `ChangeZone{Exile}` never publishes a tracked
+/// set, so `TrackedSet(0)` resolved to nothing and the copy fell back to a
+/// global scan (wrong card / no copy). Binding to `ExiledBySource` makes the
+/// exile a linked consumer that publishes an `ExileLink` the copy reads.
+///
+/// Discriminator: on `main` the recursively-found CopySpell target is
+/// `{"type":"TrackedSet","id":0}`, so the `ExiledBySource` assertion fails.
+#[test]
+fn saruman_copy_the_exiled_card_binds_exiled_by_source_not_tracked_set() {
+    fn find_copyspell_targets(v: &serde_json::Value, out: &mut Vec<serde_json::Value>) {
+        match v {
+            serde_json::Value::Object(map) => {
+                if map.get("type").and_then(|t| t.as_str()) == Some("CopySpell") {
+                    if let Some(target) = map.get("target") {
+                        out.push(target.clone());
+                    }
+                }
+                for val in map.values() {
+                    find_copyspell_targets(val, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for val in items {
+                    find_copyspell_targets(val, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let parsed = parse_oracle_text(
+        "Ward—Discard an enchantment, instant, or sorcery card.\nWhenever you cast your \
+         second spell each turn, each opponent mills two cards. When one or more cards are \
+         milled this way, exile target enchantment, instant, or sorcery card with equal or \
+         lesser mana value than that spell from an opponent's graveyard. Copy the exiled \
+         card. You may cast the copy without paying its mana cost.",
+        "Saruman of Many Colors",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &[],
+    );
+
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("Saruman's spell-cast trigger has an execute chain");
+    let json = serde_json::to_value(execute).expect("serialize the execute chain");
+
+    let mut targets = Vec::new();
+    find_copyspell_targets(&json, &mut targets);
+    assert_eq!(
+        targets.len(),
+        1,
+        "exactly one CopySpell in Saruman's chain, got {targets:?}"
+    );
+    assert_eq!(
+        targets[0],
+        serde_json::json!({ "type": "ExiledBySource" }),
+        "Saruman's copy must bind ExiledBySource (was TrackedSet(0)); got {:?}",
+        targets[0]
+    );
+}
