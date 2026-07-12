@@ -5,6 +5,7 @@
 //! both layers so structural drift and assembly bugs are independently caught.
 
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::OracleDocIr;
 
 /// Parse Oracle text through both IR and lowering layers.
@@ -27,9 +28,58 @@ fn parse_two_layer_with_keywords(
     let keywords: Vec<String> = keywords.iter().map(|s| s.to_string()).collect();
     let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
     let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
-    let ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
-    let lowered = lower_oracle_ir(&ir);
+    let mut ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
+    let lowered = lower_oracle_ir(&mut ir);
     (ir, lowered)
+}
+
+/// ISSUES #17: the swallow audit's findings must live in the doc IR's diagnostics
+/// channel, not be direct-appended to `ParsedAbilities::parse_warnings` behind the
+/// doc's back.
+///
+/// The audit's *input* is the assembled result, so it necessarily runs after the
+/// fold — but that is a reason to hand it the doc channel as its sink, not a reason
+/// to give it a private one. `OracleDocIr.diagnostics` is the single warning
+/// channel; `parse_warnings` is a copy of it.
+///
+/// Fixture is pool-verified, not synthetic: Intermediate Chirography's Oracle text
+/// is verbatim MTGJSON, and it carries a live `Duration_ThisTurn` swallowed-clause
+/// warning in shipped `card-data.json` (M1 defect ledger → issue #5638) — the
+/// "this turn" in its level-3 trigger is not represented in the parse. A synthetic
+/// fixture could go vacuously green if the detector stopped firing; this one cannot
+/// without that separately-tracked defect being fixed.
+#[test]
+fn swallow_diagnostics_are_homed_in_the_doc_ir_channel() {
+    let (ir, lowered) = parse_two_layer(
+        "(Gain the next level as a sorcery to add its ability.)\n\
+         When this Class enters, create a 2/1 white and black Inkling creature token with flying.\n\
+         {1}{B}: Level 2\n\
+         Whenever you lose life for the first time each turn, put a +1/+1 counter on target creature you control.\n\
+         {2}{B}: Level 3\n\
+         At the beginning of each end step, if a modified creature died under your control this turn, create a 2/1 white and black Inkling creature token with flying. (Equipment, Auras you control, and counters are modifications.)",
+        "Intermediate Chirography",
+        &["Enchantment"],
+        &["Class"],
+    );
+
+    // (a) The re-homing itself. Before this change the audit wrote to a private vec
+    //     that was appended straight onto `parse_warnings`, so the doc channel never
+    //     saw a swallowed clause and this assertion was unsatisfiable.
+    assert!(
+        ir.diagnostics
+            .iter()
+            .any(|d| matches!(d, OracleDiagnostic::SwallowedClause { .. })),
+        "swallow audit must emit into OracleDocIr.diagnostics; got {:?}",
+        ir.diagnostics
+    );
+
+    // (b) One channel, one order. `parse_warnings` is assigned FROM the doc channel,
+    //     so any future direct-append to `parse_warnings` re-opens the bypass and
+    //     fails here.
+    assert_eq!(
+        lowered.parse_warnings, ir.diagnostics,
+        "parse_warnings must be a copy of OracleDocIr.diagnostics, not a separate sink"
+    );
 }
 
 // ---------------------------------------------------------------------------
