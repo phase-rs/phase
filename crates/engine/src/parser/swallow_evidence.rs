@@ -58,31 +58,100 @@
 //! [`UnitEvidence::any_at`], which anchors on the JSON key the carrier field actually
 //! uses. See [`DURATION_KEYS`] / [`STATIC_MODE_KEYS`].
 //!
-//! **(2) Shared variant names between internally tagged enums.** Computed over the
-//! probed set, the colliding pairs are:
+//! **(2) Shared variant names between internally tagged enums.** An internally tagged
+//! enum is often assumed to be self-identifying, so that anchoring is needed only for the
+//! externally tagged types in hazard (1). **That assumption is false**, for two compounding
+//! reasons:
+//!
+//!   * an internally-tagged **unit** variant matches on the `type` field ALONE, and serde
+//!     **ignores unknown fields** by default — so a node carrying extra fields still
+//!     deserializes cleanly, with those fields silently dropped;
+//!   * a tag only discriminates if the variant NAME is unique across every tagged enum in
+//!     the tree. It is not.
+//!
+//! For `QuantityRef` alone — 84 variants, against the 91 `#[serde(tag = "type")]` enums in
+//! `types/` — 10 names are shared:
 //!
 //! ```text
-//! Effect                 ∩ AbilityCondition = {CastFromZone}
-//! Effect                 ∩ StaticMode       = {RevealHand}
-//! QuantityExpr           ∩ QuantityRef      = {Power}
-//! QuantityRef            ∩ AbilityCondition = {PreviousEffectAmount}
-//! AbilityCondition       ∩ StaticCondition  = {And, Not, Or, SourceMatchesFilter, IsMonarch, …17}
-//! StaticCondition        ∩ ActivationRestriction = {DuringYourTurn, SourceIsHarnessed}
-//! ContinuousModification ∩ StaticMode       = {AssignNoCombatDamage}
+//! QuantityRef ∩ AbilityCondition         = {PreviousEffectAmount}
+//! QuantityRef ∩ FilterProp               = {AttackedThisTurn, EnteredThisTurn}
+//! QuantityRef ∩ TriggerCondition         = {AttackedThisTurn, CounterAddedThisTurn}
+//! QuantityRef ∩ ParsedCondition          = {BattlefieldEntriesThisTurn}
+//! QuantityRef ∩ ChooseFromZoneConstraint = {DistinctCardTypes}
+//! QuantityRef ∩ ManaCost                 = {SelfManaValue}
+//! QuantityRef ∩ ManaProduction           = {DistinctColorsAmongPermanents}
+//! QuantityRef ∩ SolveCondition           = {ObjectCount}
+//! QuantityRef ∩ QuantityExpr             = {Power}
 //! ```
 //!
-//! A node bearing a shared name can deserialize as *either* enum. This is only a
-//! defect if a predicate's ANSWER differs across the collision. Every predicate in
-//! `swallow_check.rs` is written to be insensitive to the list above:
-//!   * no predicate matches `CastFromZone`, `RevealHand`, `PreviousEffectAmount`,
-//!     `AssignNoCombatDamage`, `DuringYourTurn` or `SourceIsHarnessed`;
-//!   * `QuantityExpr::Power` and `QuantityRef::Power` are BOTH dynamic quantities, so
-//!     the collision cannot change a `DynamicQty` answer;
-//!   * the `AbilityCondition`/`StaticCondition` 17-way overlap is asked only as
-//!     "*a* condition slot is populated", a question whose answer is the same for both.
+//! and elsewhere in the probed set:
+//!
+//! ```text
+//! Effect                 ∩ AbilityCondition      = {CastFromZone}
+//! Effect                 ∩ StaticMode            = {RevealHand}
+//! AbilityCondition       ∩ StaticCondition       = {And, Not, Or, SourceMatchesFilter, …17}
+//! StaticCondition        ∩ ActivationRestriction = {DuringYourTurn, SourceIsHarnessed}
+//! ContinuousModification ∩ StaticMode            = {AssignNoCombatDamage}
+//! ```
+//!
+//! A node bearing a shared name can deserialize as *either* enum. That is only a defect if
+//! a predicate's ANSWER differs across the collision — so the safety argument has to be made
+//! per predicate, and it is:
+//!   * `QuantityExpr::Power` and `QuantityRef::Power` are BOTH dynamic quantities, so that
+//!     collision cannot change a `DynamicQty` answer;
+//!   * the `AbilityCondition`/`StaticCondition` 17-way overlap is asked only as "*a*
+//!     condition slot is populated", a question whose answer is the same for both;
+//!   * no predicate matches `CastFromZone`, `RevealHand`, `AssignNoCombatDamage`,
+//!     `DuringYourTurn` or `SourceIsHarnessed`.
+//!
+//! **This argument was once made for the quantity probes too, and it was WRONG.** The
+//! `PreviousEffectAmount` collision above was known and listed, under the claim "no predicate
+//! matches it". But `detect_dynamic_qty` probed `any::<QuantityRef>(|_| true)` — and `|_| true`
+//! is the ONE predicate that cannot be insensitive to a collision, because it matches every
+//! variant by construction. The consequence was measured over the full 35,396-face pool:
+//! Boing!'s `AbilityCondition::PreviousEffectAmount` (under key `condition`) and Siren's Call's
+//! `FilterProp::AttackedThisTurn` (under key `properties[].prop`, a TARGET FILTER) were both
+//! read as dynamic quantities, silently suppressing two true swallowed-clause warnings. The
+//! `FilterProp` collision was not even in the old table — the table had been computed against
+//! too small a set of enums.
+//!
+//! So the rule is now structural rather than argued: **`QuantityRef` and `QuantityExpr` are
+//! probed KEY-ANCHORED** ([`QUANTITY_KEYS`]), exactly like the externally tagged types. A value
+//! reached through a quantity key IS a quantity by construction, so no collision is reachable.
+//! Prefer anchoring to a per-predicate soundness argument wherever a key set exists: the
+//! argument has to be re-derived every time a predicate or an enum changes, and nothing checks
+//! it. **Anchoring fails LOUD** (a missing key over-reports, and the full-pool delta shows it);
+//! **an unanchored probe fails QUIET** (it under-reports, and nothing shows it).
+//!
+//! RESIDUAL RISK — MEASURED, NOT ASSUMED, AND IT IS NOT ZERO. 15 other types are still probed
+//! unanchored in `swallow_check.rs`. The tempting claim is that they are safe because each
+//! matches a *specific* variant rather than `|_| true`. That claim was tested against the
+//! collision map above and it is FALSE: **13 unanchored predicates match a variant name that
+//! is shared with another tagged enum**, and 8 of those are UNIT variants — no required
+//! fields, so the deserialize succeeds on the tag alone, which is the widest possible surface:
+//!
+//! ```text
+//! any::<ManaCost>         SelfManaValue               (unit)   also: QuantityRef
+//! any::<TriggerCondition> AttackedThisTurn            (unit)   also: FilterProp, QuantityRef
+//! any::<TriggerCondition> CounterAddedThisTurn        (unit)   also: QuantityRef
+//! any::<TriggerCondition> SourceEnteredThisTurn       (unit)   also: Static/Ability/ParsedCondition
+//! any::<FilterProp>       EnteredThisTurn             (unit)   also: QuantityRef
+//! any::<FilterProp>       AttackedThisTurn            (struct) also: QuantityRef, TriggerCondition
+//! any::<StaticCondition>  SourceEnteredThisTurn       (unit)   also: Ability/Parsed/TriggerCondition
+//! any::<AbilityCondition> SourceEnteredThisTurn       (unit)   also: Static/Parsed/TriggerCondition
+//! any::<Effect>           CastFromZone                (struct) also: Ability/ReplacementCondition
+//! …and 4 more (SpellCastWithVariantThisTurn ×3, DealtDamageThisTurnBySource)
+//! ```
+//!
+//! A collision is only a DEFECT where the two readings give different answers, and that has
+//! not been adjudicated per site — so these are UNPROVEN, not proven-safe. They are NOT
+//! touched here: each needs its own variant-level ruling and its own full-pool delta, because
+//! anchoring one blind can *remove* evidence that was accidentally load-bearing (that is not
+//! hypothetical — anchoring the quantity probes did exactly that to `ManaProduction`, and the
+//! fact had to be restored as a typed leg). Tracked as its own unit. Do not "tidy" them.
 //!
 //! The collision that motivated this module — `ConditionMet` vs `SolveConditionMet` —
-//! is NOT in that table, because the names differ. That is precisely the property a
+//! is NOT in any table above, because the names differ. That is precisely the property a
 //! type has and a substring does not.
 //!
 //! # The `description` channel (cond-1)
