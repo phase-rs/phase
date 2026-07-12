@@ -82,6 +82,142 @@ fn dynamic_for_each_pump_trailing_keyword_unchanged() {
     );
 }
 
+// CR 205.1b + CR 613.4c: when a "for each X" dynamic pump carries a trailing "and
+// is a <Subtype> in addition to its other types", the type-addition tail used to
+// break the count parse and collapse the whole pump to a FIXED +N/+M (Avatar
+// Destiny, Machinist's Arsenal). The count must still scale dynamically, and the
+// trailing subtype must still be added.
+//
+// Avatar Destiny (Aura), exact Oracle text: the count is a graveyard
+// `ZoneCardCount` (creature cards in your graveyard), asserted by zone,
+// card_types, and scope — not merely "some dynamic pump".
+#[test]
+fn dynamic_for_each_pump_with_trailing_type_keeps_dynamic_scaling() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 for each creature card in your graveyard and is an Avatar in addition to its other types.",
+    );
+    assert_eq!(defs.len(), 1);
+    let mods = &defs[0].modifications;
+    // No fixed pump may survive — the whole point is the count stays dynamic.
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. }
+        )),
+        "must not emit a fixed AddPower/AddToughness: {mods:?}"
+    );
+    let expected_qty = QuantityExpr::Ref {
+        qty: QuantityRef::ZoneCardCount {
+            zone: ZoneRef::Graveyard,
+            card_types: vec![TypeFilter::Creature],
+            scope: CountScope::Controller,
+            filter: None,
+        },
+    };
+    let power = mods
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicPower { value } => Some(value),
+            _ => None,
+        })
+        .expect("dynamic power pump must be present");
+    assert_eq!(
+        *power, expected_qty,
+        "power must scale by graveyard creatures"
+    );
+    let toughness = mods
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicToughness { value } => Some(value),
+            _ => None,
+        })
+        .expect("dynamic toughness pump must be present");
+    assert_eq!(*toughness, expected_qty, "toughness must scale identically");
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Avatar".to_string()
+        }),
+        "trailing 'is an Avatar' dropped: {mods:?}"
+    );
+}
+
+// CR 205.1b + CR 613.4c: the Equipment sibling of the above — Machinist's Arsenal,
+// exact Oracle text. Here the count is an `ObjectCount` over artifacts you
+// control (asserted by filter type and controller scope), and the trailing type
+// is Artificer. Proves the fix covers BOTH quantity classes the parse-diff
+// measured, not just Avatar's graveyard count.
+#[test]
+fn dynamic_for_each_pump_with_trailing_type_machinists_arsenal() {
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +2/+2 for each artifact you control and is an Artificer in addition to its other types.",
+    );
+    assert_eq!(defs.len(), 1);
+    let mods = &defs[0].modifications;
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. }
+        )),
+        "must not emit a fixed AddPower/AddToughness: {mods:?}"
+    );
+    let power = mods
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicPower { value } => Some(value),
+            _ => None,
+        })
+        .expect("dynamic power pump must be present");
+    // Extract the ObjectCount count from either bare or "+N per" (Multiply-wrapped)
+    // dynamic pumps so the artifact filter + controller scope are asserted directly.
+    fn object_count_filter(value: &QuantityExpr) -> &TargetFilter {
+        let inner = match value {
+            // "+2/+2 for each" scales at 2 per artifact → Multiply(2, ObjectCount).
+            QuantityExpr::Multiply { factor, inner } => {
+                assert_eq!(*factor, 2, "must scale at +2 per artifact");
+                inner.as_ref()
+            }
+            other => other,
+        };
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = inner
+        else {
+            panic!("count must be an ObjectCount, got {inner:?}");
+        };
+        filter
+    }
+    let power_filter = object_count_filter(power);
+    let TargetFilter::Typed(tf) = power_filter else {
+        panic!("ObjectCount filter must be a Typed artifact filter, got {power_filter:?}");
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Artifact]);
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::You),
+        "must count artifacts YOU control, got {:?}",
+        tf.controller
+    );
+    // Toughness scales by the identical count.
+    let toughness = mods
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicToughness { value } => Some(value),
+            _ => None,
+        })
+        .expect("dynamic toughness pump must be present");
+    assert_eq!(
+        object_count_filter(toughness),
+        power_filter,
+        "toughness must scale by the same artifact count as power"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Artificer".to_string()
+        }),
+        "trailing 'is an Artificer' dropped: {mods:?}"
+    );
+}
+
 /// CR 207.2c: an ability word is italic flavor with no rules meaning. A leading
 /// ability-word label on a subject-anchored static must be stripped so the static
 /// still parses; a leading label that is NOT a recognized ability word must be
