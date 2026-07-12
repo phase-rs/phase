@@ -5990,14 +5990,22 @@ pub(super) fn parse_put_ast(
     // the "on the bottom/top of … library" phrase; without this guard it
     // hijacks the whole sentence (The Fourteenth Doctor, Garruk Caller of
     // Beasts, Goblin Ringleader, and the rest of the reveal-partition class).
-    // Scoped to the "this way" tracked anaphor plus "the rest" complement
-    // subject so ordinary single-card "put it on the bottom" text is
-    // unaffected. This is a gating pre-filter, not the classifier — the
-    // structural classification is delegated to `try_parse_put_zone_change_parts`
-    // (which recognizes the "this way" tracked anaphor via `tracked_anaphor_cause`),
+    // Scoped to the REVEAL-origin anaphor ("revealed this way") plus the "the
+    // rest" complement subject so ordinary single-card "put it on the bottom"
+    // text is unaffected. The anaphor is deliberately the full "revealed this
+    // way" phrase, not the bare "this way": an exile-origin partition whose
+    // primary subject is itself a negation over the *cast* set — Muse Vortex's
+    // "put the exiled instant and sorcery cards that weren't cast this way into
+    // your hand and the rest on the bottom of your library in a random order" —
+    // matches "the rest" + "this way" but is NOT the reveal-partition shape this
+    // guard means (it has no revealed tracked set and no targeting), so it must
+    // fall through to its own positional handling rather than be hijacked here.
+    // This is a gating pre-filter, not the classifier — the structural
+    // classification is delegated to `try_parse_put_zone_change_parts` (which
+    // recognizes the reveal tracked anaphor via `tracked_anaphor_cause`),
     // mirroring the `has_mass_zone_origin` idiom above.
     let is_this_way_partition = nom_primitives::scan_contains(lower, "the rest")
-        && nom_primitives::scan_contains(lower, "this way");
+        && nom_primitives::scan_contains(lower, "revealed this way");
 
     // "put X on top of Y's library" — specific position, no auto-shuffle.
     // Must check before try_parse_put_zone_change which would emit ChangeZone (auto-shuffles).

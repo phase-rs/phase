@@ -16636,6 +16636,79 @@ fn reveal_partition_hand_primary_any_order_rest_to_library_bottom() {
     );
 }
 
+/// CR 608.2c: the reveal-partition guard (`is_this_way_partition` in
+/// `parse_put_imperative`) must be scoped to the REVEAL-origin anaphor
+/// ("revealed this way"), NOT the bare "this way". Muse Vortex is an
+/// EXILE-origin partition whose primary subject is a negation over the *cast*
+/// set — "put the exiled instant and sorcery cards that weren't cast this way
+/// into your hand and the rest on the bottom of your library in a random
+/// order" — so it matches "the rest" + "this way" but is NOT the reveal shape
+/// the guard means. With the too-broad `"this way"` guard it was hijacked onto
+/// the tracked-set path and bound a `ChangeZone { target: TargetFilter::Any }`
+/// ("any target") into the hand — a phantom TARGETING filter on a card whose
+/// text contains no targeting at all. This pins the narrowed guard: no
+/// hand-bound zone change may carry the phantom `Any` target.
+#[test]
+fn muse_vortex_exile_partition_does_not_bind_phantom_any_target() {
+    fn collect(ability: &AbilityDefinition, out: &mut Vec<Effect>) {
+        out.push((*ability.effect).clone());
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            collect(sub, out);
+        }
+        if let Some(els) = ability.else_ability.as_deref() {
+            collect(els, out);
+        }
+    }
+
+    let parsed = parse_oracle_text(
+        "Exile the top X cards of your library. You may cast an instant or sorcery \
+         spell with mana value X or less from among them without paying its mana \
+         cost. Then put the exiled instant and sorcery cards that weren't cast this \
+         way into your hand and the rest on the bottom of your library in a random \
+         order.",
+        "Muse Vortex",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+
+    let mut effects = Vec::new();
+    for ability in &parsed.abilities {
+        collect(ability, &mut effects);
+    }
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            collect(execute, &mut effects);
+        }
+    }
+
+    // The card declares zero targets, so no zone change into the hand may be
+    // bound to `TargetFilter::Any` — that would be the reveal-partition
+    // hijack's phantom "any target".
+    for effect in &effects {
+        let phantom_any_to_hand = match effect {
+            Effect::ChangeZone {
+                target,
+                destination,
+                ..
+            }
+            | Effect::ChangeZoneAll {
+                target,
+                destination,
+                ..
+            } => {
+                *destination == crate::types::zones::Zone::Hand
+                    && matches!(target, TargetFilter::Any)
+            }
+            _ => false,
+        };
+        assert!(
+            !phantom_any_to_hand,
+            "Muse Vortex must not bind a phantom `any target` hand zone change; got {effect:?}"
+        );
+    }
+}
+
 #[test]
 fn put_discarded_card_this_way_uses_tracked_set_filter() {
     let def = parse_effect_chain(
