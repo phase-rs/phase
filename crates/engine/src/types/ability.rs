@@ -18578,7 +18578,7 @@ pub enum ReplacementMode {
     },
 }
 
-/// CR 614.12a + CR 615.5: Continuation effect that runs after a replacement
+/// CR 614.6 + CR 615.5: Continuation effect that runs after a replacement
 /// effect's modifications complete. Stashed by the replacement pipeline,
 /// drained by callers (`engine_replacement`, `stack`, `deal_damage`,
 /// `engine`).

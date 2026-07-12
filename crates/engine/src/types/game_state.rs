@@ -6706,7 +6706,7 @@ pub struct GameState {
     /// Cleared the moment it is observed. Transient — never serialized.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replacement_may_cost_paused: bool,
-    /// CR 614.12a + CR 615.5: Continuation effect to resolve after a
+    /// CR 614.6 + CR 615.5: Continuation effect to resolve after a
     /// replacement's modifications complete. The two binding states (Template
     /// AST vs. Resolved with captured targets) share one slot via
     /// `PostReplacementContinuation`. Set by `continue_replacement` for
@@ -10037,7 +10037,7 @@ impl GameState {
         }
     }
 
-    /// CR 614.12a + CR 615.5: Migrate the pre-2026-05-09 audit M4 split-slot
+    /// Migrate the pre-2026-05-09 audit M4 split-slot
     /// shape (`post_replacement_effect` + `post_replacement_resolved_effect`)
     /// into the unified `post_replacement_continuation` slot. Idempotent —
     /// no-op when both legacy slots are empty (the steady-state case once a
