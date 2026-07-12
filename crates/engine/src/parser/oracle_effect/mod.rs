@@ -20266,6 +20266,30 @@ pub(super) fn def_is_dig_or_mill(def: &AbilityDefinition) -> bool {
     matches!(&*def.effect, Effect::Dig { .. } | Effect::Mill { .. })
 }
 
+/// Membership mirror for `AntecedentRole::DamageDealer` — the `DealDamage` an
+/// "excess damage" rider redirects from (CR 120.4a).
+///
+/// The effect variant alone, mirroring where the scan it replaced STOPPED. It does
+/// NOT require `excess.is_none()`: the scan bound the nearest `DealDamage`
+/// unconditionally and then overwrote the field. Folding "not yet written" in here
+/// would resume the walk past an already-written def and bind an earlier one the old
+/// code never reached — the overwrite is the MUTATION's business, not the selector's.
+pub(super) fn def_is_damage_dealer(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::DealDamage { .. })
+}
+
+/// Membership mirror for `AntecedentRole::DigLook` — the `Dig` anchor that both
+/// private-look riders bind back to (`ExileLookedAtCard`, `ExileOneOfThemFaceDown`).
+/// ONE predicate because the two scans it replaces were byte-identical.
+///
+/// The effect variant alone, NOT `reveal: false`. The private-look condition
+/// (CR 701.20e) is the RECOGNIZERS' filter — already applied upstream, when they
+/// decided to emit these continuations. Importing it into the selector would skip a
+/// revealed `Dig` and walk back to an earlier one the old scans never reached.
+pub(super) fn def_is_dig_look(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::Dig { .. })
+}
+
 /// CR 608.2c: Apply a "Repeat this process for <keyword list>" continuation
 /// (Kathril, Aspect Warper). Walks `defs` from the back for the most recent
 /// conditional keyword-counter placement (`PutCounter { counter_type:

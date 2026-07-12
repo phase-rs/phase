@@ -3573,16 +3573,30 @@ pub(super) fn apply_clause_continuation(
             }
         }
         ContinuationAst::ExcessDamageToController => {
-            // CR 120.4a + CR 608.2c: walk backward to the nearest DealDamage and
-            // attach the excess-redirect rider. The clause may not be adjacent to
-            // the DealDamage effect, mirroring the CantRegenerate walk above.
-            if let Some(def) = defs
-                .iter_mut()
-                .rev()
-                .find(|d| matches!(&*d.effect, Effect::DealDamage { .. }))
-            {
-                if let Effect::DealDamage { excess, .. } = &mut *def.effect {
-                    *excess = Some(ExcessRecipient::TargetController);
+            // CR 120.4a + CR 608.2c: bind the nearest DealDamage and attach the
+            // excess-redirect rider. The clause may not be adjacent to the DealDamage
+            // effect, mirroring the CantRegenerate walk above — so this is a role, not
+            // `LastEmitted`.
+            //
+            // `DamageDealer` is a LIVE predicate (`def_is_damage_dealer`), so
+            // `LastWithRole` resolves to `(0..defs.len()).rev().find(|i|
+            // is_damage_dealer(&defs[i]))` — the scan this replaces, over the same
+            // `defs` at the same moment.
+            let bound = env.resolve(
+                defs,
+                super::assembly::AntecedentSelector::LastWithRole(
+                    super::assembly::AntecedentRole::DamageDealer,
+                ),
+                None,
+                super::assembly::OnMiss::Ignore,
+            );
+            if let Some(bound_index) = bound {
+                let def = &mut defs[bound_index];
+                match &mut *def.effect {
+                    Effect::DealDamage { excess, .. } => {
+                        *excess = Some(ExcessRecipient::TargetController);
+                    }
+                    _ => unreachable!(),
                 }
             }
         }
@@ -4353,14 +4367,22 @@ pub(super) fn apply_clause_continuation(
             count,
             face_down,
         } => {
-            let Some(previous) = defs
-                .iter_mut()
-                .rev()
-                .find(|d| matches!(&*d.effect, Effect::Dig { .. }))
-            else {
+            // `DigLook` is a LIVE predicate (`def_is_dig_look`) — it MUST be, and this
+            // is the site that forces it: the rewrite below replaces the bound def's
+            // effect IN PLACE, turning a `Dig` into an `ExileTop` with no change to
+            // `defs.len()`. `observe`/`refresh` only run where the length changes, so a
+            // cached registry would go on naming a def that is no longer a `Dig`.
+            let Some(bound_index) = env.resolve(
+                defs,
+                super::assembly::AntecedentSelector::LastWithRole(
+                    super::assembly::AntecedentRole::DigLook,
+                ),
+                None,
+                super::assembly::OnMiss::Ignore,
+            ) else {
                 return;
             };
-            *previous.effect = Effect::ExileTop {
+            *defs[bound_index].effect = Effect::ExileTop {
                 player,
                 count,
                 face_down,
@@ -4378,23 +4400,33 @@ pub(super) fn apply_clause_continuation(
         // a keep_count:0 pure-peek and a sibling `ChangeZone { ParentTarget }`
         // exiled the trigger source itself (#1146).
         ContinuationAst::ExileOneOfThemFaceDown => {
-            let Some(previous) = defs
-                .iter_mut()
-                .rev()
-                .find(|d| matches!(&*d.effect, Effect::Dig { .. }))
-            else {
+            // Same `DigLook` antecedent as `ExileLookedAtCard` above — the two scans
+            // this replaces had byte-identical predicates, so they name ONE role, not
+            // two. LIVE, not cached: `append_conceal_sub_ability` nests a `sub_ability`
+            // in place, which preserves `defs.len()` and so is invisible to `refresh`.
+            let Some(bound_index) = env.resolve(
+                defs,
+                super::assembly::AntecedentSelector::LastWithRole(
+                    super::assembly::AntecedentRole::DigLook,
+                ),
+                None,
+                super::assembly::OnMiss::Ignore,
+            ) else {
                 return;
             };
-            if let Effect::Dig {
-                keep_count,
-                up_to,
-                destination,
-                ..
-            } = &mut *previous.effect
-            {
-                *keep_count = Some(1);
-                *up_to = false;
-                *destination = Some(Zone::Exile);
+            let previous = &mut defs[bound_index];
+            match &mut *previous.effect {
+                Effect::Dig {
+                    keep_count,
+                    up_to,
+                    destination,
+                    ..
+                } => {
+                    *keep_count = Some(1);
+                    *up_to = false;
+                    *destination = Some(Zone::Exile);
+                }
+                _ => unreachable!(),
             }
             // CR 608.2c: chain the conceal continuation onto the Dig. The
             // `DigChoice` resolution binds the chosen (exiled) card onto this

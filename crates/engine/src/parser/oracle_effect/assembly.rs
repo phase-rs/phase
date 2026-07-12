@@ -57,12 +57,13 @@ use super::{
     attach_repeat_process_keywords, attach_same_is_true_keywords,
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
-    def_is_dig_or_mill, def_is_generic_effect_head, def_is_keyword_counter_placement,
-    fold_cast_copy_of_card_defs, has_explicit_player_target, inject_chosen_color_choice_grant,
-    mark_uses_tracked_set, parse_spell_graveyard_replacement_rider,
-    publishes_tracked_set_from_resolution, retarget_counter_additional_cost_to_target,
-    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
-    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
+    def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
+    def_is_keyword_counter_placement, fold_cast_copy_of_card_defs, has_explicit_player_target,
+    inject_chosen_color_choice_grant, mark_uses_tracked_set,
+    parse_spell_graveyard_replacement_rider, publishes_tracked_set_from_resolution,
+    retarget_counter_additional_cost_to_target, rewrite_parent_targets_to_tracked_set,
+    rewrite_rounding_mode, rewrite_that_type_mana_instead, stamp_delayed_returns,
+    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
 
 // ===========================================================================
@@ -142,7 +143,7 @@ struct NodeRef {
 //    `mem::take()` — the ops that invalidate any index-keyed reference (the
 //    reason U6-B1's registries had to be recomputed after every mutation).
 //  * A node that leaves top-level `defs` is not deleted. It is `Absorbed { into }`
-//    — nested under a known parent — or honestly `Dropped`. Design §2.2: a node
+//    — nested under a known parent. Design §2.2: a node
 //    can migrate OUT of the node-set (nested by a handler, or wrapped into an
 //    `Effect` payload), and a registry that later binds to such a node would
 //    mutate a def that is no longer in the output. That must be a typed state,
@@ -196,7 +197,6 @@ struct ArenaNode {
 /// because the asserts only ever compare witnesses of defs that are still ALIVE —
 /// a node in `order` (its def is in `defs`) or an `Absorbed` node (its def was
 /// MOVED into a parent's `sub_ability`/`else_ability`, so its `Box` is not freed).
-/// A `Dropped` node's witness is never compared against anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DefWitness(usize);
 
@@ -603,6 +603,31 @@ pub(super) enum AntecedentRole {
     /// the sibling template a "Repeat this process for <keywords>" continuation
     /// clones (Kathril, Aspect Warper).
     KeywordCounterPlacement,
+    /// A `DealDamage` — the antecedent an "excess damage" rider redirects from
+    /// (CR 120.4a). The rider need not be adjacent to the damage clause, which is
+    /// why this is a role and not `LastEmitted`.
+    ///
+    /// Membership is the EFFECT VARIANT ALONE. It deliberately does NOT require
+    /// `excess.is_none()`: the scan this replaces stopped at the nearest
+    /// `DealDamage` unconditionally and then overwrote `excess`. Narrowing the role
+    /// to "has no excess yet" would make an already-written def a NON-candidate and
+    /// resume the walk to an earlier `DealDamage` the old code never reached. The
+    /// overwrite is the mutator's business; the role names where the walk STOPS.
+    DamageDealer,
+    /// A `Dig` — the "look at the top N" anchor that BOTH private-look riders bind
+    /// back to: `ExileLookedAtCard` (the Gonti impulse idiom, CR 608.2c) rewrites it
+    /// into an `ExileTop`, and `ExileOneOfThemFaceDown` (Hideaway, CR 702.75a)
+    /// patches it into the choose-one-and-exile shape. One role, because the two
+    /// scans it replaces had BYTE-IDENTICAL predicates — they are the same
+    /// antecedent, named twice.
+    ///
+    /// Membership is the EFFECT VARIANT ALONE — NOT `reveal: false`. The private-look
+    /// requirement (CR 701.20e) is a filter the RECOGNIZERS already applied upstream
+    /// when they decided to emit these continuations at all; importing it here would
+    /// make a revealed `Dig` a non-candidate and walk PAST it to an earlier one the
+    /// old scans never reached. Same trap, mirrored, as narrowing `GenericEffectHead`
+    /// to "has a static".
+    DigLook,
 }
 
 /// Membership predicates for the roles whose candidacy is **live** — recomputed
@@ -631,6 +656,19 @@ fn live_role_predicate(role: AntecedentRole) -> Option<fn(&AbilityDefinition) ->
         // something else without any length change. Cached, this role would go on
         // naming a def that is no longer a `Dig`/`Mill`. Live, it is EXACTLY the scan.
         AntecedentRole::DigOrMill => Some(def_is_dig_or_mill),
+        // LIVE, for the same reason as `DigOrMill` — and it is the SAME rewrite that
+        // forces it: `ExileLookedAtCard` does `*previous.effect = Effect::ExileTop`,
+        // turning a `Dig` into a non-`Dig` with NO length change, so `observe` never
+        // fires and a cached registry would go on naming it. `ExileOneOfThemFaceDown`
+        // nests a `sub_ability` in place — also length-preserving. Live, the role is
+        // EXACTLY the scan it replaces.
+        AntecedentRole::DigLook => Some(def_is_dig_look),
+        // LIVE. `ExcessDamageToController` writes a FIELD (`*excess = Some(..)`) — the
+        // most length-preserving mutation there is. A cached registry is refreshed only
+        // where `defs.len()` changes, so it could not see this at all; that it happens
+        // to stay correct for THIS role today is luck, not design. Cached membership is
+        // stale by construction here, so it is not offered.
+        AntecedentRole::DamageDealer => Some(def_is_damage_dealer),
         AntecedentRole::Conditional
         | AntecedentRole::OptionalHead
         | AntecedentRole::DigOrRevealUntil
@@ -905,7 +943,9 @@ impl AssemblyEnv {
                     // NEW role cannot be added without choosing a side.
                     AntecedentRole::GenericEffectHead
                     | AntecedentRole::KeywordCounterPlacement
-                    | AntecedentRole::DigOrMill => None,
+                    | AntecedentRole::DigOrMill
+                    | AntecedentRole::DigLook
+                    | AntecedentRole::DamageDealer => None,
                 },
             },
         };
@@ -2316,8 +2356,16 @@ mod arena_tests {
         // absorb the (wrong) one, which is what the old `settle` did by inferring a
         // parent. `settle` then has nothing to object to, and the identity assert is
         // left to catch the divergence on its own.
+        //
+        // The parent is `id_at(1)`, NOT `id_at(0)`, so this test does not depend on the
+        // ORDER of the asserts. The stray node is the tail one, whose def is the one
+        // that shifted into `defs[1]`; naming `id_at(1)` as its parent therefore makes
+        // the absorbed-parenthood assert (b) genuinely TRUE (`live_root_index` lands on
+        // `defs[1]`, which IS that def), leaving assert (a) — identity — as the only
+        // false one. Absorbing into `id_at(0)` would ALSO trip (b), and (a) would only
+        // be the observed failure because it happens to run first.
         let stray = arena.detached[0];
-        let parent = arena.id_at(0).expect("defs[0] is live");
+        let parent = arena.id_at(1).expect("defs[1] is live");
         arena.absorb(stray, parent);
         arena.settle();
 
