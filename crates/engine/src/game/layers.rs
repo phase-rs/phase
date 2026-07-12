@@ -880,6 +880,9 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsHarnessed
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
+        // CR 401.1: reads the controller's LIBRARY top card, never battlefield
+        // population — a battlefield entry cannot change the library top.
+        | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceInZone { .. }
@@ -1009,6 +1012,9 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsHarnessed
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
+        // CR 401.1: reads the controller's LIBRARY top card, never battlefield
+        // population — a battlefield entry cannot change the library top.
+        | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceInZone { .. }
@@ -1334,6 +1340,25 @@ fn evaluate_condition_with_context(
             filter,
             &FilterContext::from_source(state, source_id),
         ),
+        // CR 401.1 + CR 401.5: True when the top card of the source controller's
+        // library (`library[0]`) matches `filter`. Resolves the specific top-card
+        // object and matches its printed characteristics — the filter is a plain
+        // color/type/subtype `TargetFilter` with no zone constraint, so a card in
+        // the (hidden) library zone matches on characteristics alone. Empty
+        // library → no top card → false.
+        StaticCondition::TopOfLibraryMatches { filter } => state
+            .players
+            .iter()
+            .find(|p| p.id == controller)
+            .and_then(|p| p.library.front())
+            .is_some_and(|&top_id| {
+                matches_target_filter(
+                    state,
+                    top_id,
+                    filter,
+                    &FilterContext::from_source(state, source_id),
+                )
+            }),
         StaticCondition::SourceIsPaired => state
             .objects
             .get(&source_id)
@@ -12125,6 +12150,110 @@ mod tests {
             &StaticCondition::SourceMatchesFilter { filter },
             PlayerId(0),
             creature,
+        ));
+    }
+
+    // CR 401.1 + CR 401.5: `TopOfLibraryMatches` gates a continuous static on the
+    // top card of the CONTROLLER's library matching a characteristic filter
+    // (Vampire Nocturnus "is black", Mul Daya Channelers "is a creature card").
+    // The library is hidden and off-battlefield, so the filter matches on the top
+    // card's printed characteristics alone (`library[0]` = the top). Discriminating:
+    // a non-matching top card, a different player's library, and an empty library
+    // all report false; only the matching controller's top card is true.
+    #[test]
+    fn top_of_library_matches_reads_controller_library_top() {
+        let mut state = setup();
+        // Source permanent controlled by player 0. Its identity is irrelevant —
+        // the gate reads player 0's LIBRARY, not the source's characteristics.
+        let source = make_creature(&mut state, "Vampire Nocturnus", 3, 3, PlayerId(0));
+
+        // Top card of player 0's library: a black creature card.
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Top Card".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&top).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.color = vec![ManaColor::Black];
+        }
+        {
+            let p0 = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == PlayerId(0))
+                .unwrap();
+            p0.library.retain(|&id| id != top);
+            p0.library.push_front(top); // CR 401.1: front() == library[0] == top.
+        }
+
+        let black = StaticCondition::TopOfLibraryMatches {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::HasColor {
+                    color: ManaColor::Black,
+                },
+            ])),
+        };
+        let creature = StaticCondition::TopOfLibraryMatches {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+        };
+
+        // Black creature on top → both the color and the type gate hold.
+        assert!(evaluate_condition_for_test(
+            &state,
+            &black,
+            PlayerId(0),
+            source
+        ));
+        assert!(evaluate_condition_for_test(
+            &state,
+            &creature,
+            PlayerId(0),
+            source
+        ));
+
+        // Recolor the top card white → the black gate no longer holds; the
+        // creature gate still does (discriminates the filter, not mere presence).
+        state.objects.get_mut(&top).unwrap().color = vec![ManaColor::White];
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &black,
+            PlayerId(0),
+            source
+        ));
+        assert!(evaluate_condition_for_test(
+            &state,
+            &creature,
+            PlayerId(0),
+            source
+        ));
+
+        // The gate is controller-scoped: player 1 has an empty library, so the
+        // same creature gate evaluated for player 1 is false.
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &creature,
+            PlayerId(1),
+            source
+        ));
+
+        // Empty player 0's library → no top card → false.
+        {
+            let p0 = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == PlayerId(0))
+                .unwrap();
+            p0.library.clear();
+        }
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &creature,
+            PlayerId(0),
+            source
         ));
     }
 

@@ -4396,6 +4396,10 @@ pub(crate) fn static_condition_to_ability_condition(
         // an effect-resolution gate — no `AbilityCondition` equivalent.
         | StaticCondition::IsTapped { .. }
         | StaticCondition::CastingAsVariant { .. }
+        // CR 401.1 + CR 401.5: the top-of-library gate is a continuous-static-only
+        // predicate (Layer 6 / duration `ForAsLongAs`); no effect-resolution
+        // (`AbilityCondition`) equivalent — lowering returns `None`.
+        | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::None => None,
     }
 }

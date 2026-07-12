@@ -4036,6 +4036,9 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceIsHarnessed => "source is harnessed".into(),
         SC::SourceAttachedToCreature => "source is attached to a creature".into(),
         SC::SourceMatchesFilter { filter } => format!("source is {}", fmt_target(filter)),
+        SC::TopOfLibraryMatches { filter } => {
+            format!("top card of library is {}", fmt_target(filter))
+        }
         SC::RecipientMatchesFilter { filter } => format!("recipient is {}", fmt_target(filter)),
         SC::RecipientAttackingOwnerTarget { .. } => {
             "recipient is attacking its owner's target".into()
@@ -7448,6 +7451,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
         // SourceMatchesFilter resolved by layers::evaluate_condition (layers.rs:1104)
         StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
+        // CR 401.1 + CR 401.5: top-of-library gate, resolved by
+        // layers::evaluate_condition_with_context against the controller's library top.
+        StaticCondition::TopOfLibraryMatches { .. } => ("TopOfLibraryMatches", Handled),
         StaticCondition::SourceIsPaired => ("SourceIsPaired", Handled),
         // CR 113.6b: evaluated by `layers::evaluate_condition` — checks source
         // object's zone against the specified zone. Runtime-handled.

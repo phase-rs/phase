@@ -1936,6 +1936,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
@@ -6024,6 +6025,13 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
             reads_player_of(StateKind::JournalCast)
         }
         StaticCondition::SourceMatchesFilter { filter: _ } => reads_src_of(StateKind::ObjectPt),
+        // CR 401/402: reads the controller's library top card (contents + order).
+        // A draw/scry/surveil/mill/shuffle writes `HandLibrary`, so marking this
+        // gate as reading `HandLibrary` invalidates it whenever the library top
+        // can change — the correct dependency for a top-of-library static.
+        StaticCondition::TopOfLibraryMatches { filter: _ } => {
+            reads_player_of(StateKind::HandLibrary)
+        }
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             let mut p = RwProfile::empty();
             for c in conditions {

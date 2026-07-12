@@ -3891,6 +3891,10 @@ pub(crate) fn static_condition_to_trigger_condition(
         // intervening-if (`TriggerCondition`) equivalent.
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        // CR 401.1 + CR 401.5: the top-of-library gate is a continuous-static-only
+        // predicate; no intervening-if (`TriggerCondition`) equivalent — lowering
+        // returns `None`.
+        | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::None => None,
 
         // CR 309.7: Dungeon completion bridges directly.

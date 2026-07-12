@@ -6836,6 +6836,26 @@ pub enum StaticCondition {
     SourceMatchesFilter {
         filter: TargetFilter,
     },
+    /// CR 401.1 + CR 401.5: True when the top card of the source controller's
+    /// library matches `filter`. A library is a single face-down ordered pile
+    /// (CR 401.1/401.2); its top card is `library[0]` in the engine convention.
+    /// CR 401.5 governs the "play with the top card of your library revealed"
+    /// statics that gate on it. Controller-scoped ("your library") — evaluated
+    /// against the source controller's library, so no player field is needed for
+    /// the current class (add a `ControllerRef` axis if an opponent-library form
+    /// ever appears). `filter` is a plain characteristic `TargetFilter` (color,
+    /// core type, or subtype — or an `Or` of them) with no zone/controller
+    /// constraint: the runtime resolves the specific top-card object and matches
+    /// its printed characteristics directly. Empty library → false (no top card).
+    ///
+    /// Covers the whole class: Vampire Nocturnus ("is black"), Mul Daya
+    /// Channelers ("is a creature card" / "is a land card"), Conspicuous Snoop
+    /// ("is a Goblin card"), Crown of Convergence and Chittering Illuminator
+    /// ("is a creature card"), Skill Borrower ("is an artifact or creature
+    /// card"), and Oura, the Imitator ("is a Faerie or instant card").
+    TopOfLibraryMatches {
+        filter: TargetFilter,
+    },
     /// CR 611.3a: the recipient (effective subject) of the continuous effect matches
     /// `filter`; re-evaluated per affected object each layer cycle (mirrors
     /// `RecipientHasCounters`, the recipient analog of `HasCounters`). CR 611.3a: "A

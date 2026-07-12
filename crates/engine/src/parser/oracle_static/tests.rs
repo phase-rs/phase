@@ -6995,6 +6995,66 @@ fn static_as_long_as_unrecognized_condition() {
     ));
 }
 
+/// CR 401.1 + CR 401.5: Mul Daya Channelers — a leading "As long as the top card
+/// of your library is a creature card" gate on a self-anthem. The gate assembles
+/// onto the continuous static's `condition` through the same leading-"as long
+/// as" split as the `you control six or more lands` analogue, proving the
+/// `TopOfLibraryMatches` recognizer is reached end-to-end from a real, verbatim
+/// card line — not only from `parse_inner_condition`. Full-shape: the type gate
+/// AND the +3/+3 anthem body both survive lowering.
+#[test]
+fn static_top_of_library_creature_gate_mul_daya_channelers() {
+    let def = parse_static_line(
+        "As long as the top card of your library is a creature card, this creature gets +3/+3.",
+    )
+    .unwrap();
+
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let (creature_filter, _) = crate::parser::oracle_target::parse_type_phrase("creature card");
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::TopOfLibraryMatches {
+            filter: creature_filter
+        })
+    );
+    assert!(def
+        .modifications
+        .iter()
+        .any(|m| m == &ContinuousModification::AddPower { value: 3 }));
+    assert!(def
+        .modifications
+        .iter()
+        .any(|m| m == &ContinuousModification::AddToughness { value: 3 }));
+}
+
+/// CR 401.1 + CR 401.5: Vampire Nocturnus — the marquee "top card of your library
+/// is black" card. Verifies the color gate attaches end-to-end from the verbatim
+/// line; the anthem body (compound subject, "+2/+1 and have flying") is exercised
+/// only enough to confirm the gate rides on top of a lowered body, not instead.
+#[test]
+fn static_top_of_library_black_gate_vampire_nocturnus() {
+    let def = parse_static_line(
+        "As long as the top card of your library is black, this creature and other Vampire creatures you control get +2/+1 and have flying.",
+    )
+    .unwrap();
+
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::TopOfLibraryMatches {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::HasColor {
+                    color: crate::types::mana::ManaColor::Black,
+                }
+            ])),
+        })
+    );
+    assert!(
+        !def.modifications.is_empty(),
+        "anthem body should still lower"
+    );
+}
+
 #[test]
 fn static_enchanted_or_equipped_stays_unrecognized() {
     // Novice Knight: "As long as this creature is enchanted or equipped, ~ has
