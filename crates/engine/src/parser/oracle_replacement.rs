@@ -8355,15 +8355,20 @@ fn parse_damage_to_self_instead_followup(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     let total_len = norm_lower.len();
-    let ((effect_start, effect_len), rest) = nom_on_lower(normalized, norm_lower, |i| {
+    let ((effect_start, effect_len, is_self), rest) = nom_on_lower(normalized, norm_lower, |i| {
         let (i, _) = tag("if damage would be dealt to ").parse(i)?;
-        let (i, _) = alt((tag("~"), tag("you"))).parse(i)?;
+        // CR 614.1a + CR 615.1a: "~" is the source's own object (a self-scoped
+        // shield); "you" is the controller (a player-scoped shield). They must
+        // not resolve identically — a self shield that leaves the recipient
+        // scope unset wrongly replaces damage the source DEALS, not just damage
+        // dealt TO it (#5652).
+        let (i, is_self) = alt((value(true, tag("~")), value(false, tag("you")))).parse(i)?;
         let (i, _) = tag(", ").parse(i)?;
         let effect_start = total_len - i.len();
         let (i, effect) = take_until::<_, _, OracleError<'_>>(" instead").parse(i)?;
         let (i, _) = tag(" instead").parse(i)?;
         let (i, _) = opt(char('.')).parse(i)?;
-        Ok((i, (effect_start, effect.len())))
+        Ok((i, (effect_start, effect.len(), is_self)))
     })?;
     let effect_text = normalized.get(effect_start..effect_start + effect_len)?;
 
@@ -8400,12 +8405,20 @@ fn parse_damage_to_self_instead_followup(
     };
     let followup = parse_effect_chain_with_context(&followup_text, AbilityKind::Spell, &mut ctx);
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::DealtDamage)
-            .prevention_shield(PreventionAmount::All)
-            .execute(followup)
-            .description(original_text.to_string()),
-    )
+    let mut def = ReplacementDefinition::new(ReplacementEvent::DealtDamage)
+        .prevention_shield(PreventionAmount::All)
+        .execute(followup)
+        .description(original_text.to_string());
+    if is_self {
+        // CR 614.1a + CR 615.1a: scope the shield to damage dealt TO the source's
+        // own object. The runtime applies `valid_card` against the damage
+        // recipient (`ProposedEvent::Damage::affected_object_id`), so `SelfRef`
+        // fires only when the source itself is the recipient — not when it deals
+        // damage. Without this, Phytohydra/Lichenthrope-class shields also
+        // replace the source's own combat damage (#5652).
+        def = def.valid_card(TargetFilter::SelfRef);
+    }
+    Some(def)
 }
 
 fn parse_damage_to_player_instead_followup(
@@ -8639,6 +8652,14 @@ fn parse_damage_prevention_replacement(
     // class of bug.
     let valid_card_filter: Option<TargetFilter> = if nom_primitives::scan_contains(working_lower, "dealt to ~")
             || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
+            // CR 614.1a: Active-voice self-recipient form — "If a source would
+            // deal damage to ~, prevent that damage ..." (Swans of Bryn Argoll —
+            // #5652). The passive "dealt to ~" scan above misses it because the
+            // recipient trails the verb; `~` is still the source card, so the
+            // shield is self-scoped. Without `SelfRef` `valid_card` stays None
+            // and the shield also prevents damage the source DEALS (Swans
+            // prevented its own combat damage and drew off it).
+            || nom_primitives::scan_contains(working_lower, "deal damage to ~")
             // CR 615.1a: Subject-first self-recipient form — "If ~ would be dealt
             // damage, prevent that damage ..." (Unbreathing Horde — issue #2888).
             // `~` is the source card, so the shield is self-scoped; without
@@ -18828,6 +18849,69 @@ mod snapshot_tests {
             )
             .is_none(),
             "external-subject entry must not match the self controller-override arm"
+        );
+    }
+    /// #5652 (CR 614.1a): a self-scoped damage shield ("If [a source would deal]
+    /// damage to ~, <prevent / X instead>") must scope to damage dealt TO the
+    /// source's own object via `valid_card: SelfRef`. Without it the shield
+    /// leaves the recipient scope unset and also replaces damage the source
+    /// DEALS. Covers the passive "instead" form (Phytohydra) and the active-voice
+    /// prevention form (Swans of Bryn Argoll); the player-scoped "to you" form
+    /// (Nefarious Lich) must NOT be flipped to `SelfRef`.
+    #[test]
+    fn self_scoped_damage_shields_bind_valid_card_selfref() {
+        fn valid_card_of(name: &str, kw: &[&str], text: &str) -> Option<TargetFilter> {
+            let kw: Vec<String> = kw.iter().map(|s| s.to_string()).collect();
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                text,
+                name,
+                &kw,
+                &["Creature".to_string()],
+                &[],
+            );
+            assert_eq!(
+                parsed.replacements.len(),
+                1,
+                "{name}: expected exactly one replacement, got {:?}",
+                parsed.replacements
+            );
+            parsed.replacements[0].valid_card.clone()
+        }
+
+        // Active-voice prevention self-shield (Swans) — previously valid_card: None.
+        assert_eq!(
+            valid_card_of(
+                "Swans of Bryn Argoll",
+                &["Flying"],
+                "Flying\nIf a source would deal damage to ~, prevent that damage. \
+                 The source's controller draws cards equal to the damage prevented this way.",
+            ),
+            Some(TargetFilter::SelfRef),
+            "Swans must scope its prevention shield to damage dealt TO itself"
+        );
+
+        // Passive "X instead" self-shield (Phytohydra) — previously valid_card: None.
+        assert_eq!(
+            valid_card_of(
+                "Phytohydra",
+                &[],
+                "If damage would be dealt to ~, put that many +1/+1 counters on it instead.",
+            ),
+            Some(TargetFilter::SelfRef),
+            "Phytohydra must scope its replacement to damage dealt TO itself"
+        );
+
+        // Player-scoped "to you" shield (Nefarious Lich) must stay unscoped by
+        // `valid_card` — it is a player recipient, not the source's object.
+        assert_eq!(
+            valid_card_of(
+                "Nefarious Lich probe",
+                &[],
+                "If damage would be dealt to you, exile that many cards from your \
+                 graveyard instead. If you can't, you lose the game.",
+            ),
+            None,
+            "the 'to you' player shield must not be flipped to SelfRef"
         );
     }
 }
