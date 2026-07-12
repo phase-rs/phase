@@ -584,6 +584,10 @@ pub(super) fn handle_resolution_choice(
             for &card_id in &bottom_cards {
                 player_state.library.push_back(card_id);
             }
+            // CR 401.5 + CR 611.3a: Scry reorders the library top directly (not
+            // through the zone-move seam), so a continuous `TopOfLibraryMatches`
+            // static must be re-evaluated — self-gated so it's a no-op otherwise.
+            crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
@@ -1906,6 +1910,10 @@ pub(super) fn handle_resolution_choice(
                         None => Some(Zone::Graveyard),
                     }
                 };
+                // CR 401.5 + CR 611.3a: Dig kept cards on top by editing the
+                // library directly, so a `TopOfLibraryMatches` static must be
+                // re-evaluated (self-gated on liveness).
+                crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
                 if let Some(zone) = move_unkept_to {
                     // CR 614.6 + CR 603.10a: route the unkept pile through the
                     // zone-change pipeline so a per-card `Moved` graveyard→exile
@@ -5065,6 +5073,10 @@ fn surveil_keep_on_top(
     for (index, &card_id) in top_cards.iter().enumerate() {
         player_state.library.insert(index, card_id);
     }
+    // CR 401.5 + CR 611.3a: Surveil keeps cards on top by editing the library
+    // directly (this shared helper backs every Surveil caller), so a
+    // `TopOfLibraryMatches` static must be re-evaluated — self-gated on liveness.
+    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
 }
 
 fn resume_with_error_propagation(
@@ -5093,6 +5105,162 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
+
+    /// CR 401.5 + CR 611.3a production-path harness: a battlefield permanent whose
+    /// continuous static grants itself Flying as long as the top card of player
+    /// 0's library is black (Vampire Nocturnus). Library starts black-on-top over
+    /// white. Returns (state, permanent, black, white).
+    fn top_gated_flying_library_scenario() -> (GameState, ObjectId, ObjectId, ObjectId) {
+        use crate::types::ability::{
+            ContinuousModification, FilterProp, StaticCondition, StaticDefinition, TargetFilter,
+            TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::ManaColor;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let vampire = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Vampire Nocturnus".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let def = StaticDefinition::new(StaticMode::Continuous)
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }])
+                .condition(StaticCondition::TopOfLibraryMatches {
+                    filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::HasColor {
+                            color: ManaColor::Black,
+                        },
+                    ])),
+                });
+            let obj = state.objects.get_mut(&vampire).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(def);
+        }
+        let black = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Black Card".to_string(),
+            Zone::Library,
+        );
+        let white = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "White Card".to_string(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&black).unwrap().color = vec![ManaColor::Black];
+        state.objects.get_mut(&white).unwrap().color = vec![ManaColor::White];
+        {
+            let p0 = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == PlayerId(0))
+                .unwrap();
+            p0.library.retain(|&id| id != black && id != white);
+            p0.library.push_back(white);
+            p0.library.push_front(black); // CR 401.1: front() == top.
+        }
+        (state, vampire, black, white)
+    }
+
+    fn has_flying(state: &GameState, id: ObjectId) -> bool {
+        use crate::types::keywords::Keyword;
+        state
+            .objects
+            .get(&id)
+            .unwrap()
+            .has_keyword(&Keyword::Flying)
+    }
+
+    // CR 401.5 + CR 611.3a: Scry reorders the library top by editing the library
+    // directly (outside the zone-move seam); the top-gated static must recompute.
+    #[test]
+    fn scry_reorders_top_and_reevaluates_top_gated_static() {
+        let (mut state, vampire, black, white) = top_gated_flying_library_scenario();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(has_flying(&state, vampire), "black top → Flying granted");
+
+        // Scry 2: keep white on top, black to the bottom.
+        let mut events = vec![];
+        handle_resolution_choice(
+            &mut state,
+            WaitingFor::ScryChoice {
+                player: PlayerId(0),
+                cards: vec![black, white],
+            },
+            GameAction::SelectCards { cards: vec![white] },
+            &mut events,
+        )
+        .expect("scry resolves");
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            !has_flying(&state, vampire),
+            "white scryed to top → Flying must be recomputed away"
+        );
+    }
+
+    // CR 401.5 + CR 611.3a: the shared Surveil keep-on-top helper reorders the
+    // library top directly; the top-gated static must recompute.
+    #[test]
+    fn surveil_keep_on_top_reevaluates_top_gated_static() {
+        let (mut state, vampire, _black, white) = top_gated_flying_library_scenario();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(has_flying(&state, vampire), "black top → Flying granted");
+
+        surveil_keep_on_top(&mut state, PlayerId(0), &[white]);
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            !has_flying(&state, vampire),
+            "surveil kept white on top → Flying must be recomputed away"
+        );
+    }
+
+    // CR 401.5 + CR 611.3a: a Dig that keeps a card on top of the library edits the
+    // library directly (kept_destination == Library); the static must recompute.
+    #[test]
+    fn dig_kept_to_library_top_reevaluates_top_gated_static() {
+        let (mut state, vampire, black, white) = top_gated_flying_library_scenario();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(has_flying(&state, vampire), "black top → Flying granted");
+
+        // Dig looks at [black, white]; keep white on top, rest to bottom.
+        let mut events = vec![];
+        handle_resolution_choice(
+            &mut state,
+            WaitingFor::DigChoice {
+                player: PlayerId(0),
+                library_owner: PlayerId(0),
+                cards: vec![black, white],
+                keep_count: 1,
+                up_to: false,
+                selectable_cards: vec![black, white],
+                kept_destination: Some(Zone::Library),
+                rest_destination: Some(Zone::Library),
+                source_id: None,
+                enter_tapped: false,
+            },
+            GameAction::SelectCards { cards: vec![white] },
+            &mut events,
+        )
+        .expect("dig resolves");
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            !has_flying(&state, vampire),
+            "dig kept white on top → Flying must be recomputed away"
+        );
+    }
 
     #[test]
     fn land_nonland_guess_logs_without_persisting_a_source_label() {
