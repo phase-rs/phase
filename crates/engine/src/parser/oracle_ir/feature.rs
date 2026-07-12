@@ -1,10 +1,10 @@
-//! Typed per-unit semantic feature vocabulary for the swallow audit.
+//! Typed per-item semantic feature vocabulary for the swallow audit.
 //!
 //! The swallow audit asks one question per source unit: *does the Oracle text of
 //! this unit raise a semantic expectation that the parsed output for **this same
 //! unit** does not represent?* This module owns the vocabulary that question is
-//! asked in — the closed feature set, the per-unit audit record, and the
-//! item-scoped view of the lowered definitions that supplies the evidence.
+//! asked in, and the item-scoped view of the lowered definitions that supplies
+//! the evidence half of the answer.
 //!
 //! # Why the evidence is a *lowered* definition rather than sourced IR
 //!
@@ -24,271 +24,391 @@
 //! running ahead of it would report that replacement as swallowed on exactly the
 //! cross-item cards the relations exist to model. The audit therefore runs at its
 //! pinned post-relation position, and resolves each definition back to its owning
-//! item through the parallel `_ids` tracks `lower_oracle_ir` already maintains —
-//! tracks that are kept in sync *across* relation synthesis (see the `&mut
-//! replacement_ids` parameter on `apply_linked_choice_etb_counter`).
+//! item through the parallel `_ids` tracks `lower_oracle_ir` already maintains.
+//!
+//! Those tracks stay index-aligned with their category vectors across the relation
+//! passes: of the four passes that run before the audit, three are
+//! length-preserving and the fourth (`apply_linked_choice_etb_counter`) removes
+//! from `result.replacements` and `replacement_ids` at the same index. So
+//! `result.<category>[k]` ↔ `<category>_ids[k]` is a sound zip at the audit point,
+//! which is what [`scope_to_item`] relies on.
 //!
 //! # Granularity
 //!
-//! Every unit key minted here is an item's **header unit** (`ordinal == 0`), which
-//! is document-unique and carries an `Exact` span. Sub-item units (two clauses on
-//! one line; mode A vs mode B inside one modal item) are **not** expressible
-//! today: `ClauseIrBuilder` mints its clause ids against a fresh, throwaway
+//! Every unit audited here is an item's **header unit** (`ordinal == 0`), which is
+//! document-unique and carries an `Exact` span. Sub-item units (two clauses on one
+//! line; mode A vs mode B inside one modal item) are **not** expressible today:
+//! `ClauseIrBuilder` mints its clause ids against a fresh, throwaway
 //! `OracleDocBuilder`, so every chain restarts at `OracleItemId(0)` and clause
 //! `OracleUnitId`s are not document-unique. Restoring sub-item granularity is the
-//! recognizer bring-up plan's job. This module is keyed by `OracleUnitId` rather
-//! than `OracleItemId` precisely so that landing it requires no API change here.
+//! recognizer bring-up plan's job.
 
-// NOTE ON `dead_code`: suppression here is **per item**, never module-wide — the
-// convention `doc.rs` established after a blanket `#![allow(dead_code)]` hid two
-// silent defects during review. Each allow below names the commit that gives the
-// item a production caller, and dies with it. The consumer is the `swallow_check`
-// cutover (this plan's next commit), which re-scopes the audit from the card to
-// the item and emits through this vocabulary.
-use std::collections::BTreeSet;
-
-use super::doc::OracleUnitSource;
-use crate::types::ability::{
-    AbilityDefinition, ModalChoice, ReplacementDefinition, StaticDefinition, TriggerDefinition,
-};
-use crate::types::keywords::Keyword;
+use super::doc::{OracleItemId, OracleItemIr, OracleNodeIr};
+use crate::parser::oracle::ParsedAbilities;
 
 /// A semantic that Oracle text can raise an expectation for, and that the parsed
 /// output can be checked to represent.
 ///
 /// Closed and parameter-free on purpose: a stringly feature name would put the
-/// audit back on the substring channel this module exists to remove. The three
-/// duration detectors and the two optionality detectors of the previous
-/// text-and-JSON audit collapse into `Duration` and `Optional` respectively;
-/// `Replacement` is net-new (nothing in the previous audit emitted it standalone).
+/// audit back on the substring channel this module exists to remove.
 ///
-/// `Unimplemented` is deliberately **not** a feature. An explicit unsupported node
-/// is not a semantic the text asked for — it is the parser admitting it dropped
-/// one — so it is recorded separately as an [`UnsupportedObservation`].
+/// **One variant per emitted detector label.** The tempting collapse — folding the
+/// three duration detectors into one `Duration` and the two optionality detectors
+/// into one `Optional` — is wrong twice over. `detector` is the **wire format** of
+/// `OracleDiagnostic::SwallowedClause` and is exported in `parse_warnings`, so a
+/// collapse is a silent breaking change to every downstream consumer of the
+/// coverage report; and it would make per-detector regression attribution
+/// impossible, because three distinct detectors would report under one name. The
+/// semantic *kinship* of the three durations is real, but it is not the label.
+///
+/// `Effect::Unimplemented` is deliberately **not** a feature. An explicit
+/// unsupported node is not a semantic the text asked for — it is the parser
+/// admitting it dropped one — so it suppresses its own item's expectations rather
+/// than satisfying them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[allow(dead_code)] // production caller lands in the swallow_check cutover commit.
 pub(crate) enum OracleSemanticFeature {
-    /// CR 614: an event-modifying effect exists.
+    /// CR 614: an event-modifying effect exists. Net-new in this plan — no
+    /// detector in the previous audit emitted it standalone.
     Replacement,
-    /// CR 614.1: the modification is an *instead* substitution, not an addition.
+    /// CR 614.1a: effects that use the word "instead" are replacement effects.
     ReplacementInstead,
-    /// CR 602.5: activation is restricted to a timing window.
-    ActivationTimingRestriction,
-    /// CR 602.5: activation is capped by a usage count.
-    ActivationLimit,
-    /// CR 611.2: the effect has a temporal scope.
-    Duration,
-    /// CR 603.5 / CR 609.3: the effect (or a nested one) is optional.
-    Optional,
-    /// CR 107.3: a quantity is computed from game state rather than fixed.
-    DynamicQuantity,
-    /// CR 608.2c: a conditional guard ("if", "only if").
-    Condition,
-    /// CR 608.2c: an *unless* guard — distinct from a plain condition because it
-    /// inverts, and because it usually carries a payment.
-    UnlessCondition,
-    /// CR 611.3: an *as long as* continuous gate.
-    AsLongAsCondition,
-    /// CR 101.4 + CR 800.4: an explicit turn-order start for a multiplayer
-    /// iteration. Note that a bare player scope is **not** an ordering fact.
-    ApnapOrdering,
-    /// CR 700.2: a modal choice whose maximum is dynamic.
-    ModalDynamicMaximum,
+    /// CR 602.5d + CR 602.5e: activation is confined to a timing window
+    /// ("activate only as a sorcery" / "only as an instant" / "only during ...").
+    ActivateOnlyDuring,
+    /// CR 602.5b: an activated ability carries a restriction on its use — the
+    /// rule's own example is "Activate only once each turn".
+    ActivateLimit,
+    /// CR 611.2a: a continuous effect lasts as long as stated — "until end of
+    /// turn".
+    DurationUntilEndOfTurn,
+    /// CR 611.2a: a stated duration bounded by the current turn.
+    DurationThisTurn,
+    /// CR 611.2a: a stated duration extending into the next turn.
+    DurationNextTurn,
+    /// CR 603.5: the effect is optional — it contains "may".
+    OptionalYouMay,
+    /// CR 603.5: an optional grant phrased as "may have"/"may be".
+    OptionalMayHave,
+    /// CR 608.2h + CR 107.3: the amount is read from the game ("the number of
+    /// creatures on the battlefield") or is the placeholder X, rather than being a
+    /// fixed integer.
+    DynamicQty,
+    /// CR 603.4: a conditional guard. For a triggered ability an "if" immediately
+    /// following the trigger event is the intervening-"if" clause; elsewhere the
+    /// word has its normal English meaning and still gates the effect.
+    ConditionIf,
+    /// CR 603.5: an "unless" guard — 603.5 names it alongside "may", because both
+    /// are choices resolved as the ability resolves. Distinct from a plain
+    /// condition because it inverts and usually carries a payment.
+    ConditionUnless,
+    /// CR 611.3: an "as long as" gate on a static ability's continuous effect.
+    ConditionAsLongAs,
+    /// CR 101.4: an explicit turn-order start for a multiplayer iteration (APNAP).
+    /// Note that a bare player scope is **not** an ordering fact.
+    Apnap,
+    /// CR 700.2: a modal choice whose maximum number of modes is dynamic.
+    ModalDynamicMaxDropped,
 }
 
 #[allow(dead_code)] // production caller lands in the swallow_check cutover commit.
 impl OracleSemanticFeature {
     /// The stable detector label this feature is reported under.
     ///
-    /// These strings are the wire format of `OracleDiagnostic::SwallowedClause`
-    /// and appear in exported `parse_warnings`, so they are deliberately unchanged
-    /// from the previous audit's labels — a rename here is a silent breaking
-    /// change to every downstream consumer of the coverage report.
-    ///
-    /// The mapping is many-to-one on the *source* side (three duration phrasings,
-    /// two optionality phrasings) but one-to-one here: the label names the
-    /// feature, not the phrase that raised it.
+    /// These strings are the wire format of `OracleDiagnostic::SwallowedClause` and
+    /// appear in exported `parse_warnings`, so they are byte-for-byte the labels the
+    /// previous audit emitted. This function exists to make that mapping a typed,
+    /// exhaustive, single-authority fact instead of fourteen string literals spread
+    /// across fourteen detectors.
     pub(crate) fn detector_label(self) -> &'static str {
         match self {
             Self::Replacement => "Replacement",
             Self::ReplacementInstead => "Replacement_Instead",
-            Self::ActivationTimingRestriction => "ActivateOnlyDuring",
-            Self::ActivationLimit => "ActivateLimit",
-            Self::Duration => "Duration",
-            Self::Optional => "Optional_YouMay",
-            Self::DynamicQuantity => "DynamicQty",
-            Self::Condition => "Condition_If",
-            Self::UnlessCondition => "Condition_Unless",
-            Self::AsLongAsCondition => "Condition_AsLongAs",
-            Self::ApnapOrdering => "APNAP",
-            Self::ModalDynamicMaximum => "Modal_DynamicMaxDropped",
+            Self::ActivateOnlyDuring => "ActivateOnlyDuring",
+            Self::ActivateLimit => "ActivateLimit",
+            Self::DurationUntilEndOfTurn => "Duration_UntilEndOfTurn",
+            Self::DurationThisTurn => "Duration_ThisTurn",
+            Self::DurationNextTurn => "Duration_NextTurn",
+            Self::OptionalYouMay => "Optional_YouMay",
+            Self::OptionalMayHave => "Optional_MayHave",
+            Self::DynamicQty => "DynamicQty",
+            Self::ConditionIf => "Condition_If",
+            Self::ConditionUnless => "Condition_Unless",
+            Self::ConditionAsLongAs => "Condition_AsLongAs",
+            Self::Apnap => "APNAP",
+            Self::ModalDynamicMaxDropped => "Modal_DynamicMaxDropped",
         }
     }
 }
 
-/// An explicit `Effect::Unimplemented` owned by one source unit.
+/// The parallel `OracleItemId` tracks `lower_oracle_ir` maintains, borrowed for the
+/// duration of the audit.
 ///
-/// Recorded separately from the feature sets because it is not evidence *for* a
-/// semantic — it is a declaration that this unit's text was not represented at
-/// all. It suppresses duplicate swallowed-clause reporting for **its own unit
-/// only**; a sibling unit's expectations are still audited.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `abilities[k]` is the id of the item whose parse produced `result.abilities[k]`,
+/// and likewise for the other three recursive categories. These are the only
+/// categories a relation pass can reorder or resynthesize, which is why they need a
+/// track at all; every other category is read straight off the owning item's node.
+#[derive(Debug, Clone, Copy)]
 #[allow(dead_code)] // production caller lands in the swallow_check cutover commit.
-pub(crate) struct UnsupportedObservation {
-    pub(crate) source: OracleUnitSource,
-    pub(crate) fragment: String,
+pub(crate) struct ItemIdTracks<'a> {
+    pub(crate) abilities: &'a [OracleItemId],
+    pub(crate) triggers: &'a [OracleItemId],
+    pub(crate) statics: &'a [OracleItemId],
+    pub(crate) replacements: &'a [OracleItemId],
 }
 
-/// One source unit's audit: what its text asked for, what its parse delivered,
-/// and whether it explicitly gave up.
+/// Clone out the slice of `result` that **this item alone** produced.
 ///
-/// Expectations, evidence, and unsupported declarations are three separate fields
-/// and are never conflated. In particular there is **no card-wide or item-wide
-/// `has_unimplemented` boolean**: the previous audit's card-wide suppression gate
-/// silenced every detector on 2,563 faces, and its hand-written walker leaked
-/// through a `_ => false` wildcard besides. Suppression is now a property of the
-/// unit that owns the unsupported node, and of nothing else.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// This is the evidence side of one item's audit, and it is the whole cutover. The
+/// previous audit handed every detector the *card-wide* `ParsedAbilities`, so a
+/// card that dropped an activation limit on line 3 was excused by an unrelated
+/// restriction on line 1 — the evidence never had to come from the clause that
+/// raised the expectation. Handing the same detectors an item-scoped
+/// `ParsedAbilities` makes all ~40 `any_*` / `def_tree_has_*` walkers item-scoped
+/// without touching one of them: the walkers were never the defect, their scope was.
+///
+/// The four recursive categories are resolved through `tracks` because the relation
+/// passes may have synthesized into or removed from them. Everything else is read
+/// straight off `item.node`: relations never touch those categories, so the node is
+/// already the authority.
+///
+/// Returning an owned `ParsedAbilities` rather than a borrowed view is deliberate —
+/// it is what lets the existing detectors be reused verbatim, and it costs one clone
+/// of the definitions a single item produced, at parse time only.
 #[allow(dead_code)] // production caller lands in the swallow_check cutover commit.
-pub(crate) struct UnitSemanticAudit {
-    pub(crate) source: OracleUnitSource,
-    pub(crate) expected: BTreeSet<OracleSemanticFeature>,
-    pub(crate) observed: BTreeSet<OracleSemanticFeature>,
-    pub(crate) unsupported: Vec<UnsupportedObservation>,
-}
+pub(crate) fn scope_to_item(
+    result: &ParsedAbilities,
+    tracks: &ItemIdTracks<'_>,
+    item: &OracleItemIr,
+) -> ParsedAbilities {
+    let pick = |ids: &[OracleItemId], len: usize| -> Vec<usize> {
+        (0..len)
+            .filter(|k| ids.get(*k).is_some_and(|id| *id == item.id))
+            .collect()
+    };
 
-#[allow(dead_code)] // production caller lands in the swallow_check cutover commit.
-impl UnitSemanticAudit {
-    pub(crate) fn new(source: OracleUnitSource) -> Self {
-        Self {
-            source,
-            expected: BTreeSet::new(),
-            observed: BTreeSet::new(),
-            unsupported: Vec::new(),
-        }
+    let abilities = pick(tracks.abilities, result.abilities.len())
+        .into_iter()
+        .map(|k| result.abilities[k].clone())
+        .collect();
+    let triggers = pick(tracks.triggers, result.triggers.len())
+        .into_iter()
+        .map(|k| result.triggers[k].clone())
+        .collect();
+    let statics = pick(tracks.statics, result.statics.len())
+        .into_iter()
+        .map(|k| result.statics[k].clone())
+        .collect();
+    let replacements = pick(tracks.replacements, result.replacements.len())
+        .into_iter()
+        .map(|k| result.replacements[k].clone())
+        .collect();
+
+    // Non-recursive categories: no relation pass mutates them, so the owning item's
+    // node IS the authority and no id track is needed. Exhaustive on purpose — a new
+    // `OracleNodeIr` variant must make a deliberate attribution decision here rather
+    // than defaulting into invisibility behind a `_` arm. The four IR variants and
+    // the four `PreLowered*` variants contribute through the id tracks above, so they
+    // add nothing further here.
+    let mut scoped = ParsedAbilities {
+        abilities,
+        triggers,
+        statics,
+        replacements,
+        extracted_keywords: Vec::new(),
+        modal: None,
+        additional_cost: None,
+        casting_restrictions: Vec::new(),
+        casting_options: Vec::new(),
+        solve_condition: None,
+        strive_cost: None,
+        parse_warnings: Vec::new(),
+    };
+    match &item.node {
+        OracleNodeIr::Keyword(kw) => scoped.extracted_keywords.push(kw.clone()),
+        OracleNodeIr::Modal(modal) => scoped.modal = Some(modal.clone()),
+        OracleNodeIr::AdditionalCost(cost) => scoped.additional_cost = Some(cost.clone()),
+        OracleNodeIr::CastingRestriction(r) => scoped.casting_restrictions.push(r.clone()),
+        OracleNodeIr::CastingOption(o) => scoped.casting_options.push(o.clone()),
+        OracleNodeIr::SolveCondition(c) => scoped.solve_condition = Some(c.clone()),
+        OracleNodeIr::StriveCost(c) => scoped.strive_cost = Some(c.clone()),
+        OracleNodeIr::Spell(_)
+        | OracleNodeIr::Trigger(_)
+        | OracleNodeIr::Static(_)
+        | OracleNodeIr::Replacement(_)
+        | OracleNodeIr::PreLoweredSpell(_)
+        | OracleNodeIr::PreLoweredTrigger(_)
+        | OracleNodeIr::PreLoweredStatic(_)
+        | OracleNodeIr::PreLoweredReplacement(_) => {}
     }
-
-    /// Features this unit's text asked for and its parse did not deliver.
-    ///
-    /// Empty when the unit owns an `Effect::Unimplemented`: the gap is already
-    /// reported explicitly (and fails coverage on its own), so reporting it a
-    /// second time as a swallowed clause would double-count one defect. This is
-    /// the *entire* suppression rule — it is scoped to this unit and cannot reach
-    /// a sibling.
-    pub(crate) fn swallowed(&self) -> Vec<OracleSemanticFeature> {
-        if !self.unsupported.is_empty() {
-            return Vec::new();
-        }
-        self.expected.difference(&self.observed).copied().collect()
-    }
-}
-
-/// The lowered definitions owned by exactly one document item.
-///
-/// This is the evidence side of one unit's audit. It is a borrowed *view*, not a
-/// copy: the definitions live in the `ParsedAbilities` the fold produced, and are
-/// resolved back to their owning item through `lower_oracle_ir`'s parallel `_ids`
-/// tracks — which is what lets the audit run after the relation passes have
-/// mutated and synthesized into those same vectors.
-///
-/// Every existing typed evidence walker (`def_tree_has_duration`,
-/// `static_definition_has_optional`, …) is reused verbatim against this view. The
-/// walkers were never the defect; their **card-wide scope** was. Scoping them to
-/// the owning item is what makes the audit honest, and it is why the three
-/// previously-silent detectors can fire: a card that drops an activation limit on
-/// line 3 is no longer excused by an unrelated restriction on line 1.
-#[derive(Debug, Default)]
-#[allow(dead_code)] // production caller lands in the swallow_check cutover commit.
-pub(crate) struct ItemDefs<'a> {
-    pub(crate) abilities: Vec<&'a AbilityDefinition>,
-    pub(crate) triggers: Vec<&'a TriggerDefinition>,
-    pub(crate) statics: Vec<&'a StaticDefinition>,
-    pub(crate) replacements: Vec<&'a ReplacementDefinition>,
-    pub(crate) keywords: Vec<&'a Keyword>,
-    pub(crate) modal: Option<&'a ModalChoice>,
-}
-
-#[allow(dead_code)] // production caller lands in the swallow_check cutover commit.
-impl ItemDefs<'_> {
-    /// True when this item produced no lowered definition at all.
-    ///
-    /// Such an item raises expectations from its text but can never satisfy them,
-    /// so it would warn on every marker it contains. That is correct for a line
-    /// the parser silently dropped, and wrong for a line that legitimately
-    /// contributes no definition (a keyword-only line folded into a cost, say) —
-    /// which is why the caller checks this rather than the audit assuming.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.abilities.is_empty()
-            && self.triggers.is_empty()
-            && self.statics.is_empty()
-            && self.replacements.is_empty()
-            && self.keywords.is_empty()
-            && self.modal.is_none()
-    }
+    scoped
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parser::oracle_ir::doc::{OracleDocBuilder, OracleSourceSpan};
+    use crate::types::ability::{AbilityDefinition, AbilityKind, Effect};
 
-    fn unit_source() -> OracleUnitSource {
+    /// An empty card-wide `ParsedAbilities` to fill in per test. Spelled out rather
+    /// than defaulted because `ParsedAbilities` has no `Default` — and that is a
+    /// feature: a new category cannot be added without every construction site
+    /// making a deliberate decision about it.
+    fn empty_parsed() -> ParsedAbilities {
+        ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    /// One document item at `line`, carrying `node`, sourced exactly at its fragment.
+    fn item(
+        b: &mut OracleDocBuilder,
+        line: usize,
+        fragment: &str,
+        node: OracleNodeIr,
+    ) -> OracleItemIr {
+        let span = OracleSourceSpan::exact(line, line, 0, fragment.len(), 0);
+        let slot = b.begin_item(span, Some(fragment));
+        OracleItemIr {
+            id: slot.id(),
+            source: slot.source().clone(),
+            node,
+        }
+    }
+
+    fn def(fragment: &str) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented("x", fragment))
+    }
+
+    /// Build a two-item document and the id tracks a fold would have produced, with
+    /// one ability per item, so scoping can be observed to separate them.
+    fn two_item_doc() -> (ParsedAbilities, Vec<OracleItemId>, Vec<OracleItemIr>) {
         let mut b = OracleDocBuilder::new();
-        let slot = b.begin_item(OracleSourceSpan::exact(0, 0, 0, 10, 0), Some("Flying"));
-        slot.source().clone()
-    }
-
-    #[test]
-    fn swallowed_is_expected_minus_observed() {
-        let mut audit = UnitSemanticAudit::new(unit_source());
-        audit.expected.insert(OracleSemanticFeature::Duration);
-        audit.expected.insert(OracleSemanticFeature::Optional);
-        audit.observed.insert(OracleSemanticFeature::Optional);
-        assert_eq!(audit.swallowed(), vec![OracleSemanticFeature::Duration]);
-    }
-
-    /// The whole point of the per-unit model: an unsupported node silences ONLY
-    /// the unit that owns it. This asserts the suppression is scoped, not global —
-    /// the card-wide gate this replaces silenced every detector on 2,563 faces.
-    #[test]
-    fn unsupported_suppresses_only_its_own_unit() {
-        let source = unit_source();
-        let mut owner = UnitSemanticAudit::new(source.clone());
-        owner.expected.insert(OracleSemanticFeature::Duration);
-        owner.unsupported.push(UnsupportedObservation {
-            source,
-            fragment: "some unparsed text".into(),
-        });
-        assert!(
-            owner.swallowed().is_empty(),
-            "the unit owning the Unimplemented must not double-report its gap"
+        let (def_a, def_b) = (def("line one"), def("line two"));
+        let item_a = item(
+            &mut b,
+            0,
+            "line one",
+            OracleNodeIr::PreLoweredSpell(def_a.clone()),
+        );
+        let item_b = item(
+            &mut b,
+            1,
+            "line two",
+            OracleNodeIr::PreLoweredSpell(def_b.clone()),
         );
 
-        let mut sibling = UnitSemanticAudit::new(unit_source());
-        sibling.expected.insert(OracleSemanticFeature::Duration);
-        assert_eq!(
-            sibling.swallowed(),
-            vec![OracleSemanticFeature::Duration],
-            "a sibling unit must still be audited when another unit is unsupported"
-        );
+        let mut result = empty_parsed();
+        result.abilities = vec![def_a, def_b];
+        let ids = vec![item_a.id, item_b.id];
+        (result, ids, vec![item_a, item_b])
+    }
+
+    /// The entire point of the cutover: each item sees ONLY the definitions it
+    /// produced. Under the card-wide scope this replaces, both items would have seen
+    /// both abilities — which is precisely how a line-1 fact came to excuse a line-3
+    /// expectation.
+    #[test]
+    fn scoping_separates_two_items_definitions() {
+        let (result, ability_ids, items) = two_item_doc();
+        let tracks = ItemIdTracks {
+            abilities: &ability_ids,
+            triggers: &[],
+            statics: &[],
+            replacements: &[],
+        };
+
+        let scoped_a = scope_to_item(&result, &tracks, &items[0]);
+        assert_eq!(scoped_a.abilities.len(), 1);
+        assert_eq!(scoped_a.abilities[0], result.abilities[0]);
+
+        let scoped_b = scope_to_item(&result, &tracks, &items[1]);
+        assert_eq!(scoped_b.abilities.len(), 1);
+        assert_eq!(scoped_b.abilities[0], result.abilities[1]);
     }
 
     /// Detector labels are the exported wire format; a rename silently breaks every
-    /// consumer of `parse_warnings`. Pin the three that were previously silent, so
-    /// their labels cannot drift while they are being brought to life.
+    /// consumer of `parse_warnings`. Pin every label, and in particular pin the three
+    /// durations and two optionalities as DISTINCT — collapsing them to one semantic
+    /// name is the tempting refactor that would rewrite the wire format and destroy
+    /// per-detector regression attribution.
     #[test]
     fn detector_labels_are_the_exported_wire_format() {
+        use OracleSemanticFeature as F;
+        let all = [
+            (F::Replacement, "Replacement"),
+            (F::ReplacementInstead, "Replacement_Instead"),
+            (F::ActivateOnlyDuring, "ActivateOnlyDuring"),
+            (F::ActivateLimit, "ActivateLimit"),
+            (F::DurationUntilEndOfTurn, "Duration_UntilEndOfTurn"),
+            (F::DurationThisTurn, "Duration_ThisTurn"),
+            (F::DurationNextTurn, "Duration_NextTurn"),
+            (F::OptionalYouMay, "Optional_YouMay"),
+            (F::OptionalMayHave, "Optional_MayHave"),
+            (F::DynamicQty, "DynamicQty"),
+            (F::ConditionIf, "Condition_If"),
+            (F::ConditionUnless, "Condition_Unless"),
+            (F::ConditionAsLongAs, "Condition_AsLongAs"),
+            (F::Apnap, "APNAP"),
+            (F::ModalDynamicMaxDropped, "Modal_DynamicMaxDropped"),
+        ];
+        for (feature, label) in all {
+            assert_eq!(feature.detector_label(), label);
+        }
+        let distinct: std::collections::BTreeSet<&str> =
+            all.iter().map(|(f, _)| f.detector_label()).collect();
         assert_eq!(
-            OracleSemanticFeature::ActivationLimit.detector_label(),
-            "ActivateLimit"
+            distinct.len(),
+            all.len(),
+            "every feature must map to a distinct label: a collapse rewrites the wire format"
         );
-        assert_eq!(
-            OracleSemanticFeature::ApnapOrdering.detector_label(),
-            "APNAP"
+    }
+
+    /// A non-recursive category is attributed from the item's own node, not from an
+    /// id track. Keywords are the case that matters: the activation-limit detector
+    /// reads them, and a keyword folded into a cost produces no ability at all.
+    #[test]
+    fn non_recursive_categories_come_from_the_items_own_node() {
+        use crate::types::keywords::Keyword;
+        let mut b = OracleDocBuilder::new();
+        let kw_item = item(&mut b, 0, "Flying", OracleNodeIr::Keyword(Keyword::Flying));
+
+        // The card also has a spell line, whose ability must NOT leak into the
+        // keyword item's scope — that leak is the card-wide scope this replaces.
+        let spell_def = def("draw a card");
+        let spell_item = item(
+            &mut b,
+            1,
+            "draw a card",
+            OracleNodeIr::PreLoweredSpell(spell_def.clone()),
         );
-        assert_eq!(
-            OracleSemanticFeature::ModalDynamicMaximum.detector_label(),
-            "Modal_DynamicMaxDropped"
+        let mut result = empty_parsed();
+        result.abilities = vec![spell_def];
+        result.extracted_keywords = vec![Keyword::Flying];
+        let ability_ids = vec![spell_item.id];
+
+        let tracks = ItemIdTracks {
+            abilities: &ability_ids,
+            triggers: &[],
+            statics: &[],
+            replacements: &[],
+        };
+        let scoped = scope_to_item(&result, &tracks, &kw_item);
+        assert_eq!(scoped.extracted_keywords, vec![Keyword::Flying]);
+        assert!(
+            scoped.abilities.is_empty(),
+            "the keyword item must not see the spell line's ability"
         );
     }
 }
