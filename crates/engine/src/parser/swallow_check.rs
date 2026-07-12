@@ -29,8 +29,7 @@ use super::oracle_ir::feature::{audit_units, scope_to_unit, ItemIdTracks, Oracle
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, Comparator, ContinuousModification,
     CopyRetargetPermission, Effect, FilterProp, ModalSelectionConstraint, OpponentMayScope,
-    PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode, StaticDefinition,
-    TargetFilter, TriggerDefinition,
+    PlayerFilter, QuantityExpr, ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use crate::types::game_state::RetargetScope;
 use crate::types::keywords::Keyword;
@@ -237,11 +236,9 @@ fn detect_replacement_instead(
     if any_ability_has_instead_condition(parsed) {
         return;
     }
-    // Some cards model "instead" inside a static or ability rather than as
-    // a top-level replacement (e.g., conditional alternatives). Conservative
-    // exemption: if any static/ability/trigger description mentions "instead",
-    // assume the parser captured it.
-    if any_text_field_contains(parsed, "instead") {
+    // CR 608.2m + CR 614.1a + CR 614.11: the remaining replacement carriers live
+    // in an effect or a static rather than in `parsed.replacements`.
+    if any_ability_has_replacement_carrier(parsed) {
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
@@ -1184,6 +1181,129 @@ fn any_ability_has_instead_condition(parsed: &ParsedAbilities) -> bool {
         })
 }
 
+/// CR 614: replacement semantics carried by an EFFECT or a STATIC rather than by a
+/// `ReplacementDefinition` in `parsed.replacements`.
+///
+/// # What this replaces, and why the thing it replaces was vacuous
+///
+/// The exemption here used to be `any_text_field_contains(parsed, "instead")` — a
+/// DESCRIPTION-channel check, and the purest vacuity in this module. `description` is
+/// **raw Oracle text**: `oracle_trigger.rs` sets `def.description = Some(ir.source_text
+/// .clone())` and `oracle_effect/assembly.rs` sets it from the clause's own source
+/// fragment. So the evidence for *"did the parse represent 'instead'?"* was *"does our
+/// copy of the Oracle text contain 'instead'?"* — which is true **precisely when the
+/// detector's own marker fired**, because that marker is this very detector's ` instead`
+/// substring scan over the same text.
+///
+/// That is the APNAP defect exactly (CR 101.4 / `def_tree_has_apnap_ordering`): the fact
+/// demanded as proof was implied by the very clause raising the expectation, so the
+/// detector excused itself no matter what the parser had actually dropped. A description
+/// is not evidence — it is a transcript of the question.
+///
+/// Exhaustive with no `_` arm on purpose: a new replacement-carrying effect must declare
+/// itself here rather than silently failing to suppress a false positive.
+fn effect_is_replacement_carrier(effect: &Effect) -> bool {
+    match effect {
+        // CR 614.11: "the next time you would draw a card this turn, [effect] instead"
+        // (Words of Worship / Wilding class) — the substitute rides on the effect.
+        Effect::CreateDrawReplacement { .. }
+        // CR 614.1a + CR 901.9c: "if a player would planeswalk as a result of rolling
+        // the planar die, [effect] instead" (Fixed Point in Time).
+        | Effect::CreatePlaneswalkReplacement { .. }
+        // CR 608.2m: "exile it instead of putting it into its owner's graveyard" — the
+        // variant name IS the replacement, and it takes no parameters to inspect.
+        | Effect::ExileResolvingSpellInsteadOfGraveyard => true,
+        _ => false,
+    }
+}
+
+/// CR 614.1a: a def that carries BOTH a `condition` and an `else_ability` has modelled a
+/// two-way alternative — "if C, do B **instead of** A" is exactly `A.condition = C` with
+/// `A.else_ability = B`. The branch IS the "instead", so the clause is represented.
+///
+/// This is the precise structural discriminator between the represented form and the
+/// swallowed one, and both are live in the pool:
+///
+/// - **BRANCH (represented).** `accumulate wisdom` — "Put one of those cards into your
+///   hand … Put each of those cards into your hand **instead** if there are three or more
+///   Lesson cards in your graveyard" lowers to `Dig { condition: QuantityCheck,
+///   else_ability: Dig }`. The engine does one or the other.
+/// - **CHAIN (swallowed).** `a-paragon of modernity` — "~ gets +1/+1 until end of turn.
+///   If exactly three colors of mana were spent …, put a +1/+1 counter on it **instead**"
+///   lowers to `Pump { sub_ability: PutCounter }` with **no condition and no else** — the
+///   engine does BOTH. That is a real defect, and this predicate must keep reporting it.
+///
+/// So the carrier is `else_ability`, never `sub_ability`: a sub-ability is a *sequel*
+/// ("and then"), an else-ability is an *alternative* ("instead"). Accepting `sub_ability`
+/// here would suppress precisely the class of bug the detector exists to find.
+fn def_is_represented_instead_branch(def: &AbilityDefinition) -> bool {
+    def.condition.is_some() && def.else_ability.is_some()
+}
+
+fn def_tree_has_replacement_carrier(def: &AbilityDefinition) -> bool {
+    if effect_is_replacement_carrier(&def.effect) || def_is_represented_instead_branch(def) {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_replacement_carrier(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_replacement_carrier(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_replacement_carrier)
+}
+
+/// CR 614.1a: static modes that ARE the replacement the "instead" clause asked for.
+///
+/// Each arm is pinned to a witness whose parse was read out of the pool export — a static
+/// mode is only a carrier if it encodes the replaced EVENT, not merely if it exists. The
+/// counter-example that proves this matters is `anthem of rakdos`: its "if a source you
+/// control would deal damage to an opponent, it deals that much damage plus 1 instead"
+/// lowers to a `Continuous` static with **`modifications: []`** — an empty shell carrying
+/// only the Hellbent condition. The replacement is gone. "Has a conditional static" is
+/// therefore NOT evidence, and is deliberately not accepted here.
+fn static_is_replacement_carrier(static_def: &StaticDefinition) -> bool {
+    matches!(
+        static_def.mode,
+        // CR 614.1a: "if a spell cast this way would be put into your graveyard, exile it
+        // instead". `Some(zone)` IS the rider; `None` means this printing dropped it, so
+        // it must NOT suppress — `glimpse the cosmos` and `maestros ascendancy` both carry
+        // `None` here and correctly keep warning.
+        StaticMode::GraveyardCastPermission {
+            graveyard_destination_replacement: Some(_),
+            ..
+        }
+        // CR 614.1a + CR 701.23: "If an opponent would search a library, that player
+        // searches the top four cards of that library instead" (aven mindcensor) — the
+        // replaced search IS this mode.
+        | StaticMode::RestrictLibrarySearchToTop { .. }
+        // CR 614.1a + CR 106.4 ("each player's mana pool empties … and the player is said
+        // to LOSE this mana"): "If you would lose unspent mana, that mana becomes
+        // colorless instead" (horizon stone, kruphix, omnath) — the replaced mana-loss
+        // event IS this mode.
+        | StaticMode::StepEndUnspentMana { .. }
+    )
+}
+
+fn any_ability_has_replacement_carrier(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .any(def_tree_has_replacement_carrier)
+        || parsed.triggers.iter().any(|t| {
+            t.execute
+                .as_deref()
+                .is_some_and(def_tree_has_replacement_carrier)
+        })
+        || parsed.statics.iter().any(static_is_replacement_carrier)
+}
+
 fn def_tree_has_conditional_mana_spell_grant(def: &AbilityDefinition) -> bool {
     // CR 609.4b + CR 608.2c: "if you cast a spell this way, you may spend mana as
     // though it were mana of any type/color to cast it" folds onto the preceding
@@ -1673,71 +1793,21 @@ fn any_ability_has_apnap_ordering(parsed: &ParsedAbilities) -> bool {
         })
 }
 
-fn any_text_field_contains(parsed: &ParsedAbilities, needle: &str) -> bool {
-    parsed
-        .abilities
-        .iter()
-        .any(|d| def_description_contains(d, needle))
-        || parsed
-            .triggers
-            .iter()
-            .any(|t| trigger_description_contains(t, needle))
-        || parsed
-            .statics
-            .iter()
-            .any(|s| static_description_contains(s, needle))
-}
-
-fn def_description_contains(def: &AbilityDefinition, needle: &str) -> bool {
-    if let Some(ref desc) = def.description {
-        if desc.to_ascii_lowercase().contains(needle) {
-            return true;
-        }
-    }
-    if let Effect::Unimplemented {
-        description: Some(d),
-        ..
-    } = &*def.effect
-    {
-        if d.to_ascii_lowercase().contains(needle) {
-            return true;
-        }
-    }
-    if let Some(ref sub) = def.sub_ability {
-        if def_description_contains(sub, needle) {
-            return true;
-        }
-    }
-    false
-}
-
-fn trigger_description_contains(trig: &TriggerDefinition, needle: &str) -> bool {
-    if let Some(ref desc) = trig.description {
-        if desc.to_ascii_lowercase().contains(needle) {
-            return true;
-        }
-    }
-    trig.execute
-        .as_deref()
-        .is_some_and(|d| def_description_contains(d, needle))
-}
-
-fn static_description_contains(s: &StaticDefinition, needle: &str) -> bool {
-    if let Some(ref desc) = s.description {
-        return desc.to_ascii_lowercase().contains(needle);
-    }
-    false
-}
-
-// Tag unused for the Phase 1 minimum implementation — left in scope
-// for the predicates above.
-#[allow(dead_code)]
-fn replacement_description_contains(r: &ReplacementDefinition, needle: &str) -> bool {
-    if let Some(ref desc) = r.description {
-        return desc.to_ascii_lowercase().contains(needle);
-    }
-    false
-}
+// The five `*_description_contains` helpers that used to live here are DELETED.
+//
+// They read `AbilityDefinition::description` / `TriggerDefinition::description` /
+// `StaticDefinition::description` — fields the parser fills with **raw Oracle text**
+// (`oracle_trigger.rs`: `def.description = Some(ir.source_text.clone())`;
+// `oracle_effect/assembly.rs`: `def.description = Some(clause_ir.source.fragment()…)`).
+//
+// An audit that accepts a description as evidence is asking the text whether the text is
+// represented. It is a transcript of the question, never an answer to it: every such check
+// is satisfied by the very clause that raised the expectation, which is the same defect
+// `player_scope` was for APNAP (CR 101.4). Evidence must be a STRUCTURAL fact the parser
+// could only have produced by understanding the clause.
+//
+// Their sole caller was `any_text_field_contains(parsed, "instead")` in
+// `detect_replacement_instead`, now `any_ability_has_replacement_carrier`.
 
 // ── JSON-haystack detectors ─────────────────────────────────────────────
 //
@@ -7298,6 +7368,10 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
 mod detect_condition_if_replacement_exemption_tests {
     use super::*;
     use crate::parser::oracle::parse_oracle_text;
+    // Imported here rather than at module scope: the swallow detectors no longer read
+    // `ReplacementDefinition` (the description-channel helpers that did are deleted), so a
+    // lib-level import would be dead. Only this fixture still builds one.
+    use crate::types::ability::ReplacementDefinition;
     use crate::types::replacements::ReplacementEvent;
 
     /// Plague Drone-class text: a single represented gain-life replacement,
