@@ -66,7 +66,6 @@ use crate::parser::oracle::ParsedAbilities;
 /// admitting it dropped one — so it suppresses its own item's expectations rather
 /// than satisfying them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[allow(dead_code)] // production caller lands in the swallow_check cutover commit.
 pub(crate) enum OracleSemanticFeature {
     /// CR 614: an event-modifying effect exists. Net-new in this plan — no
     /// detector in the previous audit emitted it standalone.
@@ -111,7 +110,6 @@ pub(crate) enum OracleSemanticFeature {
     ModalDynamicMaxDropped,
 }
 
-#[allow(dead_code)] // production caller lands in the swallow_check cutover commit.
 impl OracleSemanticFeature {
     /// The stable detector label this feature is reported under.
     ///
@@ -181,6 +179,22 @@ pub(crate) struct ItemIdTracks<'a> {
 /// fragments would never scan that text, raise no expectation for it, and silently
 /// *drop* warnings the card-wide audit correctly raised (measured: 21 faces, all modal
 /// blocks or d20 roll tables).
+///
+/// # What this granularity CANNOT witness — stated, not hidden
+///
+/// Grouping a line's items into one unit means a sibling's evidence can satisfy an
+/// expectation raised by its neighbour's text. Where the two clauses on a line are
+/// genuinely unrelated — clause A's semantic dropped, clause B independently carrying a
+/// def that happens to answer it — the audit stays silent. **This residual false-green
+/// is accepted BY CONSTRUCTION at line granularity, and is bounded by the width of one
+/// line.**
+///
+/// It is not a choice so much as a ceiling: the substrate hands every item on a line the
+/// *whole line* as its fragment, so line width is the finest addressing that exists.
+/// Auditing below it does not buy precision — it manufactures the false positives case
+/// (1) describes, which is strictly worse than the bounded silence it would trade them
+/// for. When the recognizer bring-up gives items real sub-line spans, units subdivide on
+/// their own and this ceiling lifts with no change here.
 ///
 /// So a unit owns every source line from its own start up to the next unit's start.
 /// Coverage is then **total by construction**: every line belongs to exactly one unit,

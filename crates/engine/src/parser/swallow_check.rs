@@ -25,7 +25,7 @@ use super::oracle::{is_draft_matters_sentence, ParsedAbilities};
 use super::oracle_effect::player_lookback_relative_clause_owns_suffix;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use super::oracle_ir::doc::OracleItemIr;
-use super::oracle_ir::feature::{audit_units, scope_to_unit, ItemIdTracks};
+use super::oracle_ir::feature::{audit_units, scope_to_unit, ItemIdTracks, OracleSemanticFeature};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, Comparator, ContinuousModification,
     CopyRetargetPermission, Effect, FilterProp, ModalSelectionConstraint, OpponentMayScope,
@@ -186,7 +186,7 @@ pub(crate) fn check_swallowed_clauses(
         detect_duration_this_turn(&cleaned, fragment, &ast_json, &mut found);
         detect_duration_next_turn(&cleaned, fragment, &ast_json, &mut found);
         detect_optional_may_have(&cleaned, fragment, &ast_json, &mut found);
-        detect_apnap(&cleaned, fragment, &ast_json, &mut found);
+        detect_apnap(&cleaned, fragment, &scoped, &mut found);
         detect_modal_dynamic_max_dropped(&cleaned, fragment, &ast_json, &mut found);
 
         stamp_line(&mut found, unit.first_line);
@@ -299,7 +299,7 @@ fn detect_activate_limit(
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "ActivateLimit".into(),
+        detector: OracleSemanticFeature::ActivateLimit.detector_label().into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
@@ -1551,10 +1551,118 @@ fn any_keyword_has_activation_limit(parsed: &ParsedAbilities) -> bool {
         .any(keyword_has_activation_limit)
 }
 
+/// CR 602.5b: does this restriction cap HOW OFTEN an ability may be activated?
+///
+/// A limit ("Activate only once each turn" — CR 602.5b's own example) is a different
+/// fact from a timing WINDOW (CR 602.5d, "Activate only as a sorcery") and from a
+/// game-state gate. Conflating them is precisely why `ActivateLimit` fired ZERO times
+/// across 35,396 faces while 113 faces' text raises the expectation: the old evidence
+/// check accepted ANY activation restriction, so a card that dropped its limit was
+/// excused by an unrelated sorcery-speed gate on the very same ability. The evidence
+/// was satisfied by a fact the expectation never asked about.
+///
+/// Exhaustive with no `_` arm on purpose: a new restriction variant must state which of
+/// the three it is, rather than defaulting into counting as a limit it is not.
+fn restriction_is_activation_limit(restriction: &ActivationRestriction) -> bool {
+    match restriction {
+        // CR 602.5b: usage caps — the only things that are limits.
+        ActivationRestriction::OnlyOnceEachTurn
+        | ActivationRestriction::OnlyOnce
+        | ActivationRestriction::MaxTimesEachTurn { .. } => true,
+        // CR 602.5d + CR 602.5e: timing windows — WHEN it may be activated, not how often.
+        ActivationRestriction::AsSorcery
+        | ActivationRestriction::AsInstant
+        | ActivationRestriction::DuringYourTurn
+        | ActivationRestriction::DuringYourUpkeep
+        | ActivationRestriction::DuringCombat
+        | ActivationRestriction::BeforeAttackersDeclared
+        | ActivationRestriction::BeforeCombatDamage
+        | ActivationRestriction::MatchesCardCastTiming => false,
+        // CR 602.5: game-state gates — WHETHER it may be activated at all.
+        ActivationRestriction::RequiresCondition { .. }
+        | ActivationRestriction::IsSolved
+        | ActivationRestriction::SourceIsHarnessed
+        | ActivationRestriction::ClassLevelIs { .. }
+        | ActivationRestriction::LevelCounterRange { .. }
+        | ActivationRestriction::CounterThreshold { .. } => false,
+    }
+}
+
+fn def_tree_has_activation_limit(def: &AbilityDefinition) -> bool {
+    if def
+        .activation_restrictions
+        .iter()
+        .any(restriction_is_activation_limit)
+    {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_activation_limit(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_activation_limit(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities.iter().any(def_tree_has_activation_limit)
+}
+
 fn any_ability_has_limit(parsed: &ParsedAbilities) -> bool {
-    // For Phase 1, treat presence of any non-trivial `constraint` as
-    // covering activation limits too. Phase 2 will split these.
-    any_ability_has_constraint(parsed) || any_keyword_has_activation_limit(parsed)
+    parsed.abilities.iter().any(def_tree_has_activation_limit)
+        || any_keyword_has_activation_limit(parsed)
+}
+
+/// CR 101.4: is an explicit turn-order start represented?
+///
+/// The ordering fact lives in exactly two typed homes: `AbilityDefinition.starting_with`
+/// and `Effect::Vote.starting_with`. It is NOT `player_scope`.
+///
+/// That distinction is the whole defect. The old evidence check listed `"player_scope":`
+/// as a marker — but a card reading "Starting with you, EACH PLAYER votes..." parses
+/// `player_scope = EachPlayer` **from the very clause that raises the expectation**, so
+/// the marker was always present and the detector always excused itself, even when
+/// `starting_with` had been dropped on the floor. Vacuous by construction: the evidence
+/// was implied by the expectation. `APNAP` fired ZERO times across 35,396 faces while 56
+/// faces' text raises it.
+///
+/// A bare player scope says WHO acts. It says nothing about the ORDER they act in, which
+/// is the only thing CR 101.4 is about.
+fn def_tree_has_apnap_ordering(def: &AbilityDefinition) -> bool {
+    if def.starting_with.is_some() {
+        return true;
+    }
+    // CR 701.38a: a Vote always carries `starting_with` as a non-optional field, so the
+    // variant's presence IS the ordering fact.
+    if matches!(&*def.effect, Effect::Vote { .. }) {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_apnap_ordering(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_apnap_ordering(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities.iter().any(def_tree_has_apnap_ordering)
+}
+
+fn any_ability_has_apnap_ordering(parsed: &ParsedAbilities) -> bool {
+    parsed.abilities.iter().any(def_tree_has_apnap_ordering)
+        || parsed.triggers.iter().any(|t| {
+            t.execute
+                .as_deref()
+                .is_some_and(def_tree_has_apnap_ordering)
+        })
+        || parsed.replacements.iter().any(|r| {
+            r.execute
+                .as_deref()
+                .is_some_and(def_tree_has_apnap_ordering)
+        })
 }
 
 fn any_text_field_contains(parsed: &ParsedAbilities, needle: &str) -> bool {
@@ -3408,7 +3516,7 @@ fn detect_optional_may_have(
 fn detect_apnap(
     cleaned: &str,
     original: &str,
-    ast_json: &str,
+    parsed: &ParsedAbilities,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
     let has_marker = cleaned.contains("starting with you") // allow-noncombinator: swallow detector marker scan on classified text
@@ -3418,20 +3526,11 @@ fn detect_apnap(
     if !has_marker {
         return;
     }
-    let markers: &[&str] = &[
-        "StartingWith",
-        "TurnOrder",
-        "Apnap",
-        "APNAP",
-        "starting_with",
-        "in_turn_order",
-        "\"player_scope\":",
-    ];
-    if json_has_any(ast_json, markers) {
+    if any_ability_has_apnap_ordering(parsed) {
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "APNAP".into(),
+        detector: OracleSemanticFeature::Apnap.detector_label().into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
@@ -4543,7 +4642,31 @@ mod tests {
             Some(PlayerFilter::Opponent),
             "repeat-for-each-opponent-in-turn-order must stamp player_scope = Opponent"
         );
-        assert!(!has_swallowed_detector(&parsed, "APNAP"));
+
+        // KNOWN GAP, pinned deliberately — and this test is why `APNAP` never fired once
+        // across 35,396 faces.
+        //
+        // The assertion directly above is the whole problem: `player_scope = Opponent` is
+        // the ONLY thing this card's "in turn order" clause leaves behind. That says WHO
+        // acts. It says nothing about the ORDER they act in, which is the sole subject of
+        // CR 101.4. The ordering fact is dropped.
+        //
+        // The old evidence check listed `"player_scope":` among its APNAP markers, so a
+        // card reading "...for each opponent IN TURN ORDER" parsed `player_scope` FROM THE
+        // VERY CLAUSE that raises the expectation, and the detector excused itself. The
+        // evidence was implied by the expectation — vacuous by construction — and this
+        // test asserted that vacuity was correct. It passed for exactly the reason the
+        // detector was broken.
+        //
+        // Typed evidence for CR 101.4 is `starting_with` (on `AbilityDefinition` or
+        // `Effect::Vote`), and this card has neither. Flip this when the turn-order
+        // iteration is given a typed ordering carrier; until then it is a tripwire.
+        assert!(
+            has_swallowed_detector(&parsed, "APNAP"),
+            "player_scope says WHO, not in what ORDER: the turn-order fact is swallowed. \
+             Warnings: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     #[test]
