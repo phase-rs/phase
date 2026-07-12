@@ -105,27 +105,77 @@ entry point and a **thin wrapper** over two phases: `parse_oracle_ir()` (IR
 production) followed by `lower_oracle_ir()` (IR lowering). Diagnostics flow
 through `OracleDocIr.diagnostics` → `ParsedAbilities.parse_warnings`.
 
+The document IR is **source-addressed**: every item carries a stable
+`OracleItemId` and an `OracleUnitSource` (byte + line span), and items are
+emitted in **Oracle source order** — not category order. This is what makes the
+CR 707.9a printed-ability slot (`"except it has this ability"`) bind to the right
+ability, and it is why preprocessor-emitted items (Saga chapters, Spacecraft
+thresholds) no longer jump ahead of main-loop items.
+
 ```
 Oracle text (from MTGJSON)
     ↓
 parse_oracle_ir()               — oracle.rs: the priority router (see §3)
     ├─ normalize_card_name_refs()   — card name / "this creature" → ~ (once, at entry)
-    ├─ pre-parsers (before the line loop): Saga chapters [oracle_saga.rs],
-    │     Attraction visit lines [oracle_attraction.rs], Class levels
-    │     [oracle_class.rs], Leveler LEVEL blocks [oracle_level.rs],
+    ├─ DocEmitter                   — oracle.rs: the SINGLE source-order emission
+    │                                 authority. Wraps OracleDocBuilder; owns the
+    │                                 one per-line ordinal allocator. Every
+    │                                 emission — preprocessors AND the dispatch
+    │                                 loop — routes through it.
+    ├─ pre-parsers (emit at their printed source line): Saga chapters
+    │     [oracle_saga.rs], Attraction visit lines [oracle_attraction.rs],
+    │     Class levels [oracle_class.rs], Leveler LEVEL blocks [oracle_level.rs],
     │     Spacecraft "N+ |" thresholds [oracle_spacecraft.rs], Strive cost
     ├─ per line: strip_reminder_text(), then classify by priority slot (§3)
     ↓
-OracleDocIr                     — oracle_ir/doc.rs: Vec<OracleItemIr> + diagnostics.
-    │                             Core variants carry typed IR (EffectChainIr,
-    │                             TriggerIr, StaticIr, ReplacementIr); PreLowered
-    │                             variants carry already-assembled engine types.
+OracleDocIr                     — oracle_ir/doc.rs:
+    │   .items       Vec<OracleItemIr { id: OracleItemId,
+    │                                   source: OracleUnitSource,
+    │                                   node: OracleNodeIr }>  — SOURCE ORDER
+    │   .relations   Vec<DocumentRelationIr>  — closed, cross-item producer→
+    │                consumer facts keyed by exact OracleItemId (never inferred
+    │                by scanning lowered shapes)
+    │   .diagnostics Vec<OracleDiagnostic>
     ↓
-lower_oracle_ir()               — oracle.rs: exhaustive match on each OracleItemIr
-    ↓                             (core IR → dedicated lowering fn; PreLowered → identity)
+lower_oracle_ir()               — oracle.rs: exhaustive match on each OracleNodeIr,
+    ↓                             iterating source-ordered items; applies relations
+    ↓                             BY ID. Folds into the grouped runtime type:
 ParsedAbilities                 — abilities / triggers / statics / replacements /
                                   keywords / casting options + parse_warnings
 ```
+
+**`OracleSourceSpan` precision** (`doc.rs`) is typed, and honest about what it knows:
+
+| `SpanPrecision` | Meaning |
+|---|---|
+| `Exact` | Card-absolute byte + line range. Every document item carries this. |
+| `ChainRelative` | Byte range is exact *within one effect chain*, not card-absolute (the document allocator is not yet threaded through `ParseContext`). The verbatim `fragment` is retained so a later unit can upgrade it. Minted by `ClauseIrBuilder` for per-clause provenance. **U5 debt — the last non-card-absolute tier.** |
+
+A renderer must consult `is_exact()` before printing a `first_line`/`start_byte` as a card
+position: a `ChainRelative` offset is truthful, but only relative to its chain. `carries_fragment()`
+is the single authority for whether a tier may report a verbatim fragment, and
+`check_fragment_precision()` enforces the coupling **both ways** (fail-closed) — a tier that cannot
+locate a unit must not hand a renderer the whole card as "the offending clause". The retired
+`WholeDocument` tier was that case; there is no longer any span that does not locate its unit.
+
+> **The builder is the ordering authority, not the call order.** `OracleDocBuilder` keys items by
+> `(first_line, ordinal_within_span)` and re-sorts, so *emission order is irrelevant* — a
+> preprocessor may emit a later line before the dispatch loop reaches an earlier one and the
+> document still comes out in source order (`builder_returns_items_in_source_order_regardless_of_emission_order`).
+> **To perturb item order you must perturb the span, never the sequence of `emit` calls.** Any
+> parity probe that reorders calls instead of spans will come back falsely green.
+
+**Cross-item relations — `DocumentRelationIr`** (closed enum, `doc.rs`). Each variant names one
+exact producer `OracleItemId` and one exact consumer `OracleItemId`, is bound at parse time, and
+**fails closed on ambiguity** rather than pairing by adjacency or by scanning lowered shapes:
+
+- `EtbExileLtbReturn` — CR 607.1 linked exile/return pairs (Oblivion Ring, Fiend Hunter).
+- `ActivePlayerPunisher` — CR 102.1 + CR 608.2c coerce/punisher rebinding (Siren's Call).
+- `LinkedChoice` — CR 607.2d "choose a [value]" → "the chosen [value]". **One parameterized
+  variant**, not three siblings: the producer is always the `choose` clause; the variants differ
+  only in `ChosenValueKind` (what is chosen) and `LinkedChoiceBinding` (which consumer surface
+  reads it back). A fourth linked-choice shape must be a new enum *value*, never a new relation
+  variant.
 
 Per-line classification inside `parse_oracle_ir` (simplified; §3 has the full slot table):
 
@@ -145,13 +195,115 @@ Per-line classification inside `parse_oracle_ir` (simplified; §3 has the full s
 | Sub-module | Purpose |
 |-----------|---------|
 | `ast.rs` | All parser AST types (`ParsedEffectClause`, `ClauseAst`, modal/loyalty AST — moved here from `oracle_effect/types.rs`, `oracle_modal.rs`, `oracle.rs`) |
-| `doc.rs` | Document-level IR: `OracleDocIr`, `OracleItemIr` |
+| `doc.rs` | Document-level IR: `OracleDocIr`, `OracleItemIr`, `OracleNodeIr`, `OracleItemId`, `OracleUnitSource`, `OracleSourceSpan`/`SpanPrecision`, `DocumentRelationIr`, `OracleDocBuilder`, `PrintedTriggerIndex` |
 | `context.rs` | `ParseContext` for stateful parsing (subject, actor, card_name, host_self_reference, …) |
 | `diagnostic.rs` | `OracleDiagnostic` — structured parse warnings |
-| `effect_chain.rs` | `EffectChainIr` + lowering for spell/ability effect chains |
+| `effect_chain.rs` | `EffectChainIr`, `ClauseIr` + **typed clause provenance** (`ClauseId`, `ClauseDisposition`, antecedents, reference uses) and the mandatory `ClauseIrBuilder` |
 | `trigger.rs` | `TriggerIr` + lowering |
 | `static_ir.rs` | `StaticIr` + lowering |
 | `replacement.rs` | `ReplacementIr` + lowering |
+
+### Clause Provenance — `ClauseIr` (`oracle_ir/effect_chain.rs`)
+
+A clause does not just carry *what* it does; it carries *where it came from* and *how it relates
+to the clause before it*. This is what replaced the old post-lowering tree-scan repairs.
+
+Every `ClauseIr` carries a stable `ClauseId`, an `OracleUnitSource`, its declared antecedents, its
+reference uses, and **exactly one** `ClauseDisposition`:
+
+| `ClauseDisposition` | Meaning (CR 608.2c: later text may modify earlier text) |
+|---|---|
+| `Emit` | Ordinary clause — emit it. |
+| `Continue { antecedent, continuation }` | Continues a named earlier instruction (search → destination, reveal → rider). |
+| `BranchOtherwise { antecedent }` | The `else` branch of a named earlier instruction. |
+| `ReplaceMeaning { antecedent }` | Re-interprets a named earlier instruction. |
+| `Absorb { antecedent }` | Folded into a named earlier instruction. |
+
+**All `ClauseIr` construction goes through `ClauseIrBuilder`.** There is no `Default`, and no public
+struct literal — missing identity or provenance is a **compile error**, not a silent `None`. The gate
+is `rg 'ClauseIr \{'`, which may match only the struct declaration and the builder's single internal
+construction.
+
+> **Antecedents are named, never searched.** When two compatible producers exist, the parser names
+> the antecedent by `ClauseId`/`AntecedentId` or target slot. The assembler must **never** choose by
+> searching the lowered tree for the nearest matching `Effect` variant. That search *was* the bug.
+
+### Effect-Chain Assembly — `oracle_effect/assembly.rs`
+
+`assemble_effect_chain(&EffectChainIr) -> AbilityDefinition` is the **single source-order assembly
+traversal**. It owns an arena of output nodes plus an `AssemblyEnv`, so an earlier node can be
+amended by an explicitly-bound later continuation without recursively walking a partially-built tree.
+
+Parsed IR is **immutable** during assembly; the assembler owns the mutable output nodes and the typed
+environment. Final materialization (arena links → `Box<AbilityDefinition>`) is mechanical and contains
+no semantic pattern matching.
+
+**The arena is keyed by node index, not by `ClauseId`.** A `ClauseId` names a *parsed clause*, but a
+continuation may push an output node that no clause owns (a search destination, a rest-destination
+patch), so a `ClauseId`-only key cannot address every amendable node. `Arena { nodes: Vec<ArenaNode> }`
+therefore addresses nodes by position, and `AssemblyEnv` carries a **typed role registry per
+amendable class** — `conditional_nodes`, `optional_head_nodes`, `search_destination_nodes`,
+`dig_or_reveal_until_nodes`, `destroy_like_nodes`, `face_down_profile_nodes` — each a `Vec<usize>` in
+emission order.
+
+They are **lists, not last-only slots**, because a guarded selector may have to walk *past* a
+candidate that fails its guard (`BranchOtherwise` skips an optional head that already has a sub).
+A binding is then `(AntecedentRole, AntecedentSelector)`: the role names *which class of node* is
+being bound, the selector names *which one* (`LastEmitted`, `LastWithRole`, …). The walk is over the
+typed candidate list — **never over the output tree**. Scanning the lowered tree for the nearest
+matching `Effect` variant is the bug this whole layer exists to delete.
+
+> Roles are deliberately **narrow and non-nested**. `DigOrRevealUntil` (the `RestDestination`
+> patchable set) is a *different* set from `DigOrMill` (the `DigFromAmong` anchor) even though both
+> contain `Dig`. Widening a role to a superset to save a variant re-opens the nearest-match trap for
+> every card in the difference.
+
+> **`lower_effect_chain_ir` (`lower.rs`) is a one-line delegator to `assemble_effect_chain`** —
+> a name-preserving wrapper kept so the traversal relocation did not have to touch every call site in
+> one commit. It is scaffolding, not an authority. **Do not add logic to it.** The ~30 `pub(super)`
+> clause-lowering helpers still live in `lower.rs`; relocating them into `assembly.rs` is a later
+> increment, not a settled design.
+
+### Known Milestone-1 debt (do not mistake these for the target architecture)
+
+- **`OracleNodeIr::PreLowered{Spell,Trigger,Static,Replacement}`** still exist (26 references in
+  `oracle.rs`). They carry an already-assembled engine type instead of typed IR, and are produced by
+  the preprocessors and the complex dispatch paths. Retiring them is **item-granular** work: the
+  document already gives every item an `OracleItemId` and an exact span, so what is missing is the
+  per-node IR type, not the addressing.
+- **`TriggerBody::PreLowered`** still exists, for the **whole-body recognizers**
+  (`parse_vote_block`, `parse_separate_into_piles`, `try_parse_inline_modal`, …). These take an
+  entire multi-sentence body and refuse to let it be chain-fragmented, so they have no `_ir` sibling.
+  Converting them is a genuine bring-up (it *changes* lowering), which a parity migration may not
+  absorb — **deferred to the recognizer→IR bring-up plan**
+  (`.planning/architecture-remediation/05-recognizer-ir-bringup.md`).
+- **`SpanPrecision::ChainRelative`** is the last non-card-absolute span tier: `ClauseIrBuilder`'s
+  allocator is seeded over the chain text because the document allocator is not yet threaded through
+  `ParseContext`. Honest, not fabricated — the fragment is retained so a later unit can upgrade it to
+  `Exact`. **This is now the only tier a position renderer must refuse to print as a card position.**
+- **Undeclared positional bindings remain outside the effect-chain arena.** 28 `defs.last_mut()`-style
+  sites (`sequence.rs` 20, `lower.rs` 4, `assembly.rs` 3, `mod.rs` 1) still bind "the previous thing"
+  by position rather than by declared role, plus a handful of clause-stream `.rev()` lookbacks in
+  `mod.rs`. Each is a latent mis-binding site of the same species the arena was built to kill.
+  **A byte-identity gate cannot validate converting these** — see the warning below.
+- **`ChainLoweringMode`** (`oracle_effect/mod.rs`) encodes a deliberate asymmetry: the standalone
+  chain entry point runs 8 bypass recognizers, the with-context one runs 9 (it also runs
+  `try_parse_exile_pile_shuffle_cloak`). This is **preserved byte-for-byte**, as typed data with an
+  exhaustive match. It is suspected-accidental history, but unifying it would silently change lowering
+  across the die-roll cards, so it is a post-Milestone-1 follow-up gated on finding a discriminating card.
+
+> **Byte-identity is structurally blind to a narrowed binding.** When the positional walk-backs were
+> converted to declared roles, *every* call site turned out to see exactly one candidate on today's
+> pool — so `LastEmitted`, `LastWithRole`, and any other nearest-match rule are all output-identical,
+> and a full-pool byte-for-byte parity run cannot tell a correct binding from a wrongly-collapsed one.
+> Validating a binding change needs a **forced diagonal** (drive the selector to a different candidate
+> and confirm the output moves) or a synthetic discriminating card. **Never sign off a binding
+> migration on byte-identity alone.**
+
+**Retired in Milestone 1** (do not re-introduce): the category-ordered `parsed_abilities_to_doc_ir`
+Class façade and its `SpanPrecision::WholeDocument` span tier — Class is now an ordinary preprocessor
+emitting at printed source lines; the four post-lowering shape-repair passes removed in U7; and the
+lowered-tree scans replaced by the arena's declared-role bindings.
 
 ### Nom Combinator Layer — `oracle_nom/`
 
