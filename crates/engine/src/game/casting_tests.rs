@@ -9432,6 +9432,107 @@ fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
     );
 }
 
+/// Helper: an artifact permanent with a pure `{2}` generic-mana activated ability
+/// (no tap/sacrifice, so affordability is a clean function of available mana).
+fn make_artifact_with_generic_ability(
+    state: &mut GameState,
+    card_id: CardId,
+    owner: PlayerId,
+    name: &str,
+    is_token: bool,
+) -> ObjectId {
+    let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.is_token = is_token;
+    obj.card_types.core_types.push(CoreType::Artifact);
+    Arc::make_mut(&mut obj.abilities).push(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Mana {
+            cost: ManaCost::generic(2),
+        }),
+    );
+    id
+}
+
+/// CR 611.2 + CR 602.2 + CR 514.2: RUNTIME PROOF of The Dining Car's transient
+/// activation-cost reduction. A `PendingActivationCostReduction` scoped to
+/// "artifact tokens you control" reduces a controlled artifact TOKEN's activated
+/// ability by {2}, but leaves a controlled artifact NONTOKEN and an OPPONENT's
+/// artifact token untouched — then the reduction is cleared at cleanup. The same
+/// `apply_static_activated_ability_cost_reduction` authority the AI's affordability
+/// check routes through is exercised via `can_activate_ability_now`.
+#[test]
+fn transient_activation_cost_reduction_hits_only_controlled_artifact_tokens() {
+    let mut state = setup_game_at_main_phase();
+
+    // FilterContext anchor for the reduction (The Dining Car itself).
+    let dining_car = create_object(
+        &mut state,
+        CardId(800),
+        PlayerId(0),
+        "The Dining Car".to_string(),
+        Zone::Battlefield,
+    );
+
+    let controlled_token =
+        make_artifact_with_generic_ability(&mut state, CardId(801), PlayerId(0), "Token A", true);
+    let controlled_nontoken =
+        make_artifact_with_generic_ability(&mut state, CardId(802), PlayerId(0), "Nontoken", false);
+    let opponent_token =
+        make_artifact_with_generic_ability(&mut state, CardId(803), PlayerId(1), "Opp Token", true);
+
+    // The chaos reduction: activated abilities of artifact tokens P0 controls cost
+    // {2} less this turn.
+    state.pending_activation_cost_reductions.push(
+        crate::types::game_state::PendingActivationCostReduction {
+            controller: PlayerId(0),
+            source_id: dining_car,
+            amount: 2,
+            source_filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Artifact],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::Token],
+            }),
+        },
+    );
+
+    // P0 has ZERO mana: only the reduced (cost 2→0) controlled token is affordable.
+    assert!(
+        can_activate_ability_now(&state, PlayerId(0), controlled_token, 0),
+        "controlled artifact token's {{2}} cost is reduced to {{0}}, affordable with no mana",
+    );
+    assert!(
+        !can_activate_ability_now(&state, PlayerId(0), controlled_nontoken, 0),
+        "artifact NONTOKEN is not a token → not reduced → still {{2}}, unaffordable with no mana",
+    );
+    // P0's reduction must not leak onto P1's artifact token.
+    assert!(
+        !can_activate_ability_now(&state, PlayerId(1), opponent_token, 0),
+        "opponent's artifact token is not controlled by the reduction's 'you' → not reduced",
+    );
+
+    // Sanity: with {2} available the unreduced nontoken IS affordable — proving the
+    // earlier `false` was a cost gate, not an unrelated legality gate.
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+    assert!(
+        can_activate_ability_now(&state, PlayerId(0), controlled_nontoken, 0),
+        "with {{2}} mana the unreduced nontoken ability is affordable",
+    );
+
+    // CR 514.2: the "this turn" reduction ends at cleanup (start_next_turn clears it).
+    crate::game::turns::start_next_turn(&mut state, &mut Vec::new());
+    assert!(
+        state.pending_activation_cost_reductions.is_empty(),
+        "the 'this turn' activation-cost reduction must be cleared at cleanup",
+    );
+}
+
 #[test]
 fn activated_ability_cost_reduction_mana_exemption_skips_mana_abilities() {
     // CR 601.2f + CR 605.1a: A "cost {2} less to activate that aren't mana

@@ -43973,3 +43973,72 @@ fn drawn_this_turn_followup_overwrites_prior_life_payment() {
         root.sub_ability
     );
 }
+
+/// CR 611.2 + CR 602.1: The Dining Car's chaos body — "activated abilities of
+/// artifact tokens you control cost {2} less to activate" — parses to the
+/// transient `Effect::ReduceActivatedAbilityCost`. The `source_filter` must be
+/// scoped to artifact TOKENS you control (the discount hits only tokens), so
+/// `FilterProp::Token` is load-bearing and asserted.
+#[test]
+fn dining_car_chaos_body_parses_reduce_activated_ability_cost() {
+    let effect = parse_effect(
+        "activated abilities of artifact tokens you control cost {2} less to activate",
+    );
+    let Effect::ReduceActivatedAbilityCost {
+        amount,
+        source_filter,
+    } = effect
+    else {
+        panic!("expected ReduceActivatedAbilityCost, got {effect:?}");
+    };
+    assert_eq!(amount, 2);
+    let TargetFilter::Typed(tf) = &source_filter else {
+        panic!("expected a Typed source filter, got {source_filter:?}");
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Artifact),
+        "source filter must be an artifact filter, got {tf:?}"
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::Token),
+        "the discount must hit only artifact TOKENS, got {tf:?}"
+    );
+}
+
+/// The transient effect arm is textually indiscriminate BY DESIGN: when
+/// `parse_imperative_effect` is reached directly with a standalone reducer line,
+/// it emits `Effect::ReduceActivatedAbilityCost`. The static (Training Grounds)
+/// vs. transient (The Dining Car) separation is enforced upstream at the dispatch
+/// site — a printed static line is claimed by `parse_static_line` before this
+/// parser runs (see `training_grounds_standalone_line_stays_static_no_transient_effect`
+/// in the static tests). This test locks the arm's intended behavior so a future
+/// maintainer cannot "fix" the helper to reject it and silently break the Dining
+/// Car path.
+#[test]
+fn imperative_effect_arm_fires_when_reached_directly() {
+    let effect =
+        parse_effect("activated abilities of creatures you control cost {2} less to activate");
+    assert!(
+        matches!(effect, Effect::ReduceActivatedAbilityCost { amount: 2, .. }),
+        "reached directly, the transient arm should fire; got {effect:?}"
+    );
+}
+
+/// The transient arm is deliberately narrow: only fixed-amount, `Reduce`,
+/// `"activated"` wordings emit an effect. Loyalty / `Raise` / variable-`{X}`
+/// transient wordings have no driver today and stay honestly `Unimplemented`
+/// rather than emitting a speculative parse.
+#[test]
+fn transient_cost_reduction_arm_rejects_unsupported_shapes() {
+    // Raise direction — no transient driver.
+    assert!(matches!(
+        parse_effect("activated abilities of creatures you control cost {2} more to activate"),
+        Effect::Unimplemented { .. }
+    ));
+    // Loyalty keyword — no transient driver.
+    assert!(matches!(
+        parse_effect("loyalty abilities of creatures you control cost {2} less to activate"),
+        Effect::Unimplemented { .. }
+    ));
+}

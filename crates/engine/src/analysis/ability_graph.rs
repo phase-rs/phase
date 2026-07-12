@@ -919,6 +919,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
+        | Effect::ReduceActivatedAbilityCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::AddPendingEntersModifications { .. }

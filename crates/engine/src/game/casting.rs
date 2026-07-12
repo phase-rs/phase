@@ -16152,8 +16152,13 @@ fn apply_static_activated_ability_cost_reduction(
     player: PlayerId,
     source_id: ObjectId,
 ) {
-    // CR 604.1: O(1) presence gate — no ReduceAbilityCost static means no reduction.
-    if !static_kind_present(state, StaticModeKind::ReduceAbilityCost) {
+    // CR 604.1: O(1) presence gate — nothing to do unless a printed
+    // ReduceAbilityCost static (CR 611.3) OR a resolution-generated transient
+    // reduction (CR 611.2 — The Dining Car's chaos ability, held in
+    // `pending_activation_cost_reductions`) is present.
+    let has_static = static_kind_present(state, StaticModeKind::ReduceAbilityCost);
+    let has_transient = !state.pending_activation_cost_reductions.is_empty();
+    if !has_static && !has_transient {
         return;
     }
     crate::game::perf_counters::record_static_full_scan();
@@ -16269,6 +16274,29 @@ fn apply_static_activated_ability_cost_reduction(
             CostModifyMode::Raise => increase_generic_in_cost(cost, effective),
             CostModifyMode::Minimum => {}
         }
+    }
+
+    // CR 611.2 + CR 602.2: resolution-generated, turn-scoped reductions
+    // (`Effect::ReduceActivatedAbilityCost` — The Dining Car's chaos ability).
+    // These live in `pending_activation_cost_reductions` (not a printed static) and
+    // are applied here so the single cost authority (CR 601.2f) stays intact.
+    // Cleared at cleanup (CR 514.2).
+    for reduction in &state.pending_activation_cost_reductions {
+        if reduction.amount == 0 {
+            continue;
+        }
+        // CR 602.2: scope by the reduction's `source_filter` against the ability's
+        // SOURCE permanent, anchoring "you control" on the reduction's controller.
+        let ctx = super::filter::FilterContext::from_source_with_controller(
+            reduction.source_id,
+            reduction.controller,
+        );
+        if !super::filter::matches_target_filter(state, source_id, &reduction.source_filter, &ctx) {
+            continue;
+        }
+        // CR 118.7a: subtract generic mana; The Dining Car specifies no one-mana
+        // floor, so the floor is 0.
+        reduce_generic_in_cost_with_minimum_mana(cost, reduction.amount, 0);
     }
 }
 

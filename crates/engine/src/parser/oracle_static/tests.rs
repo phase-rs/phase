@@ -28252,3 +28252,60 @@ fn rayami_flying_grant_is_conditional_on_matching_exiled_card() {
         "Rayami must not gain vigilance — no exiled card has vigilance"
     );
 }
+
+/// DISPATCH-SITE INVARIANT (pipeline-level): a standalone printed reducer line
+/// (Training Grounds) is claimed by `parse_static_line` as a `ReduceAbilityCost`
+/// static BEFORE `parse_imperative_effect` ever runs. Training Grounds' text and
+/// The Dining Car's chaos body are textually identical at the shared grammar head
+/// (`parse_activated_ability_cost_head`); the ONLY discriminator is the dispatch
+/// site. This test drives the real pipeline (not `parse_imperative_effect` in
+/// isolation) to prove the printed line stays a static and emits NO transient
+/// `Effect::ReduceActivatedAbilityCost`.
+#[test]
+fn training_grounds_standalone_line_stays_static_no_transient_effect() {
+    // 1. The bare line is claimed by the static classifier.
+    let def = parse_static_line(
+        "Activated abilities of creatures you control cost {2} less to activate.",
+    )
+    .expect("standalone reducer line must parse as a static");
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                ref keyword,
+                mode: CostModifyMode::Reduce,
+                amount: 2,
+                ..
+            } if keyword == "activated"
+        ),
+        "expected a ReduceAbilityCost static, got {:?}",
+        def.mode
+    );
+
+    // 2. A full-card parse of Training Grounds yields the ReduceAbilityCost static
+    //    and NO transient ReduceActivatedAbilityCost effect (no abilities/triggers).
+    let parsed = crate::parser::parse_oracle_text(
+        "Activated abilities of creatures you control cost {2} less to activate.",
+        "Training Grounds",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.statics.len(),
+        1,
+        "Training Grounds should parse to exactly one static, got {:?}",
+        parsed.statics
+    );
+    assert!(matches!(
+        parsed.statics[0].mode,
+        StaticMode::ReduceAbilityCost { .. }
+    ));
+    assert!(
+        parsed.abilities.is_empty() && parsed.triggers.is_empty(),
+        "the printed reducer line is a static, never a transient effect; got \
+         abilities={:?} triggers={:?}",
+        parsed.abilities,
+        parsed.triggers,
+    );
+}

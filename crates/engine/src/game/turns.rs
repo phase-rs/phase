@@ -975,6 +975,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 601.2f: Clear one-shot cost reductions and spell modifiers from the previous turn.
     state.pending_spell_cost_reductions.clear();
     state.pending_next_spell_modifiers.clear();
+    // CR 514.2: "this turn" activation-cost reductions (The Dining Car) end during cleanup.
+    state.pending_activation_cost_reductions.clear();
     // CR 614.1c: Pending ETB counters are turn-scoped (e.g., "this turn" effects).
     state.pending_etb_counters.clear();
     state.modal_modes_chosen_this_turn.clear();

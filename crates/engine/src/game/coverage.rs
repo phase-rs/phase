@@ -3497,6 +3497,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Cleanup { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
+        | Effect::ReduceActivatedAbilityCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }

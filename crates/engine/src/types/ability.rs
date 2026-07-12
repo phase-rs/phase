@@ -10916,6 +10916,24 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spell_filter: Option<TargetFilter>,
     },
+    /// CR 602.2 + CR 601.2f + CR 611.2: "Activated abilities of <filter> cost {N}
+    /// less to activate this turn." Resolution-generated, turn-scoped
+    /// activation-cost reduction (The Dining Car's chaos ability). Registers a
+    /// `PendingActivationCostReduction` that every matching activation reads until
+    /// the cleanup step clears it (CR 514.2). The permanent/static twin is
+    /// `StaticMode::ReduceAbilityCost { keyword: "activated" }` (Training Grounds);
+    /// this is its transient sibling, so it lives at the `Effect` layer. The static
+    /// twin also carries `exemption`/`minimum_mana`/`activator`, driven by real
+    /// static cards (Suppression Field, Zirda, Training Grounds' floor); no known
+    /// *transient* reducer carries those clauses, so per the minimalism gate they
+    /// are omitted here and added (each a `#[serde(default)]` field) only when a
+    /// card drives them.
+    ReduceActivatedAbilityCost {
+        amount: u32,
+        /// Which source permanents' activated abilities are reduced
+        /// ("artifact tokens you control" → Typed[Artifact, You, Token]).
+        source_filter: TargetFilter,
+    },
     /// CR 601.2f: "The next [type] spell you cast this turn [has keyword/can't be countered/etc.]."
     /// Creates a one-shot modifier applied when the player casts their next qualifying spell.
     GrantNextSpellAbility {
@@ -13576,6 +13594,7 @@ impl Effect {
             | Effect::AddTargetReplacement { .. }
             | Effect::AddRestriction { .. }
             | Effect::ReduceNextSpellCost { .. }
+            | Effect::ReduceActivatedAbilityCost { .. }
             | Effect::GrantNextSpellAbility { .. }
             | Effect::AddPendingETBCounters { .. }
             | Effect::AddPendingEntersModifications { .. }
@@ -13994,6 +14013,7 @@ impl Effect {
             | Effect::ReassembleContraption { .. }
             | Effect::ReassembleContraptionOnSprocket { .. }
             | Effect::ReduceNextSpellCost { .. }
+            | Effect::ReduceActivatedAbilityCost { .. }
             | Effect::RevealFromHand { .. }
             | Effect::RingTemptsYou
             | Effect::Ripple { .. }
@@ -14246,6 +14266,7 @@ impl Effect {
             | Effect::ReassembleContraption { .. }
             | Effect::ReassembleContraptionOnSprocket { .. }
             | Effect::ReduceNextSpellCost { .. }
+            | Effect::ReduceActivatedAbilityCost { .. }
             | Effect::RevealFromHand { .. }
             | Effect::RingTemptsYou
             | Effect::Ripple { .. }
@@ -14399,6 +14420,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::AddTargetReplacement { .. } => "AddTargetReplacement",
         Effect::AddRestriction { .. } => "AddRestriction",
         Effect::ReduceNextSpellCost { .. } => "ReduceNextSpellCost",
+        Effect::ReduceActivatedAbilityCost { .. } => "ReduceActivatedAbilityCost",
         Effect::GrantNextSpellAbility { .. } => "GrantNextSpellAbility",
         Effect::AddPendingETBCounters { .. } => "AddPendingETBCounters",
         Effect::AddPendingEntersModifications { .. } => "AddPendingEntersModifications",
@@ -14640,6 +14662,7 @@ pub enum EffectKind {
     AddTargetReplacement,
     AddRestriction,
     ReduceNextSpellCost,
+    ReduceActivatedAbilityCost,
     GrantNextSpellAbility,
     AddPendingETBCounters,
     AddPendingEntersModifications,
@@ -14898,6 +14921,7 @@ impl From<&Effect> for EffectKind {
             Effect::AddTargetReplacement { .. } => EffectKind::AddTargetReplacement,
             Effect::AddRestriction { .. } => EffectKind::AddRestriction,
             Effect::ReduceNextSpellCost { .. } => EffectKind::ReduceNextSpellCost,
+            Effect::ReduceActivatedAbilityCost { .. } => EffectKind::ReduceActivatedAbilityCost,
             Effect::GrantNextSpellAbility { .. } => EffectKind::GrantNextSpellAbility,
             Effect::AddPendingETBCounters { .. } => EffectKind::AddPendingETBCounters,
             Effect::AddPendingEntersModifications { .. } => {

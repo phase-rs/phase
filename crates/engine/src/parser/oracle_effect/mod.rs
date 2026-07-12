@@ -20454,6 +20454,13 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
         return parsed_clause(effect);
     }
 
+    // CR 611.2 + CR 602.1: transient (this-turn) activated-ability cost reduction —
+    // "activated abilities of <subject> cost {N} less to activate [this turn]"
+    // (The Dining Car's chaos ability). Reuses the shared static grammar head.
+    if let Some(effect) = imperative::try_parse_activated_ability_cost_reduction_effect(tp, ctx) {
+        return parsed_clause(effect);
+    }
+
     // --- Fallback ---
     let verb = tp.lower.split_whitespace().next().unwrap_or("unknown");
     tracing::debug!(

@@ -1129,6 +1129,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::SetClassLevel { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
+        | Effect::ReduceActivatedAbilityCost { .. }
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::AddPendingEntersModifications { .. }

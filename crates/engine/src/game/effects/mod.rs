@@ -3318,6 +3318,9 @@ pub fn resolve_effect(
         Effect::ReduceNextSpellCost { .. } => {
             resolve_reduce_next_spell_cost(state, ability, events)
         }
+        Effect::ReduceActivatedAbilityCost { .. } => {
+            resolve_reduce_activated_ability_cost(state, ability, events)
+        }
         Effect::GrantNextSpellAbility { .. } => {
             resolve_grant_next_spell_ability(state, ability, events)
         }
@@ -9489,6 +9492,41 @@ fn resolve_reduce_next_spell_cost(
         });
     events.push(GameEvent::EffectResolved {
         kind: crate::types::ability::EffectKind::ReduceNextSpellCost,
+        source_id: ability.source_id,
+    });
+    Ok(())
+}
+
+/// CR 602.2 + CR 601.2f + CR 611.2: Register a turn-scoped activation-cost reduction
+/// (The Dining Car's chaos ability). Unlike `resolve_reduce_next_spell_cost` this is
+/// not consumed on use — it is read by every matching activation this turn and cleared
+/// at cleanup (CR 514.2, `turns.rs`).
+fn resolve_reduce_activated_ability_cost(
+    state: &mut GameState,
+    ability: &crate::types::ability::ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), crate::types::ability::EffectError> {
+    let (amount, source_filter) = match &ability.effect {
+        Effect::ReduceActivatedAbilityCost {
+            amount,
+            source_filter,
+        } => (*amount, source_filter.clone()),
+        _ => {
+            return Err(crate::types::ability::EffectError::MissingParam(
+                "ReduceActivatedAbilityCost".to_string(),
+            ))
+        }
+    };
+    state.pending_activation_cost_reductions.push(
+        crate::types::game_state::PendingActivationCostReduction {
+            controller: ability.controller,
+            source_id: ability.source_id,
+            amount,
+            source_filter,
+        },
+    );
+    events.push(GameEvent::EffectResolved {
+        kind: crate::types::ability::EffectKind::ReduceActivatedAbilityCost,
         source_id: ability.source_id,
     });
     Ok(())
@@ -22906,5 +22944,52 @@ mod tests {
                 "2HG: opposing-team member {pid:?} is an opponent of the caster and must match"
             );
         }
+    }
+
+    /// CR 611.2 + CR 602.2: resolving `Effect::ReduceActivatedAbilityCost` registers
+    /// exactly one `PendingActivationCostReduction` carrying the effect's amount and
+    /// source filter, anchored to the resolving ability's controller/source, and
+    /// emits an `EffectResolved` event.
+    #[test]
+    fn reduce_activated_ability_cost_resolution_registers_pending_reduction() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "The Dining Car".to_string(),
+            Zone::Battlefield,
+        );
+        let source_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::Token],
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ReduceActivatedAbilityCost {
+                amount: 2,
+                source_filter: source_filter.clone(),
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_reduce_activated_ability_cost(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.pending_activation_cost_reductions.len(), 1);
+        let reduction = &state.pending_activation_cost_reductions[0];
+        assert_eq!(reduction.controller, PlayerId(0));
+        assert_eq!(reduction.source_id, source_id);
+        assert_eq!(reduction.amount, 2);
+        assert_eq!(reduction.source_filter, source_filter);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::ReduceActivatedAbilityCost,
+                ..
+            }
+        )));
     }
 }
