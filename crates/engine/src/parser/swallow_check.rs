@@ -1695,18 +1695,18 @@ fn effect_has_duration(effect: &Effect, pred: &dyn Fn(&Duration) -> bool) -> boo
         // ---- carriers ----
         Effect::BecomeCopy { duration, .. }
         | Effect::GainActivatedAbilitiesOfTarget { duration, .. }
-        | Effect::CastFromZone { duration, .. } => duration.as_ref().is_some_and(|d| pred(d)),
+        | Effect::CastFromZone { duration, .. } => duration.as_ref().is_some_and(pred),
         Effect::ForceAttack { duration, .. } => pred(duration),
         Effect::PreventDamage {
             prevention_duration,
             ..
-        } => prevention_duration.as_ref().is_some_and(|d| pred(d)),
+        } => prevention_duration.as_ref().is_some_and(pred),
         Effect::GenericEffect {
             duration,
             static_abilities,
             ..
         } => {
-            duration.as_ref().is_some_and(|d| pred(d))
+            duration.as_ref().is_some_and(pred)
                 || static_abilities
                     .iter()
                     .any(|s| static_has_duration_matching(s, pred))
@@ -1798,7 +1798,7 @@ fn casting_permission_has_duration(
 ) -> bool {
     match permission {
         crate::types::ability::CastingPermission::ExileWithAltCost { duration, .. } => {
-            duration.as_ref().is_some_and(|d| pred(d))
+            duration.as_ref().is_some_and(pred)
         }
         crate::types::ability::CastingPermission::PlayFromExile { duration, .. } => pred(duration),
         _ => false,
@@ -1824,7 +1824,7 @@ fn static_has_duration_matching(
 }
 
 fn def_has_duration(def: &AbilityDefinition, pred: &dyn Fn(&Duration) -> bool) -> bool {
-    if def.duration.as_ref().is_some_and(|d| pred(d)) {
+    if def.duration.as_ref().is_some_and(pred) {
         return true;
     }
     if effect_has_duration(&def.effect, pred) {
