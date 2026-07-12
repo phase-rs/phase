@@ -549,3 +549,74 @@ fn t9_snapshot_carries_excess_recipient_across_resume() {
         "the deferred lifelink bonus must survive the snapshot round-trip"
     );
 }
+
+/// Build a scenario, add a `source_power`-power source creature controlled by
+/// P0 (with trample if requested) and a `victim_toughness`-toughness victim
+/// creature controlled by P1, cast a free Ram Through targeting
+/// `[source, victim]` (matching "target creature you control ... target
+/// creature you don't control" order), and return the outcome plus both ids.
+fn cast_ram_through_at(
+    source_has_trample: bool,
+    source_power: i32,
+    victim_toughness: i32,
+) -> (CastOutcome, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let source = {
+        let mut c = scenario.add_creature(P0, "Rammer", source_power, source_power);
+        if source_has_trample {
+            c.with_keyword(Keyword::Trample);
+        }
+        c.id()
+    };
+    let victim = scenario
+        .add_creature(P1, "Victim", 2, victim_toughness)
+        .id();
+
+    let spell = {
+        let mut b = scenario.add_spell_to_hand_from_oracle(P0, "Ram Through", false, RAM_THROUGH);
+        b.with_mana_cost(ManaCost::generic(0));
+        b.id()
+    };
+
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[source, victim])
+        .resolve();
+    (outcome, source, victim)
+}
+
+/// T13 — cast-pipeline proof (trample): Ram Through's parsed `TargetOnly →
+/// DealDamage` chain, real cast target ordering, and source resolution must
+/// compose so the trample gate redirects excess. A power-5 trampling source
+/// hits a toughness-2 victim: the victim takes only the lethal 2, and the
+/// excess 3 redirects to the victim's controller (P1). Revert-fails if the
+/// `TargetOnly`-unwrap fix (or the trample gate itself) regresses: the
+/// redirect silently vanishes and `foe_life_delta` reads 0.
+#[test]
+fn t13_ram_through_trample_redirects_excess_through_real_cast() {
+    let (outcome, _source, victim) = cast_ram_through_at(true, 5, 2);
+    outcome.assert_life_delta(P1, -3);
+    assert_eq!(
+        outcome.state().objects[&victim].damage_marked,
+        2,
+        "the victim must take only the lethal 2, not the full 5 — the rest redirects"
+    );
+}
+
+/// T14 — cast-pipeline proof (no trample), the paired negative: the same
+/// power-5 source WITHOUT trample deals its full damage directly to the
+/// victim with no redirect — the gate must not fire, and the victim (not its
+/// controller) absorbs all 5.
+#[test]
+fn t14_ram_through_no_trample_deals_full_damage_no_redirect() {
+    let (outcome, _source, victim) = cast_ram_through_at(false, 5, 2);
+    outcome.assert_life_delta(P1, 0);
+    assert_eq!(
+        outcome.state().objects[&victim].damage_marked,
+        5,
+        "without trample the victim must take the full 5 with no redirect"
+    );
+}
