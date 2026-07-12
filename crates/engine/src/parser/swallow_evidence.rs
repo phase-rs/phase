@@ -141,6 +141,80 @@ const DURATION_KEYS: &[&str] = &["duration", "prevention_duration"];
 /// variant is the bare string `"CantTap"` and fails `ReplacementMode::deserialize`.
 const STATIC_MODE_KEYS: &[&str] = &["mode"];
 
+/// Every JSON key at which a `QuantityExpr`- or `QuantityRef`-typed field is serialized.
+///
+/// ```text
+/// $ rg '(\w+): (Option<)?(Box<)?(Vec<)?(QuantityExpr|QuantityRef)\b' crates/engine/src/types/
+/// ```
+///
+/// Anchoring these is **mandatory**, and for a different reason than [`DURATION_KEYS`].
+/// `QuantityRef` is INTERNALLY tagged, so the naive argument is that its tag makes it
+/// self-identifying and anchoring is unnecessary. That argument is false twice over:
+///
+///  1. An internally-tagged **unit** variant matches on the `type` field ALONE, and serde
+///     ignores unknown fields by default. So `AbilityCondition::PreviousEffectAmount`,
+///     serialized as `{"type":"PreviousEffectAmount","comparator":"LE","rhs":…}`,
+///     deserializes CLEANLY as `QuantityRef::PreviousEffectAmount` — the extra fields are
+///     silently dropped.
+///  2. A tag is only discriminating if the variant NAME is unique across every tagged enum
+///     in the tree. It is not. 10 of `QuantityRef`'s 84 variant names are shared with
+///     another internally-tagged enum reachable from a parsed unit:
+///
+///       QuantityRef ∩ AbilityCondition         PreviousEffectAmount
+///       QuantityRef ∩ FilterProp               AttackedThisTurn, EnteredThisTurn
+///       QuantityRef ∩ TriggerCondition         AttackedThisTurn, CounterAddedThisTurn
+///       QuantityRef ∩ ParsedCondition          BattlefieldEntriesThisTurn
+///       QuantityRef ∩ ChooseFromZoneConstraint DistinctCardTypes
+///       QuantityRef ∩ ManaCost                 SelfManaValue
+///       QuantityRef ∩ ManaProduction           DistinctColorsAmongPermanents
+///       QuantityRef ∩ SolveCondition           ObjectCount
+///       QuantityRef ∩ QuantityExpr             Power
+///
+/// Both failures were MEASURED, not hypothesized. Unanchored, `detect_dynamic_qty` accepted
+/// Boing!'s `AbilityCondition::PreviousEffectAmount` (under key `condition`) and Siren's
+/// Call's `FilterProp::AttackedThisTurn` (under key `properties[].prop`) as proof of a
+/// dynamic quantity, and SUPPRESSED both cards' real swallowed-clause warnings — Boing!
+/// lowers "scry a number of cards equal to the result" to `Scry { count: Fixed(1) }`, so the
+/// dynamic quantity is genuinely dropped and the warning is a true positive.
+///
+/// Note the shape of the fix: a value reached through one of these keys IS a quantity by
+/// construction, so no collision is possible there. The failure directions are asymmetric —
+/// a key MISSING from this list makes a detector over-report (conservative-RED, visible in
+/// the full-pool delta), whereas an unanchored probe under-reports SILENTLY. Anchoring fails
+/// loud; not anchoring fails quiet.
+const QUANTITY_KEYS: &[&str] = &[
+    "amount",
+    "amount_dynamic",
+    "attr",
+    "back",
+    "count",
+    "depth",
+    "dynamic_count",
+    "dynamic_max_choices",
+    "exponent",
+    "expr",
+    "exprs",
+    "inner",
+    "keep_count_expr",
+    "left",
+    "lhs",
+    "life_payment",
+    "mana_value_limit",
+    "max",
+    "max_ticket_cost",
+    "min",
+    "mv_bound",
+    "qty",
+    "quantity",
+    "repeat_for",
+    "rhs",
+    "right",
+    "scale",
+    "threshold",
+    "total_power_cap",
+    "value",
+];
+
 /// One audit unit's lowered definitions, as a walkable tree with the prose removed.
 ///
 /// Built once per unit and shared by every detector — the same one-serialization-per-unit
@@ -261,6 +335,29 @@ impl UnitEvidence {
         self.any_at(DURATION_KEYS, pred)
     }
 
+    /// Does any `QuantityRef` carrier satisfy `pred`? Key-anchored per [`QUANTITY_KEYS`].
+    ///
+    /// Never probe `QuantityRef` unanchored: its tag is not discriminating, because 10 of its
+    /// variant names are shared with other internally-tagged enums. See [`QUANTITY_KEYS`].
+    pub(super) fn any_quantity_ref(
+        &self,
+        pred: impl Fn(&crate::types::ability::QuantityRef) -> bool,
+    ) -> bool {
+        self.any_at(QUANTITY_KEYS, pred)
+    }
+
+    /// Does any `QuantityExpr` carrier satisfy `pred`? Key-anchored per [`QUANTITY_KEYS`].
+    ///
+    /// Anchoring matters doubly here: `QuantityExpr`'s hand-written `Deserialize` also accepts
+    /// a BARE INTEGER as `Fixed` (the legacy on-disk form), so an unanchored probe would parse
+    /// any number anywhere on the card as a quantity.
+    pub(super) fn any_quantity_expr(
+        &self,
+        pred: impl Fn(&crate::types::ability::QuantityExpr) -> bool,
+    ) -> bool {
+        self.any_at(QUANTITY_KEYS, pred)
+    }
+
     /// Does any `StaticMode` carrier satisfy `pred`? Key-anchored per [`STATIC_MODE_KEYS`].
     pub(super) fn any_static_mode(
         &self,
@@ -367,6 +464,46 @@ mod tests {
         assert!(
             !evidence.any_duration(|d| matches!(d, Duration::Permanent)),
             "key-anchored: a `Permanent` string outside a duration slot is NOT a duration"
+        );
+    }
+
+    /// An INTERNALLY tagged enum still needs key-anchoring, because a tag only discriminates
+    /// if the variant NAME is unique across every tagged enum in the tree — and it is not.
+    ///
+    /// This is the Boing! defect, reduced to the building block. `AbilityCondition` and
+    /// `QuantityRef` both have a `PreviousEffectAmount` variant; the condition's node carries
+    /// extra fields, which serde silently DROPS when it deserializes the node as the unit
+    /// variant `QuantityRef::PreviousEffectAmount`. Unanchored, a *condition* was therefore
+    /// read as proof the unit carries a *dynamic quantity*, suppressing a real swallow.
+    #[test]
+    fn quantity_probe_is_key_anchored_not_tag_matched() {
+        // The verbatim shape the parser lowers Boing!'s "if the result is 3 or less" to:
+        // an AbilityCondition, sitting under the key `condition`.
+        let evidence = UnitEvidence::from_json_for_test(
+            r#"{"abilities":[{"condition":{"type":"PreviousEffectAmount","comparator":"LE","rhs":{"type":"Fixed","value":3}}}]}"#,
+        );
+
+        assert!(
+            evidence.any::<QuantityRef>(|_| true),
+            "unanchored: the AbilityCondition IS accepted as a QuantityRef — the hazard"
+        );
+        assert!(
+            !evidence.any_quantity_ref(|_| true),
+            "key-anchored: a condition under `condition` is NOT a dynamic quantity"
+        );
+    }
+
+    /// The anchored probe still sees a genuine quantity — the fix must not blind the detector.
+    /// This is Collective Restraint's Domain count, which legitimately dissolves its warning.
+    #[test]
+    fn a_quantity_under_a_quantity_key_is_still_evidence() {
+        let evidence = UnitEvidence::from_json_for_test(
+            r#"{"statics":[{"condition":{"scaling":{"data":{"quantity":{"type":"BasicLandTypeCount","controller":"You"}}}}}]}"#,
+        );
+
+        assert!(
+            evidence.any_quantity_ref(|q| matches!(q, QuantityRef::BasicLandTypeCount { .. })),
+            "a real QuantityRef under the `quantity` key must still be evidence"
         );
     }
 

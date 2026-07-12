@@ -30,10 +30,10 @@ use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Comparator,
     ContinuousModification, CopyRetargetPermission, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PlayerFilter,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementMode, RestrictionExpiry,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, UnlessPayScaling,
+    FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope, ParsedCondition,
+    PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementMode,
+    RestrictionExpiry, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, UnlessPayScaling,
 };
 use crate::types::game_state::RetargetScope;
 use crate::types::keywords::Keyword;
@@ -2047,8 +2047,19 @@ fn detect_dynamic_qty(
     // That exclusion is load-bearing: `QuantityExpr`'s hand-written `Deserialize` also
     // accepts a BARE INTEGER as `Fixed` (the legacy on-disk form), so a predicate that
     // forgot to exclude it would be satisfied by any number anywhere on the card.
-    if evidence.any::<QuantityRef>(|_| true)
-        || evidence.any::<QuantityExpr>(|q| !matches!(q, QuantityExpr::Fixed { .. }))
+    //
+    // KEY-ANCHORED (`any_quantity_ref` / `any_quantity_expr`, see `QUANTITY_KEYS`). These
+    // were once unanchored, on the reasoning that an internally-tagged enum carries its own
+    // discriminator. It does not: an internally-tagged UNIT variant matches on `type` alone
+    // and serde drops unknown fields, and 10 of `QuantityRef`'s variant names are shared
+    // with other tagged enums. Unanchored, this probe read Boing!'s
+    // `AbilityCondition::PreviousEffectAmount` (a CONDITION, under key `condition`) and
+    // Siren's Call's `FilterProp::AttackedThisTurn` (a TARGET FILTER, under key
+    // `properties[].prop`) as dynamic quantities, and suppressed both cards' real warnings.
+    // Boing! lowers "scry a number of cards equal to the result" to `Scry { count: Fixed(1) }`
+    // — the quantity IS dropped, and the warning it silenced was a true positive.
+    if evidence.any_quantity_ref(|_| true)
+        || evidence.any_quantity_expr(|q| !matches!(q, QuantityExpr::Fixed { .. }))
     {
         return;
     }
@@ -2067,6 +2078,31 @@ fn detect_dynamic_qty(
                 | Effect::EachPlayerCopyChosen { .. }
                 | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
         )
+    }) {
+        return;
+    }
+    // CR 106.1: a mana ability whose AMOUNT is read from game state carries its quantity in
+    // the `ManaProduction` variant itself — `Effect::Mana.produced` is typed `ManaProduction`,
+    // NOT `QuantityRef`, so the key-anchored quantity probes above cannot see it.
+    //
+    //   Bloom Tender / Faeburrow Elder / Sunbird Effigy / Tarnation Vista —
+    //   "For each color among permanents you control, add one mana of that color."
+    //
+    // This leg exists BECAUSE the probes above are anchored. Unanchored, they "saw" this
+    // carrier only by ACCIDENT: `DistinctColorsAmongPermanents` is also a `QuantityRef`
+    // variant name, so the `ManaProduction` node deserialized as a `QuantityRef` by cross-enum
+    // collision. Right answer, wrong reason — and the same collision suppressed Boing! and
+    // Siren's Call. Anchoring removed the accident; this restores the fact, typed.
+    //
+    // ONE variant, and that is a MEASURED bound, not a guess: over the full 35,396-face pool,
+    // `DistinctColorsAmongPermanents` is the only `ManaProduction` on a face where the marker
+    // fires and no other dynamic carrier exists. Every other variant that appears on a warning
+    // face (Colorless, AnyOneColor, Fixed, ChosenColor, AnyInCommandersColorIdentity,
+    // TriggerEventManaType) warns on main too — widening this `matches!` would SUPPRESS true
+    // positives, which is the silent direction. A future state-derived variant that is missing
+    // here over-reports instead: conservative-RED, and the full-pool delta shows it.
+    if evidence.any_at::<ManaProduction>(&["produced"], |p| {
+        matches!(p, ManaProduction::DistinctColorsAmongPermanents { .. })
     }) {
         return;
     }
@@ -2948,7 +2984,7 @@ fn detect_condition_if(
     // allow-noncombinator: swallow detector marker scan on classified text
     if (stripped.contains("lost life this way") || stripped.contains("gained life this way"))
         && stripped.contains("that many") // allow-noncombinator: swallow detector marker scan on classified text
-        && evidence.any::<QuantityRef>(|q| matches!(q, QuantityRef::EventContextAmount { .. }))
+        && evidence.any_quantity_ref(|q| matches!(q, QuantityRef::EventContextAmount { .. }))
     {
         return;
     }
@@ -3663,7 +3699,13 @@ fn detect_duration_this_turn(
     //     ROT DIRECTION (declared): a NEW `*ThisTurn` variant added later is not caught
     //     here until this list is regenerated. That failure is conservative-RED — the
     //     audit over-reports a swallow — never a silent false green.
-    if evidence.any::<QuantityRef>(|x| {
+    // KEY-ANCHORED: four of the variants below — `AttackedThisTurn`, `EnteredThisTurn`,
+    // `BattlefieldEntriesThisTurn`, `CounterAddedThisTurn` — are ALSO variant names of
+    // `FilterProp` / `TriggerCondition` / `ParsedCondition`. Unanchored, a target filter
+    // saying "creatures that attacked this turn" would deserialize as
+    // `QuantityRef::AttackedThisTurn` and silently discharge a "this turn" duration
+    // expectation. See `QUANTITY_KEYS`.
+    if evidence.any_quantity_ref(|x| {
         matches!(
             x,
             QuantityRef::LifeLostThisTurn { .. }
