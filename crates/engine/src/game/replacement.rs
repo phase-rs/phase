@@ -6899,21 +6899,24 @@ fn replacement_definition_for_id(
                 .map(|entry| &entry.object)
         })
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
-    // CR 121.2: a `debug_assert!(def.validate_draw_scope().is_ok())` belongs here —
-    // this is the single point where the engine resolves a definition it is about to
-    // consult, so it is the one place a producer that forgot `.draw_scope(...)` can be
-    // caught. It is deliberately NOT wired, and the reason is a finding rather than an
-    // oversight: the committed fixture `crates/engine/tests/fixtures/integration_cards.json`
-    // predates the field and carries 7 Draw replacements with no scope (Abundance, Blood
-    // Scrivener, Jace Wielder of Mysteries, Laboratory Maniac, Living Conundrum, Quantum
-    // Riddler, Teferi's Ageless Insight). Wiring the assert fails all 7 until that fixture
-    // is regenerated — a separate, deliberate act, since a regen sweeps in whatever else
-    // has changed in the card pool.
-    //
-    // Production is unaffected: `card-data.json` is regenerated from the parser by CI and
-    // all 6 producers set the scope. The release-build authority is
-    // `draw_replacement_census.py`, which cross-checks every declared scope against an
-    // independently derived one across the full 51-card corpus.
+        // CR 121.2: an instruction to draw multiple cards is performed as that many
+        // individual draws, and CR 121.2a modifies the instruction's count *before* any
+        // individual draw happens. A Draw replacement must therefore declare which of the
+        // two it is (`DrawReplacementScope`) — the engine cannot infer it at consult time.
+        // This is the single point where the engine resolves a definition it is about to
+        // consult, so it is the one place a producer that forgot `.draw_scope(...)` — in
+        // card data, in a test constructor, or in a future runtime producer — is caught.
+        //
+        // Debug-only: release builds are covered by `draw_replacement_census.py`, which
+        // cross-checks every declared scope against an independently derived one across
+        // the full corpus.
+        .inspect(|def| {
+            debug_assert!(
+                def.validate_draw_scope().is_ok(),
+                "{}",
+                def.validate_draw_scope().unwrap_err()
+            );
+        })
 }
 
 fn pipeline_loop(

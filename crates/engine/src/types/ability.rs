@@ -18513,8 +18513,10 @@ pub enum CombatDamageScope {
 /// event's business, and is a separate type.
 ///
 /// Required exactly when `ReplacementDefinition::event` is `Draw`, and forbidden
-/// otherwise; checkable by `ReplacementDefinition::validate_draw_scope`, and enforced
-/// across the full corpus by `scripts/draw_replacement_census.py`.
+/// otherwise; enforced by `ReplacementDefinition::validate_draw_scope`, which every
+/// definition passes through as a `debug_assert!` at the single consult seam
+/// (`game::replacement::replacement_definition_for_id`), and enforced across the full
+/// corpus by `scripts/draw_replacement_census.py`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DrawReplacementScope {
     /// Modifies the draw *instruction*'s count before any individual draw happens
