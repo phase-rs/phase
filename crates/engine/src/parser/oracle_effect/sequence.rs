@@ -4353,7 +4353,7 @@ pub(super) fn apply_clause_continuation(
                 *rest_destination = destination;
             }
         }
-        // CR 406.3 + CR 701.16a: Rewrite the preceding private `Dig` (the
+        // CR 406.3 + CR 701.20e: Rewrite the preceding private `Dig` (the
         // "look at the top N cards of <player>'s library" look step) into an
         // `Effect::ExileTop` so the looked-at card(s) actually leave the
         // library — the Gonti, Canny Acquisitor impulse idiom. `player`/`count`
@@ -9134,6 +9134,162 @@ mod tests {
         assert!(*up_to);
         assert_eq!(*destination, Some(Zone::Hand));
         assert_eq!(*rest_destination, Some(Zone::Library));
+    }
+
+    // ---- U20: the walk-back's ONLY witnesses -------------------------------
+    //
+    // `DamageDealer` and `DigLook` bind the nearest def OF THEIR ROLE, walking
+    // PAST an intervening def that is not a member. That walk-back is the entire
+    // reason they are roles and not `AntecedentSelector::LastEmitted`.
+    //
+    // The card pool cannot prove it. All 19 fires across the full pool (4 + 11 + 4,
+    // measured) land at depth 0 with exactly one candidate, so `LastEmitted` would
+    // be output-identical on every printed card TODAY. That makes the walk-back a
+    // capability with no witness — and the first card to print an intervening
+    // clause between the anchor and its rider would be its first-ever exercise, in
+    // production, silently. These tests are that witness, synthetically: each
+    // asserts the binding lands on index 0, which is the answer `LastEmitted` gets
+    // WRONG. If someone later "simplifies" either role to `LastEmitted`, these go
+    // red instead of a card going quietly wrong.
+
+    /// The intervening def a lookback must see straight past: not a `DealDamage`,
+    /// not a `Dig`, so a member of NEITHER role.
+    fn non_member_def() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+        )
+    }
+
+    fn env_for(defs: &[AbilityDefinition]) -> crate::parser::oracle_effect::assembly::AssemblyEnv {
+        let mut env = crate::parser::oracle_effect::assembly::AssemblyEnv::default();
+        env.observe(
+            defs,
+            None,
+            crate::parser::oracle_effect::assembly::NodeRole::Primary,
+        );
+        env
+    }
+
+    /// CR 120.4a: the excess rider binds the `DealDamage`, not whatever happens to
+    /// be the last def emitted.
+    #[test]
+    fn excess_damage_rider_binds_the_damage_dealer_past_an_intervening_def() {
+        let mut defs = vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+            non_member_def(),
+        ];
+        let env = env_for(&defs);
+        apply_clause_continuation(
+            &mut defs,
+            ContinuationAst::ExcessDamageToController,
+            AbilityKind::Spell,
+            &env,
+        );
+
+        let Effect::DealDamage { excess, .. } = &*defs[0].effect else {
+            panic!("expected DealDamage at index 0, got {:?}", defs[0].effect);
+        };
+        assert_eq!(
+            *excess,
+            Some(ExcessRecipient::TargetController),
+            "the rider must walk back to the DealDamage at index 0 — `LastEmitted` \
+             would have bound the intervening def at index 1"
+        );
+        assert!(
+            matches!(&*defs[1].effect, Effect::Shuffle { .. }),
+            "the intervening def must be left untouched, got {:?}",
+            defs[1].effect
+        );
+    }
+
+    /// CR 702.75a: Hideaway's "exile one of them face down" binds the `Dig`, not
+    /// the last def emitted. Exercises `DigLook` through its FIRST consumer.
+    #[test]
+    fn exile_one_of_them_face_down_binds_the_dig_past_an_intervening_def() {
+        let mut defs = vec![
+            AbilityDefinition::new(AbilityKind::Spell, make_dig_effect()),
+            non_member_def(),
+        ];
+        let env = env_for(&defs);
+        apply_clause_continuation(
+            &mut defs,
+            ContinuationAst::ExileOneOfThemFaceDown,
+            AbilityKind::Spell,
+            &env,
+        );
+
+        let Effect::Dig {
+            keep_count,
+            up_to,
+            destination,
+            ..
+        } = &*defs[0].effect
+        else {
+            panic!("expected patched Dig at index 0, got {:?}", defs[0].effect);
+        };
+        assert_eq!(*keep_count, Some(1));
+        assert!(!*up_to);
+        assert_eq!(
+            *destination,
+            Some(Zone::Exile),
+            "the Hideaway patch must walk back to the Dig at index 0 — `LastEmitted` \
+             would have bound the intervening def at index 1"
+        );
+        assert!(
+            defs[0].sub_ability.is_some(),
+            "the conceal sub-ability must be chained onto the bound Dig"
+        );
+        assert!(
+            matches!(&*defs[1].effect, Effect::Shuffle { .. }),
+            "the intervening def must be left untouched, got {:?}",
+            defs[1].effect
+        );
+    }
+
+    /// CR 406.3 + CR 701.20e: the Gonti impulse rewrite binds the same `Dig`.
+    /// Exercises `DigLook` through its SECOND consumer — the two continuations
+    /// share ONE role because their scan predicates were byte-identical, and this
+    /// is what makes that shared binding empirical rather than asserted.
+    #[test]
+    fn exile_looked_at_card_binds_the_dig_past_an_intervening_def() {
+        let mut defs = vec![
+            AbilityDefinition::new(AbilityKind::Spell, make_dig_effect()),
+            non_member_def(),
+        ];
+        let env = env_for(&defs);
+        apply_clause_continuation(
+            &mut defs,
+            ContinuationAst::ExileLookedAtCard {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                face_down: true,
+            },
+            AbilityKind::Spell,
+            &env,
+        );
+
+        assert!(
+            matches!(&*defs[0].effect, Effect::ExileTop { .. }),
+            "the Dig at index 0 must be rewritten into an ExileTop — `LastEmitted` \
+             would have bound the intervening def at index 1; got {:?}",
+            defs[0].effect
+        );
+        assert!(
+            matches!(&*defs[1].effect, Effect::Shuffle { .. }),
+            "the intervening def must be left untouched, got {:?}",
+            defs[1].effect
+        );
     }
 
     #[test]
