@@ -1561,10 +1561,22 @@ pub(crate) fn strip_trailing_keyword_clause(clause: &str) -> &str {
             return &clause[..pos];
         }
     }
-    if let Some(pos) = clause.find(" and is ") {
-        if clause[pos..].contains("in addition to") {
-            return &clause[..pos];
-        }
+    // CR 205.1b: peel a trailing type-addition (" and is an Avatar in addition
+    // to its other types"), guarded on the "in addition to " tail so a genuine
+    // "<count> and is <...>" count phrase is never mis-truncated. Mirrors the
+    // type-addition grammar in `type_change.rs`: scan word boundaries for the
+    // "and is " verb boundary whose remainder reaches " in addition to ", and
+    // return the span preceding it. `clause` is already lowercase (caller passes
+    // `after_for_each.lower`), so tags match directly.
+    if let Some((before, _)) = nom_primitives::scan_split_at_phrase(clause, |i| {
+        (
+            tag::<_, _, OracleError<'_>>("and is "),
+            take_until::<_, _, OracleError<'_>>(" in addition to "),
+            tag::<_, _, OracleError<'_>>(" in addition to "),
+        )
+            .parse(i)
+    }) {
+        return before.trim_end();
     }
     clause
 }
