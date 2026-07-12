@@ -18479,7 +18479,8 @@ pub enum CombatDamageScope {
 /// event's business, and is a separate type.
 ///
 /// Required exactly when `ReplacementDefinition::event` is `Draw`, and forbidden
-/// otherwise; see `ReplacementDefinition::validate_draw_scope`.
+/// otherwise; checkable by `ReplacementDefinition::validate_draw_scope`, and enforced
+/// across the full corpus by `scripts/draw_replacement_census.py`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DrawReplacementScope {
     /// Modifies the draw *instruction*'s count before any individual draw happens
@@ -18600,8 +18601,10 @@ pub struct ReplacementDefinition {
     /// [`DrawReplacementScope`].
     ///
     /// `Some` exactly when `event` is `Draw`, `None` otherwise; declared at
-    /// construction and never inferred later. Checked by
-    /// [`ReplacementDefinition::validate_draw_scope`].
+    /// construction and never inferred later. Checkable by
+    /// [`ReplacementDefinition::validate_draw_scope`]; the enforcing authority is the
+    /// corpus census gate (`scripts/draw_replacement_census.py`), which cross-checks
+    /// every declared scope against an independently derived one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw_scope: Option<DrawReplacementScope>,
     /// Shield type for one-shot replacement effects that expire at cleanup.
@@ -18750,17 +18753,28 @@ impl ReplacementDefinition {
     /// match time; a non-`Draw` definition with a scope is a category error. Both
     /// are construction bugs, so this returns the offending definition's problem
     /// rather than silently defaulting.
+    /// `DrawCards` is treated as a draw event here, not as a non-draw one. It is a
+    /// dead registry alias (zero producers, zero corpus rows) slated for removal,
+    /// but while it exists it names a draw, and `draw_replacement_census.py` scans
+    /// `event in ("Draw", "DrawCards")`. Having the validator forbid a scope on a
+    /// variant the census demands one for would be a contradiction between the two
+    /// authorities, so they agree: both treat it as a draw.
     pub fn validate_draw_scope(&self) -> Result<(), String> {
-        match (&self.event, &self.draw_scope) {
-            (ReplacementEvent::Draw, None) => Err(format!(
-                "ReplacementEvent::Draw definition has no draw_scope (CR 121.2: a \
-                 definition must declare whether it modifies the instruction's count \
-                 or replaces one individual draw). description={:?}",
-                self.description
+        let is_draw_event = matches!(
+            self.event,
+            ReplacementEvent::Draw | ReplacementEvent::DrawCards
+        );
+        match (is_draw_event, &self.draw_scope) {
+            (true, None) => Err(format!(
+                "{:?} definition has no draw_scope (CR 121.2: a definition must declare \
+                 whether it modifies the instruction's count or replaces one individual \
+                 draw). description={:?}",
+                self.event, self.description
             )),
-            (event, Some(scope)) if !matches!(event, ReplacementEvent::Draw) => Err(format!(
-                "non-Draw replacement ({event:?}) carries draw_scope {scope:?} — \
-                 draw_scope is meaningless outside CR 121.2"
+            (false, Some(scope)) => Err(format!(
+                "non-Draw replacement ({:?}) carries draw_scope {scope:?} — draw_scope is \
+                 meaningless outside CR 121.2",
+                self.event
             )),
             _ => Ok(()),
         }

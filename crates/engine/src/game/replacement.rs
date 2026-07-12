@@ -6888,6 +6888,21 @@ fn replacement_definition_for_id(
                 .map(|entry| &entry.object)
         })
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    // CR 121.2: a `debug_assert!(def.validate_draw_scope().is_ok())` belongs here —
+    // this is the single point where the engine resolves a definition it is about to
+    // consult, so it is the one place a producer that forgot `.draw_scope(...)` can be
+    // caught. It is deliberately NOT wired, and the reason is a finding rather than an
+    // oversight: the committed fixture `crates/engine/tests/fixtures/integration_cards.json`
+    // predates the field and carries 7 Draw replacements with no scope (Abundance, Blood
+    // Scrivener, Jace Wielder of Mysteries, Laboratory Maniac, Living Conundrum, Quantum
+    // Riddler, Teferi's Ageless Insight). Wiring the assert fails all 7 until that fixture
+    // is regenerated — a separate, deliberate act, since a regen sweeps in whatever else
+    // has changed in the card pool.
+    //
+    // Production is unaffected: `card-data.json` is regenerated from the parser by CI and
+    // all 6 producers set the scope. The release-build authority is
+    // `draw_replacement_census.py`, which cross-checks every declared scope against an
+    // independently derived one across the full 51-card corpus.
 }
 
 fn pipeline_loop(
@@ -9744,8 +9759,9 @@ mod tests {
 
     #[test]
     fn draw_replacement_uses_event_context_amount_with_offset() {
-        let repl =
-            ReplacementDefinition::new(ReplacementEvent::Draw).execute(AbilityDefinition::new(
+        let repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+            .execute(AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Offset {
@@ -9934,7 +9950,8 @@ mod tests {
             },
         );
         mill.sub_ability = Some(Box::new(return_to_hand));
-        let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw);
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
         repl.mode = ReplacementMode::Optional { decline: None };
         repl.execute = Some(Box::new(mill));
         repl
@@ -10356,6 +10373,7 @@ mod tests {
     #[test]
     fn draw_replacement_does_not_apply_when_quantity_gate_is_false() {
         let repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
             .condition(ReplacementCondition::OnlyIfQuantity {
                 lhs: QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::HandSize {
@@ -10399,8 +10417,9 @@ mod tests {
 
     #[test]
     fn draw_replacement_does_not_apply_to_zero_card_draws() {
-        let repl =
-            ReplacementDefinition::new(ReplacementEvent::Draw).execute(AbilityDefinition::new(
+        let repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+            .execute(AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Offset {
@@ -13218,6 +13237,7 @@ mod tests {
     #[test]
     fn only_if_quantity_is_filtered_for_opponent_draws() {
         let repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
             .condition(ReplacementCondition::OnlyIfQuantity {
                 lhs: QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::HandSize {
@@ -14351,9 +14371,11 @@ mod tests {
         use crate::types::ability::PtValue;
 
         let doubler = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
             .quantity_modification(QuantityModification::DOUBLE);
-        let draw_to_token =
-            ReplacementDefinition::new(ReplacementEvent::Draw).execute(AbilityDefinition::new(
+        let draw_to_token = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+            .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
                     name: "Beast".to_string(),

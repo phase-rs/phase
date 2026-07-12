@@ -8390,7 +8390,7 @@ pub struct PendingConniveReentry {
     pub applied: HashSet<AppliedReplacementKey>,
 }
 
-/// CR 614.12a + CR 615.5: a post-replacement continuation and every value that is
+/// CR 614.6 + CR 615.5: a post-replacement continuation and every value that is
 /// consumed with it — one record, installed and drained as a unit.
 ///
 /// These five values used to be five parallel `GameState` fields. They were
@@ -8400,7 +8400,7 @@ pub struct PendingConniveReentry {
 /// block below was written and was missed until this regression."* Bundling them
 /// makes "a continuation is pending" one fact instead of an invariant maintained
 /// by hand across ~40 sites.
-/// CR 614.12a: where a drain is in its lifecycle.
+/// CR 615.5: where a drain is in its lifecycle.
 ///
 /// The continuation and the drain do not die together, and that is load-bearing.
 /// A drain's *event context* (CR 615.5 — the prevented event's source and target)
@@ -8426,7 +8426,7 @@ pub enum DrainStatus {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PostReplacementDrain {
-    /// CR 614.12a: the work to run, and whether it has been taken yet.
+    /// The work to run, and whether it has been taken yet.
     pub status: DrainStatus,
 
     /// CR 615.5: the replacement's own source (Swans of Bryn Argoll), so a
@@ -8435,7 +8435,7 @@ pub struct PostReplacementDrain {
     ///
     /// `Option` *inside* the drain, not a parallel field: several paths
     /// deliberately clear the source while the continuation stays resident
-    /// (CR 614.12a — a zone change's caller epilogue drains with the
+    /// (a zone change's caller epilogue drains with the
     /// spell-resolution ctx and no source).
     pub source: Option<crate::types::identifiers::ObjectId>,
 
@@ -8524,7 +8524,7 @@ pub enum ResidentDrainPolicy {
     Replace,
 }
 
-/// CR 614.12a + CR 616.1g: the post-replacement continuations awaiting a drain.
+/// CR 616.1g: the post-replacement continuations awaiting a drain.
 ///
 /// Depth is currently capped at one by [`ResidentDrainPolicy`] — this type
 /// reproduces the old single-slot behaviour exactly. It is a stack so that
@@ -8565,7 +8565,7 @@ impl PostReplacementDrainStack {
         self.drains.is_empty()
     }
 
-    /// CR 614.12a: is there a continuation that has not run yet?
+    /// Is there a continuation that has not run yet?
     ///
     /// A `Dispatching` drain does NOT count: its continuation is already running,
     /// and a nested check taken during that dispatch must not try to re-drain it.
@@ -8589,12 +8589,27 @@ impl PostReplacementDrainStack {
 
     /// Install `drain`, resolving a collision with any resident one per `policy`.
     ///
-    /// Returns `false` when the incoming drain was discarded (`KeepResident` onto
-    /// an occupied stack), so a caller can distinguish "installed" from "silently
-    /// dropped" — something the old `stash_post_replacement_continuation` could not.
+    /// Returns `false` when the incoming drain was discarded (`KeepResident` while
+    /// another continuation is still *pending*), so a caller can distinguish
+    /// "installed" from "silently dropped" — something the old
+    /// `stash_post_replacement_continuation` could not.
+    ///
+    /// `KeepResident` collides on [`Self::has_ready`], **not** on
+    /// `!drains.is_empty()`, and the difference is a real bug rather than a
+    /// nicety. A drain stays resident while it *dispatches* (its event context must
+    /// remain readable — CR 615.5), but its continuation has already been taken, so
+    /// it is no longer pending work. The predecessor slot expressed this by moving
+    /// the continuation out before dispatching: the slot then read empty, and a
+    /// re-entrant stash landed.
+    ///
+    /// CR 616.1g: that re-entrant stash is real. A running continuation draws, the
+    /// draw is replaced, and the replacement carries a mandatory post-effect (Jace,
+    /// Wielder of Mysteries' win; Abundance's reveal-until). Colliding on mere
+    /// residency drops it, and `draw_through_replacement` — which gates its drain on
+    /// `has_post_replacement_drain()`, i.e. on `has_ready()` — then never runs it.
     pub fn install(&mut self, drain: PostReplacementDrain, policy: ResidentDrainPolicy) -> bool {
         match policy {
-            ResidentDrainPolicy::KeepResident if !self.drains.is_empty() => false,
+            ResidentDrainPolicy::KeepResident if self.has_ready() => false,
             ResidentDrainPolicy::KeepResident => {
                 self.drains.push(drain);
                 true
@@ -8607,7 +8622,7 @@ impl PostReplacementDrainStack {
         }
     }
 
-    /// CR 614.12a: take the resident continuation and mark the drain `Dispatching`,
+    /// CR 615.5: take the resident continuation and mark the drain `Dispatching`,
     /// leaving it resident so the running effect can still read its event context.
     ///
     /// Returns `None` if there is no resident drain, or its continuation was
@@ -8616,12 +8631,9 @@ impl PostReplacementDrainStack {
         let drain = self.drains.last_mut()?;
         match std::mem::replace(&mut drain.status, DrainStatus::Dispatching) {
             DrainStatus::Ready(continuation) => Some(continuation),
-            // Already dispatching: put the status back and report no work. Restoring
-            // it matters — `Dispatching` is not idempotent state to overwrite.
-            DrainStatus::Dispatching => {
-                drain.status = DrainStatus::Dispatching;
-                None
-            }
+            // Already dispatching: report no work. The `mem::replace` above has
+            // already written `Dispatching` back, so there is nothing to restore.
+            DrainStatus::Dispatching => None,
         }
     }
 
@@ -8744,6 +8756,11 @@ impl DrawSequenceStack {
             remaining: count,
             accumulated: 0,
         });
+        debug_assert!(
+            self.validate().is_ok(),
+            "draw-sequence stack invariant broken after push: {:?}",
+            self.validate()
+        );
         frame_id
     }
 
@@ -9760,7 +9777,7 @@ impl GameState {
     /// plumbing. The Resolved arm wins when both legacy slots are
     /// (impossibly) populated, mirroring the pre-fold dispatcher precedence
     /// at `engine_replacement.rs::apply_pending_post_replacement_effect`.
-    /// CR 614.12a: is a post-replacement continuation waiting to drain?
+    /// Is a post-replacement continuation waiting to drain?
     ///
     /// The scattered `post_replacement_continuation.is_some()` checks this replaces
     /// were asking exactly this: is there work that has NOT been taken yet. A drain
@@ -9770,7 +9787,7 @@ impl GameState {
         self.post_replacement_drains.has_ready()
     }
 
-    /// CR 614.12a: install a ready continuation carrying no source, no inherited
+    /// Install a ready continuation carrying no source, no inherited
     /// applied set and no prevented-event context.
     ///
     /// Policy is `Replace` — the shape the combat prevention riders use, which have
@@ -9785,7 +9802,7 @@ impl GameState {
         );
     }
 
-    /// CR 614.12a: the resident drain's continuation, if it has not been taken for
+    /// The resident drain's continuation, if it has not been taken for
     /// dispatch yet.
     pub fn post_replacement_continuation(
         &self,
@@ -9817,7 +9834,7 @@ impl GameState {
             .and_then(|drain| drain.event_target.as_ref())
     }
 
-    /// CR 614.12a: clear the resident drain's replacement source while leaving the
+    /// Clear the resident drain's replacement source while leaving the
     /// continuation itself resident.
     ///
     /// A real thing several callers need, not a convenience: a zone change's
@@ -10349,6 +10366,97 @@ impl Eq for GameState {}
 /// serialized `WaitingFor::SeparatePiles*` states).
 fn default_pile_source_battlefield() -> PileSource {
     PileSource::Battlefield
+}
+
+#[cfg(test)]
+mod drain_stack_reentrancy_tests {
+    use super::*;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation,
+    };
+
+    fn ready_drain(name: &str) -> PostReplacementDrain {
+        PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented(name, "drain-reentrancy fixture"),
+            ),
+        )))
+    }
+
+    /// CR 616.1g: a continuation that is RUNNING must not block a new one from
+    /// being installed.
+    ///
+    /// A drain stays resident while it dispatches (its event context must remain
+    /// readable — CR 615.5). But its continuation has already been taken, so it is
+    /// no longer *pending work*. If the running continuation causes a fresh
+    /// replacement to stash a post-effect — a continuation draws, that draw is
+    /// replaced, and the replacement carries a mandatory post-effect (Jace Wielder
+    /// of Mysteries' win, Abundance's reveal-until) — that post-effect MUST install.
+    ///
+    /// The predecessor slot got this right for the wrong reason: it moved the
+    /// continuation out of the slot before dispatching, so the slot read empty and
+    /// the re-entrant stash landed. Guarding the stack on "is a drain resident?"
+    /// instead of "is a drain READY?" silently drops it, and the nested post-effect
+    /// never runs — `draw_through_replacement` gates its drain on
+    /// `has_post_replacement_drain()`, which reports only Ready drains.
+    ///
+    /// The correct predicate is the one `has_ready` already documents.
+    #[test]
+    fn keep_resident_does_not_drop_a_stash_arriving_while_the_outer_drain_dispatches() {
+        let mut stack = PostReplacementDrainStack::default();
+
+        // Outer replacement stashes its continuation, then begins running it.
+        assert!(stack.install(ready_drain("outer"), ResidentDrainPolicy::KeepResident));
+        let taken = stack.begin_dispatch();
+        assert!(
+            taken.is_some(),
+            "the outer continuation is handed out to run"
+        );
+
+        // The outer drain is still resident (its CR 615.5 event context must stay
+        // readable) but it is no longer pending work.
+        assert!(!stack.is_empty(), "the dispatching drain stays resident");
+        assert!(
+            !stack.has_ready(),
+            "a Dispatching drain is not pending work — this is what the old slot's \
+             emptiness stood for"
+        );
+
+        // The running continuation now causes a fresh replacement to stash a
+        // mandatory post-effect. It MUST install; dropping it strands the post-effect.
+        let installed = stack.install(ready_drain("nested"), ResidentDrainPolicy::KeepResident);
+        assert!(
+            installed,
+            "a stash arriving while the outer continuation is DISPATCHING must install, \
+             not be dropped: the old code took the continuation out of the slot before \
+             dispatching, so the slot read empty and this landed. Guarding on \
+             `!drains.is_empty()` instead of `has_ready()` silently strands every nested \
+             mandatory post-effect (Jace win, Abundance reveal-until)."
+        );
+        assert!(
+            stack.has_ready(),
+            "the nested post-effect must be visible as pending work — \
+             draw_through_replacement gates its drain on exactly this predicate"
+        );
+    }
+
+    /// The dedup that `KeepResident` performs BY ACCIDENT is on a READY resident,
+    /// and must survive the fix above. (Wolverine / Krark's Thumb — see the
+    /// `ResidentDrainPolicy` docs and issue #5676.)
+    #[test]
+    fn keep_resident_still_drops_a_stash_arriving_while_a_ready_drain_is_pending() {
+        let mut stack = PostReplacementDrainStack::default();
+        assert!(stack.install(ready_drain("first"), ResidentDrainPolicy::KeepResident));
+        let dropped = !stack.install(ready_drain("second"), ResidentDrainPolicy::KeepResident);
+        assert!(
+            dropped,
+            "a stash arriving while a READY continuation is still pending is still \
+             discarded — that is the pre-existing accidental CR 614.5 dedup the \
+             Wolverine and Krark witnesses depend on. Task #39 replaces it with an \
+             identity gate; this fix must not prejudge that."
+        );
+    }
 }
 
 #[cfg(test)]

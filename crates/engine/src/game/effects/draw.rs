@@ -660,17 +660,22 @@ mod tests {
             Zone::Battlefield,
         );
         let teferi_obj = state.objects.get_mut(&teferi).unwrap();
-        teferi_obj.replacement_definitions = vec![ReplacementDefinition::new(
-            ReplacementEvent::Draw,
-        )
-        .execute(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 2 },
-                target: TargetFilter::Controller,
-            },
-        ))]
-        .into();
+        // CR 121.6b: Teferi's antecedent is SINGULAR — "if you would draw a card …
+        // draw two cards instead" — so it replaces one individual draw, and is
+        // `IndividualDraw` despite being a doubler colloquially. This matches what
+        // the real card carries in the corpus; a hand-built fixture that disagreed
+        // with its own card would be testing a shape that does not exist.
+        teferi_obj.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 2 },
+                        target: TargetFilter::Controller,
+                    },
+                ))]
+            .into();
 
         for card_id in 2..=4 {
             create_object(

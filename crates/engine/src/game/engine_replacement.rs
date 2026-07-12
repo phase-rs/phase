@@ -2070,6 +2070,7 @@ mod tests {
         );
         shield_obj.replacement_definitions.push(
             ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
                 .mode(ReplacementMode::Optional { decline: None })
                 .description("Draw Shield".to_string()),
         );
