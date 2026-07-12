@@ -20285,8 +20285,29 @@ pub(super) fn def_is_dig_or_mill(def: &AbilityDefinition) -> bool {
 /// unconditionally and then overwrote the field. Folding "not yet written" in here
 /// would resume the walk past an already-written def and bind an earlier one the old
 /// code never reached — the overwrite is the MUTATION's business, not the selector's.
+///
+/// Unwraps a `TargetOnly` head the same way `intrinsic_continuation_effect`
+/// does: "Target creature you control deals damage..." (Ram Through-class)
+/// lowers to a `TargetOnly` clause with `DealDamage` as its own `sub_ability`
+/// (assembly.rs's `is_target_only` handling), so the damage-dealer role must
+/// look past the head to find it.
 pub(super) fn def_is_damage_dealer(def: &AbilityDefinition) -> bool {
-    matches!(&*def.effect, Effect::DealDamage { .. })
+    matches!(
+        intrinsic_continuation_effect(def),
+        Effect::DealDamage { .. }
+    )
+}
+
+/// Mutable counterpart to `def_is_damage_dealer` — the effect to patch when a
+/// rider binds to the `DamageDealer` role, unwrapping the same `TargetOnly`
+/// head.
+pub(super) fn damage_dealer_effect_mut(def: &mut AbilityDefinition) -> &mut Effect {
+    if matches!(*def.effect, Effect::TargetOnly { .. }) {
+        if let Some(sub_ability) = def.sub_ability.as_deref_mut() {
+            return &mut sub_ability.effect;
+        }
+    }
+    &mut def.effect
 }
 
 /// Membership mirror for `AntecedentRole::DigLook` — the `Dig` anchor that both
@@ -27085,6 +27106,22 @@ pub(crate) fn parse_effect_chain_ir(
                 None
             }
         });
+        // CR 608.2c: A clause's own `parsed.effect` is only its HEAD — a clause
+        // like "Target creature you control deals damage ... to target creature
+        // you don't control" lowers to a `TargetOnly` head with `DealDamage` as
+        // its own internal `sub_ability`. In the old flat-`defs` model,
+        // `defs.last()` after such a clause would be the DealDamage entry (the
+        // last one pushed), not the TargetOnly head — so lookback must walk to
+        // the deepest effect in the clause's own chain, mirroring
+        // `sequence::deepest_effect`, or a later followup rider (e.g. an
+        // excess-damage redirect) targeting the DealDamage never matches and
+        // silently falls back to `Effect::Unimplemented`.
+        fn deepest_clause_effect(clause: &ClauseIr) -> Effect {
+            match clause.parsed.sub_ability.as_deref() {
+                Some(sub) => sequence::deepest_effect(sub).clone(),
+                None => clause.parsed.effect.clone(),
+            }
+        }
         // "Effective effect" of a non-absorbed clause — what `defs.last()` would
         // be after intrinsic/followup continuation application. Shared by the
         // nearest-clause lookback and the CR 608.2c deeper-clause lookback.
@@ -27121,11 +27158,14 @@ pub(crate) fn parse_effect_chain_ir(
                         }
                     }
                     // Simple patch-in-place continuations leave the previous
-                    // effect type as the effective lookback target.
-                    _ => previous.parsed.effect.clone(),
+                    // effect type as the effective lookback target — but that
+                    // clause may itself carry its own internal sub_ability
+                    // chain (see below), so route through the same deepest-effect
+                    // walk rather than the bare head effect.
+                    _ => deepest_clause_effect(previous),
                 }
             } else {
-                previous.parsed.effect.clone()
+                deepest_clause_effect(previous)
             }
         };
         // Non-absorbed clauses, nearest-first — the lookback search space.

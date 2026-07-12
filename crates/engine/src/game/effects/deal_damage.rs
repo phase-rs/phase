@@ -652,7 +652,9 @@ pub(crate) fn apply_damage_after_replacement(
         && matches!(
             (ctx.excess_recipient, &t),
             (
-                Some(ExcessRecipient::TargetController),
+                Some(ExcessRecipient::TargetController {
+                    source_keyword: None
+                }),
                 TargetRef::Object(_)
             )
         ) {
@@ -778,8 +780,12 @@ pub(crate) fn apply_damage_after_replacement(
     // the snapshot / PendingReplacement). `redirected` records that the excess and
     // this leg's lifelink were handed off, so the creature leg gains nothing here.
     let mut redirected = false;
-    if let (Some(ExcessRecipient::TargetController), TargetRef::Object(obj_id)) =
-        (ctx.excess_recipient, t)
+    if let (
+        Some(ExcessRecipient::TargetController {
+            source_keyword: None,
+        }),
+        TargetRef::Object(obj_id),
+    ) = (ctx.excess_recipient, t)
     {
         if redirect_excess > 0 {
             if let Some(controller) = state.objects.get(obj_id).map(|o| o.controller) {
@@ -1061,6 +1067,31 @@ fn stash_remaining_each_source_damage(
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
 
+/// CR 120.4a + CR 608.2c + CR 702: Resolve an excess-redirect rider against
+/// the actual damage source. Unconditional riders apply directly; keyword-gated
+/// riders apply only while the source has the named effective keyword.
+fn active_excess_recipient(
+    state: &GameState,
+    ctx: &DamageContext,
+    excess: Option<ExcessRecipient>,
+) -> Option<ExcessRecipient> {
+    match excess {
+        Some(ExcessRecipient::TargetController {
+            source_keyword: None,
+        }) => Some(ExcessRecipient::TargetController {
+            source_keyword: None,
+        }),
+        Some(ExcessRecipient::TargetController {
+            source_keyword: Some(keyword),
+        }) if keywords::object_has_effective_keyword_kind(state, ctx.source_id, keyword) => {
+            Some(ExcessRecipient::TargetController {
+                source_keyword: None,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// CR 120.1: Deal N damage — reduces life for players, marks damage on creatures.
 /// Reads amount from `Effect::DealDamage { amount }`.
 pub fn resolve(
@@ -1126,11 +1157,12 @@ pub fn resolve(
         }
     };
 
-    // CR 120.4a: attach the excess-redirect rider parsed onto this DealDamage so
-    // `apply_damage_after_replacement` can redirect excess to the target's
-    // controller. Inert for combat damage (that path builds its own contexts).
+    // CR 120.4a + CR 608.2c: attach the active excess-redirect rider parsed onto
+    // this DealDamage so `apply_damage_after_replacement` can redirect excess to
+    // the target's controller. Keyword-gated riders read the resolved damage
+    // source (for DamageSource::Target, the first object target), not the spell.
     if let Effect::DealDamage { excess, .. } = &ability.effect {
-        ctx.excess_recipient = *excess;
+        ctx.excess_recipient = active_excess_recipient(state, &ctx, *excess);
     }
 
     // CR 120.1 + CR 608.2c: Resolve effective damage targets.
@@ -4923,6 +4955,85 @@ mod tests {
         } else {
             panic!("expected DamageDealt event");
         }
+    }
+
+    /// CR 120.4a + CR 608.2c + CR 702: A source-keyword-gated excess rider
+    /// redirects only when the resolved damage source target has the keyword.
+    #[test]
+    fn source_keyword_gated_excess_redirect_requires_source_keyword() {
+        fn run(source_has_trample: bool) -> (GameState, Vec<GameEvent>, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_object(
+                &mut state,
+                CardId(10),
+                PlayerId(0),
+                "Source Creature".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&source_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                if source_has_trample {
+                    obj.keywords.push(crate::types::keywords::Keyword::Trample);
+                }
+            }
+            let target_id = create_object(
+                &mut state,
+                CardId(20),
+                PlayerId(1),
+                "Target Creature".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&target_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.toughness = Some(2);
+            }
+            let ability = ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    target: TargetFilter::Any,
+                    damage_source: Some(DamageSource::Target),
+                    excess: Some(ExcessRecipient::TargetController {
+                        source_keyword: Some(crate::types::keywords::KeywordKind::Trample),
+                    }),
+                },
+                vec![TargetRef::Object(source_id), TargetRef::Object(target_id)],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+
+            resolve(&mut state, &ability, &mut events).unwrap();
+            (state, events, target_id)
+        }
+
+        let (trample_state, trample_events, trample_target) = run(true);
+        assert_eq!(trample_state.objects[&trample_target].damage_marked, 2);
+        assert_eq!(trample_state.players[1].life, 17);
+        assert_eq!(
+            trample_events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::DamageDealt { .. }))
+                .count(),
+            2,
+            "lethal creature leg plus redirected controller leg"
+        );
+
+        let (no_trample_state, no_trample_events, no_trample_target) = run(false);
+        assert_eq!(
+            no_trample_state.objects[&no_trample_target].damage_marked,
+            5
+        );
+        assert_eq!(no_trample_state.players[1].life, 20);
+        assert_eq!(
+            no_trample_events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::DamageDealt { .. }))
+                .count(),
+            1,
+            "without trample the excess stays on the creature event"
+        );
     }
 
     /// CR 120.10 + CR 120.6: the Torch the Witness / Orbital Plunge class —

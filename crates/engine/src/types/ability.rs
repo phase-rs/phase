@@ -8772,8 +8772,14 @@ pub enum EachDamageRecipient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ExcessRecipient {
-    /// CR 120.4a: excess is dealt to the damaged permanent's controller.
-    TargetController,
+    /// CR 120.4a: excess is dealt to the damaged permanent's controller,
+    /// optionally gated on the resolved damage source having the named
+    /// keyword (CR 608.2c + CR 702; Ram Through's "If the creature you
+    /// control has trample" prefix). `None` redirects unconditionally.
+    TargetController {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_keyword: Option<KeywordKind>,
+    },
 }
 
 /// CR 120.3: Source characteristics captured before applying an already-replaced
@@ -18513,8 +18519,10 @@ pub enum CombatDamageScope {
 /// event's business, and is a separate type.
 ///
 /// Required exactly when `ReplacementDefinition::event` is `Draw`, and forbidden
-/// otherwise; checkable by `ReplacementDefinition::validate_draw_scope`, and enforced
-/// across the full corpus by `scripts/draw_replacement_census.py`.
+/// otherwise; enforced by `ReplacementDefinition::validate_draw_scope`, which every
+/// definition passes through as a `debug_assert!` at the single consult seam
+/// (`game::replacement::replacement_definition_for_id`), and enforced across the full
+/// corpus by `scripts/draw_replacement_census.py`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DrawReplacementScope {
     /// Modifies the draw *instruction*'s count before any individual draw happens

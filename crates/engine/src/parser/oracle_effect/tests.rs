@@ -2,7 +2,9 @@ use super::*;
 use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
-use crate::types::ability::{AttachmentKind, ForEachCategoryAction, PerpetualModification};
+use crate::types::ability::{
+    AttachmentKind, ExcessRecipient, ForEachCategoryAction, PerpetualModification,
+};
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
@@ -908,6 +910,128 @@ fn multi_source_each_power_damage_back_reference_shape() {
         ),
         "expected EachTarget damage in the 'They each' sub-ability, got {:?}",
         sub.effect
+    );
+}
+
+/// CR 120.4a + CR 608.2c + CR 702: Ram Through's conditional excess-damage
+/// rider patches the preceding target-source damage effect without making the
+/// damage instruction itself conditional.
+#[test]
+fn ram_through_trample_gated_excess_rider_patches_damage() {
+    let def = parse_effect_chain(
+        "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has trample, excess damage is dealt to that creature's controller instead.",
+        AbilityKind::Spell,
+    );
+
+    // The head is `TargetOnly` (selecting "target creature you control" as the
+    // damage source); `DealDamage` is that clause's own `sub_ability`.
+    let damage_def = def
+        .sub_ability
+        .as_deref()
+        .expect("expected a DealDamage sub_ability under the TargetOnly source selection");
+    let Effect::DealDamage {
+        damage_source,
+        excess,
+        ..
+    } = &*damage_def.effect
+    else {
+        panic!("expected DealDamage, got {:?}", damage_def.effect);
+    };
+    assert_eq!(*damage_source, Some(DamageSource::Target));
+    assert_eq!(
+        *excess,
+        Some(ExcessRecipient::TargetController {
+            source_keyword: Some(crate::types::keywords::KeywordKind::Trample),
+        })
+    );
+    assert!(
+        damage_def.sub_ability.is_none(),
+        "conditional excess rider must be absorbed, got {:?}",
+        damage_def.sub_ability
+    );
+}
+
+/// CR 120.4a: Existing unconditional excess-damage riders still patch to the
+/// plain target-controller redirect.
+#[test]
+fn unconditional_excess_rider_still_patches_damage() {
+    let def = parse_effect_chain(
+        "~ deals 4 damage to target creature. Excess damage is dealt to that creature's controller instead.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::DealDamage { excess, .. } = &*def.effect else {
+        panic!("expected DealDamage, got {:?}", def.effect);
+    };
+    assert_eq!(
+        *excess,
+        Some(ExcessRecipient::TargetController {
+            source_keyword: None
+        })
+    );
+}
+
+/// CR 120.4a + CR 608.2c: Partial or misspelled conditional riders must fail
+/// closed instead of broadly matching on loose excess-damage words.
+#[test]
+fn partial_conditional_excess_rider_does_not_patch_damage() {
+    let def = parse_effect_chain(
+        "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has tramplers, excess damage is dealt to that creature's controller instead.",
+        AbilityKind::Spell,
+    );
+
+    let damage_def = def
+        .sub_ability
+        .as_deref()
+        .expect("expected a DealDamage sub_ability under the TargetOnly source selection");
+    let Effect::DealDamage { excess, .. } = &*damage_def.effect else {
+        panic!("expected DealDamage head, got {:?}", damage_def.effect);
+    };
+    assert_eq!(*excess, None);
+    assert!(
+        damage_def.sub_ability.is_some(),
+        "invalid rider should remain visible as an unparsed follow-up"
+    );
+}
+
+/// CR 120.4a + CR 608.2c + CR 702: Ram Through's real, complete Oracle text
+/// (verified against Scryfall) through the actual card pipeline
+/// (`parse_oracle_text`, not the fragment-only `parse_effect_chain`). Proves
+/// the `Unimplemented("excess", ...)` node reported by issue #5632 no longer
+/// survives when the card is parsed the way `card-data.json` parses it.
+#[test]
+fn ram_through_real_oracle_text_has_no_unimplemented_excess() {
+    let parsed = parse_oracle_text(
+        "Target creature you control deals damage equal to its power to target \
+         creature you don't control. If the creature you control has trample, \
+         excess damage is dealt to that creature's controller instead.",
+        "Ram Through",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let ability = parsed.abilities.first().expect("expected a spell ability");
+    assert!(
+        !ability_chain_has_unimplemented(ability),
+        "Ram Through must have no residual Unimplemented node, got {ability:#?}"
+    );
+
+    fn find_deal_damage(ability: &AbilityDefinition) -> Option<&AbilityDefinition> {
+        if matches!(*ability.effect, Effect::DealDamage { .. }) {
+            return Some(ability);
+        }
+        ability.sub_ability.as_deref().and_then(find_deal_damage)
+    }
+    let deal_damage = find_deal_damage(ability).expect("expected a DealDamage node in the chain");
+    let Effect::DealDamage { excess, .. } = &*deal_damage.effect else {
+        unreachable!()
+    };
+    assert_eq!(
+        *excess,
+        Some(ExcessRecipient::TargetController {
+            source_keyword: Some(crate::types::keywords::KeywordKind::Trample),
+        }),
+        "excess rider must be attached to the DealDamage node via the real pipeline"
     );
 }
 
