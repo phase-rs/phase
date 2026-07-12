@@ -3077,8 +3077,10 @@ fn parse_strive_cost_body(effect_text: &str) -> Option<ManaCost> {
 /// surface, so the source-order guarantee is a property of this one type rather
 /// than of 90 hand-written call sites.
 ///
-/// This replaces the former category-ordered `parsed_abilities_to_doc_ir` on
-/// every non-Class path. `whole_document` spans survive only in the Class shim.
+/// This is the single emission authority for EVERY path — the dispatch loop and
+/// every preprocessor, Class included. The category-ordered
+/// `parsed_abilities_to_doc_ir` façade it replaced is gone, and with it the last
+/// producer of whole-document spans.
 struct DocEmitter<'a> {
     builder: OracleDocBuilder,
     lines: &'a [&'a str],
@@ -3377,14 +3379,26 @@ pub(crate) fn parse_oracle_ir(
     let mut strive_cost_line: Option<usize> = None;
     let mut modal_line: Option<usize> = None;
 
-    // CR 716: Class cards use the whole-document shim (unit 6 unifies the path).
-    // HOISTED above the saga/attraction/level/spacecraft pre-loop blocks so the
-    // shim can never drop a pre-emitted builder item — the emitter is provably
-    // empty at this early return.
+    // CR 716: Class cards are a preprocessor like any other — they emit through
+    // `DocEmitter` at their printed source line. HOISTED above the
+    // saga/attraction/level/spacecraft pre-loop blocks so the early return can
+    // never drop a pre-emitted builder item: the emitter is provably empty here.
+    //
+    // `parse_class_oracle_text` returns items already in printed source order, so
+    // no sort is needed — the builder keys them by span anyway. Emission is via the
+    // `emit_at` primitive rather than the typed `*_at` helpers because this branch
+    // returns immediately: the `last_trigger`/`last_static` mirrors those helpers
+    // maintain exist solely for the dispatch loop's mid-loop readers, and no
+    // dispatch loop runs on a Class card.
     if subtypes.iter().any(|s| s == "Class") {
-        let class_result =
-            parse_class_oracle_text(&lines, card_name, mtgjson_keyword_names, result);
-        let doc = parsed_abilities_to_doc_ir(class_result, oracle_text, card_name, &mut ctx);
+        for (line, node) in parse_class_oracle_text(&lines, card_name, mtgjson_keyword_names) {
+            emitter.emit_at(line, node);
+        }
+        // `oracle_text` (the ORIGINAL, un-normalized text), not `oracle_text_owned`
+        // — matching the main path's `finish` below. `OracleDocIr.source_text` is
+        // the swallow audit's input, so normalizing it here would change which
+        // clauses the audit sees.
+        let doc = emitter.finish(oracle_text, card_name, std::mem::take(&mut ctx.diagnostics));
         return finalize_document_relations(doc, types);
     }
 
@@ -5536,8 +5550,7 @@ pub(crate) fn parse_oracle_ir(
 
     // Emit the four order-agnostic SINGLETONS (held on `result` for mid-loop
     // read-back/merge/dedup) as Exact items at their captured source line, then
-    // finish — producing items already in Oracle source order. `whole_document`
-    // survives only in the Class shim, which returned earlier.
+    // finish — producing items already in Oracle source order.
     if let Some(modal) = result.modal {
         emitter.modal_at(modal_line.unwrap_or(0), modal);
     }
@@ -5675,82 +5688,6 @@ fn parse_activated_ability_definition(
     extract_cost_reduction_from_chain(&mut def);
     extract_mana_spend_trigger_from_chain(&mut def);
     (def, effect_text)
-}
-
-/// Convert a `ParsedAbilities` into an `OracleDocIr` using `PreLowered*` variants.
-///
-/// UNIT-3B DEBT — this is the document façade, and it is still category-ordered.
-/// It runs *after* lowering and therefore has no access to the line cursor, so it
-/// cannot recover an exact source position for any item. Every item is emitted
-/// with `OracleSourceSpan::whole_document` (a true containing span, not a minimal
-/// one) and a distinct `ordinal_within_span` that reproduces today's category
-/// emission order exactly. Lowered output is therefore byte-identical.
-///
-/// Unit 3b moves emission into `parse_oracle_ir`'s dispatch loop, where the exact
-/// line/byte range is in hand; this function is deleted there (removal gate 5).
-///
-/// Routing through `OracleDocBuilder` now — rather than pushing a bare `Vec` — is
-/// what makes item identity, the CR 707.9a printed-slot counters, and the span
-/// invariants have a single authority before that move.
-fn parsed_abilities_to_doc_ir(
-    result: ParsedAbilities,
-    oracle_text: &str,
-    card_name: &str,
-    ctx: &mut ParseContext,
-) -> OracleDocIr {
-    let mut builder = OracleDocBuilder::new();
-    let mut ordinal: u32 = 0;
-
-    // One helper, so the ordinal can never be advanced without emitting, and an
-    // emission can never reuse an ordinal. Both are builder-rejected anyway; this
-    // makes the pairing structural.
-    let mut emit = |builder: &mut OracleDocBuilder, node: OracleNodeIr| {
-        let span = OracleSourceSpan::whole_document(oracle_text, ordinal);
-        ordinal += 1;
-        // `None`: a whole-document span cannot honestly name a fragment — the only
-        // text it covers is the entire card. Unit 3b supplies `Some(line)` with an
-        // `Exact` span. `emit` rejects any other combination.
-        let slot = builder.begin_item(span, None);
-        builder
-            .emit(slot, node)
-            .expect("whole-document spans carry distinct ordinals, so emit cannot reject");
-    };
-
-    for def in result.abilities {
-        emit(&mut builder, OracleNodeIr::PreLoweredSpell(def));
-    }
-    for def in result.triggers {
-        emit(&mut builder, OracleNodeIr::PreLoweredTrigger(def));
-    }
-    for def in result.statics {
-        emit(&mut builder, OracleNodeIr::PreLoweredStatic(def));
-    }
-    for def in result.replacements {
-        emit(&mut builder, OracleNodeIr::PreLoweredReplacement(def));
-    }
-    for kw in result.extracted_keywords {
-        emit(&mut builder, OracleNodeIr::Keyword(kw));
-    }
-    if let Some(modal) = result.modal {
-        emit(&mut builder, OracleNodeIr::Modal(modal));
-    }
-    if let Some(cost) = result.additional_cost {
-        emit(&mut builder, OracleNodeIr::AdditionalCost(cost));
-    }
-    for restriction in result.casting_restrictions {
-        emit(&mut builder, OracleNodeIr::CastingRestriction(restriction));
-    }
-    for option in result.casting_options {
-        emit(&mut builder, OracleNodeIr::CastingOption(option));
-    }
-    if let Some(condition) = result.solve_condition {
-        emit(&mut builder, OracleNodeIr::SolveCondition(condition));
-    }
-    if let Some(cost) = result.strive_cost {
-        emit(&mut builder, OracleNodeIr::StriveCost(cost));
-    }
-
-    builder.finish(oracle_text, card_name, std::mem::take(&mut ctx.diagnostics))
 }
 
 /// Parse Oracle text into structured ability definitions.
