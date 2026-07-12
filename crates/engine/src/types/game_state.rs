@@ -6602,54 +6602,36 @@ pub struct GameState {
     /// `post_replacement_resolved_effect` fields were merged here. Old saved
     /// JSON migrates via `migrate_post_replacement_continuation`, called from
     /// `finalize_public_state`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub post_replacement_continuation: Option<crate::types::ability::PostReplacementContinuation>,
+    #[serde(default, skip_serializing_if = "PostReplacementDrainStack::is_empty")]
+    pub post_replacement_drains: PostReplacementDrainStack,
+
     /// Pre-2026-05-09 audit M4 compat: legacy template slot. Read from old
-    /// JSON only; migrated into `post_replacement_continuation` by
+    /// JSON only; migrated into `post_replacement_drains` by
     /// `migrate_post_replacement_continuation`. Never written to.
     #[serde(default, skip_serializing, rename = "post_replacement_effect")]
     pub(crate) legacy_post_replacement_effect:
         Option<Box<crate::types::ability::AbilityDefinition>>,
     /// Pre-2026-05-09 audit M4 compat: legacy resolved slot. Read from old
-    /// JSON only; migrated into `post_replacement_continuation` by
+    /// JSON only; migrated into `post_replacement_drains` by
     /// `migrate_post_replacement_continuation`. Never written to.
     #[serde(default, skip_serializing, rename = "post_replacement_resolved_effect")]
     pub(crate) legacy_post_replacement_resolved_effect:
         Option<Box<crate::types::ability::ResolvedAbility>>,
 
-    /// CR 615.5: Source object of the replacement that stashed
-    /// `post_replacement_continuation`. Used by prevention follow-ups (e.g.
-    /// Phyrexian Hydra) so the post-effect's `SelfRef`-targeted PutCounter
-    /// resolves against the shield's own object rather than the damaged target.
-    /// Set alongside `post_replacement_continuation` and consumed at the same
-    /// time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub post_replacement_source: Option<crate::types::identifiers::ObjectId>,
-
-    /// CR 614.5 + CR 616.1f: replacement identities already applied to the
-    /// event that produced a deferred post-replacement continuation.
-    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
-    pub post_replacement_applied: HashSet<AppliedReplacementKey>,
-
-    /// CR 615.5 + CR 609.7: Source object of the *prevented event itself*
-    /// (e.g. the damage dealer in a damage-prevention replacement) — distinct
-    /// from `post_replacement_source` (which is the replacement's own source,
-    /// e.g. Swans of Bryn Argoll). Used by `TargetFilter::PostReplacementSourceController`
-    /// to resolve "the source's controller draws cards" / "deals damage to the
-    /// source's controller" follow-ups. Architectural twin of `last_effect_count`
-    /// (the quantity-side post-replacement fallback at `replacement.rs:317`):
-    /// both stash event context that lives outside the trigger window. Set
-    /// only at the prevention applier's `Prevented` arm; cleared at every
-    /// other set-site of `post_replacement_source` and at every consume-site.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub post_replacement_event_source: Option<crate::types::identifiers::ObjectId>,
-
-    /// CR 615.5: Target of the prevented event itself. Used by
-    /// `TargetFilter::PostReplacementDamageTarget` for follow-ups like
-    /// "that player exiles that many cards" after damage to a player is
-    /// prevented and replaced.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub post_replacement_event_target: Option<crate::types::ability::TargetRef>,
+    /// Legacy flat save shape for the drain's companion values, superseded by the
+    /// fields inside [`PostReplacementDrain`]. Read from old JSON only; folded
+    /// into the resident drain by `migrate_post_replacement_continuation`.
+    #[serde(default, skip_serializing, rename = "post_replacement_continuation")]
+    pub(crate) legacy_post_replacement_continuation:
+        Option<crate::types::ability::PostReplacementContinuation>,
+    #[serde(default, skip_serializing, rename = "post_replacement_source")]
+    pub(crate) legacy_post_replacement_source: Option<crate::types::identifiers::ObjectId>,
+    #[serde(default, skip_serializing, rename = "post_replacement_applied")]
+    pub(crate) legacy_post_replacement_applied: HashSet<AppliedReplacementKey>,
+    #[serde(default, skip_serializing, rename = "post_replacement_event_source")]
+    pub(crate) legacy_post_replacement_event_source: Option<crate::types::identifiers::ObjectId>,
+    #[serde(default, skip_serializing, rename = "post_replacement_event_target")]
+    pub(crate) legacy_post_replacement_event_target: Option<crate::types::ability::TargetRef>,
 
     /// CR 614.6 + CR 616.1: When an optional CreateToken replacement defers a
     /// `ChooseOneOf` post-effect (Jinnie Fay class), the chosen branch's token
@@ -8408,6 +8390,210 @@ pub struct PendingConniveReentry {
     pub applied: HashSet<AppliedReplacementKey>,
 }
 
+/// CR 614.12a + CR 615.5: a post-replacement continuation and every value that is
+/// consumed with it — one record, installed and drained as a unit.
+///
+/// These five values used to be five parallel `GameState` fields. They were
+/// written by three different install paths, none of which set all five, and the
+/// teardown had to remember to null each one by hand. `elimination.rs` still
+/// carries the scar of that design: *"this field was added after the teardown
+/// block below was written and was missed until this regression."* Bundling them
+/// makes "a continuation is pending" one fact instead of an invariant maintained
+/// by hand across ~40 sites.
+/// CR 614.12a: where a drain is in its lifecycle.
+///
+/// The continuation and the drain do not die together, and that is load-bearing.
+/// A drain's *event context* (CR 615.5 — the prevented event's source and target)
+/// must stay readable while its continuation runs: that is how
+/// `TargetFilter::PostReplacementSourceController` resolves "the source's
+/// controller draws cards" (Swans of Bryn Argoll). But the continuation itself
+/// must already be gone, so a nested "is a continuation pending?" check taken
+/// during the dispatch sees none and does not re-drain it.
+///
+/// The old single slot expressed this by taking the continuation early and
+/// clearing the event fields late — an interleaving that no type enforced and
+/// every caller had to respect. Here it is a state transition:
+/// `Ready(work)` → `Dispatching` → popped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DrainStatus {
+    /// Not yet run. `Template` is an AST resolved against `source`; `Resolved`
+    /// carries targets captured at shield-install time.
+    Ready(crate::types::ability::PostReplacementContinuation),
+    /// Taken and running. The drain stays resident so the running effect can still
+    /// read its event context (CR 615.5).
+    Dispatching,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PostReplacementDrain {
+    /// CR 614.12a: the work to run, and whether it has been taken yet.
+    pub status: DrainStatus,
+
+    /// CR 615.5: the replacement's own source (Swans of Bryn Argoll), so a
+    /// `SelfRef`-targeted post-effect resolves against the shield rather than the
+    /// damaged object.
+    ///
+    /// `Option` *inside* the drain, not a parallel field: several paths
+    /// deliberately clear the source while the continuation stays resident
+    /// (CR 614.12a — a zone change's caller epilogue drains with the
+    /// spell-resolution ctx and no source).
+    pub source: Option<crate::types::identifiers::ObjectId>,
+
+    /// CR 614.5 + CR 616.1f: replacement identities already applied to the event
+    /// that produced this continuation, so a def cannot fire twice on it.
+    pub applied: HashSet<AppliedReplacementKey>,
+
+    /// CR 615.5 + CR 609.7: source of the *prevented event itself* (the damage
+    /// dealer), distinct from `source` (the shield). Resolves
+    /// `TargetFilter::PostReplacementSourceController` — "the source's controller
+    /// draws cards".
+    pub event_source: Option<crate::types::identifiers::ObjectId>,
+
+    /// CR 615.5: target of the prevented event itself, for
+    /// `TargetFilter::PostReplacementDamageTarget`.
+    pub event_target: Option<crate::types::ability::TargetRef>,
+}
+
+/// CR 616.1g: what an install does when a continuation is already resident.
+///
+/// This is an explicit parameter because the three production install paths
+/// genuinely disagree today, and a refactor that silently picked one would change
+/// behaviour:
+///
+///   * [`Self::KeepResident`] — `apply_single_replacement`'s stash: the *incoming*
+///     continuation is discarded.
+///   * [`Self::Replace`] — the optional accept/decline path and the combat
+///     prevention riders: the *resident* continuation is overwritten.
+///
+/// Both are lossy, in opposite directions. Neither can be right in general —
+/// CR 616.1g explicitly contemplates one replacement applying to an event
+/// contained within another, so a resident continuation and an incoming one are
+/// both real work and a single slot can hold only one.
+///
+/// Naming them is the point: today the policy is an accident of where the
+/// assignment happens to sit. Once the stack can hold both (nesting), this enum
+/// goes away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentDrainPolicy {
+    KeepResident,
+    Replace,
+}
+
+/// CR 614.12a + CR 616.1g: the post-replacement continuations awaiting a drain.
+///
+/// Depth is currently capped at one by [`ResidentDrainPolicy`] — this type
+/// reproduces the old single-slot behaviour exactly. It is a stack so that
+/// nesting can be turned on as an isolated, reviewable change rather than as a
+/// side effect of the bundling.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PostReplacementDrainStack {
+    drains: Vec<PostReplacementDrain>,
+}
+
+impl PostReplacementDrain {
+    /// A ready drain carrying only a continuation — no source, no inherited applied
+    /// set, no prevented-event context. The shape the combat prevention riders and
+    /// most test setups want.
+    pub fn ready(continuation: crate::types::ability::PostReplacementContinuation) -> Self {
+        Self {
+            status: DrainStatus::Ready(continuation),
+            source: None,
+            applied: HashSet::new(),
+            event_source: None,
+            event_target: None,
+        }
+    }
+
+    /// The continuation, if it has not been taken for dispatch yet.
+    pub fn ready_continuation(
+        &self,
+    ) -> Option<&crate::types::ability::PostReplacementContinuation> {
+        match &self.status {
+            DrainStatus::Ready(continuation) => Some(continuation),
+            DrainStatus::Dispatching => None,
+        }
+    }
+}
+
+impl PostReplacementDrainStack {
+    pub fn is_empty(&self) -> bool {
+        self.drains.is_empty()
+    }
+
+    /// CR 614.12a: is there a continuation that has not run yet?
+    ///
+    /// A `Dispatching` drain does NOT count: its continuation is already running,
+    /// and a nested check taken during that dispatch must not try to re-drain it.
+    /// This is exactly what `post_replacement_continuation.is_some()` meant, since
+    /// the old code took the continuation out of the slot before dispatching.
+    pub fn has_ready(&self) -> bool {
+        self.drains
+            .iter()
+            .any(|drain| matches!(drain.status, DrainStatus::Ready(_)))
+    }
+
+    /// The innermost drain, whatever its status. Event-context reads (CR 615.5)
+    /// go through here, because they must still resolve while it is `Dispatching`.
+    pub fn resident(&self) -> Option<&PostReplacementDrain> {
+        self.drains.last()
+    }
+
+    pub fn resident_mut(&mut self) -> Option<&mut PostReplacementDrain> {
+        self.drains.last_mut()
+    }
+
+    /// Install `drain`, resolving a collision with any resident one per `policy`.
+    ///
+    /// Returns `false` when the incoming drain was discarded (`KeepResident` onto
+    /// an occupied stack), so a caller can distinguish "installed" from "silently
+    /// dropped" — something the old `stash_post_replacement_continuation` could not.
+    pub fn install(&mut self, drain: PostReplacementDrain, policy: ResidentDrainPolicy) -> bool {
+        match policy {
+            ResidentDrainPolicy::KeepResident if !self.drains.is_empty() => false,
+            ResidentDrainPolicy::KeepResident => {
+                self.drains.push(drain);
+                true
+            }
+            ResidentDrainPolicy::Replace => {
+                self.drains.pop();
+                self.drains.push(drain);
+                true
+            }
+        }
+    }
+
+    /// CR 614.12a: take the resident continuation and mark the drain `Dispatching`,
+    /// leaving it resident so the running effect can still read its event context.
+    ///
+    /// Returns `None` if there is no resident drain, or its continuation was
+    /// already taken.
+    pub fn begin_dispatch(&mut self) -> Option<crate::types::ability::PostReplacementContinuation> {
+        let drain = self.drains.last_mut()?;
+        match std::mem::replace(&mut drain.status, DrainStatus::Dispatching) {
+            DrainStatus::Ready(continuation) => Some(continuation),
+            // Already dispatching: put the status back and report no work. Restoring
+            // it matters — `Dispatching` is not idempotent state to overwrite.
+            DrainStatus::Dispatching => {
+                drain.status = DrainStatus::Dispatching;
+                None
+            }
+        }
+    }
+
+    /// Pop the drain whose continuation has finished dispatching.
+    pub fn finish_dispatch(&mut self) -> Option<PostReplacementDrain> {
+        if matches!(self.drains.last()?.status, DrainStatus::Dispatching) {
+            return self.drains.pop();
+        }
+        None
+    }
+
+    /// CR 800.4a: abandon every pending continuation (player departure).
+    pub fn abandon_all(&mut self) {
+        self.drains.clear();
+    }
+}
+
 /// Legacy pre-`DrawSequenceStack` save shape: the single in-flight multi-card
 /// draw. Deserialize-only — [`GameState::migrate_pending_multi_draw`] converts it
 /// into a one-frame [`DrawSequenceStack`]. No production writer remains.
@@ -9039,13 +9225,14 @@ impl GameState {
             liminal_entries: HashMap::new(),
             pending_liminal_entry_resume: None,
             replacement_may_cost_paused: false,
-            post_replacement_continuation: None,
+            post_replacement_drains: PostReplacementDrainStack::default(),
             legacy_post_replacement_effect: None,
             legacy_post_replacement_resolved_effect: None,
-            post_replacement_source: None,
-            post_replacement_applied: HashSet::new(),
-            post_replacement_event_source: None,
-            post_replacement_event_target: None,
+            legacy_post_replacement_continuation: None,
+            legacy_post_replacement_source: None,
+            legacy_post_replacement_applied: HashSet::new(),
+            legacy_post_replacement_event_source: None,
+            legacy_post_replacement_event_target: None,
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
             pending_connive_reentry: None,
@@ -9528,20 +9715,130 @@ impl GameState {
     /// plumbing. The Resolved arm wins when both legacy slots are
     /// (impossibly) populated, mirroring the pre-fold dispatcher precedence
     /// at `engine_replacement.rs::apply_pending_post_replacement_effect`.
+    /// CR 614.12a: is a post-replacement continuation waiting to drain?
+    ///
+    /// The scattered `post_replacement_continuation.is_some()` checks this replaces
+    /// were asking exactly this: is there work that has NOT been taken yet. A drain
+    /// that is mid-dispatch does not count — the old slot was already empty at that
+    /// point, because the continuation had been moved out of it before dispatching.
+    pub fn has_post_replacement_drain(&self) -> bool {
+        self.post_replacement_drains.has_ready()
+    }
+
+    /// CR 614.12a: install a ready continuation carrying no source, no inherited
+    /// applied set and no prevented-event context.
+    ///
+    /// Policy is `Replace` — the shape the combat prevention riders use, which have
+    /// always overwritten a resident continuation rather than deferring to it.
+    pub fn install_ready_continuation(
+        &mut self,
+        continuation: crate::types::ability::PostReplacementContinuation,
+    ) {
+        self.post_replacement_drains.install(
+            PostReplacementDrain::ready(continuation),
+            ResidentDrainPolicy::Replace,
+        );
+    }
+
+    /// CR 614.12a: the resident drain's continuation, if it has not been taken for
+    /// dispatch yet.
+    pub fn post_replacement_continuation(
+        &self,
+    ) -> Option<&crate::types::ability::PostReplacementContinuation> {
+        self.post_replacement_drains
+            .resident()
+            .and_then(|drain| drain.ready_continuation())
+    }
+
+    /// CR 615.5: the resident drain's replacement source (the shield's own object).
+    pub fn post_replacement_source(&self) -> Option<crate::types::identifiers::ObjectId> {
+        self.post_replacement_drains
+            .resident()
+            .and_then(|drain| drain.source)
+    }
+
+    /// CR 615.5 + CR 609.7: the resident drain's *prevented-event* source — the
+    /// damage dealer, not the shield.
+    pub fn post_replacement_event_source(&self) -> Option<crate::types::identifiers::ObjectId> {
+        self.post_replacement_drains
+            .resident()
+            .and_then(|drain| drain.event_source)
+    }
+
+    /// CR 615.5: the resident drain's prevented-event target.
+    pub fn post_replacement_event_target(&self) -> Option<&crate::types::ability::TargetRef> {
+        self.post_replacement_drains
+            .resident()
+            .and_then(|drain| drain.event_target.as_ref())
+    }
+
+    /// CR 614.12a: clear the resident drain's replacement source while leaving the
+    /// continuation itself resident.
+    ///
+    /// A real thing several callers need, not a convenience: a zone change's
+    /// caller epilogue drains with the spell-resolution ctx and must not resolve
+    /// `SelfRef` against the replacement's source.
+    pub fn clear_post_replacement_source(&mut self) {
+        if let Some(drain) = self.post_replacement_drains.resident_mut() {
+            drain.source = None;
+        }
+    }
+
     pub fn migrate_post_replacement_continuation(&mut self) {
-        if self.post_replacement_continuation.is_some() {
+        // The canonical stack wins outright: every legacy slot is stale.
+        if !self.post_replacement_drains.is_empty() {
             self.legacy_post_replacement_effect = None;
             self.legacy_post_replacement_resolved_effect = None;
+            self.legacy_post_replacement_continuation = None;
+            self.legacy_post_replacement_source = None;
+            self.legacy_post_replacement_applied.clear();
+            self.legacy_post_replacement_event_source = None;
+            self.legacy_post_replacement_event_target = None;
             return;
         }
-        if let Some(resolved) = self.legacy_post_replacement_resolved_effect.take() {
-            self.post_replacement_continuation =
-                Some(crate::types::ability::PostReplacementContinuation::Resolved(resolved));
-            self.legacy_post_replacement_effect = None;
-        } else if let Some(template) = self.legacy_post_replacement_effect.take() {
-            self.post_replacement_continuation =
-                Some(crate::types::ability::PostReplacementContinuation::Template(template));
-        }
+
+        // The continuation itself comes from whichever generation of the save
+        // recorded it. The Resolved arm wins when both pre-fold slots are
+        // (impossibly) populated, mirroring the pre-fold dispatcher precedence.
+        let continuation = self
+            .legacy_post_replacement_continuation
+            .take()
+            .or_else(|| {
+                self.legacy_post_replacement_resolved_effect
+                    .take()
+                    .map(crate::types::ability::PostReplacementContinuation::Resolved)
+            })
+            .or_else(|| {
+                self.legacy_post_replacement_effect
+                    .take()
+                    .map(crate::types::ability::PostReplacementContinuation::Template)
+            });
+        self.legacy_post_replacement_effect = None;
+        self.legacy_post_replacement_resolved_effect = None;
+
+        let Some(continuation) = continuation else {
+            // No continuation means the companion values are orphans; drop them
+            // rather than leaving them to bleed into an unrelated later drain.
+            self.legacy_post_replacement_source = None;
+            self.legacy_post_replacement_applied.clear();
+            self.legacy_post_replacement_event_source = None;
+            self.legacy_post_replacement_event_target = None;
+            return;
+        };
+
+        self.post_replacement_drains.install(
+            PostReplacementDrain {
+                // A legacy save recorded a continuation that had not run, so it
+                // deserializes as `Ready`. A save can never have captured one
+                // mid-dispatch: the old slot was emptied before dispatching.
+                status: DrainStatus::Ready(continuation),
+                source: self.legacy_post_replacement_source.take(),
+                applied: std::mem::take(&mut self.legacy_post_replacement_applied),
+                event_source: self.legacy_post_replacement_event_source.take(),
+                event_target: self.legacy_post_replacement_event_target.take(),
+            },
+            ResidentDrainPolicy::Replace,
+        );
     }
 
     /// CR 121.2: Migrate the legacy single-slot `pending_multi_draw` save shape
@@ -11757,12 +12054,12 @@ mod tests {
         let serialized = serde_json::to_string(&snapshot).unwrap();
         let mut state: GameState = serde_json::from_str(&serialized).unwrap();
         // Pre-migration: legacy slot populated, unified slot empty.
-        assert!(state.post_replacement_continuation.is_none());
+        assert!(!state.has_post_replacement_drain());
         assert!(state.legacy_post_replacement_effect.is_some());
 
         state.migrate_post_replacement_continuation();
 
-        match state.post_replacement_continuation {
+        match state.post_replacement_continuation() {
             Some(PostReplacementContinuation::Template(ref def)) => {
                 assert_eq!(**def, template);
             }
@@ -11795,12 +12092,12 @@ mod tests {
 
         let serialized = serde_json::to_string(&snapshot).unwrap();
         let mut state: GameState = serde_json::from_str(&serialized).unwrap();
-        assert!(state.post_replacement_continuation.is_none());
+        assert!(!state.has_post_replacement_drain());
         assert!(state.legacy_post_replacement_resolved_effect.is_some());
 
         state.migrate_post_replacement_continuation();
 
-        match state.post_replacement_continuation {
+        match state.post_replacement_continuation() {
             Some(PostReplacementContinuation::Resolved(ref boxed)) => {
                 assert_eq!(**boxed, resolved);
             }

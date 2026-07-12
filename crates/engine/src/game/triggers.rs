@@ -4988,7 +4988,7 @@ fn can_drain_deferred_triggers(state: &GameState, allow_spell_on_stack: bool) ->
     if state.pending_repeat_iteration.is_some() {
         return false;
     }
-    if state.post_replacement_continuation.is_some() {
+    if state.has_post_replacement_drain() {
         return false;
     }
     if state.pending_change_zone_iteration.is_some() {

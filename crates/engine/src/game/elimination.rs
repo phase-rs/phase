@@ -1086,8 +1086,8 @@ mod tests {
         };
         // Coupled continuation slots the resume drain would clear on a normal answer.
         state.replacement_may_cost_paused = true;
-        state.post_replacement_continuation = Some(PostReplacementContinuation::Resolved(
-            Box::new(ResolvedAbility::new(
+        state.install_ready_continuation(PostReplacementContinuation::Resolved(Box::new(
+            ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "psrc".into(),
                     description: None,
@@ -1095,11 +1095,23 @@ mod tests {
                 vec![],
                 o,
                 PlayerId(2),
-            )),
-        ));
-        state.post_replacement_source = Some(o);
-        state.post_replacement_event_source = Some(o);
-        state.post_replacement_event_target = Some(TargetRef::Object(o));
+            ),
+        )));
+        state
+            .post_replacement_drains
+            .resident_mut()
+            .expect("a drain must be resident")
+            .source = Some(o);
+        state
+            .post_replacement_drains
+            .resident_mut()
+            .expect("a drain must be resident")
+            .event_source = Some(o);
+        state
+            .post_replacement_drains
+            .resident_mut()
+            .expect("a drain must be resident")
+            .event_target = Some(TargetRef::Object(o));
         // Issue #4886 (review #6): a live Jinnie Fay-class token-choice applied
         // seed, owned by this same abandoned continuation, must be abandoned
         // alongside its siblings — this field was added after the teardown
@@ -1147,10 +1159,10 @@ mod tests {
         );
         // Every coupled continuation slot the resume drain owns is torn down.
         assert!(!state.replacement_may_cost_paused);
-        assert!(state.post_replacement_continuation.is_none());
-        assert!(state.post_replacement_source.is_none());
-        assert!(state.post_replacement_event_source.is_none());
-        assert!(state.post_replacement_event_target.is_none());
+        assert!(!state.has_post_replacement_drain());
+        assert!(state.post_replacement_source().is_none());
+        assert!(state.post_replacement_event_source().is_none());
+        assert!(state.post_replacement_event_target().is_none());
         assert!(
             state.post_replacement_token_choice_applied.is_none(),
             "abandoning the parked chooser's continuation must also clear the token-choice \

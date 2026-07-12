@@ -18,7 +18,8 @@ use super::filter::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, PendingReplacement, ReplacementCandidateSummary, ReplacementIndexEntry, WaitingFor,
+    DrainStatus, GameState, PendingReplacement, PostReplacementDrain, ReplacementCandidateSummary,
+    ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -265,6 +266,13 @@ pub enum ApplyResult {
     Prevented,
 }
 
+/// CR 614.12a: Install a mandatory post-effect's continuation.
+///
+/// Policy is [`ResidentDrainPolicy::KeepResident`], preserving this function's
+/// long-standing behaviour: when a continuation is already resident, the incoming
+/// one is **discarded**. That is lossy — CR 616.1g contemplates a replacement
+/// applying to an event contained within another — but it is what the engine does
+/// today, and changing it is a separate, characterized commit.
 fn stash_post_replacement_continuation(
     state: &mut GameState,
     continuation: PostReplacementContinuation,
@@ -273,14 +281,16 @@ fn stash_post_replacement_continuation(
     event_source: Option<ObjectId>,
     event_target: Option<TargetRef>,
 ) {
-    if state.post_replacement_continuation.is_some() {
-        return;
-    }
-    state.post_replacement_continuation = Some(continuation);
-    state.post_replacement_source = Some(source);
-    state.post_replacement_applied = applied;
-    state.post_replacement_event_source = event_source;
-    state.post_replacement_event_target = event_target;
+    state.post_replacement_drains.install(
+        PostReplacementDrain {
+            status: DrainStatus::Ready(continuation),
+            source: Some(source),
+            applied,
+            event_source,
+            event_target,
+        },
+        ResidentDrainPolicy::KeepResident,
+    );
 }
 
 fn ability_tree_creates_tokens(def: &AbilityDefinition) -> bool {
@@ -331,10 +341,10 @@ fn is_copy_token_substitution(def: &AbilityDefinition) -> bool {
 /// (player elimination mid-resolution, `elimination.rs`) precisely because it
 /// was hand-listed there instead of routed through one function.
 pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
-    state.post_replacement_continuation = None;
-    state.post_replacement_source = None;
-    state.post_replacement_event_source = None;
-    state.post_replacement_event_target = None;
+    // The drain owns its source / applied / event-source / event-target, so one
+    // call abandons all four. This is precisely the hand-listing hazard the doc
+    // above describes: those four could no longer be stranded individually.
+    state.post_replacement_drains.abandon_all();
     state.post_replacement_token_choice_applied = None;
     // CR 614.1a: the Moonlit-scoped "that many" copy count is single-authority
     // abandoned alongside the applied seed it rides with.
@@ -7063,7 +7073,7 @@ pub(crate) fn replace_combat_damage_batch(
         // partial prevention (`Modified` → `Execute`) — so a depletion-shield
         // rider fires "immediately afterward" and never leaks past the batch.
         if !matches!(result, ReplacementResult::NeedsChoice(_))
-            && state.post_replacement_continuation.is_some()
+            && state.has_post_replacement_drain()
         {
             let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                 state, None, None, None, events,
@@ -7235,17 +7245,6 @@ fn continue_replacement_impl(
         // `draw_applier`) can see the continuation slot and suppress the
         // original event when its replacement is a non-modifier chain
         // (CR 614.6: the draw never happens when fully replaced).
-        if post_effect.is_some() {
-            state.post_replacement_source = Some(rid.source);
-            state.post_replacement_applied = proposed.applied_set().clone();
-            // CR 615.5 + CR 609.7: Optional/decline post-effects don't carry
-            // prevention-event-source semantics — clear so a prior prevention
-            // can't leak into a non-prevention stash.
-            state.post_replacement_event_source = None;
-            state.post_replacement_event_target = None;
-        } else {
-            state.post_replacement_applied.clear();
-        }
         // CR 614.12a + CR 616.1: Seed the inherited replacement-applied set ONLY
         // when this replacement originates a token-choice continuation (Jinnie
         // Fay-class `CreateToken -> ChooseOneOf(Token, Token)`). The seed is
@@ -7274,8 +7273,35 @@ fn continue_replacement_impl(
                 state.post_replacement_token_substitution_count = Some(*count as i32);
             }
         }
-        state.post_replacement_continuation =
-            post_effect.map(PostReplacementContinuation::Template);
+        // CR 614.12a: install (or clear) the optional branch's continuation.
+        //
+        // Policy is `Replace`: unlike `stash_post_replacement_continuation`, this
+        // path has always OVERWRITTEN a resident continuation rather than
+        // discarding the incoming one. The two policies genuinely disagree; both
+        // are preserved exactly here, and naming them is the point.
+        //
+        // CR 615.5 + CR 609.7: an optional/decline post-effect carries no
+        // prevention-event-source semantics, so `event_source`/`event_target` are
+        // empty — a prior prevention must not leak into a non-prevention drain.
+        // The drain owns those fields, so replacing it clears them by construction.
+        match post_effect {
+            Some(def) => {
+                state.post_replacement_drains.install(
+                    PostReplacementDrain {
+                        status: DrainStatus::Ready(PostReplacementContinuation::Template(def)),
+                        source: Some(rid.source),
+                        applied: proposed.applied_set().clone(),
+                        event_source: None,
+                        event_target: None,
+                    },
+                    ResidentDrainPolicy::Replace,
+                );
+            }
+            // No post-effect: this branch produces no continuation, so any resident
+            // one (and the `applied` set that rode with it) is dropped — exactly
+            // what `continuation = None` + `applied.clear()` did before.
+            None => state.post_replacement_drains.abandon_all(),
+        }
 
         match apply_single_replacement_and_dirty(state, proposed, rid, branch, registry, events) {
             Ok(new_event) => proposed = new_event,
@@ -7449,7 +7475,7 @@ mod tests {
             "chosen-dependent counters must not fold pre-choice"
         );
         assert!(
-            state.post_replacement_continuation.is_some(),
+            state.has_post_replacement_drain(),
             "Choose + chosen-dependent PutCounter must stash post-replacement work"
         );
     }
@@ -7493,7 +7519,7 @@ mod tests {
         assert!(enter_tapped.resolve(false));
         assert_eq!(enter_with_counters, vec![(CounterType::Stun, 1)]);
         assert!(
-            state.post_replacement_continuation.is_none(),
+            !state.has_post_replacement_drain(),
             "pure ETB modifier chains must not be replayed after the event"
         );
     }
@@ -9338,7 +9364,7 @@ mod tests {
             "Gate land should enter the battlefield tapped"
         );
         assert!(
-            state.post_replacement_continuation.is_some(),
+            state.has_post_replacement_drain(),
             "the as-enters color Choose should be stashed as a post-replacement continuation"
         );
     }
@@ -9673,10 +9699,10 @@ mod tests {
         // continuation. A leaked Template here is the same defect class as
         // the Jace empty-library win bug.
         assert!(
-            state.post_replacement_continuation.is_none(),
+            !state.has_post_replacement_drain(),
             "GainLife→GainLife amount-substitution must not leak a post-replacement \
              continuation; found {:?}",
-            state.post_replacement_continuation
+            state.post_replacement_continuation()
         );
     }
 
@@ -14183,7 +14209,7 @@ mod tests {
         };
 
         assert!(
-            state.post_replacement_continuation.is_none(),
+            !state.has_post_replacement_drain(),
             "token substitution must not stash a post-replacement continuation"
         );
 
@@ -14276,7 +14302,7 @@ mod tests {
         };
         assert_eq!(count, 0, "accepted substitution suppresses original batch");
         assert!(
-            state.post_replacement_continuation.is_some(),
+            state.has_post_replacement_drain(),
             "accepted substitution must park the branch choice as a continuation"
         );
 
