@@ -333,10 +333,9 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::CaseSolved => push(TriggerEventKey::DungeonOrClassOrCase),
 
         // --- Planar ---
-        TriggerMode::PlanarDice
-        | TriggerMode::PlaneswalkedFrom
-        | TriggerMode::PlaneswalkedTo
-        | TriggerMode::ChaosEnsues => return (keys, true),
+        TriggerMode::PlanarDice | TriggerMode::Planeswalked { .. } | TriggerMode::ChaosEnsues => {
+            return (keys, true)
+        }
 
         // --- Dice / coin ---
         TriggerMode::RolledDie | TriggerMode::RolledDieOnce | TriggerMode::FlippedCoin => {
@@ -635,7 +634,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::RoomEntered { .. } | GameEvent::DungeonCompleted { .. } => {
             push(TriggerEventKey::DungeonOrClassOrCase);
         }
-        // Planechase trigger modes (PlaneswalkedFrom/To, ChaosEnsues) route to the
+        // Planechase trigger modes (Planeswalked { role }, ChaosEnsues) route to the
         // always-checked unclassified bucket in `keys_from_trigger_def`, so these
         // events need no dedicated index key — their matchers are always consulted.
         GameEvent::Planeswalked { .. }

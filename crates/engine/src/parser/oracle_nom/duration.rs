@@ -198,6 +198,10 @@ pub fn parse_for_as_long_as_condition(input: &str) -> OracleResult<'_, Duration>
         // creature", bare card names) bind to the source. See
         // `parse_remains_tapped`.
         parse_remains_tapped,
+        // CR 311.2 + CR 901.7 + CR 611.2b: "[this plane] remains face up" — the
+        // plane-face-up-gated continuous-effect duration. Kept adjacent to
+        // `parse_remains_tapped` (the sibling source-status "remains X" family).
+        parse_remains_face_up,
         // "you control [subject]" → host-control lifetime, modeled with the
         // existing UntilHostLeavesPlay variant.
         value(
@@ -310,6 +314,39 @@ fn parse_remains_tapped(input: &str) -> OracleResult<'_, Duration> {
     );
 
     alt((demonstrative, source_self_ref, source_fallback)).parse(input)
+}
+
+/// CR 311.2 + CR 901.7 + CR 611.2b: subject-aware "[this plane] remains face up"
+/// duration, mirroring `parse_remains_tapped`. Plane/phenomenon cards are always
+/// the source subject of their own face-up duration, so the referent normalizes
+/// to `~` (or a `SELF_REF_TYPE_PHRASES` self-reference). Emits
+/// `ForAsLongAs(SourceIsFaceUp)`; the layer system evaluates it against the
+/// command-zone active plane (`planechase::active_plane`), so the effect ends the
+/// instant the plane is planeswalked away and turned face down (CR 701.31b).
+///
+/// The Doctor's Childhood Barn ("They can't phase in for as long as ~ remains
+/// face up") is the source-subject witness; the `scan_contains` fallback catches
+/// any residual proper-name phrasing the same way the tapped fallback does.
+fn parse_remains_face_up(input: &str) -> OracleResult<'_, Duration> {
+    // Tier 1: explicit source self-reference ("~", "this creature", …).
+    let source_self_ref = value(
+        Duration::ForAsLongAs {
+            condition: StaticCondition::SourceIsFaceUp,
+        },
+        (parse_self_reference_subject, tag(" remains face up"), rest),
+    );
+
+    // Tier 2: any other source phrasing (proper card names, compound remnants).
+    // Word-boundary scan, not a dispatch primitive, reached only after the
+    // self-reference tier fails.
+    let source_fallback = value(
+        Duration::ForAsLongAs {
+            condition: StaticCondition::SourceIsFaceUp,
+        },
+        verify(rest, |tail: &str| scan_contains(tail, "remains face up")),
+    );
+
+    alt((source_self_ref, source_fallback)).parse(input)
 }
 
 /// Source self-reference subject combinator: "~" or any `SELF_REF_TYPE_PHRASES`
@@ -677,6 +714,41 @@ mod tests {
                 "self-reference subject {subject:?} must bind the source",
             );
         }
+    }
+
+    /// CR 311.2 + CR 901.7: "for as long as [this plane] remains face up" → the
+    /// source plane's face-up status (`SourceIsFaceUp`). The normalized `~` self-
+    /// reference (The Doctor's Childhood Barn) and any self-ref phrasing bind the
+    /// source; a leading-`The` proper name hits the `scan_contains` fallback.
+    #[test]
+    fn test_remains_face_up_binds_source() {
+        for subject in ["~", "this permanent", "The Doctor's Childhood Barn"] {
+            let text = format!("for as long as {subject} remains face up");
+            let (rest, d) = parse_duration(&text).unwrap();
+            assert_eq!(rest, "", "failed for {subject:?}");
+            assert_eq!(
+                d,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::SourceIsFaceUp,
+                },
+                "face-up subject {subject:?} must bind the source plane",
+            );
+        }
+    }
+
+    /// The bare condition text arriving at `parse_for_as_long_as_condition`
+    /// (post-"for as long as " strip, normalized to `~`) resolves to
+    /// `SourceIsFaceUp`, NOT the `Unrecognized` fallback that left the Barn's
+    /// "can't phase in" lock permanently active.
+    #[test]
+    fn test_for_as_long_as_condition_face_up_not_unrecognized() {
+        let (_, d) = parse_for_as_long_as_condition("~ remains face up").unwrap();
+        assert_eq!(
+            d,
+            Duration::ForAsLongAs {
+                condition: StaticCondition::SourceIsFaceUp,
+            },
+        );
     }
 
     /// Proper-name regression: a card name beginning with "The" is a SOURCE

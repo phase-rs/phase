@@ -4666,6 +4666,27 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 },
                 tag("at the beginning of the next cleanup step, "),
             ),
+            // CR 603.7a + CR 701.31 + CR 901.11: inline delayed triggered ability
+            // keyed to any planeswalk ("When a player planeswalks, …"). Mirrors The
+            // Pandorica's `WhenNextEvent { Untaps, or LeavesBattlefield, Persistent }`
+            // delayed trigger, differing only in the trigger event.
+            // `Persistent` (CR 603.7b): no stated duration → survives across turns
+            // until the next planeswalk. The stripped body ("those permanents phase
+            // in") then parses to `Effect::PhaseIn { target: ParentTarget }`, and the
+            // chosen permanents are frozen into `ability.targets` at delayed-trigger
+            // creation by the existing `parent_target_snapshot` path.
+            value(
+                DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(crate::types::ability::TriggerDefinition::new(
+                        crate::types::triggers::TriggerMode::Planeswalked {
+                            role: crate::types::triggers::PlaneswalkRole::Any,
+                        },
+                    )),
+                    or_trigger: None,
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::Persistent,
+                },
+                tag("when a player planeswalks, "),
+            ),
         ))
         .parse(i)
     }) {
@@ -8570,7 +8591,7 @@ mod tests {
     };
     use crate::types::counter::CounterType;
     use crate::types::phase::Phase;
-    use crate::types::triggers::TriggerMode;
+    use crate::types::triggers::{PlaneswalkRole, TriggerMode};
     use crate::types::zones::Zone;
 
     /// CR 608.2c: a `ChooseFromZone` head with a `RemoveCounter`/`PutCounter`
@@ -9404,6 +9425,28 @@ mod tests {
             cond,
             Some(DelayedTriggerCondition::AtNextPhase {
                 phase: Phase::EndCombat,
+            })
+        );
+    }
+
+    /// CR 603.7a + CR 701.31: the inline "When a player planeswalks, …" delayed
+    /// trigger prefix strips to its body and yields a `WhenNextEvent` condition
+    /// keyed to `Planeswalked { role: Any }`, no `or_trigger`, `Persistent` lifetime
+    /// (CR 603.7b — no stated duration). The Doctor's Childhood Barn's delayed
+    /// phase-in.
+    #[test]
+    fn strip_temporal_prefix_when_a_player_planeswalks() {
+        let (body, cond) =
+            strip_temporal_prefix("when a player planeswalks, those permanents phase in");
+        assert_eq!(body, "those permanents phase in");
+        assert_eq!(
+            cond,
+            Some(DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(TriggerDefinition::new(TriggerMode::Planeswalked {
+                    role: PlaneswalkRole::Any,
+                })),
+                or_trigger: None,
+                lifetime: crate::types::ability::DelayedTriggerLifetime::Persistent,
             })
         );
     }

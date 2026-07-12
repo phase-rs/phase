@@ -7,7 +7,7 @@
 //! shows up in the report.
 
 use engine::types::ability::{CounterTriggerFilter, DamageKindFilter, TriggerConstraint};
-use engine::types::triggers::{AttackTargetFilter, TriggerMode};
+use engine::types::triggers::{AttackTargetFilter, PlaneswalkRole, TriggerMode};
 use engine::types::{Phase, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter, Zone};
 
 use crate::convert::filter::{
@@ -546,14 +546,18 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
 
         // CR 701.31 + CR 901.11: "When you planeswalk to/away from a plane" —
         // fires when a face-up plane card changes (CR 701.31d). Engine
-        // `TriggerMode::PlaneswalkedTo` / `PlaneswalkedFrom` are unit modes;
-        // the `Plane` filter and `Players` axis are dropped (planar controller
-        // is implicit per CR 901.6).
+        // `TriggerMode::Planeswalked { role }` carries the endpoint role (`To` /
+        // `From`); the `Plane` filter and `Players` axis are dropped (planar
+        // controller is implicit per CR 901.6).
         Trigger::WhenAPlayerPlaneswalksToAPlane(_players, _planes) => {
-            TriggerDefinition::new(TriggerMode::PlaneswalkedTo)
+            TriggerDefinition::new(TriggerMode::Planeswalked {
+                role: PlaneswalkRole::To,
+            })
         }
         Trigger::WhenAPlayerPlaneswalksAwayFromAPlane(_players, _planes) => {
-            TriggerDefinition::new(TriggerMode::PlaneswalkedFrom)
+            TriggerDefinition::new(TriggerMode::Planeswalked {
+                role: PlaneswalkRole::From,
+            })
         }
 
         // CR 508.3d: "Whenever [a player] attacks" — fires when one or more

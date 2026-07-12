@@ -12189,7 +12189,12 @@ fn trigger_planeswalk_away_from_mode() {
         "Whenever you planeswalk away from Test Plane, draw a card.",
         "Test Plane",
     );
-    assert_eq!(def.mode, TriggerMode::PlaneswalkedFrom);
+    assert_eq!(
+        def.mode,
+        TriggerMode::Planeswalked {
+            role: PlaneswalkRole::From
+        }
+    );
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
 }
@@ -12201,7 +12206,12 @@ fn trigger_planeswalk_to_mode() {
         "Whenever you planeswalk to Test Plane, draw a card.",
         "Test Plane",
     );
-    assert_eq!(def.mode, TriggerMode::PlaneswalkedTo);
+    assert_eq!(
+        def.mode,
+        TriggerMode::Planeswalked {
+            role: PlaneswalkRole::To
+        }
+    );
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
 }
@@ -12214,7 +12224,12 @@ fn trigger_encounter_maps_to_planeswalked_to() {
         "When you encounter Test Phenomenon, draw a card.",
         "Test Phenomenon",
     );
-    assert_eq!(def.mode, TriggerMode::PlaneswalkedTo);
+    assert_eq!(
+        def.mode,
+        TriggerMode::Planeswalked {
+            role: PlaneswalkRole::To
+        }
+    );
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
 }
 
@@ -12254,7 +12269,12 @@ fn caught_in_a_parallel_universe_per_player_left_neighbor_choose_is_deferred_gap
         "Caught in a Parallel Universe",
     );
     // CR 312.5: the encounter maps to the face-up (planeswalked-to) endpoint.
-    assert_eq!(def.mode, TriggerMode::PlaneswalkedTo);
+    assert_eq!(
+        def.mode,
+        TriggerMode::Planeswalked {
+            role: PlaneswalkRole::To
+        }
+    );
     let execute = def
         .execute
         .as_deref()
@@ -12289,7 +12309,12 @@ fn fixed_point_in_time_full_trigger_parses_replacement_with_duration() {
     let trigger = parsed
         .triggers
         .iter()
-        .find(|trigger| trigger.mode == TriggerMode::PlaneswalkedTo)
+        .find(|trigger| {
+            trigger.mode
+                == TriggerMode::Planeswalked {
+                    role: PlaneswalkRole::To,
+                }
+        })
         .expect("Fixed Point in Time encounter trigger must parse");
 
     assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
@@ -12314,8 +12339,8 @@ fn fixed_point_in_time_full_trigger_parses_replacement_with_duration() {
 #[test]
 fn trigger_arrival_phrase_axis_all_map_to_planeswalked_to() {
     // CR 312.5 / CR 701.31d: every arrival/encounter phrasing in the class
-    // maps to PlaneswalkedTo with the controller target filter — including
-    // the "here" and literal "this plane"/"this phenomenon" forms that do
+    // maps to Planeswalked { role: To } with the controller target filter —
+    // including the "here" and literal "this plane"/"this phenomenon" forms that do
     // NOT normalize to ~ (so they exercise the literal arms of the axis).
     for (oracle, name) in [
         // "planeswalk here" — Ghirapur Grand Prix's arrival trigger.
@@ -12338,8 +12363,10 @@ fn trigger_arrival_phrase_axis_all_map_to_planeswalked_to() {
         let def = parse_trigger_line(oracle, name);
         assert_eq!(
             def.mode,
-            TriggerMode::PlaneswalkedTo,
-            "`{oracle}` should map to PlaneswalkedTo",
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::To
+            },
+            "`{oracle}` should map to Planeswalked {{ role: To }}",
         );
         assert_eq!(
             def.valid_card,
