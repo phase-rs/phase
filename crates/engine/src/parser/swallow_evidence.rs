@@ -229,15 +229,17 @@ const STATIC_MODE_KEYS: &[&str] = &["mode"];
 ///     in the tree. It is not. 10 of `QuantityRef`'s 84 variant names are shared with
 ///     another internally-tagged enum reachable from a parsed unit:
 ///
-///       QuantityRef ∩ AbilityCondition         PreviousEffectAmount
-///       QuantityRef ∩ FilterProp               AttackedThisTurn, EnteredThisTurn
-///       QuantityRef ∩ TriggerCondition         AttackedThisTurn, CounterAddedThisTurn
-///       QuantityRef ∩ ParsedCondition          BattlefieldEntriesThisTurn
-///       QuantityRef ∩ ChooseFromZoneConstraint DistinctCardTypes
-///       QuantityRef ∩ ManaCost                 SelfManaValue
-///       QuantityRef ∩ ManaProduction           DistinctColorsAmongPermanents
-///       QuantityRef ∩ SolveCondition           ObjectCount
-///       QuantityRef ∩ QuantityExpr             Power
+///     ```text
+///     QuantityRef ∩ AbilityCondition         PreviousEffectAmount
+///     QuantityRef ∩ FilterProp               AttackedThisTurn, EnteredThisTurn
+///     QuantityRef ∩ TriggerCondition         AttackedThisTurn, CounterAddedThisTurn
+///     QuantityRef ∩ ParsedCondition          BattlefieldEntriesThisTurn
+///     QuantityRef ∩ ChooseFromZoneConstraint DistinctCardTypes
+///     QuantityRef ∩ ManaCost                 SelfManaValue
+///     QuantityRef ∩ ManaProduction           DistinctColorsAmongPermanents
+///     QuantityRef ∩ SolveCondition           ObjectCount
+///     QuantityRef ∩ QuantityExpr             Power
+///     ```
 ///
 /// Both failures were MEASURED, not hypothesized. Unanchored, `detect_dynamic_qty` accepted
 /// Boing!'s `AbilityCondition::PreviousEffectAmount` (under key `condition`) and Siren's
