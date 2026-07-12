@@ -9,11 +9,11 @@ use crate::game::conditions::{
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ChosenAttribute, CoinFlipResult,
-    ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect,
-    EffectError, EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope,
-    PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, RepeatContinuation,
-    ResolvedAbility, RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
+    AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ChosenAttribute, ControllerRef,
+    CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError,
+    EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
+    PlayerScope, PtValue, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
+    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
     SharedQualityRelation, SubAbilityLink, TapStateChange, TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
@@ -5980,6 +5980,25 @@ pub fn resolve_ability_chain(
                 .or_insert(0);
             *count += 1;
         }
+        // CR 705.2 + CR 608.2c: `resolution_coin_flip` is scoped to a single
+        // resolution — a `CoinFlipOutcome` gate ("if you lose the flip, repeat
+        // this process") must read only a flip performed DURING this resolution,
+        // never one left over from a prior spell/ability. Top-level entry is the
+        // authoritative resolution-lifetime boundary (CR 608.2c: a resolution is
+        // one ordered execution of the object's instructions), so clear any
+        // prior resolution's flip here, before any instruction runs. This single
+        // reset covers every exit shape uniformly — a `WhileCondition` loop that
+        // ran to COMPLETION, a bounded loop that hit its cap, and the no-loop
+        // case — so a stale result can never survive into the next resolution.
+        // (A resumed continuation or a repeated iteration re-enters at depth > 0
+        // and intentionally preserves the flip it just produced; the per-iteration
+        // clear inside the `WhileCondition` branch handles the intra-loop boundary.)
+        // NOTE: `run_flip_branch` resolves a flip's win/lose sub-effect at depth 0,
+        // so this clear also fires there — harmless because a `CoinFlipOutcome`
+        // gate is only ever produced for the BARE-flip "repeat this process"
+        // pattern (`strip_coin_flip_conditional` requires the body to be the
+        // repeat directive), and a bare flip has no win/lose branch to re-enter.
+        state.resolution_coin_flip = None;
     }
 
     // CR 608.2c + CR 107.1c: "Repeat this process" dispatch — the non-count
@@ -6056,9 +6075,13 @@ pub fn resolve_ability_chain(
                 // the copy multiplies (and the loop never terminates once the
                 // accumulated set keeps the predicate true).
                 state.chain_tracked_set_id = None;
-                // CR 705.2: a `CoinFlipOutcome` gate must read only THIS
-                // iteration's flip. Clear the resolution-scoped result before the
-                // iteration runs so a stale prior-iteration flip can't satisfy it.
+                // CR 705.2: intra-loop boundary — a `CoinFlipOutcome` gate must
+                // read only THIS iteration's flip. The authoritative
+                // resolution-lifetime clear at top-level entry (above) handles
+                // leaks ACROSS resolutions; this clear handles the boundary
+                // BETWEEN iterations of the same loop, so an iteration whose body
+                // doesn't reach the flip can't satisfy the gate on a prior
+                // iteration's stale result.
                 state.resolution_coin_flip = None;
                 let initial_waiting_for = state.waiting_for.clone();
                 resolve_chain_body(state, ability, events, depth)?;
@@ -8630,11 +8653,9 @@ pub(crate) fn evaluate_condition(
         // controller's most recent in-resolution flip matches `result`. Reads
         // `state.resolution_coin_flip` (written at the flip authority), not the
         // trigger event, so a phenomenon / mid-resolution flip gates correctly.
-        AbilityCondition::CoinFlipOutcome { result } => {
-            state.resolution_coin_flip.is_some_and(|f| {
-                f.flipper == ability.controller && f.won == matches!(result, CoinFlipResult::Won)
-            })
-        }
+        AbilityCondition::CoinFlipOutcome { result } => state
+            .resolution_coin_flip
+            .is_some_and(|f| f.flipper == ability.controller && f.result == *result),
         // CR 603.12: A reflexive triggered ability ("when you do") triggers
         // "based on whether the trigger event or events occurred earlier during
         // the resolution" of the parent. For a cost-payment parent
@@ -18989,6 +19010,7 @@ mod tests {
     /// opposite result, or no flip at all does not.
     #[test]
     fn evaluate_condition_coin_flip_outcome_is_controller_relative() {
+        use crate::types::ability::CoinFlipResult;
         use crate::types::game_state::ResolutionCoinFlip;
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
@@ -19004,7 +19026,7 @@ mod tests {
         // Controller (p0) lost → "if you lose the flip" holds, "win" fails.
         state.resolution_coin_flip = Some(ResolutionCoinFlip {
             flipper: PlayerId(0),
-            won: false,
+            result: CoinFlipResult::Lost,
         });
         assert!(evaluate_condition(
             &AbilityCondition::CoinFlipOutcome {
@@ -19024,7 +19046,7 @@ mod tests {
         // Controller (p0) won → "win" holds.
         state.resolution_coin_flip = Some(ResolutionCoinFlip {
             flipper: PlayerId(0),
-            won: true,
+            result: CoinFlipResult::Won,
         });
         assert!(evaluate_condition(
             &AbilityCondition::CoinFlipOutcome {
@@ -19037,7 +19059,7 @@ mod tests {
         // A flip by another player (p1) never satisfies the controller's gate.
         state.resolution_coin_flip = Some(ResolutionCoinFlip {
             flipper: PlayerId(1),
-            won: false,
+            result: CoinFlipResult::Lost,
         });
         assert!(!evaluate_condition(
             &AbilityCondition::CoinFlipOutcome {

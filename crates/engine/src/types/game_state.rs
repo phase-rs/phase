@@ -9,7 +9,7 @@ use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
     CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ChosenAttribute, Comparator, ContinuousModification, ControlWindow, CopyScale,
+    ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification, ControlWindow, CopyScale,
     CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
     GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, PileSource,
     QuantityExpr, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
@@ -1147,13 +1147,17 @@ pub struct PendingCoinFlip {
 /// loop re-evaluates its predicate ("if you lose the flip, repeat this process").
 /// Carries the `flipper` (CR 705.2: only the player who flips wins/loses) so the
 /// gate stays controller-relative even in a hypothetical multi-flipper process.
-/// Mirrors `last_revealed_ids`: resolution-scoped, overwrite-on-produce, reset at
-/// each `WhileCondition` iteration start so the gate reads only that iteration's
-/// flip.
+/// The stored `result` reuses the same `CoinFlipResult` vocabulary that
+/// `AbilityCondition::CoinFlipOutcome` matches against, so the written value and
+/// the read predicate can never drift into a `bool`-vs-enum mismatch.
+/// Resolution-scoped like `last_revealed_ids`: overwrite-on-produce, cleared at
+/// the authoritative resolution-lifetime boundary (top-level `resolve_ability_chain`
+/// entry) and again at each `WhileCondition` iteration start so the gate reads
+/// only the current iteration's flip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionCoinFlip {
     pub flipper: PlayerId,
-    pub won: bool,
+    pub result: CoinFlipResult,
 }
 
 /// CR 614.12b + CR 614.1c + CR 614.13: Resume state for a multi-target
@@ -7731,7 +7735,10 @@ pub struct GameState {
     /// carrying the flipper so `AbilityCondition::CoinFlipOutcome` is
     /// controller-relative. Written by the flip authority and read when a
     /// `RepeatContinuation::WhileCondition` loop re-evaluates ("if you lose the
-    /// flip, repeat this process"). Resolution-scoped like `last_revealed_ids`.
+    /// flip, repeat this process"). Resolution-scoped like `last_revealed_ids`:
+    /// cleared at top-level `resolve_ability_chain` entry (CR 608.2c — the
+    /// authoritative resolution-lifetime boundary) so a stale flip from a prior
+    /// resolution can never satisfy a later gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_coin_flip: Option<ResolutionCoinFlip>,
 

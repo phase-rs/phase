@@ -17816,6 +17816,22 @@ pub enum CoinFlipResult {
     Lost,
 }
 
+impl CoinFlipResult {
+    /// CR 705.2: The single authority mapping the engine's `won: bool` flip
+    /// outcome onto the typed `CoinFlipResult` stored in `ResolutionCoinFlip`
+    /// and matched by `AbilityCondition::CoinFlipOutcome`. Keeping the mapping
+    /// here (rather than open-coding `if won { Won } else { Lost }` at each flip
+    /// site) means the written result and the read predicate share one
+    /// vocabulary and can never drift.
+    pub fn from_won(won: bool) -> Self {
+        if won {
+            CoinFlipResult::Won
+        } else {
+            CoinFlipResult::Lost
+        }
+    }
+}
+
 /// CR 706.2: Typed result-face filter for "Whenever you roll a [result]" die-roll
 /// triggers. `Exact` covers single faces ("roll a 1") AND disjunctions ("roll a 1
 /// or 2") — a set, which no single Comparator can express; `AtLeast` is the GE
