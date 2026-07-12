@@ -1488,6 +1488,13 @@ pub(crate) enum ZoneCounterImperativeAst {
         /// ("exile a card … with N <type> counters on it"). Empty for the
         /// common no-counter case. Mirrors `Effect::ChangeZone.enter_with_counters`.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// CR 700.4 (#5649): a counted graveyard exile — "exile <N> cards from
+        /// your graveyard" (Nefarious Lich: "exile that many cards … instead").
+        /// `Effect::ChangeZone` carries no count, so the quantity rides the
+        /// clause's `MultiTargetSpec` (mirroring Forage), threaded at lowering by
+        /// `lower_imperative_family_ast`. `None` for the ordinary single-object
+        /// exile.
+        multi_target: Option<MultiTargetSpec>,
     },
     ExileTop {
         player: TargetFilter,

@@ -8365,17 +8365,40 @@ fn parse_damage_to_self_instead_followup(
         let (i, _) = opt(char('.')).parse(i)?;
         Ok((i, (effect_start, effect.len())))
     })?;
-    if !rest.trim().is_empty() {
-        return None;
-    }
-
     let effect_text = normalized.get(effect_start..effect_start + effect_len)?;
+
+    // CR 614.1a impossibility rider: "... <effect> instead. If you can't,
+    // <consequence>." (Nefarious Lich — "exile that many cards from your
+    // graveyard instead. If you can't, you lose the game."). `nom_on_lower`
+    // returns `rest` in the original (mixed-case) text, so match it via a
+    // lowercased copy. Fold the rider back onto the substituted effect so the
+    // shared "if you can't" lowering (→ `Not { ZoneChangedThisWay }`) threads it
+    // as a conditional continuation of the substituted effect, rather than
+    // bailing on the non-empty remainder. Any OTHER trailing text still bails,
+    // preserving the recognizer's single-clause scope.
+    let rider = rest.trim();
+    let followup_text = if rider.is_empty() {
+        effect_text.to_string()
+    } else {
+        let rider_lower = rider.to_lowercase();
+        if alt((
+            tag::<_, _, OracleError<'_>>("if you can't,"),
+            tag("if you cannot,"),
+        ))
+        .parse(rider_lower.as_str())
+        .is_err()
+        {
+            return None;
+        }
+        format!("{effect_text}. {rider}")
+    };
+
     let mut ctx = ParseContext {
         subject: Some(TargetFilter::SelfRef),
         in_replacement: true,
         ..ParseContext::default()
     };
-    let followup = parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut ctx);
+    let followup = parse_effect_chain_with_context(&followup_text, AbilityKind::Spell, &mut ctx);
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::DealtDamage)
@@ -9675,6 +9698,86 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
+
+    /// #5649: Nefarious Lich's damage clause is a CR 614.1a substitution
+    /// replacement — "If damage would be dealt to you, exile that many cards from
+    /// your graveyard instead. If you can't, you lose the game." Previously it
+    /// dropped to an inert standalone ability with the impossibility rider lost
+    /// (the recognizer bailed on the non-empty remainder). It must now parse as a
+    /// `DealtDamage` replacement whose execute exiles `EventContextAmount` cards
+    /// from the controller's graveyard — the count riding the clause's
+    /// `MultiTargetSpec` (CR 700.4, Forage precedent) — with the "if you can't"
+    /// rider threaded as a conditional `LoseTheGame`.
+    #[test]
+    fn nefarious_lich_damage_substitution_exiles_that_many_with_impossibility_rider() {
+        let parsed = parse_oracle_text(
+            "If damage would be dealt to you, exile that many cards from your graveyard instead. \
+             If you can't, you lose the game.",
+            "Nefarious Lich",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let rep = parsed
+            .replacements
+            .iter()
+            .find(|r| matches!(r.event, ReplacementEvent::DealtDamage))
+            .expect("damage-substitution replacement must exist (was inert on main)");
+        assert!(
+            matches!(rep.shield_kind, ShieldKind::Prevention { .. }),
+            "the substituted damage must be prevented, got {:?}",
+            rep.shield_kind
+        );
+        let execute = rep
+            .execute
+            .as_ref()
+            .expect("replacement must carry an execute");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "execute must exile from the graveyard, got {:?}",
+            execute.effect
+        );
+        // CR 700.4: the "that many" count rides the clause `MultiTargetSpec`.
+        let mt = execute
+            .multi_target
+            .as_ref()
+            .expect("counted graveyard exile must carry a MultiTargetSpec");
+        assert!(
+            matches!(
+                &mt.min,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                }
+            ),
+            "exile count must be the dynamic damage amount, got {:?}",
+            mt.min
+        );
+        // CR 614.1a: "if you can't, you lose the game" → conditional `LoseTheGame`.
+        let rider = execute
+            .sub_ability
+            .as_ref()
+            .expect("impossibility rider must be threaded onto the exile");
+        assert!(
+            matches!(&*rider.effect, Effect::LoseTheGame { .. }),
+            "rider effect must be LoseTheGame, got {:?}",
+            rider.effect
+        );
+        assert!(
+            matches!(
+                rider.condition,
+                Some(crate::types::ability::AbilityCondition::Not { .. })
+            ),
+            "rider must be gated on the impossibility condition, got {:?}",
+            rider.condition
+        );
+    }
 
     /// CR 614.1c + CR 614.12 + CR 700.6 + CR 205.1b: "As a [historic permanent
     /// you control] enters, it becomes a 7/7 Dinosaur creature in addition to its

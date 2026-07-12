@@ -13893,6 +13893,7 @@ fn try_parse_verb_and_target<'a>(
                         ),
                         all: true,
                         enter_with_counters: vec![],
+                        multi_target: None,
                     },
                 )),
                 // The matcher only claims a fully-consumed clause (trailing text
@@ -13914,6 +13915,7 @@ fn try_parse_verb_and_target<'a>(
                 target,
                 all: true,
                 enter_with_counters: vec![],
+                multi_target: None,
             })),
             rem,
         ));
@@ -13935,6 +13937,7 @@ fn try_parse_verb_and_target<'a>(
                 target,
                 all: false,
                 enter_with_counters: vec![],
+                multi_target: None,
             })),
             rem,
         ));

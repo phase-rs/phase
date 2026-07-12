@@ -7407,6 +7407,32 @@ fn filter_targets_stack(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 700.4 (#5649): match "&lt;quantity&gt; cards from your graveyard" and return the
+/// exile count. `"that many"` → the dynamic replacement amount
+/// (`QuantityRef::EventContextAmount`, Nefarious Lich); a number word → `Fixed`.
+/// Anchored on the possessive "your graveyard" so it never overlaps the
+/// top-of-library impulse idiom guarded by `parse_dynamic_count_phrase`.
+fn parse_exile_count_from_your_graveyard(lower: &str) -> Option<QuantityExpr> {
+    let trimmed = lower.trim().trim_end_matches('.').trim();
+    let (rest, qty) = alt((
+        value(
+            QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::EventContextAmount,
+            },
+            tag::<_, _, OracleError<'_>>("that many"),
+        ),
+        map(crate::parser::oracle_nom::primitives::parse_number, |n| {
+            QuantityExpr::Fixed { value: n as i32 }
+        }),
+    ))
+    .parse(trimmed)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" cards from your graveyard")
+        .parse(rest)
+        .ok()?;
+    rest.trim().is_empty().then_some(qty)
+}
+
 pub(super) fn parse_exile_ast(
     text: &str,
     lower: &str,
@@ -7527,6 +7553,7 @@ pub(super) fn parse_exile_ast(
                 ),
                 all: true,
                 enter_with_counters: vec![],
+                multi_target: None,
             });
         }
         // CR 205.2a + CR 205.3a + CR 608.2c: parse the full target as a
@@ -7554,6 +7581,7 @@ pub(super) fn parse_exile_ast(
             target,
             all: true,
             enter_with_counters: vec![],
+            multi_target: None,
         });
     }
 
@@ -7597,6 +7625,7 @@ pub(super) fn parse_exile_ast(
             target,
             all: true,
             enter_with_counters: vec![],
+            multi_target: None,
         });
     }
 
@@ -7633,6 +7662,7 @@ pub(super) fn parse_exile_ast(
                 target,
                 all: false,
                 enter_with_counters,
+                multi_target: None,
             });
         }
     }
@@ -7664,8 +7694,31 @@ pub(super) fn parse_exile_ast(
                 },
                 all: false,
                 enter_with_counters: vec![],
+                multi_target: None,
             });
         }
+    }
+
+    // CR 700.4 (#5649): "exile <N> cards from your graveyard" is a COUNTED
+    // graveyard exile — Nefarious Lich's damage substitution ("exile that many
+    // cards from your graveyard instead"). `Effect::ChangeZone` has no count
+    // slot, so capture the quantity here and thread it onto the clause's
+    // `MultiTargetSpec` at lowering (Forage precedent). The generic tail below
+    // would otherwise drop the count and bind a bare `ParentTarget`.
+    if let Some(count) = parse_exile_count_from_your_graveyard(&rest_text.to_ascii_lowercase()) {
+        let mut filter = crate::types::ability::TypedFilter::default()
+            .controller(ControllerRef::You)
+            .properties(vec![crate::types::ability::FilterProp::InZone {
+                zone: crate::types::zones::Zone::Graveyard,
+            }]);
+        filter.type_filters = vec![crate::types::ability::TypeFilter::Card];
+        return Some(ZoneCounterImperativeAst::Exile {
+            origin: Some(crate::types::zones::Zone::Graveyard),
+            target: TargetFilter::Typed(filter),
+            all: false,
+            enter_with_counters: vec![],
+            multi_target: Some(crate::types::ability::MultiTargetSpec::exact(count)),
+        });
     }
 
     // CR 608.2k: thread `ctx` through so bare "it"/"them" anaphors in trigger
@@ -7723,6 +7776,7 @@ pub(super) fn parse_exile_ast(
         target,
         all: false,
         enter_with_counters,
+        multi_target: None,
     })
 }
 
@@ -11035,6 +11089,26 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             )));
             clause
         }
+        // CR 700.4 (#5649): a COUNTED graveyard exile ("exile that many cards
+        // from your graveyard", Nefarious Lich) captured a `multi_target`; the
+        // bare-Effect lowering below produces a `ChangeZone` that cannot carry
+        // the count, so thread it onto the clause here (mirroring the Tap/Untap
+        // arm). The runtime resolves the card selection via the shared
+        // multi-target picker (Forage precedent).
+        ImperativeFamilyAst::ZoneCounter(
+            ast @ ZoneCounterImperativeAst::Exile {
+                multi_target: Some(_),
+                ..
+            },
+        ) => {
+            let multi_target = match &ast {
+                ZoneCounterImperativeAst::Exile { multi_target, .. } => multi_target.clone(),
+                _ => None,
+            };
+            let mut clause = parsed_clause(lower_zone_counter_ast(ast));
+            clause.multi_target = multi_target;
+            clause
+        }
         // All other arms produce a bare Effect with no sub_ability chain.
         other => parsed_clause(lower_imperative_family_effect(other)),
     }
@@ -11611,6 +11685,10 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             target,
             all,
             enter_with_counters,
+            // The count (for "exile N cards from your graveyard") rides the
+            // clause's `MultiTargetSpec`, threaded by `lower_imperative_family_ast`
+            // (#5649); the bare-Effect lowering here ignores it.
+            multi_target: _,
         } => {
             if all {
                 // `ChangeZoneAll` has no counter slot; mass exile never carries
@@ -13396,6 +13474,7 @@ mod tests {
             target: TargetFilter::Typed(filter),
             all: false,
             enter_with_counters,
+            multi_target: _,
         }) = result
         else {
             panic!("{input}: expected hand-origin typed exile, got {result:?}");
@@ -13425,6 +13504,7 @@ mod tests {
             target: TargetFilter::Or { filters },
             all: true,
             enter_with_counters,
+            multi_target: _,
         }) = result
         else {
             panic!("{input}: expected mass exile type union, got {result:?}");
@@ -13449,6 +13529,7 @@ mod tests {
             target: TargetFilter::Typed(filter),
             all: true,
             enter_with_counters,
+            multi_target: _,
         }) = result
         else {
             panic!("{input}: expected mass exile parity filter, got {result:?}");
@@ -13474,6 +13555,7 @@ mod tests {
                 target: TargetFilter::Typed(filter),
                 all: false,
                 enter_with_counters: _,
+                multi_target: _,
             }) = result
             else {
                 panic!("{input}: expected hand-origin typed exile, got {result:?}");
@@ -13502,6 +13584,7 @@ mod tests {
             target: TargetFilter::Typed(filter),
             all: false,
             enter_with_counters,
+            multi_target: _,
         }) = result
         else {
             panic!("{input}: expected hand-origin typed exile, got {result:?}");
