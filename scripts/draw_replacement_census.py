@@ -65,19 +65,24 @@ CARD_DATA = REPO_ROOT / "data" / "card-data.json"
 # This is where `.draw_scope(..)` has to be threaded.
 CONSTRUCTOR = re.compile(r"ReplacementDefinition::new\(\s*ReplacementEvent::Draw(Cards)?\b")
 
-# A definition decoded from text: a match arm YIELDING `ReplacementEvent::Draw`
-# (the Forge importer, `FromStr`). These mint Draw definitions without ever
-# calling the constructor above, so a constructor-only census misses them.
+# A definition decoded from text: a match arm YIELDING `ReplacementEvent::Draw`.
+# These mint Draw definitions without ever calling the constructor above, so a
+# constructor-only census misses them. Both shapes in the tree are matched, and
+# both are named here so this comment cannot drift away from the regex below:
+#
+#     => ReplacementEvent::Draw           types/replacements.rs::from_str
+#     => Ok(ReplacementEvent::Draw)       database/forge/replacement.rs
+#                                         (Result-returning, hence the Ok wrap)
 #
 # Keyed on the arm's RESULT, not on its `"Draw"` string literal, because the
 # shared scanner strips string literals before matching (brace counting must not
 # see a `{` inside a string). A pattern spelled `"Draw"\s*=>` would match nothing
-# and the census would silently report zero decode sites.
+# and the census would silently report zero decode sites while passing green.
 #
-# Direction matters: `=> ReplacementEvent::Draw` PRODUCES the event, while
-# `ReplacementEvent::Draw =>` merely matches on it (e.g. coverage.rs's
+# Direction matters: an arrow BEFORE the variant produces the event; an arrow
+# AFTER it merely matches on the event (e.g. coverage.rs's
 # `ReplacementEvent::Draw | ReplacementEvent::DrawCards => {`). Only the former
-# is a producer.
+# is a producer, so the `=>` must lead.
 EVENT_DECODE = re.compile(r"=>\s*(?:Ok\()?\s*ReplacementEvent::Draw(Cards)?\b")
 
 FAMILIES = (("constructor", CONSTRUCTOR), ("event-decode", EVENT_DECODE))
