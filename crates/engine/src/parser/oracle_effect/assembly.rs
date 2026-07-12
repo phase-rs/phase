@@ -45,11 +45,11 @@ use super::lower::{
     patch_choose_from_zone_counter_continuation_target, patch_population_head_tap_anaphor,
     patch_self_ref_head_tap_anaphor, resolve_populated_token_anaphors,
     resolve_populated_unsuspect_anaphors, resolve_those_tokens_anaphors,
-    rewire_cross_sentence_token_counter_attach, rewire_result_anchored_subchain,
-    rewrite_counter_instead_target_from_antecedent, rewrite_else_event_context_to_stable,
-    rewrite_else_parent_target_to_self_ref, rewrite_player_anaphor_targets_in_definition,
-    rewrite_those_tokens_from_antecedent, rewrite_two_target_counter_chain,
-    target_choice_timing_for_clause, thread_chosen_damage_source_into_oneshot_effects,
+    rewire_result_anchored_subchain, rewrite_counter_instead_target_from_antecedent,
+    rewrite_else_event_context_to_stable, rewrite_else_parent_target_to_self_ref,
+    rewrite_player_anaphor_targets_in_definition, rewrite_those_tokens_from_antecedent,
+    rewrite_two_target_counter_chain, target_choice_timing_for_clause,
+    thread_chosen_damage_source_into_oneshot_effects,
 };
 use super::sequence::apply_clause_continuation;
 use super::{
@@ -2093,6 +2093,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     inject_chosen_color_choice_grant(&mut result, false);
     rewrite_that_type_mana_instead(&mut result);
 
+    fold_token_it_has_grants_into_token_statics(&mut result);
+    fold_copy_spell_gains_haste_and_quoted_grant(&mut result);
+    nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
     // parent zone-change to Battlefield when the chained sub-ability is an
     // `Attach` gated by `ZoneChangedThisWay`. Without this, the runtime
@@ -2116,10 +2119,6 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // card's id as the sub-ability's `source_id` (see `effects/mod.rs`
     // forward_result branch), so `Attach::resolve` operates on the correct
     // attaching object.
-    rewire_cross_sentence_token_counter_attach(&mut result);
-    fold_token_it_has_grants_into_token_statics(&mut result);
-    fold_copy_spell_gains_haste_and_quoted_grant(&mut result);
-    nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     rewire_result_anchored_subchain(&mut result);
     fold_enters_this_way_counter_rider(&mut result);
     wire_optional_cast_decline_fallback(&mut result);

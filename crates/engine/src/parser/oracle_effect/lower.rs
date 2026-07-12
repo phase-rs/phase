@@ -2244,52 +2244,6 @@ fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 608.2c + CR 122.6 + CR 614.1c: Fractal Harness class — sentence
-/// splitting lowers token creation and a sibling `PutCounter` targeting
-/// `SelfRef` (the ETB source). Preserve `Token -> PutCounter -> Attach` as
-/// separate instructions; rebind anaphoric targets to `LastCreated`.
-pub(super) fn rewire_cross_sentence_token_counter_attach(def: &mut AbilityDefinition) {
-    if !matches!(&*def.effect, Effect::Token { .. }) {
-        return;
-    }
-    let Some(put_box) = def.sub_ability.take() else {
-        return;
-    };
-    let mut put_sub = *put_box;
-    if put_sub.sub_link != SubAbilityLink::SequentialSibling {
-        def.sub_ability = Some(Box::new(put_sub));
-        return;
-    }
-    let Effect::PutCounter { target, .. } = put_sub.effect.as_ref() else {
-        def.sub_ability = Some(Box::new(put_sub));
-        return;
-    };
-    if !matches!(target, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
-        def.sub_ability = Some(Box::new(put_sub));
-        return;
-    }
-    let attach_sub = match put_sub.sub_ability.take() {
-        Some(sub) if matches!(&*sub.effect, Effect::Attach { .. }) => sub,
-        other => {
-            put_sub.sub_ability = other;
-            def.sub_ability = Some(Box::new(put_sub));
-            return;
-        }
-    };
-
-    if let Effect::PutCounter { target, .. } = &mut *put_sub.effect {
-        *target = TargetFilter::LastCreated;
-    }
-    put_sub.sub_link = SubAbilityLink::ContinuationStep;
-
-    let mut attach_sub = *attach_sub;
-    attach_sub.sub_link = SubAbilityLink::ContinuationStep;
-    rewrite_parent_target_to_last_created(&mut attach_sub.effect);
-
-    put_sub.sub_ability = Some(Box::new(attach_sub));
-    def.sub_ability = Some(Box::new(put_sub));
-}
-
 /// CR 111.3 + CR 702.6a: Intrinsic token statics (Equipment tokens with Equip,
 /// Urza's Saga Construct-style explicit permanent grants) belong on the token's
 /// own `static_abilities`. Transient resolution-time grants — keyword pumps and
