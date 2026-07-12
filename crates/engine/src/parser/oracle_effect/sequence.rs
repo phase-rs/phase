@@ -2392,6 +2392,30 @@ fn starts_up_to_target_combat_clause_lower(s: &str) -> OracleResult<'_, ()> {
     Ok((rest, ()))
 }
 
+/// CR 705.1 + CR 710.4: "flip <count> coin[s]" clause start — the COIN sense of
+/// "flip" only. Used by `starts_bare_and_clause_lower` to peel a coin-flip
+/// conjunct joined by a bare " and " into its own clause (Desperate Gambit:
+/// "Choose a source you control and flip a coin" — issue #5601). Without the
+/// split the "choose a source" head is rejected by the damage-source candidate
+/// parser (trailing "and flip a coin") and the clause collapses to a generic
+/// `TargetOnly { Any }`, dropping both the `ChooseDamageSource` step and the
+/// coin-flip anchor; splitting restores "choose a source you control" →
+/// `ChooseDamageSource` and "flip a coin" → `FlipCoin`.
+///
+/// The "coin"/"coins" noun is REQUIRED, mirroring the `FlipCoin`/`FlipCoins`
+/// leaf parser (`try_parse_flip_n_coins`). That noun is what distinguishes the
+/// CR 705.1 coin flip from the CR 710.4 permanent-flip mechanic ("flip
+/// <permanent>", the Kamigawa double-faced flip cards), which carries no coin
+/// noun and routes to a different effect — so this arm never bisects a
+/// permanent-flip conjunct. `parse_count_expr` accepts the printed count forms
+/// ("a", "two", "X", "that many"), keeping the split general across the class.
+fn starts_flip_coin_clause_lower(s: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = tag("flip ").parse(s)?;
+    let (_, after_count) = crate::parser::oracle_util::parse_count_expr(rest)
+        .ok_or_else(|| nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Alt)))?;
+    value((), alt((tag("coins"), tag("coin")))).parse(after_count)
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_bare_and_clause_lower(s: &str) -> bool {
     // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
@@ -2433,6 +2457,13 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     .or(value((), tag("cast ")))
     .or(value((), tag("cloak ")))
     .or(value((), tag("convert ")))
+    // CR 705.1 + CR 608.2c: "flip <count> coin[s]" is an imperative game action,
+    // so a leading clause joined to it by a bare " and " is an independent
+    // instruction (Desperate Gambit: "Choose a source you control and flip a
+    // coin"). Delegated to `starts_flip_coin_clause_lower` (trailing `.or()` arm
+    // mirroring `starts_target_continuous_clause_lower`) so it requires the
+    // "coin"/"coins" noun and never bisects the CR 710.4 permanent-flip mechanic.
+    .or(value((), starts_flip_coin_clause_lower))
     // CR 701.34a + CR 608.2c: "draw a card and proliferate" is two
     // independent instructions. `proliferate` is intransitive, so it has no
     // trailing space; keep it in the bare-and splitter instead of letting the
@@ -7543,6 +7574,30 @@ mod tests {
                 "attach this Equipment to it"
             ]
         );
+    }
+
+    #[test]
+    fn bare_and_splits_choose_source_and_flip_a_coin() {
+        // CR 705.1 + CR 608.2c (issue #5601): Desperate Gambit — "Choose a source
+        // you control and flip a coin" is two independent instructions. "flip " is
+        // an imperative game action, so the conjunct must peel into its own clause;
+        // without the split the choose head is rejected (trailing "and flip a
+        // coin") and collapses to TargetOnly { Any }, dropping both the
+        // ChooseDamageSource step and the coin-flip anchor.
+        let chunks = clause_texts("Choose a source you control and flip a coin");
+        assert_eq!(chunks, vec!["Choose a source you control", "flip a coin"]);
+    }
+
+    #[test]
+    fn bare_and_keeps_permanent_flip_conjunct() {
+        // CR 710.4 (issue #5601 review): the permanent-flip mechanic ("flip
+        // <permanent>", the Kamigawa double-faced flip cards) is NOT a coin flip
+        // and carries no "coin" noun, so " and flip <cardname>" must NOT split at
+        // the flip conjunct. `starts_flip_coin_clause_lower` requires the coin
+        // noun precisely so this boundary is preserved; a broad `tag("flip ")`
+        // would wrongly bisect the conjunct here.
+        let chunks = clause_texts("remove all of them and flip ~");
+        assert_eq!(chunks, vec!["remove all of them and flip ~"]);
     }
 
     #[test]

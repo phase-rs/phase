@@ -16697,51 +16697,103 @@ mod tests {
         }
     }
 
-    /// CR 609.7a + CR 705: Desperate Gambit's lose branch bare "it" must thread
-    /// `ChosenDamageSource` when the chain opens with `ChooseDamageSource`.
+    /// CR 705.1 + CR 609.7a + CR 608.2c: Desperate Gambit's real Oracle wording
+    /// joins the "choose a source" step to "flip a coin" with a bare " and "
+    /// ("Choose a source you control and flip a coin."). The clause splitter must
+    /// treat "flip a coin" as an independent instruction so the head parses as
+    /// `ChooseDamageSource` (not `TargetOnly { Any }`), the flip becomes a single
+    /// consolidated `FlipCoin`, and both coin-flip branches bind the chosen
+    /// source — the win branch via "that source" and the lose branch via the
+    /// `thread_chosen_damage_source_into_oneshot_effects` anaphor repair (issue
+    /// #5601). The pre-fix parse dropped the choose step, split the flip into two
+    /// `FlipCoin`s, and left the lose branch pointed at `SelfRef`.
     #[test]
     fn desperate_gambit_lose_branch_threads_chosen_damage_source() {
         use crate::parser::oracle_effect::parse_effect_chain;
 
-        fn find_flip_coin(def: &AbilityDefinition) -> Option<&Effect> {
-            if matches!(&*def.effect, Effect::FlipCoin { .. }) {
-                return Some(&def.effect);
+        fn collect_effects<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&def.effect);
+            if let Effect::FlipCoin {
+                win_effect,
+                lose_effect,
+                ..
+            } = &*def.effect
+            {
+                if let Some(win) = win_effect.as_deref() {
+                    collect_effects(win, out);
+                }
+                if let Some(lose) = lose_effect.as_deref() {
+                    collect_effects(lose, out);
+                }
             }
-            def.sub_ability
-                .as_deref()
-                .and_then(find_flip_coin)
-                .or_else(|| def.else_ability.as_deref().and_then(find_flip_coin))
+            if let Some(sub) = def.sub_ability.as_deref() {
+                collect_effects(sub, out);
+            }
+            if let Some(else_def) = def.else_ability.as_deref() {
+                collect_effects(else_def, out);
+            }
         }
 
-        let text = "Choose a source you control. Flip a coin. If you win the flip, \
+        // Real Scryfall Oracle text: single sentence joining choose + flip with
+        // " and ", verified against the printed card.
+        let text = "Choose a source you control and flip a coin. If you win the flip, \
             the next time that source would deal damage this turn, it deals double that damage instead. \
             If you lose the flip, the next time it would deal damage this turn, prevent that damage.";
         let def = parse_effect_chain(text, AbilityKind::Spell);
-        let flip = find_flip_coin(&def).expect("expected FlipCoin in chain");
+
+        let mut effects = Vec::new();
+        collect_effects(&def, &mut effects);
+
+        // The "choose a source you control" step must survive as a real
+        // ChooseDamageSource — without it, ChosenDamageSource has nothing to bind
+        // to at resolution and both branches are inert.
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ChooseDamageSource { .. })),
+            "expected a ChooseDamageSource effect in the chain, got {effects:#?}"
+        );
+
+        // CR 705.1: exactly one coin flip — not two.
+        let flips: Vec<&Effect> = effects
+            .iter()
+            .copied()
+            .filter(|e| matches!(e, Effect::FlipCoin { .. }))
+            .collect();
+        assert_eq!(flips.len(), 1, "expected a single FlipCoin, got {flips:#?}");
+
         let Effect::FlipCoin {
             win_effect,
             lose_effect,
             ..
-        } = flip
+        } = flips[0]
         else {
             unreachable!();
         };
         let win = win_effect.as_ref().expect("win branch");
         let lose = lose_effect.as_ref().expect("lose branch");
-        assert!(matches!(
-            &*win.effect,
-            Effect::CreateDamageReplacement {
-                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
-                ..
-            }
-        ));
-        assert!(matches!(
-            &*lose.effect,
-            Effect::PreventDamage {
-                damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
-                ..
-            }
-        ));
+        assert!(
+            matches!(
+                &*win.effect,
+                Effect::CreateDamageReplacement {
+                    source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                    ..
+                }
+            ),
+            "win branch: {:#?}",
+            win.effect
+        );
+        assert!(
+            matches!(
+                &*lose.effect,
+                Effect::PreventDamage {
+                    damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                    ..
+                }
+            ),
+            "lose branch: {:#?}",
+            lose.effect
+        );
     }
 
     /// CR 115.1c + CR 608.2c regression: "target X and put a counter on it"
