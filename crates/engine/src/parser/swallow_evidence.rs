@@ -345,7 +345,7 @@ impl UnitEvidence {
     /// Do NOT use for `Duration` or `StaticMode` — see [`Self::any_at`].
     pub(super) fn any<T: DeserializeOwned>(&self, pred: impl Fn(&T) -> bool) -> bool {
         Self::visit(&self.root, None, &mut |node, _| {
-            T::deserialize(node.clone()).is_ok_and(|value| pred(&value))
+            T::deserialize(node).is_ok_and(|value| pred(&value))
         })
     }
 
@@ -362,7 +362,7 @@ impl UnitEvidence {
     ) -> bool {
         Self::visit(&self.root, None, &mut |node, key| {
             key.is_some_and(|k| keys.contains(&k))
-                && T::deserialize(node.clone()).is_ok_and(|value| pred(&value))
+                && T::deserialize(node).is_ok_and(|value| pred(&value))
         })
     }
 
