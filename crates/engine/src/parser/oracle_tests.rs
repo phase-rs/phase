@@ -18211,7 +18211,7 @@ fn petrified_hamlet_full_parse() {
     ));
 }
 
-// CR 608.2 + CR 107.1a + CR 701.16a: Pox Plague — the "Each player loses
+// CR 608.2 + CR 107.1a + CR 701.21a: Pox Plague — the "Each player loses
 // half their life, then discards half the cards in their hand, then
 // sacrifices half the permanents they control of their choice. Round down
 // each time." chain exercises all four fixes landed in the punisher-chain

@@ -18012,7 +18012,7 @@ fn lift_effect_player_class_to_scope(effect: &mut Effect) -> Option<PlayerFilter
     }
 }
 
-/// CR 701.16a + CR 115.1: Unconditionally set the controller constraint on a
+/// CR 701.21a + CR 115.1: Unconditionally set the controller constraint on a
 /// typed object filter, overwriting any existing value. Used when a targeted
 /// subject ("target opponent sacrifices...") must override a pre-parsed "they
 /// control" → `ControllerRef::You` with `ControllerRef::TargetPlayer`.

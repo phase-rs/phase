@@ -1122,7 +1122,7 @@ fn strip_article(text: &str) -> &str {
         .unwrap_or(text)
 }
 
-/// CR 107.1a + CR 701.16a: Extract the typed filter embedded in an
+/// CR 107.1a + CR 701.21a: Extract the typed filter embedded in an
 /// `ObjectCount` quantity expression. Used by the sacrifice AST builder to
 /// lift "half the permanents they control" → ObjectCount's filter into the
 /// effect's target, so eligibility matches the same set the count was
@@ -2556,7 +2556,7 @@ pub(super) fn parse_search_and_creation_ast(
             source_zones: details.source_zones,
         });
     }
-    // CR 701.16a + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
+    // CR 701.20e + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
     // both produce Dig — the reveal flag distinguishes visibility semantics.
     if let Some((reveal, rest)) = nom_on_lower(text, lower, |input| {
         alt((
@@ -2660,7 +2660,7 @@ pub(super) fn parse_search_and_creation_ast(
             }
         }
     }
-    // CR 701.16a: "look at that many cards from the top of your library" — variable-count dig
+    // CR 701.20e: "look at that many cards from the top of your library" — variable-count dig
     // where "that many" references the result of a previous effect (e.g., damage dealt).
     if let Some((reveal, _)) = nom_on_lower(text, lower, |input| {
         alt((

@@ -425,7 +425,7 @@ pub(crate) enum ContinuationAst {
     /// and Destroy the Evidence where "those cards" refers to all cards revealed
     /// during the RevealUntil resolution, not only the non-matching ones.
     RevealUntilAllToZone { destination: Zone },
-    /// CR 406.3 + CR 701.16a: "[then] exile it/them [face down]" after a private
+    /// CR 406.3 + CR 701.20e: "[then] exile it/them [face down]" after a private
     /// `Dig` (the "look at the top N cards of <player>'s library" look step).
     /// Rewrites the preceding `Dig` into an `Effect::ExileTop` so the looked-at
     /// card(s) actually leave the library — the Gonti, Canny Acquisitor impulse
@@ -889,7 +889,7 @@ pub(crate) enum TargetedImperativeAst {
     },
     Sacrifice {
         target: TargetFilter,
-        /// CR 701.16a: Number of permanents to sacrifice. Defaults to
+        /// CR 701.21a: Number of permanents to sacrifice. Defaults to
         /// `QuantityExpr::Fixed { value: 1 }` for the common "sacrifice a X"
         /// case; "sacrifice N X" / "sacrifice half the permanents they
         /// control" carry the parsed dynamic count.
@@ -1073,7 +1073,7 @@ pub(crate) enum SearchCreationImperativeAst {
     },
     Dig {
         count: QuantityExpr,
-        /// CR 701.20a vs CR 701.16a: True = revealed (public), false = looked at (private).
+        /// CR 701.20a vs CR 701.20e: True = revealed (public), false = looked at (private).
         reveal: bool,
         player: TargetFilter,
     },

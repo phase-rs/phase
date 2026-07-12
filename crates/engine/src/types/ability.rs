@@ -9727,7 +9727,7 @@ pub enum Effect {
         /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
         #[serde(default)]
         rest_destination: Option<Zone>,
-        /// CR 701.20a vs CR 701.16a: True = cards are revealed (public), false = looked at (private).
+        /// CR 701.20a vs CR 701.20e: True = cards are revealed (public), false = looked at (private).
         #[serde(default)]
         reveal: bool,
         /// CR 614.1 / CR 110.5b: Kept cards routed to the battlefield enter
