@@ -652,7 +652,9 @@ pub(crate) fn apply_damage_after_replacement(
         && matches!(
             (ctx.excess_recipient, &t),
             (
-                Some(ExcessRecipient::TargetController),
+                Some(ExcessRecipient::TargetController {
+                    source_keyword: None
+                }),
                 TargetRef::Object(_)
             )
         ) {
@@ -778,8 +780,12 @@ pub(crate) fn apply_damage_after_replacement(
     // the snapshot / PendingReplacement). `redirected` records that the excess and
     // this leg's lifelink were handed off, so the creature leg gains nothing here.
     let mut redirected = false;
-    if let (Some(ExcessRecipient::TargetController), TargetRef::Object(obj_id)) =
-        (ctx.excess_recipient, t)
+    if let (
+        Some(ExcessRecipient::TargetController {
+            source_keyword: None,
+        }),
+        TargetRef::Object(obj_id),
+    ) = (ctx.excess_recipient, t)
     {
         if redirect_excess > 0 {
             if let Some(controller) = state.objects.get(obj_id).map(|o| o.controller) {
@@ -1070,11 +1076,17 @@ fn active_excess_recipient(
     excess: Option<ExcessRecipient>,
 ) -> Option<ExcessRecipient> {
     match excess {
-        Some(ExcessRecipient::TargetController) => Some(ExcessRecipient::TargetController),
-        Some(ExcessRecipient::TargetControllerIfSourceHasKeyword { keyword })
-            if keywords::object_has_effective_keyword_kind(state, ctx.source_id, keyword) =>
-        {
-            Some(ExcessRecipient::TargetController)
+        Some(ExcessRecipient::TargetController {
+            source_keyword: None,
+        }) => Some(ExcessRecipient::TargetController {
+            source_keyword: None,
+        }),
+        Some(ExcessRecipient::TargetController {
+            source_keyword: Some(keyword),
+        }) if keywords::object_has_effective_keyword_kind(state, ctx.source_id, keyword) => {
+            Some(ExcessRecipient::TargetController {
+                source_keyword: None,
+            })
         }
         _ => None,
     }
@@ -4982,8 +4994,8 @@ mod tests {
                     amount: QuantityExpr::Fixed { value: 5 },
                     target: TargetFilter::Any,
                     damage_source: Some(DamageSource::Target),
-                    excess: Some(ExcessRecipient::TargetControllerIfSourceHasKeyword {
-                        keyword: crate::types::keywords::KeywordKind::Trample,
+                    excess: Some(ExcessRecipient::TargetController {
+                        source_keyword: Some(crate::types::keywords::KeywordKind::Trample),
                     }),
                 },
                 vec![TargetRef::Object(source_id), TargetRef::Object(target_id)],
@@ -5009,7 +5021,10 @@ mod tests {
         );
 
         let (no_trample_state, no_trample_events, no_trample_target) = run(false);
-        assert_eq!(no_trample_state.objects[&no_trample_target].damage_marked, 5);
+        assert_eq!(
+            no_trample_state.objects[&no_trample_target].damage_marked,
+            5
+        );
         assert_eq!(no_trample_state.players[1].life, 20);
         assert_eq!(
             no_trample_events

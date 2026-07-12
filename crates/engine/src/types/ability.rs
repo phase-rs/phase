@@ -8763,13 +8763,14 @@ pub enum EachDamageRecipient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ExcessRecipient {
-    /// CR 120.4a: excess is dealt to the damaged permanent's controller.
-    TargetController,
-    /// CR 120.4a + CR 608.2c + CR 702: excess is dealt to the damaged
-    /// permanent's controller only if the resolved damage source has the named
-    /// keyword. Covers Ram Through's "If the creature you control has trample"
-    /// gate without making the whole damage instruction conditional.
-    TargetControllerIfSourceHasKeyword { keyword: KeywordKind },
+    /// CR 120.4a: excess is dealt to the damaged permanent's controller,
+    /// optionally gated on the resolved damage source having the named
+    /// keyword (CR 608.2c + CR 702; Ram Through's "If the creature you
+    /// control has trample" prefix). `None` redirects unconditionally.
+    TargetController {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_keyword: Option<KeywordKind>,
+    },
 }
 
 /// CR 120.3: Source characteristics captured before applying an already-replaced

@@ -640,7 +640,7 @@ fn target_filter_uses_chosen_card_predicate(filter: &TargetFilter) -> bool {
     }
 }
 
-fn deepest_effect(ability: &AbilityDefinition) -> &Effect {
+pub(super) fn deepest_effect(ability: &AbilityDefinition) -> &Effect {
     let mut cursor = ability;
     while let Some(sub) = cursor.sub_ability.as_deref() {
         cursor = sub;
@@ -3610,13 +3610,15 @@ pub(super) fn apply_clause_continuation(
             );
             if let Some(bound_index) = bound {
                 let def = &mut defs[bound_index];
-                match &mut *def.effect {
+                // CR 608.2c: `def` itself may be the `TargetOnly` head of a
+                // Ram Through-class "Target creature you control deals
+                // damage..." clause, with `DealDamage` nested as its
+                // `sub_ability` — unwrap the same way `def_is_damage_dealer`
+                // detected membership.
+                match super::damage_dealer_effect_mut(def) {
                     Effect::DealDamage { excess, .. } => {
-                        *excess = Some(match source_keyword_condition {
-                            Some(keyword) => ExcessRecipient::TargetControllerIfSourceHasKeyword {
-                                keyword,
-                            },
-                            None => ExcessRecipient::TargetController,
+                        *excess = Some(ExcessRecipient::TargetController {
+                            source_keyword: source_keyword_condition,
                         });
                     }
                     _ => unreachable!(),
@@ -5862,9 +5864,7 @@ pub(crate) fn is_moved_object_put_onto_battlefield_counters_clause(sentence: &st
 /// with an optional source-keyword condition such as Ram Through's "If the
 /// creature you control has trample" prefix. The body remains the same
 /// CR 120.4a redirect; only the source-keyword gate is optional.
-fn parse_excess_damage_to_controller_rider(
-    input: &str,
-) -> OracleResult<'_, Option<KeywordKind>> {
+fn parse_excess_damage_to_controller_rider(input: &str) -> OracleResult<'_, Option<KeywordKind>> {
     /// CR 608.2c + CR 702: Parse the source-referential keyword gate.
     fn parse_source_keyword_condition(input: &str) -> OracleResult<'_, KeywordKind> {
         // This is not parse_inner_condition: Ram Through's definite phrase
@@ -5881,10 +5881,8 @@ fn parse_excess_damage_to_controller_rider(
     }
 
     let (input, source_keyword_condition) = opt(parse_source_keyword_condition).parse(input)?;
-    let (input, _) = tag(
-        "excess damage is dealt to that creature's controller instead",
-    )
-    .parse(input)?;
+    let (input, _) =
+        tag("excess damage is dealt to that creature's controller instead").parse(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
     let (input, _) = eof(input)?;
     Ok((input, source_keyword_condition))
@@ -9254,7 +9252,9 @@ mod tests {
         };
         assert_eq!(
             *excess,
-            Some(ExcessRecipient::TargetController),
+            Some(ExcessRecipient::TargetController {
+                source_keyword: None
+            }),
             "the rider must walk back to the DealDamage at index 0 — `LastEmitted` \
              would have bound the intervening def at index 1"
         );
