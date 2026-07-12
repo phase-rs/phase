@@ -230,9 +230,10 @@ fn queue_planeswalk_trigger(
 /// planeswalk: `from == to`); the command zone is never left empty.
 ///
 /// Trigger collection (CR 603.3): the `Planeswalked` event triggers both the
-/// departing plane's "planeswalk away from ~" ability (`PlaneswalkedFrom`) and
-/// the arriving plane's "planeswalk to / encounter ~" ability
-/// (`PlaneswalkedTo`). Both abilities function from the command zone
+/// departing plane's "planeswalk away from ~" ability
+/// (`Planeswalked { role: From }`) and the arriving plane's
+/// "planeswalk to / encounter ~" ability (`Planeswalked { role: To }`). Both
+/// abilities function from the command zone
 /// (`trigger_zones = [Command]`, stamped by `synthesize_planechase`), and the
 /// command-zone trigger scan only inspects objects currently in
 /// `state.command_zone`. Because planeswalking removes the departing card from
@@ -420,7 +421,7 @@ pub fn chaos_ensues(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// card off a planar deck and turn it face up." Encountering a phenomenon is the
 /// planeswalk that turns it face up; this entry point performs that planeswalk,
 /// which emits the `Planeswalked { to }` event the encounter trigger
-/// (`PlaneswalkedTo`) matches.
+/// (`Planeswalked { role: To }`) matches.
 pub fn encounter(state: &mut GameState, player_id: PlayerId, events: &mut Vec<GameEvent>) {
     // CR 312.5: encountering a phenomenon IS this planeswalk — it is the
     // turn-based/effect-driven planeswalk that turns the phenomenon face up, NOT

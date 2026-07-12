@@ -198,6 +198,18 @@ pub enum AttackTargetFilter {
     PlayerOrPermanents,
 }
 
+/// CR 701.31 + CR 701.31d: which role the trigger's source must occupy in the
+/// planeswalk event. `From` binds the source to the plane/phenomenon walked away
+/// from, `To` binds it to the plane/phenomenon walked to (the encounter/arrival
+/// endpoint), and `Any` is source-independent — it fires for any planeswalk
+/// (CR 901.11), used by delayed "when a player planeswalks" triggers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlaneswalkRole {
+    From,
+    To,
+    Any,
+}
+
 /// All trigger modes from Forge's TriggerType enum (CR 603).
 ///
 /// Triggered abilities have a trigger condition and an effect, written as
@@ -457,13 +469,16 @@ pub enum TriggerMode {
 
     // Planar
     PlanarDice,
-    PlaneswalkedFrom,
-    PlaneswalkedTo,
-    /// CR 701.31 + CR 901.11: "Whenever a player planeswalks" — fires for ANY
-    /// planeswalk event, source-independent (unlike `PlaneswalkedFrom`/`To`,
-    /// which bind the source plane to the `from`/`to` endpoint of the event).
-    /// The Doctor's Childhood Barn keys its delayed phase-in off this event.
-    PlayerPlaneswalked,
+    /// CR 701.31 + CR 701.31d + CR 901.11: planeswalk trigger, parameterized by
+    /// which endpoint of the `GameEvent::Planeswalked` event the trigger's source
+    /// must bind to. `role: From` = walked away from the source plane, `role: To`
+    /// = walked to (encounter) the source plane, `role: Any` = source-independent
+    /// "whenever a player planeswalks" (e.g. The Doctor's Childhood Barn's delayed
+    /// phase-in). All three share the same event and player-validity check; only
+    /// the endpoint binding differs.
+    Planeswalked {
+        role: PlaneswalkRole,
+    },
     ChaosEnsues,
 
     // Dice / coin
@@ -709,9 +724,15 @@ impl FromStr for TriggerMode {
             "PhaseOut" => TriggerMode::PhaseOut,
             "PhaseOutAll" => TriggerMode::PhaseOutAll,
             "PlanarDice" => TriggerMode::PlanarDice,
-            "PlaneswalkedFrom" => TriggerMode::PlaneswalkedFrom,
-            "PlaneswalkedTo" => TriggerMode::PlaneswalkedTo,
-            "PlayerPlaneswalked" => TriggerMode::PlayerPlaneswalked,
+            "PlaneswalkedFrom" => TriggerMode::Planeswalked {
+                role: PlaneswalkRole::From,
+            },
+            "PlaneswalkedTo" => TriggerMode::Planeswalked {
+                role: PlaneswalkRole::To,
+            },
+            "PlayerPlaneswalked" => TriggerMode::Planeswalked {
+                role: PlaneswalkRole::Any,
+            },
             "Proliferate" => TriggerMode::Proliferate,
             "Revealed" => TriggerMode::Revealed,
             "RingTemptsYou" => TriggerMode::RingTemptsYou,
@@ -841,18 +862,49 @@ mod tests {
         );
     }
 
-    /// CR 701.31 / CR 901.11: the source-independent planar planeswalk mode must
-    /// survive Display -> from_str without degrading to `Unknown` (a missing
-    /// `from_str` arm would silently no-fire the Barn's delayed phase-in). Also
-    /// guards the `all_modes` validation list.
+    /// CR 701.31 / CR 701.31d / CR 901.11: the parameterized planeswalk mode must
+    /// survive both the Forge-string `from_str` path and serde round-trips without
+    /// degrading to `Unknown` (a missing arm would silently no-fire the trigger).
+    /// The three legacy Forge strings each map onto a distinct `PlaneswalkRole`.
     #[test]
-    fn player_planeswalked_mode_string_round_trips() {
-        let mode = TriggerMode::PlayerPlaneswalked;
-        assert_eq!(mode.to_string(), "PlayerPlaneswalked");
+    fn planeswalked_roles_round_trip() {
+        // Forge-string import path: each legacy string resolves to the right role.
+        assert_eq!(
+            TriggerMode::from_str("PlaneswalkedFrom").unwrap(),
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::From
+            }
+        );
+        assert_eq!(
+            TriggerMode::from_str("PlaneswalkedTo").unwrap(),
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::To
+            }
+        );
         assert_eq!(
             TriggerMode::from_str("PlayerPlaneswalked").unwrap(),
-            TriggerMode::PlayerPlaneswalked
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::Any
+            }
         );
+
+        // Serde is the card-data persistence path. Externally-tagged struct
+        // variant → `{"Planeswalked":{"role":"..."}}`. Locking this format also
+        // documents the on-disk shape used by the integration-card fixture.
+        for (role, json) in [
+            (PlaneswalkRole::From, r#"{"Planeswalked":{"role":"From"}}"#),
+            (PlaneswalkRole::To, r#"{"Planeswalked":{"role":"To"}}"#),
+            (PlaneswalkRole::Any, r#"{"Planeswalked":{"role":"Any"}}"#),
+        ] {
+            let mode = TriggerMode::Planeswalked { role };
+            let serialized = serde_json::to_string(&mode).unwrap();
+            assert_eq!(serialized, json);
+            assert_eq!(
+                serde_json::from_str::<TriggerMode>(json).unwrap(),
+                mode,
+                "serde round-trip must preserve the planeswalk role"
+            );
+        }
     }
 
     #[test]

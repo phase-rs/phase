@@ -1048,7 +1048,7 @@ use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, ProhibitionScope, StaticMode};
-use crate::types::triggers::TriggerMode;
+use crate::types::triggers::{PlaneswalkRole, TriggerMode};
 use crate::types::zones::Zone;
 
 fn parse(
@@ -1068,7 +1068,7 @@ fn parse(
 /// a Planechase plane — parses its "Whenever chaos ensues …" trigger chain with
 /// ZERO `Effect::Unimplemented` and ZERO `StaticCondition::Unrecognized`, and
 /// specifically produces (a) the inline delayed `PhaseIn { ParentTarget }`
-/// trigger keyed to `PlayerPlaneswalked` (`uses_tracked_set: false`,
+/// trigger keyed to `Planeswalked { role: Any }` (`uses_tracked_set: false`,
 /// `Persistent`) and (b) the plane-face-up `CantPhaseIn` duration
 /// `ForAsLongAs { SourceIsFaceUp }`. Regression against the two prior gaps.
 #[test]
@@ -1137,10 +1137,10 @@ fn the_doctors_childhood_barn_planechase_full_parse() {
                 effect,
                 uses_tracked_set: false,
             }
-            if trigger.mode == TriggerMode::PlayerPlaneswalked
+            if matches!(trigger.mode, TriggerMode::Planeswalked { role: PlaneswalkRole::Any })
                 && matches!(&*effect.effect, Effect::PhaseIn { target: TargetFilter::ParentTarget })
         )),
-        "delayed PhaseIn{{ParentTarget}} keyed to PlayerPlaneswalked (uses_tracked_set false), got {effects:?}"
+        "delayed PhaseIn{{ParentTarget}} keyed to Planeswalked {{ role: Any }} (uses_tracked_set false), got {effects:?}"
     );
     assert!(
         durations.iter().any(|d| matches!(
@@ -10880,14 +10880,16 @@ fn ghirapur_grand_prix_put_counter_uses_speed_quantity() {
     ));
 
     // CR 312.5 / CR 701.31d: the "When you planeswalk here" arrival clause
-    // must also map to PlaneswalkedTo — the end-step assertion above does not
-    // cover the arrival trigger, so assert it explicitly.
+    // must also map to Planeswalked { role: To } — the end-step assertion above
+    // does not cover the arrival trigger, so assert it explicitly.
     assert!(
-        result
-            .triggers
-            .iter()
-            .any(|t| t.mode == TriggerMode::PlaneswalkedTo),
-        "Ghirapur Grand Prix's 'When you planeswalk here' must produce a PlaneswalkedTo trigger",
+        result.triggers.iter().any(|t| matches!(
+            t.mode,
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::To
+            }
+        )),
+        "Ghirapur Grand Prix's 'When you planeswalk here' must produce a Planeswalked {{ role: To }} trigger",
     );
 }
 

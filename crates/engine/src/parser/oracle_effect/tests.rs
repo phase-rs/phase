@@ -42416,7 +42416,7 @@ fn resolution_unless_anaphoric_payers_unchanged() {
 }
 
 /// CR 101.4 + CR 707.2 + CR 122.1: the real WHO phenomenon Human—Time Lord
-/// Meta-Crisis lowers its whole `PlaneswalkedTo` body to a single
+/// Meta-Crisis lowers its whole `Planeswalked { role: To }` body to a single
 /// `EachPlayerCopyChosen` (min:1, max:2, RemoveSupertype(Legendary), scale by the
 /// second creature's power) — NOT a `CopyTokenOf` chain with a trailing
 /// `Unimplemented`.
@@ -42429,7 +42429,9 @@ fn each_player_copy_chosen_human_time_lord_trigger() {
     );
     assert_eq!(
         def.mode,
-        crate::types::triggers::TriggerMode::PlaneswalkedTo,
+        crate::types::triggers::TriggerMode::Planeswalked {
+            role: crate::types::triggers::PlaneswalkRole::To
+        },
         "phenomenon encounter trigger"
     );
     let execute = def.execute.expect("planeswalked-to execute");

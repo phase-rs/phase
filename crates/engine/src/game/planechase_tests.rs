@@ -26,7 +26,7 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
-use crate::types::triggers::TriggerMode;
+use crate::types::triggers::{PlaneswalkRole, TriggerMode};
 use crate::types::zones::Zone;
 use std::str::FromStr;
 
@@ -46,21 +46,25 @@ fn synthesized_planar_face(
     face
 }
 
-/// A `PlaneswalkedFrom` trigger that draws a card (its `valid_target` is
-/// `Controller`, like the parser emits).
+/// A `Planeswalked { role: From }` trigger that draws a card (its `valid_target`
+/// is `Controller`, like the parser emits).
 fn planeswalked_from_trigger() -> TriggerDefinition {
-    TriggerDefinition::new(TriggerMode::PlaneswalkedFrom)
-        .valid_card(TargetFilter::SelfRef)
-        .valid_target(TargetFilter::Controller)
-        .execute(draw_ability())
+    TriggerDefinition::new(TriggerMode::Planeswalked {
+        role: PlaneswalkRole::From,
+    })
+    .valid_card(TargetFilter::SelfRef)
+    .valid_target(TargetFilter::Controller)
+    .execute(draw_ability())
 }
 
-/// A `PlaneswalkedTo` trigger that draws a card.
+/// A `Planeswalked { role: To }` trigger that draws a card.
 fn planeswalked_to_trigger() -> TriggerDefinition {
-    TriggerDefinition::new(TriggerMode::PlaneswalkedTo)
-        .valid_card(TargetFilter::SelfRef)
-        .valid_target(TargetFilter::Controller)
-        .execute(draw_ability())
+    TriggerDefinition::new(TriggerMode::Planeswalked {
+        role: PlaneswalkRole::To,
+    })
+    .valid_card(TargetFilter::SelfRef)
+    .valid_target(TargetFilter::Controller)
+    .execute(draw_ability())
 }
 
 /// A `ChaosEnsues` trigger that draws a card.
@@ -288,11 +292,11 @@ fn source_is_face_up_flips_false_on_planeswalk_away() {
 }
 
 /// CR 603.7a/b + CR 701.31 + CR 901.11: end-to-end firing proof for The Doctor's
-/// Childhood Barn's delayed phase-in. A `WhenNextEvent { PlayerPlaneswalked }`
+/// Childhood Barn's delayed phase-in. A `WhenNextEvent { Planeswalked { role: Any } }`
 /// delayed trigger (created via the real `delayed_trigger::resolve` snapshot
 /// path, mirroring the parsed AST) must (a) NOT fire on a non-planeswalk event
 /// and (b) fire and be consumed on a `Planeswalked` event — routing through the
-/// shared `delayed_trigger_event_with_index` → `trigger_matcher(PlayerPlaneswalked)`
+/// shared `delayed_trigger_event_with_index` → `trigger_matcher(Planeswalked { role: Any })`
 /// registry path and putting its `PhaseIn` ability on the stack.
 #[test]
 fn delayed_phase_in_fires_only_on_planeswalk() {
@@ -335,7 +339,9 @@ fn delayed_phase_in_fires_only_on_planeswalk() {
     let create = ResolvedAbility::new(
         Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WhenNextEvent {
-                trigger: Box::new(TriggerDefinition::new(TriggerMode::PlayerPlaneswalked)),
+                trigger: Box::new(TriggerDefinition::new(TriggerMode::Planeswalked {
+                    role: PlaneswalkRole::Any,
+                })),
                 or_trigger: None,
                 lifetime: DelayedTriggerLifetime::Persistent,
             },
@@ -374,7 +380,7 @@ fn delayed_phase_in_fires_only_on_planeswalk() {
     );
     assert!(
         state.delayed_triggers.is_empty(),
-        "PlayerPlaneswalked event fires and consumes the delayed phase-in"
+        "Planeswalked {{ role: Any }} event fires and consumes the delayed phase-in"
     );
     assert!(
         state.stack.len() > stack_before,
@@ -390,7 +396,7 @@ fn delayed_phase_in_fires_only_on_planeswalk() {
 fn planeswalk_away_trigger_fires_via_command_scan() {
     // DISCRIMINATING: fails if `synthesize_planechase` stops stamping
     // `trigger_zones = [Command]` (the command-zone scan would skip the plane's
-    // departing trigger) or if the `PlaneswalkedFrom` matcher is reverted.
+    // departing trigger) or if the `Planeswalked { role: From }` matcher is reverted.
     let mut state = GameState::new_two_player(7);
     let p0 = PlayerId(0);
     let plane_a =
@@ -826,7 +832,9 @@ fn synthesize_planechase_appends_command_zone() {
     // Guard for Finding 3: `synthesize_planechase` must PUSH Zone::Command onto
     // any pre-existing zone list, not overwrite it. A trigger/static that already
     // designated another zone must keep it and gain Command.
-    let mut trigger = TriggerDefinition::new(TriggerMode::PlaneswalkedFrom);
+    let mut trigger = TriggerDefinition::new(TriggerMode::Planeswalked {
+        role: PlaneswalkRole::From,
+    });
     trigger.trigger_zones = vec![Zone::Exile];
     let mut static_def = StaticDefinition::new(StaticMode::Continuous);
     static_def.active_zones = vec![Zone::Exile];

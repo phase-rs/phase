@@ -747,7 +747,7 @@ mod tests {
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
-    use crate::types::triggers::TriggerMode;
+    use crate::types::triggers::{PlaneswalkRole, TriggerMode};
 
     /// T5 (s25 site 1) — CR 603.7c + CR 608.2c: `concrete_parent_target_filter`
     /// binds a `ParentTargetSlot { index }` delayed-condition filter to the
@@ -875,7 +875,9 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::CreateDelayedTrigger {
                 condition: DelayedTriggerCondition::WhenNextEvent {
-                    trigger: Box::new(TriggerDefinition::new(TriggerMode::PlayerPlaneswalked)),
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::Planeswalked {
+                        role: PlaneswalkRole::Any,
+                    })),
                     or_trigger: None,
                     lifetime: crate::types::ability::DelayedTriggerLifetime::Persistent,
                 },

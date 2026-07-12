@@ -4678,7 +4678,9 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
             value(
                 DelayedTriggerCondition::WhenNextEvent {
                     trigger: Box::new(crate::types::ability::TriggerDefinition::new(
-                        crate::types::triggers::TriggerMode::PlayerPlaneswalked,
+                        crate::types::triggers::TriggerMode::Planeswalked {
+                            role: crate::types::triggers::PlaneswalkRole::Any,
+                        },
                     )),
                     or_trigger: None,
                     lifetime: crate::types::ability::DelayedTriggerLifetime::Persistent,
@@ -8589,7 +8591,7 @@ mod tests {
     };
     use crate::types::counter::CounterType;
     use crate::types::phase::Phase;
-    use crate::types::triggers::TriggerMode;
+    use crate::types::triggers::{PlaneswalkRole, TriggerMode};
     use crate::types::zones::Zone;
 
     /// CR 608.2c: a `ChooseFromZone` head with a `RemoveCounter`/`PutCounter`
@@ -9429,7 +9431,7 @@ mod tests {
 
     /// CR 603.7a + CR 701.31: the inline "When a player planeswalks, …" delayed
     /// trigger prefix strips to its body and yields a `WhenNextEvent` condition
-    /// keyed to `PlayerPlaneswalked`, no `or_trigger`, `Persistent` lifetime
+    /// keyed to `Planeswalked { role: Any }`, no `or_trigger`, `Persistent` lifetime
     /// (CR 603.7b — no stated duration). The Doctor's Childhood Barn's delayed
     /// phase-in.
     #[test]
@@ -9440,7 +9442,9 @@ mod tests {
         assert_eq!(
             cond,
             Some(DelayedTriggerCondition::WhenNextEvent {
-                trigger: Box::new(TriggerDefinition::new(TriggerMode::PlayerPlaneswalked)),
+                trigger: Box::new(TriggerDefinition::new(TriggerMode::Planeswalked {
+                    role: PlaneswalkRole::Any,
+                })),
                 or_trigger: None,
                 lifetime: crate::types::ability::DelayedTriggerLifetime::Persistent,
             })
