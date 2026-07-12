@@ -3946,7 +3946,7 @@ mod tests {
     /// into attached-subject filters must not trip Condition_AsLongAs warnings
     /// (issue #2234).
     #[test]
-    fn condition_as_long_as_accepts_bronze_horse_and_champions_helm() {
+    fn condition_as_long_as_bronze_horse_reports_known_gap_champions_helm_accepted() {
         use crate::types::ability::{FilterProp, ShieldKind, TypedFilter};
         use crate::types::keywords::Keyword;
         use crate::types::replacements::ReplacementEvent;
@@ -4640,7 +4640,7 @@ mod tests {
     }
 
     #[test]
-    fn apnap_accepts_protection_racket_repeat_for_each_opponent_in_turn_order() {
+    fn apnap_protection_racket_reports_turn_order_as_swallowed() {
         use crate::types::ability::PlayerFilter;
 
         let parsed = parse_named(
@@ -6073,7 +6073,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// internal `ChangeZone` (Dig keep grammar). The refactor must NOT
     /// regress this — verified via `effect_has_internal_optionality`.
     #[test]
-    fn optional_you_may_accepts_atraxa_grand_unifier_from_among() {
+    fn optional_you_may_atraxa_grand_unifier_reports_known_gap() {
         let parsed = parse_named(
             "Flying, vigilance, deathtouch, lifelink\n\
              When this creature enters, reveal the top ten cards of your library. \
@@ -6462,7 +6462,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// "Hexproof" line into an `Effect::Unimplemented`, tripping the card-wide gate that
     /// silenced every detector on the card.
     #[test]
-    fn optional_may_have_siege_behemoth() {
+    fn optional_may_have_siege_behemoth_reports_known_gap() {
         let parsed = parse_named(
             "Hexproof\nAs long as this creature is attacking, for each creature you control, \
              you may have that creature assign its combat damage as though it weren't blocked.",
@@ -6551,7 +6551,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     }
 
     #[test]
-    fn duration_until_eot_dragon_egg() {
+    fn duration_until_eot_dragon_egg_reports_known_gap() {
         let parsed = parse_named(
             "Defender\n\
              When this creature dies, create a 2/2 red Dragon creature token with flying and \"{R}: This token gets +1/+0 until end of turn.\"",

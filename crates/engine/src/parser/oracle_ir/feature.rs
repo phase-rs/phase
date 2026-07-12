@@ -608,3 +608,95 @@ mod tests {
         );
     }
 }
+
+/// Item-structure census over a real card pool — the instrument that sizes the substrate
+/// defects this module works around, and that Plan 05 inherits.
+///
+/// Kept (rather than deleted with the investigation that spawned it) because it is the only
+/// thing in the tree that can measure them. Two of `audit_units`' guards were proven DEAD on
+/// the real pool by this census — `first_line` out of range: 0, `fragment == None`: 0 — and
+/// the whole-line-fragment defect it sizes is the reason units are span-blocks at all.
+///
+/// `#[ignore]`d: it parses the entire pool (~30 min debug) and needs a card pool, which a
+/// checkout does not have. Point it at one and run it explicitly:
+///
+/// ```text
+/// ORACLE_POOL_DIR=/path/to/data cargo test -p engine --lib pool_structure_census \
+///     -- --ignored --nocapture
+/// ```
+#[cfg(test)]
+mod pool_structure_census {
+    use crate::parser::oracle::parse_oracle_ir;
+    use std::collections::BTreeMap;
+
+    #[test]
+    #[ignore = "parses the whole card pool; needs ORACLE_POOL_DIR"]
+    fn census() {
+        let Ok(dir) = std::env::var("ORACLE_POOL_DIR") else {
+            panic!("set ORACLE_POOL_DIR to a directory containing mtgjson/AtomicCards.json");
+        };
+        let raw = std::fs::read_to_string(format!("{dir}/mtgjson/AtomicCards.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let data = v.get("data").unwrap().as_object().unwrap();
+
+        let (mut faces, mut items_total) = (0usize, 0usize);
+        let (mut frag_none, mut out_of_range, mut zero_item_faces) = (0usize, 0usize, 0usize);
+        let (mut multi_item_lines, mut faces_with_multi_item_line) = (0usize, 0usize);
+
+        for printings in data.values() {
+            for card in printings.as_array().unwrap() {
+                let text = card.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                if text.is_empty() {
+                    continue;
+                }
+                let name = card.get("name").and_then(|t| t.as_str()).unwrap_or("");
+                let strs = |k: &str| -> Vec<String> {
+                    card.get(k)
+                        .and_then(|x| x.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|s| s.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let ir = parse_oracle_ir(
+                    text,
+                    name,
+                    &strs("keywords"),
+                    &strs("types"),
+                    &strs("subtypes"),
+                );
+                faces += 1;
+                items_total += ir.items.len();
+                if ir.items.is_empty() {
+                    zero_item_faces += 1;
+                }
+                let nlines = ir.source_text.lines().count();
+                let mut per_line: BTreeMap<usize, usize> = BTreeMap::new();
+                for item in &ir.items {
+                    if item.source.fragment().is_none() {
+                        frag_none += 1;
+                    }
+                    if item.source.span().first_line >= nlines {
+                        out_of_range += 1;
+                    }
+                    *per_line.entry(item.source.span().first_line).or_default() += 1;
+                }
+                let multi = per_line.values().filter(|c| **c > 1).count();
+                multi_item_lines += multi;
+                if multi > 0 {
+                    faces_with_multi_item_line += 1;
+                }
+            }
+        }
+        println!("\n===== POOL ITEM-STRUCTURE CENSUS =====");
+        println!("faces with text                     : {faces}");
+        println!("items total                         : {items_total}");
+        println!("faces with ZERO items               : {zero_item_faces}");
+        println!("items with fragment == None         : {frag_none}");
+        println!("items with first_line out of range  : {out_of_range}");
+        println!("MULTI-ITEM LINES (>1 item on a line): {multi_item_lines}");
+        println!("faces having >=1 multi-item line    : {faces_with_multi_item_line}");
+    }
+}
