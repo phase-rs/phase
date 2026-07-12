@@ -95,7 +95,15 @@ SCOPES = ENGINE_SCOPES + ("crates/mtgish-import/src",)
 # the family currently has exactly one occupant — but the next engine Draw written
 # as a literal would have been invisible to a constructor+decode census.
 
-# `ReplacementDefinition::new(ReplacementEvent::Draw)` — the builder entry point.
+# Matches ONE of the two live ways Rust code builds a `ReplacementDefinition`:
+# the `::new(..)` builder. It does NOT match the other one -- a struct literal --
+# which is why `STRUCT_LITERAL` below exists. Across `crates/` today: 429 `::new(`
+# sites and 91 `ReplacementDefinition {` sites, so neither shape is exotic.
+#
+# Naming this "the way a definition is built in Rust" is what the first cut of
+# this comment did, and it is the same category error that hid the mtgish
+# producer for a full review cycle: a comment that describes a family instead of
+# a pattern invites the reader to believe the pattern covers the family.
 CONSTRUCTOR = re.compile(r"ReplacementDefinition::new\(\s*ReplacementEvent::Draw(Cards)?\b")
 
 # A match arm YIELDING the event (see the two shapes above). Keyed on the arm's
