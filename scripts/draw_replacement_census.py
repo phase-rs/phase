@@ -48,7 +48,7 @@ from pathlib import Path
 # free to drift, and their disagreements would be silent in both directions.
 from zone_authority_census import (
     REPO_ROOT,
-    SCOPES,
+    SCOPES as ENGINE_SCOPES,
     TEST_SUPPORT_FILES,
     iter_production_lines,
 )
@@ -57,35 +57,68 @@ PRODUCERS_BASELINE = REPO_ROOT / "scripts" / "draw-replacement-producers.txt"
 CORPUS_BASELINE = REPO_ROOT / "scripts" / "draw-replacement-corpus.tsv"
 CARD_DATA = REPO_ROOT / "data" / "card-data.json"
 
+# The zone census scans the engine, because only the engine mutates zones. A Draw
+# REPLACEMENT DEFINITION, though, can be minted by anything that builds one and
+# hands it to the engine — and `crates/mtgish-import` does exactly that. Scanning
+# it is a READ; nothing here modifies it.
+#
+# Omitting it is how the first cut of this gate froze 6 producers while a 7th was
+# live: a census is only as honest as the population it admits, and "the engine"
+# was the wrong population for this question.
+SCOPES = ENGINE_SCOPES + ("crates/mtgish-import/src",)
+
 # ---------------------------------------------------------------------------
 # (A) Producer surface
 # ---------------------------------------------------------------------------
+#
+# Three shapes mint a Draw `ReplacementDefinition`. All three are matched, and all
+# three are named here with the file they live in, so this block cannot drift away
+# from the regexes below:
+#
+#   ReplacementDefinition::new(ReplacementEvent::Draw)     -> family `constructor`
+#       parser/oracle_replacement.rs  (x2)
+#       database/synthesis.rs::synthesize_dredge
+#       game/effects/create_draw_replacement.rs::resolve
+#
+#   => ReplacementEvent::Draw                              -> family `event-decode`
+#       types/replacements.rs::from_str
+#   => Ok(ReplacementEvent::Draw)                          -> family `event-decode`
+#       database/forge/replacement.rs  (Result-returning, hence the Ok wrap)
+#
+#   ReplacementDefinition { .. event: ReplacementEvent::Draw .. }
+#                                                          -> family `struct-literal`
+#       mtgish-import/convert/replacement.rs::convert_replace_would_draw
+#
+# The struct-literal family is not hypothetical scaffolding for the one mtgish
+# site: `ReplacementDefinition { .. }` is a live idiom INSIDE the engine too
+# (~50 literals in database/synthesis.rs alone). None of them is a Draw today, so
+# the family currently has exactly one occupant — but the next engine Draw written
+# as a literal would have been invisible to a constructor+decode census.
 
-# A definition built in Rust: `ReplacementDefinition::new(ReplacementEvent::Draw)`.
-# This is where `.draw_scope(..)` has to be threaded.
+# `ReplacementDefinition::new(ReplacementEvent::Draw)` — the builder entry point.
 CONSTRUCTOR = re.compile(r"ReplacementDefinition::new\(\s*ReplacementEvent::Draw(Cards)?\b")
 
-# A definition decoded from text: a match arm YIELDING `ReplacementEvent::Draw`.
-# These mint Draw definitions without ever calling the constructor above, so a
-# constructor-only census misses them. Both shapes in the tree are matched, and
-# both are named here so this comment cannot drift away from the regex below:
+# A match arm YIELDING the event (see the two shapes above). Keyed on the arm's
+# RESULT, not on a `"Draw"` string literal, because the shared scanner strips
+# string literals before matching (brace counting must not see a `{` inside a
+# string) — a pattern spelled `"Draw"\s*=>` would match nothing and the census
+# would report zero decode sites while passing green.
 #
-#     => ReplacementEvent::Draw           types/replacements.rs::from_str
-#     => Ok(ReplacementEvent::Draw)       database/forge/replacement.rs
-#                                         (Result-returning, hence the Ok wrap)
-#
-# Keyed on the arm's RESULT, not on its `"Draw"` string literal, because the
-# shared scanner strips string literals before matching (brace counting must not
-# see a `{` inside a string). A pattern spelled `"Draw"\s*=>` would match nothing
-# and the census would silently report zero decode sites while passing green.
-#
-# Direction matters: an arrow BEFORE the variant produces the event; an arrow
-# AFTER it merely matches on the event (e.g. coverage.rs's
-# `ReplacementEvent::Draw | ReplacementEvent::DrawCards => {`). Only the former
-# is a producer, so the `=>` must lead.
+# Direction matters: an arrow BEFORE the variant produces it; an arrow AFTER it
+# merely matches on it (coverage.rs's `ReplacementEvent::Draw | ... => {`). Only
+# the former is a producer, so the `=>` must lead.
 EVENT_DECODE = re.compile(r"=>\s*(?:Ok\()?\s*ReplacementEvent::Draw(Cards)?\b")
 
-FAMILIES = (("constructor", CONSTRUCTOR), ("event-decode", EVENT_DECODE))
+# The `event:` field of a struct literal. Keyed on the field binding rather than
+# on `ReplacementDefinition {`, because the literal spans many lines and the
+# scanner is line-oriented: the type name and the event sit on different lines.
+STRUCT_LITERAL = re.compile(r"\bevent:\s*ReplacementEvent::Draw(Cards)?\b")
+
+FAMILIES = (
+    ("constructor", CONSTRUCTOR),
+    ("event-decode", EVENT_DECODE),
+    ("struct-literal", STRUCT_LITERAL),
+)
 
 
 def collect_producers() -> dict[tuple[str, str, str], int]:
@@ -123,11 +156,20 @@ PRODUCERS_HEADER = """\
 # row below is a site the rewrite must touch. A new row means a new producer
 # that would otherwise get a silently wrong default scope.
 #
-# family=constructor   `ReplacementDefinition::new(ReplacementEvent::Draw)`
-# family=event-decode  a string -> ReplacementEvent::Draw decode. Mints a Draw
-#                      definition without calling the constructor.
+# family=constructor     `ReplacementDefinition::new(ReplacementEvent::Draw)`
+# family=event-decode    `=> ReplacementEvent::Draw` / `=> Ok(ReplacementEvent::Draw)`
+#                        (from_str; the Forge importer). Mints a definition
+#                        without calling the constructor.
+# family=struct-literal  `ReplacementDefinition { .. event: ReplacementEvent::Draw .. }`
+#                        (mtgish-import). Same: no constructor call.
 #
-# Coverage boundary, stated so it is not mistaken for "every possible source":
+# SCOPE, stated exactly rather than implied: this scans the engine crates AND
+# crates/mtgish-import/src. It does NOT scan any other crate. The first cut of
+# this gate scanned the engine only, and froze 6 producers while a 7th was live in
+# mtgish-import -- the count was right about the population it looked at and wrong
+# about the question it claimed to answer.
+#
+# COVERAGE BOUNDARY, stated so this is not mistaken for "every possible source":
 # a `ReplacementDefinition` also comes back to life via its plain serde derive
 # when the engine loads the card-data export. That path is structurally singular
 # (one struct's own derive, not a scanned set of call sites), so it is gated by
