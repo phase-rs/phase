@@ -1546,9 +1546,23 @@ pub(crate) fn is_text_based_cost_prefix(lower_prefix: &str) -> bool {
 /// no boundary is present. Mirrors the keyword recognition in
 /// `extract_keyword_clause` but in the inverse direction (returns the
 /// pre-boundary span instead of the post-boundary one).
+/// Peel a trailing grant conjunct off a dynamic "for each <count>" clause so the
+/// count itself parses cleanly. Strips a trailing keyword grant (" and has
+/// flying") and — CR 205.1b — a trailing type-addition (" and is an Avatar in
+/// addition to its other types"). The peeled clause is recovered separately by
+/// the caller (`extract_keyword_clause` / `parse_additive_type_clause_modifications`
+/// over the full description); without this the count parse fails on the tail and
+/// the whole dynamic pump collapses to a fixed +N/+M (Avatar Destiny, Machinist's
+/// Arsenal). The type-addition arm is guarded on the "in addition to" marker so a
+/// genuine "<count> and is <...>" count phrase is never mis-truncated.
 pub(crate) fn strip_trailing_keyword_clause(clause: &str) -> &str {
     for needle in [" and gains ", " and gain ", " and has ", " and have "] {
         if let Some(pos) = clause.find(needle) {
+            return &clause[..pos];
+        }
+    }
+    if let Some(pos) = clause.find(" and is ") {
+        if clause[pos..].contains("in addition to") {
             return &clause[..pos];
         }
     }
