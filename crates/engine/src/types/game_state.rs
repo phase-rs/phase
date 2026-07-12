@@ -8615,7 +8615,22 @@ impl PostReplacementDrainStack {
                 true
             }
             ResidentDrainPolicy::Replace => {
-                self.drains.pop();
+                // CR 615.5: evict a READY resident, never a DISPATCHING one. A
+                // `Dispatching` drain is not stale state to overwrite — it is the
+                // event context of a continuation running right now, and it is what
+                // `TargetFilter::PostReplacementSourceController` reads to answer
+                // "the source's controller draws cards" (Swans of Bryn Argoll).
+                // Popping it mid-dispatch destroys that answer under the running
+                // effect. The incoming continuation nests above it instead
+                // (CR 616.1g) — the same READY-not-RESIDENT predicate `KeepResident`
+                // uses.
+                if self
+                    .drains
+                    .last()
+                    .is_some_and(|resident| matches!(resident.status, DrainStatus::Ready(_)))
+                {
+                    self.drains.pop();
+                }
                 self.drains.push(drain);
                 true
             }
@@ -10455,6 +10470,73 @@ mod drain_stack_reentrancy_tests {
              discarded — that is the pre-existing accidental CR 614.5 dedup the \
              Wolverine and Krark witnesses depend on. Task #39 replaces it with an \
              identity gate; this fix must not prejudge that."
+        );
+    }
+
+    fn dispatching_drain_event_source(stack: &PostReplacementDrainStack) -> Option<ObjectId> {
+        stack
+            .drains
+            .iter()
+            .find(|drain| matches!(drain.status, DrainStatus::Dispatching))
+            .and_then(|drain| drain.event_source)
+    }
+
+    /// CR 615.5: `Replace` must never evict a **Dispatching** drain.
+    ///
+    /// A `Dispatching` drain is not idle state to be overwritten — it is the
+    /// event context of a continuation that is running *right now*. That context
+    /// is how `TargetFilter::PostReplacementSourceController` resolves "the
+    /// source's controller draws cards" (Swans of Bryn Argoll): the answer is read
+    /// out of the drain *while* the continuation resolves. `install(Replace)`
+    /// popped unconditionally, so a `Replace`-policy install arriving mid-dispatch
+    /// destroyed the running continuation's event context and left it resolving
+    /// against whatever landed on top.
+    ///
+    /// Reachable via the optional accept/decline path (`replacement.rs`) during a
+    /// dispatch. No live victim in today's suite — the census over the engine
+    /// integration suite (2732 tests) records 14 `Replace` installs, all at depth 0
+    /// — so this pins the seam before a card walks into it.
+    ///
+    /// The predicate is the same one `KeepResident` already uses: act on READY,
+    /// never on DISPATCHING.
+    #[test]
+    fn replace_evicts_a_ready_resident_but_never_a_dispatching_one() {
+        // (1) Against a READY resident, `Replace` still replaces — unchanged.
+        let mut stack = PostReplacementDrainStack::default();
+        assert!(stack.install(ready_drain("stale"), ResidentDrainPolicy::KeepResident));
+        assert!(stack.install(ready_drain("winner"), ResidentDrainPolicy::Replace));
+        assert_eq!(
+            stack.drains.len(),
+            1,
+            "Replace evicts a READY resident: that is the policy's whole purpose"
+        );
+
+        // (2) Against a DISPATCHING resident, it must NOT.
+        let mut stack = PostReplacementDrainStack::default();
+        let mut outer = ready_drain("outer");
+        outer.event_source = Some(ObjectId(7));
+        assert!(stack.install(outer, ResidentDrainPolicy::KeepResident));
+        assert!(
+            stack.begin_dispatch().is_some(),
+            "the outer continuation is handed out to run"
+        );
+
+        // A Replace-policy install arrives while that continuation is still running.
+        assert!(stack.install(ready_drain("incoming"), ResidentDrainPolicy::Replace));
+
+        assert_eq!(
+            dispatching_drain_event_source(&stack),
+            Some(ObjectId(7)),
+            "CR 615.5: the RUNNING continuation's event context must survive a \
+             Replace-policy install. Popping the Dispatching drain destroys the \
+             answer to `PostReplacementSourceController` mid-flight — Swans of Bryn \
+             Argoll resolves 'the source's controller draws cards' out of exactly \
+             this field, while the continuation is resolving."
+        );
+        assert!(
+            stack.has_ready(),
+            "the incoming continuation still installs — it is nested above the \
+             dispatching drain (CR 616.1g), not dropped"
         );
     }
 }
