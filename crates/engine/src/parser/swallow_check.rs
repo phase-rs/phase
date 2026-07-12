@@ -245,7 +245,9 @@ fn detect_replacement_instead(
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "Replacement_Instead".into(),
+        detector: OracleSemanticFeature::ReplacementInstead
+            .detector_label()
+            .into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
@@ -270,7 +272,9 @@ fn detect_activate_only_during(
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "ActivateOnlyDuring".into(),
+        detector: OracleSemanticFeature::ActivateOnlyDuring
+            .detector_label()
+            .into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
@@ -339,7 +343,9 @@ fn detect_duration_until_eot(
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "Duration_UntilEndOfTurn".into(),
+        detector: OracleSemanticFeature::DurationUntilEndOfTurn
+            .detector_label()
+            .into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
@@ -418,7 +424,9 @@ fn detect_optional_you_may(
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "Optional_YouMay".into(),
+        detector: OracleSemanticFeature::OptionalYouMay
+            .detector_label()
+            .into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
@@ -1963,7 +1971,7 @@ fn detect_dynamic_qty(
         }
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "DynamicQty".into(),
+        detector: OracleSemanticFeature::DynamicQty.detector_label().into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
@@ -2028,7 +2036,9 @@ fn detect_modal_dynamic_max_dropped(
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "Modal_DynamicMaxDropped".into(),
+        detector: OracleSemanticFeature::ModalDynamicMaxDropped
+            .detector_label()
+            .into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
@@ -2816,7 +2826,7 @@ fn detect_condition_if(
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "Condition_If".into(),
+        detector: OracleSemanticFeature::ConditionIf.detector_label().into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
@@ -3015,7 +3025,9 @@ fn detect_condition_unless(
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "Condition_Unless".into(),
+        detector: OracleSemanticFeature::ConditionUnless
+            .detector_label()
+            .into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
@@ -3077,7 +3089,9 @@ fn detect_condition_as_long_as(
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "Condition_AsLongAs".into(),
+        detector: OracleSemanticFeature::ConditionAsLongAs
+            .detector_label()
+            .into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
@@ -3431,7 +3445,9 @@ fn detect_duration_this_turn(
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "Duration_ThisTurn".into(),
+        detector: OracleSemanticFeature::DurationThisTurn
+            .detector_label()
+            .into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
@@ -3458,7 +3474,9 @@ fn detect_duration_next_turn(
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "Duration_NextTurn".into(),
+        detector: OracleSemanticFeature::DurationNextTurn
+            .detector_label()
+            .into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
@@ -3501,7 +3519,9 @@ fn detect_optional_may_have(
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: "Optional_MayHave".into(),
+        detector: OracleSemanticFeature::OptionalMayHave
+            .detector_label()
+            .into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });

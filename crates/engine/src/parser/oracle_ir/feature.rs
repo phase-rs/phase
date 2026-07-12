@@ -115,9 +115,14 @@ impl OracleSemanticFeature {
     ///
     /// These strings are the wire format of `OracleDiagnostic::SwallowedClause` and
     /// appear in exported `parse_warnings`, so they are byte-for-byte the labels the
-    /// previous audit emitted. This function exists to make that mapping a typed,
-    /// exhaustive, single-authority fact instead of fourteen string literals spread
-    /// across fourteen detectors.
+    /// previous audit emitted.
+    ///
+    /// This IS the single authority: every one of the fourteen `SwallowedClause` emit
+    /// sites in `swallow_check.rs` constructs its `detector` through this function, and
+    /// none constructs a string literal. That is what makes the label test below a pin on
+    /// the WIRE FORMAT rather than merely on this table — a claim worth stating precisely,
+    /// because while the fourteen literals still existed the two were independent
+    /// authorities and the test could stay green while the export silently changed.
     pub(crate) fn detector_label(self) -> &'static str {
         match self {
             Self::Replacement => "Replacement",
@@ -307,6 +312,23 @@ pub(crate) fn audit_units<'a>(
 /// Returning an owned `ParsedAbilities` rather than a borrowed view is deliberate —
 /// it is what lets the existing detectors be reused verbatim, and it costs one clone
 /// of the definitions a single unit produced, at parse time only.
+///
+/// # The premise the "unit evidence ⊆ card evidence" argument rests on
+///
+/// That argument is what makes an evidence-side LOSS structurally impossible (fewer facts
+/// can only yield more warnings), and it is how the delta's loss ledger is reasoned about.
+/// It holds unconditionally for the four id-tracked categories and for the `Vec` ones.
+///
+/// It does NOT hold unconditionally for the four **`Option`-valued singletons** — `modal`,
+/// `additional_cost`, `solve_condition`, `strive_cost`. `lower_oracle_ir` assigns those
+/// last-write-wins across items, so on a card carrying two such items the card-wide view
+/// shows only the LAST one, while the unit-scoped view shows each unit its OWN. A unit
+/// could then hold a singleton the card-wide view had overwritten — evidence the card-wide
+/// audit never had — and that is the one shape that can produce an evidence-side loss.
+///
+/// No card in the pool does this today (each singleton appears at most once per card), so
+/// the impact is zero and the subset argument stands as used. The debug assertion below
+/// makes the premise fail loudly rather than silently if a future card breaks it.
 pub(crate) fn scope_to_unit(
     result: &ParsedAbilities,
     tracks: &ItemIdTracks<'_>,
@@ -363,12 +385,39 @@ pub(crate) fn scope_to_unit(
     for item in &unit.items {
         match &item.node {
             OracleNodeIr::Keyword(kw) => scoped.extracted_keywords.push(kw.clone()),
-            OracleNodeIr::Modal(modal) => scoped.modal = Some(modal.clone()),
-            OracleNodeIr::AdditionalCost(cost) => scoped.additional_cost = Some(cost.clone()),
+            // The four `Option`-valued singletons. `lower_oracle_ir` assigns these
+            // last-write-wins card-wide, so a second one on a card would give this unit
+            // evidence the card-wide view had overwritten — the one shape that breaks the
+            // "unit evidence ⊆ card evidence" premise the loss ledger is reasoned on. No
+            // card in the pool does this; these assertions make a future one fail loudly
+            // rather than quietly turning a warning off.
+            OracleNodeIr::Modal(modal) => {
+                debug_assert!(scoped.modal.is_none(), "two Modal items in one unit");
+                scoped.modal = Some(modal.clone());
+            }
+            OracleNodeIr::AdditionalCost(cost) => {
+                debug_assert!(
+                    scoped.additional_cost.is_none(),
+                    "two AdditionalCost items in one unit"
+                );
+                scoped.additional_cost = Some(cost.clone());
+            }
+            OracleNodeIr::SolveCondition(c) => {
+                debug_assert!(
+                    scoped.solve_condition.is_none(),
+                    "two SolveCondition items in one unit"
+                );
+                scoped.solve_condition = Some(c.clone());
+            }
+            OracleNodeIr::StriveCost(c) => {
+                debug_assert!(
+                    scoped.strive_cost.is_none(),
+                    "two StriveCost items in one unit"
+                );
+                scoped.strive_cost = Some(c.clone());
+            }
             OracleNodeIr::CastingRestriction(r) => scoped.casting_restrictions.push(r.clone()),
             OracleNodeIr::CastingOption(o) => scoped.casting_options.push(o.clone()),
-            OracleNodeIr::SolveCondition(c) => scoped.solve_condition = Some(c.clone()),
-            OracleNodeIr::StriveCost(c) => scoped.strive_cost = Some(c.clone()),
             OracleNodeIr::Spell(_)
             | OracleNodeIr::Trigger(_)
             | OracleNodeIr::Static(_)
@@ -489,7 +538,7 @@ mod tests {
     /// name is the tempting refactor that would rewrite the wire format and destroy
     /// per-detector regression attribution.
     #[test]
-    fn detector_labels_are_the_exported_wire_format() {
+    fn detector_labels_are_distinct_and_pin_the_exported_wire_format() {
         use OracleSemanticFeature as F;
         let all = [
             (F::Replacement, "Replacement"),
