@@ -2984,7 +2984,7 @@ fn detect_condition_if(
     // allow-noncombinator: swallow detector marker scan on classified text
     if (stripped.contains("lost life this way") || stripped.contains("gained life this way"))
         && stripped.contains("that many") // allow-noncombinator: swallow detector marker scan on classified text
-        && evidence.any_quantity_ref(|q| matches!(q, QuantityRef::EventContextAmount { .. }))
+        && evidence.any_quantity_ref(|q| matches!(q, QuantityRef::EventContextAmount))
     {
         return;
     }
@@ -3905,7 +3905,7 @@ fn detect_duration_this_turn(
     //     "this turn" is implicit in the spell-level replacement lifetime.
     //     `ReplacementEvent` is EXTERNALLY tagged, so it is key-anchored.
     if evidence.any_at::<ReplacementEvent>(&["event"], |e| {
-        matches!(e, ReplacementEvent::DamageDone { .. })
+        matches!(e, ReplacementEvent::DamageDone)
     }) {
         return;
     }
