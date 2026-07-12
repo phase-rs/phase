@@ -4,6 +4,7 @@ mod ad_nauseam_repeat;
 mod adapter_contract_fixtures;
 mod advanced_reconstruction_regression;
 mod ajani_nacatl_pariah_transform;
+mod alchemists_gift_pump_modal_keyword_choice;
 mod ambuscade_one_sided_fight_anaphoric;
 mod amphin_mutineer_regression;
 mod ancient_brass_dragon_roll_d20;
