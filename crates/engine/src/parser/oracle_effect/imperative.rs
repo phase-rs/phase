@@ -6040,7 +6040,7 @@ pub(super) fn parse_put_ast(
         }
     }
 
-    if let Some((effect, choice_count)) = super::try_parse_put_zone_change_parts(lower, text) {
+    if let Some((effect, choice_count)) = super::try_parse_put_zone_change_parts(lower, text, ctx) {
         return match effect {
             Effect::ChangeZoneAll {
                 origin,

@@ -27514,12 +27514,13 @@ fn tracked_anaphor_cause(before_lower: &str, is_dig_anaphor: bool) -> Option<Opt
 
 #[cfg(test)]
 fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
-    try_parse_put_zone_change_parts(lower, text).map(|(effect, _)| effect)
+    try_parse_put_zone_change_parts(lower, text, &ParseContext::default()).map(|(effect, _)| effect)
 }
 
 fn try_parse_put_zone_change_parts(
     lower: &str,
     text: &str,
+    ctx: &ParseContext,
 ) -> Option<(Effect, Option<MultiTargetSpec>)> {
     let tp = TextPair::new(text, lower);
     let (_, after_put_tp) = tp.split_at(4);
@@ -27641,6 +27642,27 @@ fn try_parse_put_zone_change_parts(
                     caused_by,
                 },
                 None => target,
+            };
+            // CR 406.6 + CR 607.1/607.2a (#5577): a singular "the exiled card"
+            // anaphor in a `ChangeZoneAll` "put" clause whose exile was made in a
+            // SEPARATE, earlier resolution must bind durably to `ExiledBySource`,
+            // not the chain-local `TrackedSet(0)` sentinel — the THIRD emission
+            // site (after the Copy verb and `try_parse_cast_effect`) of the #5571
+            // cross-resolution rebinding. Watcher for Tomorrow's Hideaway LTB
+            // ("put the exiled card into its owner's hand") references the card
+            // exiled by its ETB, so the LTB chain has no exile producer and the
+            // `TrackedSet(0)` sentinel is empty at resolution. A SAME-chain exile
+            // keeps `TrackedSet(0)` (the helper returns `same_chain_binding`); a
+            // "this way" tracked anaphor keeps its `TrackedSetFiltered` path
+            // (guarded by `!is_tracked_anaphor`); an exile-cost zone context is
+            // excluded exactly as the cast-path caller does.
+            let target = if !is_tracked_anaphor
+                && ctx.current_ability_exile_cost_zone.is_none()
+                && target_text.trim().eq_ignore_ascii_case("the exiled card")
+            {
+                resolve_singular_exiled_card_target(ctx.chain_has_prior_exile_producer, target)
+            } else {
+                target
             };
             // CR 608.2c: A tracked-set anaphor ("<filter> revealed/milled/…
             // this way", "from among them") already names the exact objects;
