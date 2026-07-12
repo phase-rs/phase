@@ -16717,10 +16717,7 @@ mod tests {
         } = &*def.effect
         {
             for branch in [win_effect, lose_effect] {
-                if let Some(found) = branch
-                    .as_deref()
-                    .and_then(|b| find_effect_in_def(b, pred))
-                {
+                if let Some(found) = branch.as_deref().and_then(|b| find_effect_in_def(b, pred)) {
                     return Some(found);
                 }
             }
