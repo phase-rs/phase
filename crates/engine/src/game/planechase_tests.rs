@@ -1187,7 +1187,7 @@ fn fixed_point_replaces_planar_die_planeswalk_with_chaos() {
     );
     // The continuation slot is drained (no leftover post-replacement effect).
     assert!(
-        state.post_replacement_continuation.is_none(),
+        !state.has_post_replacement_drain(),
         "the post-replacement continuation must be drained exactly once"
     );
 

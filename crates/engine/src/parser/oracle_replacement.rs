@@ -34,11 +34,12 @@ use super::oracle_util::{
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
     Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
-    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect,
-    EffectScope, FilterProp, LibraryPosition, ManaModification, ManaReplacementScope, PlayerFilter,
-    PreventionAmount, QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, StaticCondition,
-    StaticDefinition, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope,
+    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaModification,
+    ManaReplacementScope, PlayerFilter, PreventionAmount, QuantityExpr, QuantityModification,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -406,21 +407,29 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // CR 614.1a: Widened from "you would draw" to handle opponent/player
     // scope (Notion Thief, Hullbreacher, Chains of Mephistopheles) mirroring
     // the gain-life widening below.
-    let mentions_draw = nom_primitives::scan_at_word_boundaries(&lower, |i| {
-        value(
-            (),
-            alt((
+    // CR 121.2 + CR 121.2a: the antecedent's grammatical number IS the draw scope,
+    // so capture which alternative matched instead of discarding it. A singular
+    // "would draw a card" hooks one individual draw; a count-form "would draw one
+    // or more cards" hooks the instruction, which CR 121.2a modifies "before
+    // considering any of the individual card draws".
+    let draw_scope = nom_primitives::scan_at_word_boundaries(&lower, |i| {
+        alt((
+            value(
+                DrawReplacementScope::IndividualDraw,
                 tag::<_, _, OracleError<'_>>("would draw a card"),
+            ),
+            value(
+                DrawReplacementScope::InstructionCount,
                 tag("would draw one or more cards"),
-            )),
-        )
+            ),
+        ))
         .parse(i)
-    })
-    .is_some();
-    if mentions_draw {
+    });
+    if let Some(draw_scope) = draw_scope {
         let effect_text = extract_replacement_effect(&normalized);
-        let mut def =
-            ReplacementDefinition::new(ReplacementEvent::Draw).description(text.to_string());
+        let mut def = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(draw_scope)
+            .description(text.to_string());
         // CR 614.6 + CR 121.6: "skip that draw instead" fully suppresses the
         // draw (Living Conundrum: "If you would draw a card while your library
         // has no cards in it, skip that draw instead"). The body lowers to a
@@ -6985,6 +6994,10 @@ fn parse_conditional_draw_replacement(text: &str, lower: &str) -> Option<Replace
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::Draw)
+            // CR 121.2a: this branch is the count-form antecedent ("if you would draw
+            // one or more cards, you draw that many cards plus one instead" — Quantum
+            // Riddler). It modifies the INSTRUCTION before any individual draw happens.
+            .draw_scope(DrawReplacementScope::InstructionCount)
             .condition(ReplacementCondition::OnlyIfQuantity {
                 lhs,
                 comparator,

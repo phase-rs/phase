@@ -304,6 +304,32 @@ def corpus_rows(export: dict) -> list[tuple[str, ...]]:
             nested_draw = any(
                 d.get("type") == "Draw" and "count" in d for d in walk(execute)
             )
+
+            # The scope column stopped being an aspiration the day the engine
+            # started emitting `draw_scope`. Two INDEPENDENT derivations must now
+            # agree: what the producer declared at construction (`emitted`), and
+            # what this script derives from the definition's shape (`required`).
+            #
+            # Checking only that the field is present would be vacuous — a producer
+            # that defaulted every Draw to IndividualDraw would sail through. The
+            # cross-check is what makes a wrong scope a build failure, and it is the
+            # whole reason the scope is declared rather than inferred at match time.
+            required = classify_scope(card, repl)
+            emitted = repl.get("draw_scope")
+            if emitted is None:
+                raise ClassificationError(
+                    f"{card}: Draw replacement has no `draw_scope` (CR 121.2 requires "
+                    f"every Draw definition to declare its scope at construction; "
+                    f"expected {required!r}). A producer is not setting it."
+                )
+            if emitted != required:
+                raise ClassificationError(
+                    f"{card}: producer declared draw_scope={emitted!r} but the "
+                    f"definition's shape requires {required!r} (CR 121.2a). Either the "
+                    f"producer is wrong, or this card is a shape the classifier has "
+                    f"not been taught."
+                )
+
             rows.append(
                 (
                     card,
@@ -312,7 +338,7 @@ def corpus_rows(export: dict) -> list[tuple[str, ...]]:
                     str(qm or "none"),
                     effect.get("type", "none") if execute else "none",
                     "nested-draw" if nested_draw else "-",
-                    classify_scope(card, repl),
+                    required,
                 )
             )
     return sorted(rows)

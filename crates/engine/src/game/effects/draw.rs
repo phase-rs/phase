@@ -135,10 +135,11 @@ pub fn resolve(
         _ => (1, ability.controller),
     };
 
-    // CR 121.6b: Route through `resume_multi_draw` so a multi-card draw
-    // (num_cards > 1) offers replacement independently to each unit instead
-    // of the whole count being replaced or drawn as one atomic batch.
-    match resume_multi_draw(state, drawing_player, num_cards, 0, events) {
+    // CR 121.2: Route through the draw-sequence stack so a multi-card draw
+    // (num_cards > 1) performs that many individual card draws, each offered
+    // replacement independently, instead of the whole count being replaced or
+    // drawn as one atomic batch.
+    match start_draw_sequence(state, drawing_player, num_cards, events) {
         ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}
         ReplacementResult::NeedsChoice(_) => return Ok(()),
     }
@@ -151,65 +152,97 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 121.6b: Resolve `remaining` independent draw events for `player`, one at
-/// a time, offering each its own replacement choice — "if an effect replaces a
-/// draw within a sequence of card draws, the replacement effect is completed
-/// before resuming the sequence." Called both by `resolve`'s first pass
-/// (`remaining` = the full requested count, `accumulated` = 0) and by
-/// `handle_replacement_choice`'s resume path (`remaining`/`accumulated` =
-/// whatever `PendingMultiDraw` recorded when the previous unit parked).
+/// CR 121.2: Begin one draw instruction — "if a player is instructed to draw
+/// multiple cards, that player performs that many individual card draws."
 ///
-/// CR 609.3: `accumulated` is the running total of cards ACTUALLY delivered
-/// across every completed unit of this instruction (0 for a unit whose draw
-/// was replaced by something else, e.g. Dredge; the post-replacement count for
-/// a unit doubled by a count-modifier like Teferi's Ageless Insight). Committed
-/// to `state.last_effect_count` exactly once, when `remaining` reaches 0, so a
-/// chained "discard that many" sub-ability sees the true total across the
-/// WHOLE original multi-draw, not just the last unit processed.
-///
-/// Returns `NeedsChoice` and stashes `state.pending_multi_draw` if a unit
-/// pauses with units still left; otherwise returns the terminal
-/// `Execute`/`Prevented`-equivalent result with `state.last_effect_count`
-/// already committed. The `Execute(ProposedEvent::Draw{count: 0, ..})` used as
-/// the completion sentinel reuses the engine's existing zero-count draw shape
-/// (already produced today by `Effect::Draw{count: 0}` via
-/// `resolve_quantity_with_targets(...).max(0)`), not a new event shape.
-pub(crate) fn resume_multi_draw(
+/// Pushes a [`DrawSequenceFrame`] and immediately drives it. The frame is the
+/// durable record of the instruction: it survives a pause (a per-unit replacement
+/// choice) so the remaining individual draws resume against exactly this
+/// instruction and not some other draw that started in the meantime.
+pub(crate) fn start_draw_sequence(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
-    remaining: u32,
-    accumulated: u32,
+    count: u32,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
-    let mut total = accumulated;
-    let mut left = remaining;
-    while left > 0 {
-        // This unit is now in flight — decrement BEFORE attempting so a park
-        // mid-attempt stores the count of units AFTER this one, not including
-        // it (the paused unit resumes via the accepted/declined choice itself,
-        // not via a fresh loop iteration).
-        left -= 1;
+    let frame_id = state.draw_sequences.push(player, count);
+    resume_draw_sequence(state, frame_id, events)
+}
+
+/// CR 121.6b: The single post-pause driver for a draw instruction — "if an effect
+/// replaces a draw within a sequence of card draws, the replacement effect is
+/// completed before resuming the sequence."
+///
+/// Drives `frame_id`'s remaining individual draws to completion. On a pause the
+/// frame stays on the stack with its cursor already advanced past the in-flight
+/// unit, so the resume that follows the player's choice picks up exactly where it
+/// left off; the paused unit is settled by the choice itself, not replayed here.
+///
+/// CR 608.2c: on completion the frame's running total is committed to
+/// `state.last_effect_count` exactly once — the value a later "that many" clause
+/// on the same card reads ("Draw two cards, then discard that many"), which must
+/// be the true total across the WHOLE instruction rather than the last unit's
+/// count. A unit whose draw was replaced by something else (Dredge) contributes
+/// 0; one doubled by a count modifier (Teferi's Ageless Insight) contributes its
+/// post-replacement count.
+///
+/// The terminal `Execute(ProposedEvent::Draw { count: 0, .. })` is a completion
+/// sentinel, reusing the engine's existing zero-count draw shape (already produced
+/// by `Effect::Draw { count: 0 }`), not a new event shape.
+///
+/// `frame_id` must be the active frame. It cannot be an outer frame with a nested
+/// instruction still above it (CR 616.1g) — that resume must wait for the inner
+/// instruction to complete.
+pub(crate) fn resume_draw_sequence(
+    state: &mut GameState,
+    frame_id: crate::types::game_state::DrawSequenceFrameId,
+    events: &mut Vec<GameEvent>,
+) -> replacement::ReplacementResult {
+    loop {
+        // Take the next owed unit off the cursor BEFORE attempting it, so a park
+        // mid-attempt leaves the frame recording the units AFTER this one. The
+        // in-flight unit is settled by the replacement choice that parked it.
+        let Some(frame) = state.draw_sequences.active_if(frame_id) else {
+            debug_assert!(
+                false,
+                "resume_draw_sequence({frame_id:?}) is not the active draw frame — a nested \
+                 instruction is still above it, or the frame was already popped"
+            );
+            return ReplacementResult::Prevented;
+        };
+        if frame.remaining == 0 {
+            break;
+        }
+        frame.remaining -= 1;
+        let player = frame.player;
+
         let mut unit_drawn: u32 = 0;
         let result = draw_through_replacement(state, player, 1, events, |state, event, events| {
             unit_drawn = apply_draw_after_replacement(state, event, events);
         });
         match result {
             ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
-                total += unit_drawn;
+                // The unit's delivery may itself have pushed and popped a nested
+                // instruction, so re-address this frame by ID rather than assuming
+                // it is still whatever `active_mut()` returns.
+                if let Some(frame) = state.draw_sequences.active_if(frame_id) {
+                    frame.accumulated += unit_drawn;
+                }
             }
+            // The frame stays parked on the stack; the choice resumes it.
             ReplacementResult::NeedsChoice(waiting_player) => {
-                state.pending_multi_draw = Some(crate::types::game_state::PendingMultiDraw {
-                    player,
-                    remaining: left,
-                    accumulated: total,
-                });
                 return ReplacementResult::NeedsChoice(waiting_player);
             }
         }
     }
-    state.last_effect_count = Some(total as i32);
+
+    let Some(frame) = state.draw_sequences.pop(frame_id) else {
+        debug_assert!(false, "draw frame {frame_id:?} vanished before completion");
+        return ReplacementResult::Prevented;
+    };
+    state.last_effect_count = Some(frame.accumulated as i32);
     ReplacementResult::Execute(ProposedEvent::Draw {
-        player_id: player,
+        player_id: frame.player,
         count: 0,
         applied: HashSet::new(),
     })
@@ -251,7 +284,7 @@ pub(crate) fn draw_through_replacement(
     match &result {
         ReplacementResult::Execute(event) => {
             apply_executed(state, event.clone(), events);
-            if state.post_replacement_continuation.is_some() {
+            if state.has_post_replacement_drain() {
                 let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                     state, None, None, None, events,
                 );
@@ -272,15 +305,16 @@ pub(crate) fn draw_through_replacement(
 /// `handle_replacement_choice` when a player accepts a draw-replacement choice.
 /// Caller is responsible for emitting `EffectResolved`.
 ///
-/// Returns the number of cards actually delivered by this call. CR 609.3: this
-/// function does NOT write `state.last_effect_count` itself — `resume_multi_draw`
-/// accumulates the returned counts across every unit of the original
-/// multi-card draw and commits the TRUE total once, when the whole instruction
-/// completes, so a chained "discard that many" sees the real total rather than
-/// just the last unit's count. Callers outside `resume_multi_draw` that invoke
-/// this directly for a single, non-multi-draw event (the two unit tests below,
-/// `scry.rs`'s delegation arm, `handle_replacement_choice`'s non-multi-draw
-/// resume path) may ignore the return value — Rust does not require consuming it.
+/// Returns the number of cards actually delivered by this call. CR 608.2c: this
+/// function does NOT write `state.last_effect_count` itself — the draw sequence
+/// accumulates the returned counts across every unit of the instruction into its
+/// [`DrawSequenceFrame`] and commits the TRUE total once, when the whole
+/// instruction completes, so a chained "discard that many" reads the real total
+/// rather than just the last unit's count ("later text on the card may modify the
+/// meaning of earlier text"). Callers outside the sequence driver that invoke this
+/// directly for a single, non-sequenced event (the two unit tests below,
+/// `scry.rs`'s delegation arm, `handle_replacement_choice`'s resume path) may
+/// ignore the return value — Rust does not require consuming it.
 pub fn apply_draw_after_replacement(
     state: &mut GameState,
     event: ProposedEvent,
@@ -626,17 +660,22 @@ mod tests {
             Zone::Battlefield,
         );
         let teferi_obj = state.objects.get_mut(&teferi).unwrap();
-        teferi_obj.replacement_definitions = vec![ReplacementDefinition::new(
-            ReplacementEvent::Draw,
-        )
-        .execute(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 2 },
-                target: TargetFilter::Controller,
-            },
-        ))]
-        .into();
+        // CR 121.6b: Teferi's antecedent is SINGULAR — "if you would draw a card …
+        // draw two cards instead" — so it replaces one individual draw, and is
+        // `IndividualDraw` despite being a doubler colloquially. This matches what
+        // the real card carries in the corpus; a hand-built fixture that disagreed
+        // with its own card would be testing a shape that does not exist.
+        teferi_obj.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 2 },
+                        target: TargetFilter::Controller,
+                    },
+                ))]
+            .into();
 
         for card_id in 2..=4 {
             create_object(

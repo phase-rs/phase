@@ -2959,7 +2959,10 @@ pub fn synthesize_dredge(face: &mut CardFace) {
     );
     mill.sub_ability = Some(Box::new(return_to_hand));
 
-    let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw);
+    // CR 702.52a + CR 121.6b: Dredge replaces a single individual card draw
+    // ("if you would draw a card, you may instead mill N"), not the instruction count.
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
+        .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
     replacement.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
     replacement.description = Some(
         "CR 702.52a: Dredge — instead of drawing, you may mill N cards and return this \
