@@ -45636,3 +45636,70 @@ fn instead_override_never_absorbs_the_preceding_sentence() {
         "Draw a card. If you control three or more artifacts, draw two cards instead.",
     );
 }
+
+/// CR 109.4 + CR 608.2h + CR 701.16a: an "its controller / that player
+/// investigates" subject-predicate (whose fieldless `Effect::Investigate` gives
+/// `inject_subject_target` nowhere to stamp the subject) lifts the dropped
+/// player anaphor to the Investigate sub-ability's `player_scope`, so the Clue
+/// goes to the target's controller — not the caster. Covers the whole class
+/// (Declaration in Stone + Fateful Absence) plus a caster-default negative.
+#[test]
+fn investigate_subject_lifts_parent_target_controller_to_player_scope() {
+    fn find_investigate_scope(def: &AbilityDefinition) -> Option<Option<PlayerFilter>> {
+        let mut node = Some(def);
+        while let Some(d) = node {
+            if matches!(&*d.effect, Effect::Investigate) {
+                return Some(d.player_scope.clone());
+            }
+            node = d.sub_ability.as_deref();
+        }
+        None
+    }
+
+    // Declaration in Stone: "That player investigates for each nontoken creature
+    // exiled this way" — "that player" = the exiled creature's controller.
+    let dis = parse_oracle_text(
+        "Exile target creature and all other creatures its controller controls with the same \
+         name as that creature. That player investigates for each nontoken creature exiled this way.",
+        "Declaration in Stone",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert_eq!(
+        find_investigate_scope(&dis.abilities[0]),
+        Some(Some(PlayerFilter::ParentObjectTargetController)),
+        "Declaration in Stone's Investigate must fan out to the exiled creature's controller"
+    );
+
+    // Fateful Absence: "Destroy target creature or planeswalker. Its controller
+    // investigates." — same class, singular non-token target.
+    let fateful = parse_oracle_text(
+        "Destroy target creature or planeswalker. Its controller investigates.",
+        "Fateful Absence",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert_eq!(
+        find_investigate_scope(&fateful.abilities[0]),
+        Some(Some(PlayerFilter::ParentObjectTargetController)),
+        "Fateful Absence's \"its controller investigates\" must fan out to the destroyed \
+         permanent's controller"
+    );
+
+    // Negative: a bare "investigate" with no player subject stays the caster
+    // default (no player_scope) — the lift must not over-apply.
+    let press = parse_oracle_text(
+        "Tap target creature. Investigate.",
+        "Press for Answers",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert_eq!(
+        find_investigate_scope(&press.abilities[0]),
+        Some(None),
+        "a bare \"investigate\" must keep the caster default (no player_scope)"
+    );
+}

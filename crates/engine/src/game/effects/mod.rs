@@ -6556,11 +6556,18 @@ fn resolve_chain_body(
             controller,
         );
         let matching_players: Vec<PlayerId> = match scope {
-            PlayerFilter::AllExcept { .. } => {
-                // CR 608.2c + CR 109.4 + CR 608.2h: the `AllExcept` anchor may be an
-                // ability-target reference (ParentObjectTargetController), which the
-                // generic `matches_player_scope` predicate cannot resolve (it carries
-                // no `ResolvedAbility`). Route through the ability-aware
+            PlayerFilter::AllExcept { .. }
+            | PlayerFilter::ParentObjectTargetController
+            | PlayerFilter::ParentObjectTargetOwner => {
+                // CR 608.2c + CR 109.4 + CR 608.2h: these anchors are all
+                // ability-target references — the `AllExcept` exclude anchor and the
+                // direct `ParentObjectTargetController` / `ParentObjectTargetOwner`
+                // scopes (e.g. Declaration in Stone's "That player investigates",
+                // where "that player" = the controller of the exiled target). The
+                // generic `matches_player_scope` predicate cannot resolve them (it
+                // carries no `ResolvedAbility`, so `parent_target_controller`'s
+                // last-known-information lookup over `ability.targets` is
+                // unavailable). Route through the ability-aware
                 // `speed_effects::players_for_filter`, then re-impose APNAP order by
                 // intersecting against the apnap sequence.
                 let set =
