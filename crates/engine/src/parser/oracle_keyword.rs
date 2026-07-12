@@ -1355,9 +1355,20 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // CR 702.120a: Escalate with em-dash cost — covers non-mana costs such as
     // Collective Effort's "Escalate—Tap an untapped creature you control."
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("escalate\u{2014}").parse(text) {
-        let cost = normalize_escalate_cost(parse_oracle_cost(rest));
+        let cost = normalize_em_dash_tap_cost(parse_oracle_cost(rest));
         if !matches!(cost, AbilityCost::Unimplemented { .. }) {
             return Some(Keyword::Escalate(cost));
+        }
+    }
+
+    // CR 702.56a: Replicate with em-dash cost — covers non-mana replicate costs
+    // such as Exterminate!'s "Replicate—Tap an untapped Dalek you control."
+    // Mirrors the Escalate arm above: the general `AbilityCost` payload (not
+    // `ManaCost`) is what lets a tap/sacrifice/etc. replicate cost survive.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("replicate\u{2014}").parse(text) {
+        let cost = normalize_em_dash_tap_cost(parse_oracle_cost(rest));
+        if !matches!(cost, AbilityCost::Unimplemented { .. }) {
+            return Some(Keyword::Replicate(cost));
         }
     }
 
@@ -1682,7 +1693,11 @@ fn is_numeric_count_keyword(name: &str) -> bool {
     .is_ok()
 }
 
-fn normalize_escalate_cost(cost: AbilityCost) -> AbilityCost {
+/// CR 701.26a: Normalize an em-dash keyword cost so a single-target tap
+/// effect-cost ("Tap an untapped creature/Dalek you control") becomes the typed
+/// `AbilityCost::TapCreatures` form. Shared by the Escalate and Replicate
+/// em-dash arms (both accept any additional-cost shape, not just mana).
+fn normalize_em_dash_tap_cost(cost: AbilityCost) -> AbilityCost {
     match cost {
         AbilityCost::EffectCost { effect } => match *effect {
             // CR 701.26a: a single-target tap effect-cost becomes a typed
@@ -4085,6 +4100,41 @@ mod tests {
             panic!("expected Escalate(TapCreatures), got {:?}", kw);
         };
         assert_eq!(requirement.fixed_count(), Some(1));
+    }
+
+    /// CR 702.56a: Replicate accepts any additional-cost shape (parameterized on
+    /// `AbilityCost` like its sibling Escalate), not just mana — Exterminate!'s
+    /// "Replicate—Tap an untapped Dalek you control" survives as a typed tap cost
+    /// with the Dalek subtype filter instead of being dropped.
+    #[test]
+    fn parse_keyword_from_oracle_replicate_tap_dalek_cost() {
+        let kw = parse_keyword_from_oracle("replicate\u{2014}tap an untapped dalek you control")
+            .unwrap();
+        let Keyword::Replicate(AbilityCost::TapCreatures {
+            requirement,
+            filter,
+        }) = kw
+        else {
+            panic!("expected Replicate(TapCreatures), got {:?}", kw);
+        };
+        assert_eq!(requirement.fixed_count(), Some(1));
+        // The Dalek subtype filter must survive (not a Dalek special-case — the
+        // subtype canonicalization pass in the cost parser handles it).
+        assert!(
+            format!("{filter:?}").contains("Dalek"),
+            "expected Dalek subtype filter, got {filter:?}"
+        );
+    }
+
+    /// CR 702.56a: The mana replicate form still parses (backward compat) into the
+    /// general `AbilityCost::Mana` payload.
+    #[test]
+    fn parse_keyword_from_oracle_replicate_mana_backward_compat() {
+        use std::str::FromStr;
+        let kw = Keyword::from_str("Replicate:2U").unwrap();
+        let Keyword::Replicate(AbilityCost::Mana { .. }) = kw else {
+            panic!("expected Replicate(Mana), got {:?}", kw);
+        };
     }
 
     /// CR 303.4a + CR 702.5: "Enchant creature, land, or planeswalker"

@@ -5488,11 +5488,23 @@ fn record_graveyard_play_permission(
     }
 }
 
-fn record_exile_play_permission(state: &mut GameState, source: Option<ObjectId>) {
+fn record_exile_play_permission(
+    state: &mut GameState,
+    object_id: ObjectId,
+    source: Option<ObjectId>,
+) {
     let Some(source_id) = source else {
         return;
     };
     state.exile_play_permissions_used.insert(source_id);
+    // CR 406.6 + CR 607.2a: Stamp the played land with the exile-pool source that
+    // authorized it, so `TargetFilter::PlayedFromSourceExile` triggers (The Matrix
+    // of Time) can gate on provenance after the exile link is stripped on zone
+    // exit. Captured here rather than read live because the link is already gone
+    // by the time the LandPlayed trigger evaluates.
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.played_from_exile_source = Some(source_id);
+    }
 }
 
 /// CR 305.1 + CR 116.2a + CR 401.5: Consume the per-turn slot when a
@@ -5927,7 +5939,7 @@ fn handle_play_land(
                     state.lands_played_this_turn += 1;
                     record_land_played_from_zone(state, player, object_id, origin_zone);
                     record_graveyard_play_permission(state, gy_permission_source, object_id);
-                    record_exile_play_permission(state, exile_permission_source);
+                    record_exile_play_permission(state, object_id, exile_permission_source);
                     // CR 305.1 + CR 116.2a + CR 401.5: consume the once-per-turn
                     // library play slot using the pre-captured source (land play is
                     // a special action per CR 305.1/116.2a; CR 401.5 top-of-library
@@ -5963,7 +5975,7 @@ fn handle_play_land(
             record_land_played_from_zone(state, player, object_id, origin_zone);
             // CR 604.2: Record once-per-turn graveyard play permission usage.
             record_graveyard_play_permission(state, gy_permission_source, object_id);
-            record_exile_play_permission(state, exile_permission_source);
+            record_exile_play_permission(state, object_id, exile_permission_source);
             // CR 305.1 + CR 116.2a + CR 401.5: consume the once-per-turn library
             // play slot using the pre-captured source (land play is a special
             // action per CR 305.1/116.2a; CR 401.5 top-of-library visibility
@@ -5994,7 +6006,7 @@ fn handle_play_land(
     record_land_played_from_zone(state, player, object_id, origin_zone);
     // CR 604.2: Record once-per-turn graveyard play permission usage.
     record_graveyard_play_permission(state, gy_permission_source, object_id);
-    record_exile_play_permission(state, exile_permission_source);
+    record_exile_play_permission(state, object_id, exile_permission_source);
     // CR 305.1 + CR 116.2a + CR 401.5: consume the once-per-turn library play
     // slot using the pre-captured source (land play is a special action per
     // CR 305.1/116.2a; CR 401.5 top-of-library visibility closes after the

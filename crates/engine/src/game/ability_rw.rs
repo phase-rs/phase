@@ -1361,6 +1361,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::PlayedFromSourceExile
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
@@ -1855,6 +1856,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::ControlsCommander { .. }
         | TriggerCondition::ChosenLabelIs { .. }
         | TriggerCondition::ExceptFirstDrawInDrawStep
+        | TriggerCondition::SourceHasntAddedManaThisTurn
         | TriggerCondition::PlacedByAbilitySource => false,
     }
 }
@@ -2236,6 +2238,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::PlayedFromSourceExile
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
@@ -2410,6 +2413,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::PlayedFromSourceExile
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::ChosenCard
         | TargetFilter::HasChosenName
@@ -5992,6 +5996,10 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::ControlsCommander { .. }
         | TriggerCondition::ChosenLabelIs { .. }
         | TriggerCondition::ExceptFirstDrawInDrawStep
+        // CR 603.4: reads a per-turn source-scoped mana-production fact (like the
+        // sibling per-turn facts Descended / EchoDue above); an intervening-if
+        // gate, not a sibling-orderable effect read.
+        | TriggerCondition::SourceHasntAddedManaThisTurn
         | TriggerCondition::PlacedByAbilitySource => RwProfile::empty(),
     }
 }
@@ -6160,6 +6168,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::PlayedFromSourceExile
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController

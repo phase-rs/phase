@@ -4435,6 +4435,15 @@ pub enum TargetFilter {
     /// CR 607.2a: Cards exiled by a specific source via "exile until ~ leaves" links.
     /// Resolves via relational `state.exile_links` lookup, not intrinsic object properties.
     ExiledBySource,
+    /// CR 406.6 + CR 607.2a: The referenced card was PLAYED or CAST from the
+    /// ability source's own linked exile pool (e.g. "play a land or cast a spell
+    /// from among cards exiled with ~"). Provenance is captured at play/cast time
+    /// (`GameObject.played_from_exile_source`) because the source's exile link is
+    /// stripped on zone exit (zones.rs) BEFORE the LandPlayed/SpellCast trigger is
+    /// evaluated — a live-link lookup (`ExiledBySource`) would already be empty at
+    /// that point. Distinct from `ExiledBySource` (card still physically IN exile).
+    /// Relational, not intrinsic; false in generic non-provenance object contexts.
+    PlayedFromSourceExile,
     /// CR 607.2b: References a specific card exiled by the source, indexed by order.
     /// Used by The Mimeoplasm to distinguish "the first card exiled this way" from
     /// "the second card exiled this way". The index is 0-based and corresponds to
@@ -17008,6 +17017,15 @@ pub enum TriggerCondition {
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
+    /// CR 603.4: "if you haven't added mana with this ability this turn" — a
+    /// self-referential once-per-turn mana gate (Carpet of Flowers). True when
+    /// the source has NOT yet added mana this turn via a printed
+    /// triggered/activated ability (checked against
+    /// `GameState.mana_added_by_ability_this_turn`, keyed by source ObjectId).
+    /// Unlike `NthResolutionThisTurn`, which counts *resolutions*, this reads
+    /// whether mana was actually produced — a declined `may` or an X=0 production
+    /// in an earlier main phase must not block the ability in a later one.
+    SourceHasntAddedManaThisTurn,
     /// CR 506.5 + CR 508.1m: "Whenever [a creature] attacks alone" /
     /// "Whenever ~ and at least N other creatures attack". True when combat is
     /// active and at least `minimum` other creatures controlled by the same

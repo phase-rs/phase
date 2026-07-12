@@ -812,6 +812,9 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
+        // CR 406.6 + CR 607.2a: provenance-stamp match delegated to
+        // `matches_target_filter` alongside the sibling exile-relational filters.
+        | TargetFilter::PlayedFromSourceExile
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. } => super::filter::matches_target_filter(

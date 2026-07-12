@@ -1027,8 +1027,11 @@ pub enum Keyword {
     /// replicate cost was paid for it, copy it for each time its
     /// replicate cost was paid. If the spell has any targets, you may
     /// choose new targets for any of the copies." Carries the per-copy
-    /// mana cost.
-    Replicate(ManaCost),
+    /// cost as a general `AbilityCost` (parameterized like its sibling
+    /// `Escalate`) so non-mana replicate costs — e.g. Exterminate!'s
+    /// "Replicate—Tap an untapped Dalek you control" — are representable,
+    /// not just `{mana}` costs.
+    Replicate(AbilityCost),
 
     /// CR 702.113a: Awaken N—{cost} — alternative cost that also puts N +1/+1
     /// counters on target land you control, animating it as a 0/0 Elemental
@@ -2181,8 +2184,14 @@ impl FromStr for Keyword {
                 // CR 702.157
                 "squad" => return Ok(Keyword::Squad(parse_keyword_mana_cost(p))),
                 // CR 702.56a: Replicate {cost} — repeatable optional additional
-                // cost paid at cast; copy the spell once per payment.
-                "replicate" => return Ok(Keyword::Replicate(parse_keyword_mana_cost(p))),
+                // cost paid at cast; copy the spell once per payment. The MTGJSON
+                // keyword payload only ever carries a mana cost; wrap it in the
+                // general `AbilityCost::Mana` axis (mirrors Escalate).
+                "replicate" => {
+                    return Ok(Keyword::Replicate(AbilityCost::Mana {
+                        cost: parse_keyword_mana_cost(p),
+                    }))
+                }
                 // CR 702.29: Typecycling — "typecycling:{subtype}:{cost}"
                 "typecycling" => {
                     if let Some(colon_pos) = p.find(':') {
@@ -3114,8 +3123,15 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         }
         // CR 702.157
         "Squad" => Ok(Keyword::Squad(mana(data)?)),
-        // CR 702.56a: Replicate {cost}
-        "Replicate" => Ok(Keyword::Replicate(mana(data)?)),
+        // CR 702.56a: Replicate {cost} — accept both legacy ManaCost format and
+        // new AbilityCost tagged format (mirrors Escalate).
+        "Replicate" => {
+            if let Ok(cost) = serde_json::from_value::<AbilityCost>(data.clone()) {
+                Ok(Keyword::Replicate(cost))
+            } else {
+                Ok(Keyword::Replicate(AbilityCost::Mana { cost: mana(data)? }))
+            }
+        }
         // CR 702.29
         "Typecycling" => {
             let obj = data.as_object().ok_or("Typecycling: expected object")?;

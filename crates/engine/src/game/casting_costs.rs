@@ -5828,7 +5828,10 @@ pub(super) fn effective_replicate_additional_cost_instances(
                 AdditionalCostOrigin::Replicate,
                 u32::try_from(ordinal).unwrap_or(u32::MAX),
                 AdditionalCost::Optional {
-                    cost: AbilityCost::Mana { cost },
+                    // CR 702.56a: the replicate cost is already a general
+                    // `AbilityCost` (mana for most cards, or a non-mana cost such
+                    // as Exterminate!'s tap-a-Dalek), used directly with no wrap.
+                    cost,
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
                 },
             )
@@ -7081,6 +7084,16 @@ fn finalize_cast_with_phyrexian_choices_inner(
         exile_play_permission_source
     {
         state.exile_play_permissions_used.insert(source);
+    }
+    // CR 406.6 + CR 607.2a: Stamp the cast spell with the exile-pool source that
+    // authorized it (any frequency — The Matrix of Time's permission is
+    // Unlimited), so `TargetFilter::PlayedFromSourceExile` triggers can gate the
+    // SpellCast trigger on provenance after the exile link is stripped by the
+    // Exile→Stack move above. Mirrors the land-play stamp in engine.rs.
+    if let Some((source, _frequency)) = exile_play_permission_source {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.played_from_exile_source = Some(source);
+        }
     }
     // CR 601.2a + CR 401.5: Consume the per-turn slot ONLY when the *selected*
     // authorizing top-of-library permission is `OncePerTurn` (Assemble the
@@ -17075,7 +17088,9 @@ its replicate cost was paid.)\nDraw a card.";
             generic: 1,
         };
         StaticDefinition::new(StaticMode::CastWithKeyword {
-            keyword: Keyword::Replicate(replicate_cost),
+            keyword: Keyword::Replicate(AbilityCost::Mana {
+                cost: replicate_cost,
+            }),
         })
         .affected(TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Instant).controller(ControllerRef::You),

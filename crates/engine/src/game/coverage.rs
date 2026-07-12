@@ -629,6 +629,9 @@ fn fmt_target(filter: &TargetFilter) -> String {
             format!("tracked set #{} matching {}", id.0, fmt_target(filter))
         }
         TargetFilter::ExiledBySource => "cards exiled by source".into(),
+        TargetFilter::PlayedFromSourceExile => {
+            "card played/cast from among cards exiled by source".into()
+        }
         TargetFilter::HasChosenName => "card with the chosen name".into(),
         TargetFilter::ChosenDamageSource { filter: Some(f) } => {
             format!("chosen damage source matching {}", fmt_target(f))
@@ -3798,6 +3801,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         }
         TC::SourceEnteredThisTurn => "source entered this turn".into(),
         TC::EchoDue => "echo due".into(),
+        TC::SourceHasntAddedManaThisTurn => "hasn't added mana with this ability this turn".into(),
         TC::MinCoAttackers { minimum, .. } => format!("with {minimum}+ other attackers"),
         TC::SolveConditionMet => "solve condition met".into(),
         TC::ClassLevelGE { level } => format!("class level ≥ {level}"),

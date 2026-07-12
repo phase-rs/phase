@@ -10992,7 +10992,9 @@ fn static_grant_replicate_hatchery_sliver() {
     assert_eq!(
         def.mode,
         StaticMode::CastWithKeyword {
-            keyword: Keyword::Replicate(ManaCost::SelfManaCost),
+            keyword: Keyword::Replicate(crate::types::ability::AbilityCost::Mana {
+                cost: ManaCost::SelfManaCost,
+            }),
         }
     );
     let Some(TargetFilter::Typed(tf)) = &def.affected else {
@@ -12378,6 +12380,41 @@ fn graveyard_play_permission_crucible() {
             def.affected
         );
     }
+}
+
+/// CR 601.2f: Me, the Immortal — "You may cast this card from your graveyard by
+/// discarding two cards in addition to paying its other costs" lowers to a
+/// graveyard-cast permission carrying an ADDITIONAL `Discard { count: 2 }` cost
+/// (not dropped). Exercises the generalized `parse_cast_permission_rider_cost_head`
+/// discard arm and the "in addition to paying its other costs" closer.
+#[test]
+fn graveyard_cast_permission_me_the_immortal_discard_rider() {
+    use crate::types::ability::{AbilityCost, CardSelectionMode, DiscardSelfScope, QuantityExpr};
+    use crate::types::statics::{CastCostMode, CastExtraCost};
+    let text = "You may cast this card from your graveyard by discarding two cards in addition to paying its other costs.";
+    let def = parse_static_line(text).expect("Me, the Immortal static must parse");
+    let StaticMode::GraveyardCastPermission {
+        play_mode,
+        ref extra_cost,
+        ..
+    } = def.mode
+    else {
+        panic!("expected GraveyardCastPermission, got {:?}", def.mode);
+    };
+    assert!(matches!(play_mode, CardPlayMode::Cast));
+    assert_eq!(
+        *extra_cost,
+        Some(CastExtraCost {
+            cost: AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                filter: None,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
+            },
+            mode: CastCostMode::Additional,
+        }),
+        "the 'by discarding two cards' additional cost must not be dropped"
+    );
 }
 
 #[test]

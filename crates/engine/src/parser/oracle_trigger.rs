@@ -664,6 +664,14 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
     // (N-way serial) or "whenever ~ A or B" (2-way). CR 603.1: each listed event
     // is its own trigger condition, all sharing the one subject.
     if let Some(halves) = split_shared_subject_event_list(&cond_lower, &condition) {
+        // CR 406.6 + CR 607.2a: The exile-provenance qualifier ("from among cards
+        // exiled with ~") sits on the SHARED pre-split compound subject. When the
+        // event list is split, the qualifier is dropped from the land half's text,
+        // so it must be detected HERE (on the pre-split compound) and applied to
+        // EVERY resulting half — never re-detected per half (the land half no
+        // longer contains it). Without this, every ordinary land drop would fire
+        // the "loses 3 life and exiles the top card" trigger (The Matrix of Time).
+        let gates_on_source_exile = condition_gates_on_source_exile(&cond_lower);
         let mut results = Vec::with_capacity(halves.len());
         for (i, cond) in halves.into_iter().enumerate() {
             let trigger_text = if effect.is_empty() {
@@ -671,12 +679,16 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
             } else {
                 format!("{cond}, {effect}")
             };
-            results.push(parse_trigger_line_with_index_ir(
+            let mut result = parse_trigger_line_with_index_ir(
                 &trigger_text,
                 card_name,
                 base_trigger_index.map(|b| b.offset(i)),
                 ctx,
-            ));
+            );
+            if gates_on_source_exile {
+                apply_played_from_source_exile_gate(&mut result.partial_def);
+            }
+            results.push(result);
         }
         return results;
     }
@@ -688,6 +700,36 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
         base_trigger_index,
         ctx,
     )]
+}
+
+/// CR 406.6 + CR 607.2a: True when a (self-ref-normalized) trigger condition
+/// gates on the source's own exile pool — "from among cards exiled with ~". Uses
+/// the nom word-boundary scanner, mirroring the classifier's detection of the
+/// same phrase on the paired `ExileCastPermission` static line.
+fn condition_gates_on_source_exile(cond_lower: &str) -> bool {
+    nom_primitives::scan_contains(cond_lower, "from among cards exiled with ~")
+}
+
+/// CR 406.6 + CR 607.2a: Attach the `PlayedFromSourceExile` provenance gate to a
+/// LandPlayed / SpellCast trigger's `valid_card`. When the trigger already
+/// carries a real card filter (e.g. "cast a creature spell from among cards
+/// exiled with ~"), the two are AND-combined so both the type and the provenance
+/// must hold; a trivial `None`/`SelfRef` slot is replaced outright. No-op for
+/// modes that do not match a played land or cast spell.
+fn apply_played_from_source_exile_gate(def: &mut TriggerDefinition) {
+    if !matches!(
+        def.mode,
+        TriggerMode::LandPlayed | TriggerMode::SpellCast | TriggerMode::SpellCastOrCopy
+    ) {
+        return;
+    }
+    let gate = TargetFilter::PlayedFromSourceExile;
+    def.valid_card = Some(match def.valid_card.take() {
+        None | Some(TargetFilter::SelfRef) => gate,
+        Some(existing) => TargetFilter::And {
+            filters: vec![existing, gate],
+        },
+    });
 }
 
 /// Part D: If a `"for the first time ..."` qualifier appears as a
@@ -4015,6 +4057,20 @@ fn parse_first_time_tapped_intervening_if(input: &str) -> OracleResult<'_, Trigg
     Ok((rest, TriggerCondition::FirstTimeObjectTappedThisTurn))
 }
 
+/// CR 603.4: Parse "if you haven't added mana with this ability this turn" — a
+/// self-referential once-per-turn mana gate (Carpet of Flowers). "this ability"
+/// binds to the trigger's own source, so it cannot lower through a
+/// `StaticCondition`; it emits the `TriggerCondition` directly. Both the ASCII
+/// (`haven't`) and curly (`haven’t`, U+2019) apostrophe are accepted.
+fn parse_hasnt_added_mana_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
+    let (rest, _) = alt((
+        tag("if you haven't added mana with this ability this turn"),
+        tag("if you haven’t added mana with this ability this turn"),
+    ))
+    .parse(input)?;
+    Ok((rest, TriggerCondition::SourceHasntAddedManaThisTurn))
+}
+
 /// CR 603.4 + CR 601.2: Parse "if you didn't cast it from your hand/exile" or
 /// "if you didn't cast it from your graveyard" — negated zone-specific cast
 /// provenance intervening-if (Chainer, Nightmare Adept; Phage the Untouchable;
@@ -4198,6 +4254,20 @@ fn extract_if_condition_with_card_name(
                 }),
             );
         }
+    }
+
+    // CR 603.4: "if you haven't added mana with this ability this turn" — a
+    // self-referential once-per-turn mana gate (Carpet of Flowers). Source-
+    // referential ("this ability"), so it emits the TriggerCondition directly.
+    if let Some((before, condition, rest)) =
+        scan_preceded(&lower, parse_hasnt_added_mana_intervening_if)
+    {
+        let pos = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, pos, clause_len),
+            Some(condition),
+        );
     }
 
     // CR 603.4 + CR 601.2 + CR 603.2c + CR 603.10a: disjunctive

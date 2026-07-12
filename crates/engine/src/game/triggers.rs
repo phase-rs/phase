@@ -6281,6 +6281,14 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::EchoDue => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.echo_due),
+        // CR 603.4: "if you haven't added mana with this ability this turn" —
+        // true iff the source has not recorded mana production this turn
+        // (Carpet of Flowers). Checked at both the trigger-time and
+        // resolution-time edges of the intervening-if. Missing source_id fails
+        // closed (the gate can't be evaluated without a source).
+        TriggerCondition::SourceHasntAddedManaThisTurn => {
+            source_id.is_some_and(|id| !state.mana_added_by_ability_this_turn.contains(&id))
+        }
         // CR 506.5 + CR 508.1m + CR 603.2c: Count co-attackers excluding the
         // matched attacking creature. Attack matchers narrow ordinary Attacks
         // trigger events to one attacker; observer triggers (HYDRA
@@ -16321,6 +16329,54 @@ pub mod tests {
         ));
     }
 
+    /// CR 603.4: `SourceHasntAddedManaThisTurn` reads the per-turn
+    /// `mana_added_by_ability_this_turn` tracker keyed by source ObjectId — true
+    /// (the gate is open) until the source records mana production, then false
+    /// (Carpet of Flowers: mana added in one main phase blocks the later one).
+    #[test]
+    fn source_hasnt_added_mana_this_turn_reads_tracker() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(77);
+        let condition = TriggerCondition::SourceHasntAddedManaThisTurn;
+
+        // Fresh turn: the source has not added mana → the gate is open (true).
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+
+        // After the source records mana production → the gate is closed (false).
+        state.mana_added_by_ability_this_turn.insert(source);
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+
+        // A different source is unaffected — the tracker is per-source.
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(ObjectId(78)),
+            None,
+        ));
+
+        // No source id → fails closed (cannot evaluate the gate).
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            None
+        ));
+    }
+
     /// CR 603.4 + CR 810.9a: "if you have N or more life" reads the
     /// controller's TEAM total in a 2HG game. Team A = 30 + 25 = 55 satisfies a
     /// minimum of 50, even though neither individual reaches 50. Reverting Site
@@ -21297,7 +21353,9 @@ pub mod tests {
             Zone::Battlefield,
         );
         let grant = StaticDefinition::new(StaticMode::CastWithKeyword {
-            keyword: Keyword::Replicate(ManaCost::SelfManaCost),
+            keyword: Keyword::Replicate(AbilityCost::Mana {
+                cost: ManaCost::SelfManaCost,
+            }),
         })
         .affected(TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Subtype("Sliver".into())).controller(ControllerRef::You),

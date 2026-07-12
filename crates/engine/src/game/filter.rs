@@ -79,6 +79,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::PlayedFromSourceExile
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
@@ -302,6 +303,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::PlayedFromSourceExile
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
@@ -1938,6 +1940,18 @@ fn filter_inner_for_object(
                 .iter()
                 .any(|entry| entry.exiled_id == object_id)
         }
+        // CR 406.6 + CR 607.2a: "played/cast from among cards exiled with [this
+        // object]" — matched against the provenance stamp captured at play/cast
+        // time (`GameObject.played_from_exile_source`), because the source's exile
+        // link is already stripped by the time the LandPlayed/SpellCast trigger
+        // evaluates. `source_id` is the ability source (the exiling permanent).
+        TargetFilter::PlayedFromSourceExile => {
+            state
+                .objects
+                .get(&object_id)
+                .and_then(|obj| obj.played_from_exile_source)
+                == Some(source_id)
+        }
         // CR 607.2a: References a specific card exiled by the source, indexed by order.
         // Used by The Mimeoplasm to distinguish "the first card exiled this way" from
         // "the second card exiled this way". ENGINE INVARIANT: The ordering is
@@ -2241,6 +2255,19 @@ fn zone_change_filter_inner(
             .attachments
             .iter()
             .any(|att| att.object_id == source_id),
+        // CR 406.6 + CR 607.2a: "played from among cards exiled with [this
+        // object]" — the played land carries a provenance stamp captured at play
+        // time (`GameObject.played_from_exile_source`), which is set before the
+        // LandPlayed event is pushed, so it is live when this matcher runs. Unlike
+        // `ExiledBySource` (below, `=> false` on a record because the live link is
+        // gone), this reads the durable stamp on the just-played land.
+        TargetFilter::PlayedFromSourceExile => {
+            state
+                .objects
+                .get(&record.object_id)
+                .and_then(|obj| obj.played_from_exile_source)
+                == Some(source_id)
+        }
         TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
@@ -2556,6 +2583,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::PlayedFromSourceExile
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
@@ -2866,6 +2894,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::PlayedFromSourceExile
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner

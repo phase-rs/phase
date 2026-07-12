@@ -956,6 +956,74 @@ fn parse_syr_konrad_trigger_lines_stays_single_disjunctive_trigger() {
     );
 }
 
+/// CR 401 + CR 406.6 + CR 607.2a: The Matrix of Time's shared-subject compound
+/// "Whenever you play a land or cast a spell from among cards exiled with ~, that
+/// card's owner loses 3 life and exiles the top card of their library" must:
+///   1. split into a LandPlayed + SpellCast pair (CR 603.1),
+///   2. carry the FULL effect chain LoseLife(3) → ExileTop(1) on BOTH halves
+///      (the trailing exile leg must not be dropped), and
+///   3. gate BOTH halves with `valid_card = PlayedFromSourceExile` — the
+///      provenance qualifier sits on the pre-split compound and must be applied
+///      to the land half too (the asymmetric-split trap: post-split the land half
+///      no longer contains "from among cards exiled with ~").
+#[test]
+fn parse_matrix_of_time_gates_both_halves_and_chains_exile_top() {
+    const ORACLE: &str = "Whenever you play a land or cast a spell from among cards \
+        exiled with The Matrix of Time, that card's owner loses 3 life and exiles \
+        the top card of their library.";
+    let defs = parse_trigger_lines(ORACLE, "The Matrix of Time");
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected LandPlayed + SpellCast, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    let has_land = defs
+        .iter()
+        .any(|d| matches!(d.mode, TriggerMode::LandPlayed));
+    let has_spell = defs.iter().any(|d| {
+        matches!(
+            d.mode,
+            TriggerMode::SpellCast | TriggerMode::SpellCastOrCopy
+        )
+    });
+    assert!(
+        has_land && has_spell,
+        "expected both LandPlayed and SpellCast halves"
+    );
+
+    for def in &defs {
+        // C2: both halves gated on exile-pool provenance (guards the land-half
+        // asymmetric-split trap — without the pre-split gate the land half would
+        // fire on every ordinary land drop).
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::PlayedFromSourceExile),
+            "half {:?} must be gated on PlayedFromSourceExile",
+            def.mode
+        );
+        // C1: the effect chain is LoseLife(3) → ExileTop(1), both bound to the
+        // played/cast card's owner.
+        let execute = def.execute.as_ref().expect("trigger has an execute body");
+        assert!(
+            matches!(&*execute.effect, Effect::LoseLife { .. }),
+            "half {:?} primary effect must be LoseLife, got {:?}",
+            def.mode,
+            execute.effect
+        );
+        let exile_sib = execute
+            .sub_ability
+            .as_ref()
+            .expect("LoseLife must chain an ExileTop sibling (not drop it)");
+        assert!(
+            matches!(&*exile_sib.effect, Effect::ExileTop { .. }),
+            "half {:?} sibling must be ExileTop, got {:?}",
+            def.mode,
+            exile_sib.effect
+        );
+    }
+}
+
 // SHAPE TEST — issue #411: Syr Konrad's three-way disjunctive zone-change
 // trigger. Asserts the parsed `TriggerDefinition` SHAPE; it does not drive
 // the runtime apply pipeline (see `triggers.rs` for the runtime test).

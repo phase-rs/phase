@@ -17274,6 +17274,82 @@ fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
     false
 }
 
+/// Append `sibling` at the END of a clause's `sub_ability` sibling chain,
+/// walking any existing links so it becomes the last sequential step.
+fn append_sequential_sibling(clause: &mut ParsedEffectClause, sibling: AbilityDefinition) {
+    let mut slot = &mut clause.sub_ability;
+    while let Some(existing) = slot {
+        slot = &mut existing.sub_ability;
+    }
+    *slot = Some(Box::new(sibling));
+}
+
+/// CR 401 + CR 406: Split a player-subject predicate of the form
+/// "<verb…> and exile(s) the top [N] card(s) of their library [face down]" into
+/// its leading verb clause plus a trailing `Effect::ExileTop` sibling, both bound
+/// to the same player subject. Without this, `lower_imperative_clause` parses
+/// only the first verb (e.g. "loses 3 life") and silently drops the exile leg
+/// (The Matrix of Time: "that card's owner loses 3 life and exiles the top card
+/// of their library"). The leading verb is lowered through the full
+/// subject-predicate machinery, so this composes for every "<player> <verb> and
+/// exiles the top card of their library" card. Returns `None` when no trailing
+/// library-exile leg is present.
+fn try_split_subject_verb_and_exiles_top(
+    subject: &SubjectPhraseAst,
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    // The trailing leg exiles the subject's own library, so it is meaningful
+    // only for a player subject.
+    if !target_filter_can_target_player(&subject.affected) {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    // Structural split on the coordinating "and exile(s)" that introduces the
+    // trailing library-exile leg (third-person "exiles" or bare "exile").
+    let (primary_lower, exile_tail) = nom_primitives::split_once_on(&lower, " and exiles ")
+        .ok()
+        .or_else(|| nom_primitives::split_once_on(&lower, " and exile ").ok())
+        .map(|(_, pair)| pair)?;
+    // The tail must be a "the top [N] card(s) of their library" exile; any other
+    // "and exile" clause is left for the general parser.
+    if !scan_contains_phrase(exile_tail, "the top")
+        || !scan_contains_phrase(exile_tail, "library")
+        || primary_lower.trim().is_empty()
+    {
+        return None;
+    }
+    // Recover the original-case leading verb text (Oracle text is ASCII here, so
+    // the lowercase byte offset maps 1:1 onto the original).
+    let primary_text = &text[..primary_lower.len()];
+    // Lower the leading verb through the full subject-predicate machinery so it
+    // inherits the subject exactly as it would standalone (LoseLife →
+    // ParentTargetOwner, etc.).
+    let mut primary = lower_subject_predicate_ast(
+        subject.clone(),
+        PredicateAst::ImperativeFallback {
+            text: primary_text.to_string(),
+        },
+        ctx,
+    );
+    // Build the trailing ExileTop leg bound to the same player subject.
+    // `parse_subject_exile_top_count` reads the count (default 1 for "the top
+    // card"); a trailing "face down" marks a hidden-information exile (CR 406.3).
+    let count = parse_subject_exile_top_count(exile_tail);
+    let face_down = scan_contains_phrase(exile_tail, "face down");
+    let mut exile_def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ExileTop {
+            player: subject.affected.clone(),
+            count,
+            face_down,
+        },
+    );
+    exile_def.sub_link = SubAbilityLink::SequentialSibling;
+    append_sequential_sibling(&mut primary, exile_def);
+    Some(primary)
+}
+
 fn lower_subject_predicate_ast(
     subject: SubjectPhraseAst,
     predicate: PredicateAst,
@@ -17329,6 +17405,13 @@ fn lower_subject_predicate_ast(
         },
         PredicateAst::ImperativeFallback { text } => {
             let pred_lower = text.to_lowercase();
+            // CR 401 + CR 406: "<player> <verb> and exiles the top card of their
+            // library" — chain the trailing library-exile leg instead of dropping
+            // it (The Matrix of Time). Runs first so the leading verb is lowered
+            // through the normal machinery below.
+            if let Some(clause) = try_split_subject_verb_and_exiles_top(&subject, &text, ctx) {
+                return clause;
+            }
             if matches!(pred_lower.as_str(), "shuffle" | "shuffles")
                 && matches!(
                     subject.affected,

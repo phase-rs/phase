@@ -2447,6 +2447,7 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
             acc
         }
         TargetFilter::ExiledBySource => Axes::NONE,
+        TargetFilter::PlayedFromSourceExile => Axes::NONE,
         TargetFilter::ExiledCardByIndex { index: _ } => Axes::NONE,
         TargetFilter::TriggeringSpellController => Axes {
             event: true,
@@ -2608,6 +2609,9 @@ fn scan_trigger_condition(x: &TriggerCondition) -> Axes {
             projected: true,
         },
         TriggerCondition::EchoDue => Axes::NONE,
+        // CR 603.4: reads a per-turn mana-production tracker keyed by source; no
+        // event/sibling/projected axis involvement.
+        TriggerCondition::SourceHasntAddedManaThisTurn => Axes::NONE,
         TriggerCondition::MinCoAttackers { filter, minimum: _ } => {
             let mut acc = Axes::NONE;
             if let Some(x) = filter {

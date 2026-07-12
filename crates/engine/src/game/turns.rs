@@ -871,6 +871,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // boundary alongside other "this turn" trackers (mirrors the cleanup of
     // `trigger_fire_counts_this_turn`).
     state.ability_resolutions_this_turn.clear();
+    // CR 603.4: Per-turn "added mana with this ability" tracker resets at the turn
+    // boundary alongside the resolution counter (Carpet of Flowers).
+    state.mana_added_by_ability_this_turn.clear();
     state.graveyard_cast_permissions_used.clear();
     // CR 110.4 + CR 601.2a: Reset per-turn-per-permanent-type tracking (Muldrotha).
     state.graveyard_cast_permissions_used_per_type.clear();

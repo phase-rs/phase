@@ -158,6 +158,7 @@ pub fn resolve(
         );
     }
     record_firebending_if_marked(state, ability, produced_mana, events);
+    record_mana_added_by_ability(state, ability, produced_mana);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -219,6 +220,7 @@ pub fn handle_choose_mana_effect(
         );
     }
     record_firebending_if_marked(state, ability, produced_mana, events);
+    record_mana_added_by_ability(state, ability, produced_mana);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -236,6 +238,26 @@ pub fn handle_choose_mana_effect(
     state.priority_player = ability.controller;
     super::drain_pending_continuation(state, events);
     Ok(state.waiting_for.clone())
+}
+
+/// CR 603.4: Record that this source added mana via a printed
+/// triggered/activated ability, so a `TriggerCondition::SourceHasntAddedManaThisTurn`
+/// intervening-if can gate a once-per-turn mana trigger (Carpet of Flowers)
+/// across the turn's main phases. Only records when ≥1 mana was actually added
+/// (a declined `may` or an X=0 production must NOT block the later phase) and the
+/// resolving ability is a printed ability (`ability_index.is_some()` —
+/// synthesized/inline mana abilities and spell effects are excluded, matching the
+/// "with this ability" scope). Keyed by source ObjectId.
+fn record_mana_added_by_ability(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    produced_mana: bool,
+) {
+    if produced_mana && ability.ability_index.is_some() {
+        state
+            .mana_added_by_ability_this_turn
+            .insert(ability.source_id);
+    }
 }
 
 fn record_firebending_if_marked(

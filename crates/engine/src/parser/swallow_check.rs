@@ -774,6 +774,13 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // modes above; without it the swallow auditor false-positives an
             // Optional_YouMay clause and demotes the card from "supported."
             | StaticMode::CastFromHandFree { .. }
+            // CR 701.38d: "While voting, you may vote an additional time" grants a
+            // player extra votes at the time they would otherwise vote. The entire
+            // semantic content of the mode is the opt-in "you may vote" permission,
+            // so its "you may" surface must not trip the Optional_YouMay swallow
+            // detector (The Valeyard). Its mandatory twin GrantsExtraVillainousChoice
+            // has no "you may" surface and is deliberately omitted.
+            | StaticMode::GrantsExtraVote
     )
 }
 

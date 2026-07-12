@@ -1743,41 +1743,92 @@ pub(crate) fn try_parse_graveyard_cast_permission(
 
 /// CR 601.2f: Parse a trailing ADDITIONAL-cost rider on a cast-from-zone
 /// permission — "by paying <N> life in addition to their other costs" (Festival
-/// of Embers). The cost is paid on TOP of the spell's normal mana cost (CR
-/// 601.2f), distinct from the CR 118.9 alternative rider parsed by
+/// of Embers) or "by discarding <N> cards in addition to paying its other costs"
+/// (Me, the Immortal). The cost is paid on TOP of the spell's normal mana cost
+/// (CR 601.2f: "additional costs ... may include ... discarding cards"), distinct
+/// from the CR 118.9 alternative rider parsed by
 /// `oracle_effect::try_parse_alt_cost_rider`. Composed from nom combinators so
-/// the prefix × quantity × suffix axes stay independent and future shapes
-/// (other costs, "its"/"their" pronoun) extend without permutation blowup.
+/// the (verb-prefix × quantity × unit) and closer axes stay independent and
+/// future cost shapes extend without permutation blowup.
 /// Returns `None` when the rider shape is absent.
 fn parse_cast_permission_additional_cost_rider(
     trailing: &str,
 ) -> Option<crate::types::ability::AbilityCost> {
     let lower = trailing.trim_start();
-    // CR 601.2f: "by paying " opens the rider; "in addition to" distinguishes
-    // the additional shape from a CR 118.9 "rather than" alternative.
+    // CR 601.2f: "in addition to" distinguishes the additional shape from a CR
+    // 118.9 "rather than" alternative.
     if !nom_primitives::scan_contains(lower, "in addition to") {
         return None;
     }
-    let rest = nom_tag_lower(lower, lower, "by paying ")?;
-    // CR 119.4: "<N> life" — the only additional-cost shape used by the current
-    // class that this permission carries (Festival of Embers).
-    let (after_num, n) = nom_primitives::parse_number(rest).ok()?;
-    let after_life = nom_tag_lower(after_num, after_num, " life")?;
-    // CR 601.2f: the tail must be the "in addition to (their|its) other costs"
-    // closer — anything else is an unmodeled shape.
-    let after_life = after_life.trim_start();
-    let after_in_addition = nom_tag_lower(after_life, after_life, "in addition to ")?;
-    let after_pronoun = nom_tag_lower(after_in_addition, after_in_addition, "their other costs")
-        .or_else(|| nom_tag_lower(after_in_addition, after_in_addition, "its other costs"))?;
+    // CR 601.2f: the cost head is one of the permitted additional-cost shapes,
+    // each an independent (verb-prefix × quantity × unit) axis.
+    let (after_cost, cost) = parse_cast_permission_rider_cost_head(lower)?;
+    // CR 601.2f: the tail must be the shared "in addition to [paying] (their|its)
+    // other costs" closer — anything else is an unmodeled shape.
+    let after_cost = after_cost.trim_start();
+    let after_in_addition = nom_tag_lower(after_cost, after_cost, "in addition to ")?;
+    // "paying " is optional: Festival of Embers omits it ("in addition to their
+    // other costs"), Me, the Immortal includes it ("in addition to paying its
+    // other costs"). Both denote the spell's normal costs paid alongside.
+    let after_paying =
+        nom_tag_lower(after_in_addition, after_in_addition, "paying ").unwrap_or(after_in_addition);
+    let after_pronoun = nom_tag_lower(after_paying, after_paying, "their other costs")
+        .or_else(|| nom_tag_lower(after_paying, after_paying, "its other costs"))?;
     // allow-noncombinator: punctuation cleanup (drop the sentence terminator) on a pre-tokenized chunk, not parsing dispatch.
     let trimmed_pronoun = after_pronoun.trim_start();
     let after_pronoun = trimmed_pronoun.strip_prefix('.').unwrap_or(trimmed_pronoun); // allow-noncombinator: punctuation cleanup on a pre-tokenized chunk, not parsing dispatch.
     if !after_pronoun.trim().is_empty() {
         return None;
     }
-    Some(crate::types::ability::AbilityCost::PayLife {
-        amount: QuantityExpr::Fixed { value: n as i32 },
-    })
+    Some(cost)
+}
+
+/// CR 601.2f: Parse the cost head of a cast-permission additional-cost rider,
+/// returning the remaining text after the cost phrase plus the typed cost. Each
+/// arm composes an independent (verb-prefix × quantity × unit) axis via
+/// `nom_tag_lower`/`parse_number`, so new additional-cost shapes extend without
+/// permutation blowup. Recognized shapes:
+/// - CR 119.4: "by paying <N> life" (Festival of Embers).
+/// - CR 601.2f: "by discarding <N> card(s)" (Me, the Immortal) — additional
+///   costs "may include ... discarding cards," chosen from hand by the player.
+fn parse_cast_permission_rider_cost_head(
+    lower: &str,
+) -> Option<(&str, crate::types::ability::AbilityCost)> {
+    use crate::types::ability::{AbilityCost, CardSelectionMode, DiscardSelfScope};
+    // CR 119.4: "by paying <N> life".
+    if let Some(rest) = nom_tag_lower(lower, lower, "by paying ") {
+        if let Ok((after_num, n)) = nom_primitives::parse_number(rest) {
+            if let Some(after_life) = nom_tag_lower(after_num, after_num, " life") {
+                return Some((
+                    after_life,
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: n as i32 },
+                    },
+                ));
+            }
+        }
+    }
+    // CR 601.2f + CR 601.2f/701.9a default: "by discarding <N> card(s)" — the
+    // discarded cards are the player's choice (`Chosen`) from hand (`FromHand`).
+    if let Some(rest) = nom_tag_lower(lower, lower, "by discarding ") {
+        if let Ok((after_num, n)) = nom_primitives::parse_number(rest) {
+            // Plural "cards" first so the singular " card" arm doesn't leave a "s".
+            if let Some(after_cards) = nom_tag_lower(after_num, after_num, " cards")
+                .or_else(|| nom_tag_lower(after_num, after_num, " card"))
+            {
+                return Some((
+                    after_cards,
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: n as i32 },
+                        filter: None,
+                        selection: CardSelectionMode::Chosen,
+                        self_scope: DiscardSelfScope::FromHand,
+                    },
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// CR 305.1 + CR 601.2a + CR 700.6: Parse the disjunctive once-per-turn
@@ -1945,6 +1996,7 @@ fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
+        | TargetFilter::PlayedFromSourceExile
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner

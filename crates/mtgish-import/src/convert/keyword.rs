@@ -302,9 +302,12 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
             cost: pure_mana(cost, "Rule::SpliceOnto", path)?,
         },
 
-        // CR 702.56a: Replicate {cost} — additional-cost-on-cast copy
-        // mechanic. Engine carries only the mana cost.
-        Rule::Replicate(c) => Keyword::Replicate(pure_mana(c, "Rule::Replicate", path)?),
+        // CR 702.56a: Replicate {cost} — additional-cost-on-cast copy mechanic.
+        // The engine now carries a general `AbilityCost` (like Escalate); mtgish
+        // only ever supplies a mana replicate cost, so wrap it in `AbilityCost::Mana`.
+        Rule::Replicate(c) => Keyword::Replicate(AbilityCost::Mana {
+            cost: pure_mana(c, "Rule::Replicate", path)?,
+        }),
         // CR 702.163a: For Mirrodin! — Equipment ETB triggered ability
         // (Rebel-token + auto-attach). Bare keyword.
         Rule::ForMirrodin => Keyword::ForMirrodin,

@@ -246,7 +246,14 @@ pub(crate) fn parse_spells_have_keyword_for_test(text: &str) -> Option<StaticDef
 fn parse_granted_self_cost_keyword(keyword_str: &str) -> Option<Keyword> {
     [
         ("blitz", Keyword::Blitz as fn(ManaCost) -> Keyword),
-        ("replicate", Keyword::Replicate as fn(ManaCost) -> Keyword),
+        // CR 702.56a: Replicate now carries a general `AbilityCost`; the granted
+        // self-cost form is always a mana cost, wrapped via a non-capturing
+        // closure that coerces to the shared `fn(ManaCost) -> Keyword` shape.
+        (
+            "replicate",
+            (|mc| Keyword::Replicate(crate::types::ability::AbilityCost::Mana { cost: mc }))
+                as fn(ManaCost) -> Keyword,
+        ),
     ]
     .into_iter()
     .find_map(|(name, ctor)| {
