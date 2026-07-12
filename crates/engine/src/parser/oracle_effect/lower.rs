@@ -4895,9 +4895,28 @@ pub(super) fn extract_switch_pt_multi_target(text: &str) -> Option<MultiTargetSp
 
 pub(super) fn extract_double_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
-    let (_, target_text) = preceded(
-        tag::<_, _, OracleError<'_>>("double the number of each kind of counter on "),
-        rest,
+    // CR 701.10e (#5247): "double the number of <descriptor> counter(s) on
+    // <target>" — the descriptor is either "each kind of" or a TYPED counter
+    // ("+1/+1 counters", "charge counters", …). Consume the descriptor up to the
+    // "counter(s) on " that introduces the target, so a typed counter surfaces
+    // the same `MultiTargetSpec` as the "each kind of" form. Without this, Kinetic
+    // Ooze ("double the number of +1/+1 counters on any number of other target
+    // creatures") drops its "any number of … target creatures" bound and binds a
+    // single required target — the ETB then panics with "Unused selected target
+    // slots" (p0). The singular "counter on" arm preserves the "each kind of
+    // counter on" form unchanged.
+    let (target_text, _) = preceded(
+        tag::<_, _, OracleError<'_>>("double the number of "),
+        alt((
+            (
+                take_until::<_, _, OracleError<'_>>(" counters on "),
+                tag(" counters on "),
+            ),
+            (
+                take_until::<_, _, OracleError<'_>>(" counter on "),
+                tag(" counter on "),
+            ),
+        )),
     )
     .parse(lower.as_str())
     .ok()?;

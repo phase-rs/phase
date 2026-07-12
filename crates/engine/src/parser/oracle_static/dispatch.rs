@@ -2668,6 +2668,12 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 122.1d + CR 101.2: "<Counter> counters can't be removed from <subject>."
+    // (Fear of Sleep Paralysis) — counter-removal prohibition.
+    if let Some(def) = parse_counters_cant_be_removed_static(&tp, &text) {
+        return Some(def);
+    }
+
     // NOTE: "enters with N counters" patterns are now handled by oracle_replacement.rs
     // as proper Moved replacement effects (paralleling the "enters tapped" pattern).
 
@@ -3564,6 +3570,46 @@ pub(crate) fn try_parse_counts_as_named_static(text: &str) -> Option<StaticDefin
     Some(
         StaticDefinition::new(StaticMode::CountsAsNamed { name })
             .active_zones(vec![Zone::Graveyard])
+            .description(text.to_string()),
+    )
+}
+
+/// CR 122.1d + CR 101.2: "<Counter> counters can't be removed from <subject>."
+/// (Fear of Sleep Paralysis) — counter-removal prohibition. Parses the Oracle
+/// text pattern and builds a `StaticMode::CountersCantBeRemoved` static whose
+/// `affected` filter scopes the protected permanents.
+fn parse_counters_cant_be_removed_static(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    // Composed grammar (CR 122.1d + CR 101.2):
+    //   <counter_type> " counters can't be removed from " <subject> [.] EOF
+    // Uses nom combinators for the counter-type prefix and the fixed anchor,
+    // then parse_type_phrase for the subject (same pattern as
+    // parse_damage_not_removed_during_cleanup).
+
+    // Step 1: Parse the counter type from the start of the lowercase text.
+    let (after_counter, counter_type) = nom_primitives::parse_strict_counter_type(tp.lower).ok()?;
+
+    // Step 2: Consume the fixed anchor via nom_tag_lower.
+    let body = nom_tag_lower(
+        after_counter,
+        after_counter,
+        " counters can't be removed from ",
+    )?;
+
+    // Step 3: Parse the subject from the original-case text at the same byte
+    // offset as `body` within `tp.lower`.
+    let consumed = tp.lower.len() - body.len();
+    let subject_original = tp.original[consumed..].trim_end_matches('.').trim();
+    let (filter, remainder) = parse_type_phrase(subject_original);
+    if matches!(&filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::CountersCantBeRemoved { counter_type })
+            .affected(filter)
             .description(text.to_string()),
     )
 }

@@ -112,23 +112,14 @@ fn advance_to_declare_blockers(runner: &mut GameRunner) {
 /// by `apply_pending_post_replacement_effect`, which runs `Effect::Draw` as a
 /// general (non-draw-owned) post-replacement continuation.
 ///
-/// # This test pins a KNOWN BUG (issue #5652). Read before "fixing" it.
+/// # Self-scope (issue #5652, FIXED).
 ///
 /// Swans' Oracle text scopes its shield to damage dealt **to this creature**.
-/// `DamageTargetFilter` has no variant that can express that (`CreatureOnly`,
-/// `Player`, `PlayerOrPermanentsControlledBy` — none mean "the host object"), so
-/// the parser leaves `damage_target_filter: None`, and `replacement.rs`'s
-/// `if let Some(ref tf) = repl_def.damage_target_filter` then applies **no target
-/// restriction at all**. The shield therefore also fires on the damage Swans
-/// *deals*: the blocker takes 0 damage and P0 draws 4.
-///
-/// Correct behaviour is `hand_drawn(P0) == 0` and `blocker.damage_marked == 4`.
-/// The assertions below deliberately encode the CURRENT (wrong) values, because
-/// Plan 03's job is to rewrite the draw-delivery seam **without changing
-/// observable behaviour** — a pin that encoded the fix would fail for the entire
-/// rewrite and tell us nothing. When the scoping bug is fixed, this test SHOULD
-/// go red; flip the two marked assertions then, and delete this section. The
-/// fix lands under issue #5652.
+/// The parser now sets `valid_card: SelfRef` for self-scoped damage shields,
+/// which `replacement.rs` applies against `ProposedEvent::Damage`'s recipient
+/// (`affected_object_id`), so the shield fires only for damage dealt TO Swans —
+/// not for the damage Swans *deals*. The blocker takes Swans' full 4 and P0
+/// draws nothing (see the two assertions at the end of this test).
 ///
 /// What the test pins that is genuinely correct, and that the rewrite must keep:
 ///   * **who draws** — P1, the *source's* controller, for the damage dealt to
@@ -209,27 +200,21 @@ fn swans_prevented_damage_draws_that_many_for_the_sources_controller() {
         "Swans (4/3) survives — the 3 damage was prevented, not merely sub-lethal"
     );
 
-    // ── BUG-PIN — issue #5652 (see the "KNOWN BUG" section on this test) ──────
-    // Swans' shield has `damage_target_filter: None`, so it is not scoped to
-    // damage dealt TO Swans. It also intercepts the 4 damage Swans DEALS to the
-    // blocker: the blocker takes none, and the rider draws for that damage's
-    // source's controller — P0.
-    //
-    // CORRECT: hand_drawn(P0) == 0 and blocker damage_marked == 4.
-    // These two assertions encode today's wrong values on purpose, so the Plan 03
-    // rewrite cannot change them silently. Fixing the scoping SHOULD break them.
+    // ── #5652 FIXED: the shield is now scoped to damage dealt TO Swans
+    //    (`valid_card: SelfRef`), so it no longer intercepts the 4 damage Swans
+    //    DEALS to the blocker. The blocker takes the full 4, and no draw fires
+    //    for Swans' own damage — P0 draws nothing. ─────────────────────────────
     assert_eq!(
         outcome.hand_drawn(P0),
-        4,
-        "BUG-PIN (#5652): P0 draws 4 because Swans' unscoped shield also prevents \
-         the damage Swans deals. Correct value is 0 — Swans is not the source's \
-         controller for any damage dealt TO it. Fixing #5652 flips this to 0."
+        0,
+        "P0 must draw 0: Swans' self-scoped shield only prevents damage dealt TO \
+         Swans, so no prevention rider fires for the damage Swans deals (#5652)"
     );
     assert_eq!(
         runner.state().objects[&blocker].damage_marked,
-        0,
-        "BUG-PIN (#5652): the blocker takes 0 of Swans' 4 damage because the \
-         unscoped shield prevented it. Correct value is 4. Fixing #5652 flips this."
+        4,
+        "the blocker takes Swans' full 4 combat damage — the self-scoped shield \
+         no longer prevents damage Swans deals (#5652)"
     );
 }
 
