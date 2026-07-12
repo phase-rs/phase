@@ -46,6 +46,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CROSS_PRODUCT_DETECTOR="$SCRIPT_DIR/lib/detect-cross-product-alts.py"
 
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
+BASE_SHA="$(git rev-parse "$BASE")"
+HEAD_SHA="$(git rev-parse HEAD)"
 SCOPE='crates/engine/src/parser'
 
 # When invoked as a pre-commit hook (GIT_INDEX_FILE is set, or no explicit base
@@ -138,6 +140,7 @@ files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" \
     ':(exclude)**/tests.rs' \
     ':(exclude)**/*_tests.rs' 2>/dev/null || true)
 if [ -z "$files" ]; then
+    printf 'Gate A PASS head=%s base=%s\n' "$HEAD_SHA" "$BASE_SHA"
     exit 0
 fi
 
@@ -358,4 +361,5 @@ EOF
     exit 1
 fi
 
+printf 'Gate A PASS head=%s base=%s\n' "$HEAD_SHA" "$BASE_SHA"
 exit 0
