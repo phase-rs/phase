@@ -16360,4 +16360,59 @@ mod tests {
             "UnlessYourTurn shield should match on opponent's turn"
         );
     }
+    /// #5652 (CR 615.1): a prevention effect is a "shield around whatever it's
+    /// affecting" — a self-scoped shield must fire only for damage dealt TO its
+    /// own object, never for damage the object DEALS. Swans of Bryn
+    /// Argoll blocks: the attacker's damage to Swans is prevented (draw rider
+    /// fires), but Swans' combat damage to the attacker must LAND. Before the
+    /// parser fix Swans' shield had `valid_card: None`, so it also prevented the
+    /// damage Swans dealt — the attacker took 0.
+    #[test]
+    fn swans_self_shield_does_not_prevent_damage_it_deals() {
+        use crate::game::combat::AttackTarget;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::game_state::WaitingFor;
+        use crate::types::phase::Phase;
+
+        const SWANS: &str = "Flying\nIf a source would deal damage to ~, prevent that damage. The source's controller draws cards equal to the damage prevented this way.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // P0 attacks with a 2/4 (survives 2 damage so we can read marked damage).
+        let attacker = scenario.add_creature(P0, "Grizzly", 2, 4).id();
+        // The prevented-damage rider makes the damage source's controller draw;
+        // the source of the prevented damage is P0's attacker, so seed P0's
+        // library to avoid a draw-from-empty loss confounding the combat step.
+        scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+        // P1 blocks with Swans (2/2). Flying does not stop a flyer from blocking.
+        let swans = scenario
+            .add_creature_from_oracle(P1, "Swans of Bryn Argoll", 2, 2, SWANS)
+            .id();
+
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+            .expect("declare attackers");
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            runner.pass_both_players();
+        }
+        runner
+            .declare_blockers(&[(swans, attacker)])
+            .expect("declare blockers");
+        let _ = runner.combat_damage();
+
+        // Discriminator: Swans deals 2 to the attacker and it MUST land.
+        assert_eq!(
+            runner.state().objects[&attacker].damage_marked,
+            2,
+            "Swans' own combat damage must not be prevented by its self-shield"
+        );
+        // Reach-guard: the attacker's 2 damage TO Swans is still prevented.
+        assert_eq!(
+            runner.state().objects[&swans].damage_marked,
+            0,
+            "damage dealt TO Swans must still be prevented"
+        );
+    }
 }

@@ -8355,34 +8355,77 @@ fn parse_damage_to_self_instead_followup(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     let total_len = norm_lower.len();
-    let ((effect_start, effect_len), rest) = nom_on_lower(normalized, norm_lower, |i| {
-        let (i, _) = tag("if damage would be dealt to ").parse(i)?;
-        let (i, _) = alt((tag("~"), tag("you"))).parse(i)?;
-        let (i, _) = tag(", ").parse(i)?;
-        let effect_start = total_len - i.len();
-        let (i, effect) = take_until::<_, _, OracleError<'_>>(" instead").parse(i)?;
-        let (i, _) = tag(" instead").parse(i)?;
-        let (i, _) = opt(char('.')).parse(i)?;
-        Ok((i, (effect_start, effect.len())))
-    })?;
-    if !rest.trim().is_empty() {
-        return None;
-    }
-
+    let ((effect_start, effect_len, recipient_scope), rest) =
+        nom_on_lower(normalized, norm_lower, |i| {
+            let (i, _) = tag("if damage would be dealt to ").parse(i)?;
+            // CR 614.1: a replacement effect is a "shield" around whatever it's
+            // affecting. "~" is the source's own object (self-scoped → scope to
+            // `SelfRef`); "you" is the controller (a player-scoped shield, not an
+            // object filter → no `valid_card`). They must not resolve identically:
+            // a self shield left with no recipient scope wrongly replaces damage
+            // the source DEALS, not just damage dealt TO it (#5652).
+            let (i, recipient_scope) = alt((
+                value(Some(TargetFilter::SelfRef), tag("~")),
+                value(Option::<TargetFilter>::None, tag("you")),
+            ))
+            .parse(i)?;
+            let (i, _) = tag(", ").parse(i)?;
+            let effect_start = total_len - i.len();
+            let (i, effect) = take_until::<_, _, OracleError<'_>>(" instead").parse(i)?;
+            let (i, _) = tag(" instead").parse(i)?;
+            let (i, _) = opt(char('.')).parse(i)?;
+            Ok((i, (effect_start, effect.len(), recipient_scope)))
+        })?;
     let effect_text = normalized.get(effect_start..effect_start + effect_len)?;
+
+    // CR 614.1a impossibility rider: "... <effect> instead. If you can't,
+    // <consequence>." (Nefarious Lich — "exile that many cards from your
+    // graveyard instead. If you can't, you lose the game."). `nom_on_lower`
+    // returns `rest` in the original (mixed-case) text, so match it via a
+    // lowercased copy. Fold the rider back onto the substituted effect so the
+    // shared "if you can't" lowering (→ `Not { ZoneChangedThisWay }`) threads it
+    // as a conditional continuation of the substituted effect, rather than
+    // bailing on the non-empty remainder. Any OTHER trailing text still bails,
+    // preserving the recognizer's single-clause scope.
+    let rider = rest.trim();
+    let followup_text = if rider.is_empty() {
+        effect_text.to_string()
+    } else {
+        let rider_lower = rider.to_lowercase();
+        if alt((
+            tag::<_, _, OracleError<'_>>("if you can't,"),
+            tag("if you cannot,"),
+        ))
+        .parse(rider_lower.as_str())
+        .is_err()
+        {
+            return None;
+        }
+        format!("{effect_text}. {rider}")
+    };
+
     let mut ctx = ParseContext {
         subject: Some(TargetFilter::SelfRef),
         in_replacement: true,
         ..ParseContext::default()
     };
-    let followup = parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut ctx);
+    let followup = parse_effect_chain_with_context(&followup_text, AbilityKind::Spell, &mut ctx);
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::DealtDamage)
-            .prevention_shield(PreventionAmount::All)
-            .execute(followup)
-            .description(original_text.to_string()),
-    )
+    let mut def = ReplacementDefinition::new(ReplacementEvent::DealtDamage)
+        .prevention_shield(PreventionAmount::All)
+        .execute(followup)
+        .description(original_text.to_string());
+    if let Some(scope) = recipient_scope {
+        // CR 614.1: scope the replacement to damage dealt TO the source's own
+        // object (the "shield around whatever it's affecting"). The runtime
+        // applies `valid_card` against the damage recipient
+        // (`ProposedEvent::Damage::affected_object_id`), so `SelfRef` fires only
+        // when the source itself is the recipient — not when it deals damage.
+        // Without this, Phytohydra/Lichenthrope-class shields also replace the
+        // source's own combat damage (#5652).
+        def = def.valid_card(scope);
+    }
+    Some(def)
 }
 
 fn parse_damage_to_player_instead_followup(
@@ -8616,6 +8659,15 @@ fn parse_damage_prevention_replacement(
     // class of bug.
     let valid_card_filter: Option<TargetFilter> = if nom_primitives::scan_contains(working_lower, "dealt to ~")
             || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
+            // CR 615.1: Active-voice self-recipient form — "If a source would
+            // deal damage to ~, prevent that damage ..." (Swans of Bryn Argoll —
+            // #5652). A prevention effect is a "shield around whatever it's
+            // affecting"; here that is `~`, the source card. The passive "dealt
+            // to ~" scan above misses the active-voice phrasing because the
+            // recipient trails the verb. Without `SelfRef` `valid_card` stays
+            // None and the shield also prevents damage the source DEALS (Swans
+            // prevented its own combat damage and drew off it).
+            || nom_primitives::scan_contains(working_lower, "deal damage to ~")
             // CR 615.1a: Subject-first self-recipient form — "If ~ would be dealt
             // damage, prevent that damage ..." (Unbreathing Horde — issue #2888).
             // `~` is the source card, so the shield is self-scoped; without
@@ -9675,6 +9727,86 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
+
+    /// #5649: Nefarious Lich's damage clause is a CR 614.1a substitution
+    /// replacement — "If damage would be dealt to you, exile that many cards from
+    /// your graveyard instead. If you can't, you lose the game." Previously it
+    /// dropped to an inert standalone ability with the impossibility rider lost
+    /// (the recognizer bailed on the non-empty remainder). It must now parse as a
+    /// `DealtDamage` replacement whose execute exiles `EventContextAmount` cards
+    /// from the controller's graveyard — the count riding the clause's
+    /// `MultiTargetSpec` (CR 700.4, Forage precedent) — with the "if you can't"
+    /// rider threaded as a conditional `LoseTheGame`.
+    #[test]
+    fn nefarious_lich_damage_substitution_exiles_that_many_with_impossibility_rider() {
+        let parsed = parse_oracle_text(
+            "If damage would be dealt to you, exile that many cards from your graveyard instead. \
+             If you can't, you lose the game.",
+            "Nefarious Lich",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let rep = parsed
+            .replacements
+            .iter()
+            .find(|r| matches!(r.event, ReplacementEvent::DealtDamage))
+            .expect("damage-substitution replacement must exist (was inert on main)");
+        assert!(
+            matches!(rep.shield_kind, ShieldKind::Prevention { .. }),
+            "the substituted damage must be prevented, got {:?}",
+            rep.shield_kind
+        );
+        let execute = rep
+            .execute
+            .as_ref()
+            .expect("replacement must carry an execute");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "execute must exile from the graveyard, got {:?}",
+            execute.effect
+        );
+        // CR 700.4: the "that many" count rides the clause `MultiTargetSpec`.
+        let mt = execute
+            .multi_target
+            .as_ref()
+            .expect("counted graveyard exile must carry a MultiTargetSpec");
+        assert!(
+            matches!(
+                &mt.min,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                }
+            ),
+            "exile count must be the dynamic damage amount, got {:?}",
+            mt.min
+        );
+        // CR 614.1a: "if you can't, you lose the game" → conditional `LoseTheGame`.
+        let rider = execute
+            .sub_ability
+            .as_ref()
+            .expect("impossibility rider must be threaded onto the exile");
+        assert!(
+            matches!(&*rider.effect, Effect::LoseTheGame { .. }),
+            "rider effect must be LoseTheGame, got {:?}",
+            rider.effect
+        );
+        assert!(
+            matches!(
+                rider.condition,
+                Some(crate::types::ability::AbilityCondition::Not { .. })
+            ),
+            "rider must be gated on the impossibility condition, got {:?}",
+            rider.condition
+        );
+    }
 
     /// CR 614.1c + CR 614.12 + CR 700.6 + CR 205.1b: "As a [historic permanent
     /// you control] enters, it becomes a 7/7 Dinosaur creature in addition to its
@@ -18725,6 +18857,70 @@ mod snapshot_tests {
             )
             .is_none(),
             "external-subject entry must not match the self controller-override arm"
+        );
+    }
+    /// #5652 (CR 614.1 / CR 615.1): a self-scoped damage shield ("If [a source
+    /// would deal] damage to ~, <prevent / X instead>") is a "shield around
+    /// whatever it's affecting" — it must scope to damage dealt TO the source's
+    /// own object via `valid_card: SelfRef`. Without it the shield
+    /// leaves the recipient scope unset and also replaces damage the source
+    /// DEALS. Covers the passive "instead" form (Phytohydra) and the active-voice
+    /// prevention form (Swans of Bryn Argoll); the player-scoped "to you" form
+    /// (Nefarious Lich) must NOT be flipped to `SelfRef`.
+    #[test]
+    fn self_scoped_damage_shields_bind_valid_card_selfref() {
+        fn valid_card_of(name: &str, kw: &[&str], text: &str) -> Option<TargetFilter> {
+            let kw: Vec<String> = kw.iter().map(|s| s.to_string()).collect();
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                text,
+                name,
+                &kw,
+                &["Creature".to_string()],
+                &[],
+            );
+            assert_eq!(
+                parsed.replacements.len(),
+                1,
+                "{name}: expected exactly one replacement, got {:?}",
+                parsed.replacements
+            );
+            parsed.replacements[0].valid_card.clone()
+        }
+
+        // Active-voice prevention self-shield (Swans) — previously valid_card: None.
+        assert_eq!(
+            valid_card_of(
+                "Swans of Bryn Argoll",
+                &["Flying"],
+                "Flying\nIf a source would deal damage to ~, prevent that damage. \
+                 The source's controller draws cards equal to the damage prevented this way.",
+            ),
+            Some(TargetFilter::SelfRef),
+            "Swans must scope its prevention shield to damage dealt TO itself"
+        );
+
+        // Passive "X instead" self-shield (Phytohydra) — previously valid_card: None.
+        assert_eq!(
+            valid_card_of(
+                "Phytohydra",
+                &[],
+                "If damage would be dealt to ~, put that many +1/+1 counters on it instead.",
+            ),
+            Some(TargetFilter::SelfRef),
+            "Phytohydra must scope its replacement to damage dealt TO itself"
+        );
+
+        // Player-scoped "to you" shield (Nefarious Lich) must stay unscoped by
+        // `valid_card` — it is a player recipient, not the source's object.
+        assert_eq!(
+            valid_card_of(
+                "Nefarious Lich probe",
+                &[],
+                "If damage would be dealt to you, exile that many cards from your \
+                 graveyard instead. If you can't, you lose the game.",
+            ),
+            None,
+            "the 'to you' player shield must not be flipped to SelfRef"
         );
     }
 }
