@@ -65,7 +65,7 @@ use crate::parser::oracle::ParsedAbilities;
 /// unsupported node is not a semantic the text asked for — it is the parser
 /// admitting it dropped one — so it suppresses its own item's expectations rather
 /// than satisfying them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, strum::EnumIter)]
 pub(crate) enum OracleSemanticFeature {
     /// CR 614: an event-modifying effect exists. Net-new in this plan — no
     /// detector in the previous audit emitted it standalone.
@@ -539,8 +539,12 @@ mod tests {
     /// per-detector regression attribution.
     #[test]
     fn detector_labels_are_distinct_and_pin_the_exported_wire_format() {
+        use strum::IntoEnumIterator;
         use OracleSemanticFeature as F;
-        let all = [
+
+        // The expected table is deliberately hand-written — it is the pin, and a generated
+        // one would only ever agree with whatever the code says.
+        let expected = [
             (F::Replacement, "Replacement"),
             (F::ReplacementInstead, "Replacement_Instead"),
             (F::ActivateOnlyDuring, "ActivateOnlyDuring"),
@@ -557,15 +561,29 @@ mod tests {
             (F::Apnap, "APNAP"),
             (F::ModalDynamicMaxDropped, "Modal_DynamicMaxDropped"),
         ];
-        for (feature, label) in all {
+        for (feature, label) in expected {
             assert_eq!(feature.detector_label(), label);
         }
+
+        // Exhaustiveness comes from `EnumIter`, not from the length of a hand-written array.
+        // `detector_label`'s match already forces a 16th variant to declare a LABEL — but a
+        // 16th variant declaring a DUPLICATE label would sail past a 15-entry array that
+        // never mentions it, and a collapsed label is the exact failure this test exists to
+        // catch. Iterating the enum closes that: a new variant enters both checks below on
+        // its own, whether or not anyone remembers this file.
+        let every: Vec<F> = F::iter().collect();
+        assert_eq!(
+            every.len(),
+            expected.len(),
+            "a variant was added without pinning its exported label above"
+        );
         let distinct: std::collections::BTreeSet<&str> =
-            all.iter().map(|(f, _)| f.detector_label()).collect();
+            every.iter().map(|f| f.detector_label()).collect();
         assert_eq!(
             distinct.len(),
-            all.len(),
-            "every feature must map to a distinct label: a collapse rewrites the wire format"
+            every.len(),
+            "every feature must map to a DISTINCT label: a collapse silently rewrites the \
+             wire format and destroys per-detector regression attribution"
         );
     }
 
