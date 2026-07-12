@@ -4451,6 +4451,38 @@ fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
         children.push(build_ability_item(mode_ability));
     }
 
+    // CR 705.2 (#5601): coin-flip branch effects are embedded `AbilityDefinition`s
+    // (not `sub_ability` links), so — like the sub-ability / else / modal chains
+    // above — recurse into them here. Without this the win/lose branch parse
+    // signatures are swallowed by the bare `("win"/"lose", "yes")` presence
+    // markers in `effect_details`, making a real parser change inside a branch
+    // (e.g. Desperate Gambit's lose-branch `damage_source_filter` flipping
+    // `SelfRef` → `ChosenDamageSource`) invisible to the coverage parse-diff.
+    // Same swallowed-structure class as #5492/#5495/#5501.
+    match &*def.effect {
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(win) = win_effect {
+                children.push(build_ability_item(win));
+            }
+            if let Some(lose) = lose_effect {
+                children.push(build_ability_item(lose));
+            }
+        }
+        Effect::FlipCoinUntilLose { win_effect } => {
+            children.push(build_ability_item(win_effect));
+        }
+        _ => {}
+    }
+
     ParsedItem {
         category: ParseCategory::Ability,
         label,
@@ -10495,6 +10527,48 @@ mod tests {
                 .iter()
                 .any(|k| k == "damage_source_filter"),
             "an absent damage_source_filter must not appear",
+        );
+    }
+
+    /// #5601 (same swallowed-structure class as #5492/#5495/#5501): a parser
+    /// change INSIDE a coin-flip branch — e.g. Desperate Gambit's lose-branch
+    /// `damage_source_filter` flipping `SelfRef` → `ChosenDamageSource` — must be
+    /// visible to the coverage parse-diff. The FlipCoin branch effects are
+    /// embedded `AbilityDefinition`s (not `sub_ability` links), so
+    /// `build_ability_item` must recurse into `win_effect`/`lose_effect` rather
+    /// than emit only the bare `("lose", "yes")` presence marker — otherwise the
+    /// change is swallowed and the sticky reports a false "No card-parse changes".
+    #[test]
+    fn flip_coin_branch_effects_are_exposed_in_parse_details() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind};
+
+        let lose = Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                prevention_duration: None,
+            },
+        ));
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: Some(lose),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let item = build_ability_item(&def);
+        assert!(
+            item.children
+                .iter()
+                .any(|c| c.details.iter().any(|(k, _)| k == "damage_source_filter")),
+            "FlipCoin lose-branch damage_source_filter must be exposed as a child \
+             parse detail; got children {:#?}",
+            item.children
         );
     }
 

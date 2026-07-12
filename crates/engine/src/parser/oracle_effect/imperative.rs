@@ -16746,19 +16746,28 @@ mod tests {
     /// 0/35,396 pool-wide). Reverting the flattened-head gate signal flips the
     /// lose-branch assertion below back to `SelfRef` — this test can fail if the
     /// fix is removed (AI-CONTRIBUTOR.md §5(i)).
+    ///
+    /// It drives the FULL card pipeline via `parse_oracle_text` — the exact entry
+    /// `database::synthesis` uses to generate `card-data.json` — NOT the
+    /// standalone `parse_effect_chain`, so it exercises the path the shipped card
+    /// actually takes and cannot go green while the card is broken.
     #[test]
     fn desperate_gambit_shipped_text_threads_chosen_damage_source_both_branches() {
-        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::parser::oracle::parse_oracle_text;
 
         let text = "Choose a source you control and flip a coin. If you win the flip, \
             the next time that source would deal damage this turn, it deals double that damage instead. \
             If you lose the flip, the next time it would deal damage this turn, prevent that damage.";
-        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let parsed =
+            parse_oracle_text(text, "Desperate Gambit", &[], &["Instant".to_string()], &[]);
 
-        let win = find_effect_in_def(&def, &|e| {
-            matches!(e, Effect::CreateDamageReplacement { .. })
-        })
-        .expect("win branch must emit a CreateDamageReplacement");
+        let win = parsed
+            .abilities
+            .iter()
+            .find_map(|d| {
+                find_effect_in_def(d, &|e| matches!(e, Effect::CreateDamageReplacement { .. }))
+            })
+            .expect("win branch must emit a CreateDamageReplacement");
         assert!(
             matches!(
                 win,
@@ -16770,7 +16779,10 @@ mod tests {
             "win branch must bind ChosenDamageSource, got {win:?}"
         );
 
-        let lose = find_effect_in_def(&def, &|e| matches!(e, Effect::PreventDamage { .. }))
+        let lose = parsed
+            .abilities
+            .iter()
+            .find_map(|d| find_effect_in_def(d, &|e| matches!(e, Effect::PreventDamage { .. })))
             .expect("lose branch must emit a PreventDamage");
         assert!(
             matches!(
@@ -16791,12 +16803,22 @@ mod tests {
     /// damage-source prevention filter, so this pins the gate's blast radius.
     #[test]
     fn mercenaries_selfref_prevention_is_not_rewritten() {
-        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::parser::oracle::parse_oracle_text;
 
-        let text =
-            "The next time this creature would deal damage to you this turn, prevent that damage.";
-        let def = parse_effect_chain(text, AbilityKind::Spell);
-        let prevent = find_effect_in_def(&def, &|e| matches!(e, Effect::PreventDamage { .. }))
+        // Full card pipeline, activated ability form (Mercenaries' real card).
+        let text = "{3}: The next time this creature would deal damage to you this turn, \
+            prevent that damage. Any player may activate this ability.";
+        let parsed = parse_oracle_text(
+            text,
+            "Mercenaries",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Mercenary".to_string()],
+        );
+        let prevent = parsed
+            .abilities
+            .iter()
+            .find_map(|d| find_effect_in_def(d, &|e| matches!(e, Effect::PreventDamage { .. })))
             .expect("must emit a PreventDamage");
         assert!(
             matches!(
