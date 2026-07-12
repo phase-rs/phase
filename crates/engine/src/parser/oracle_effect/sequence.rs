@@ -7531,8 +7531,7 @@ mod tests {
         // Field-Tested Frying Pan (#835): "create a 1/1 white Halfling creature
         // token and attach this Equipment to it" — "attach " is an imperative game
         // action, so the conjunct must peel into its own clause and lower to a
-        // Token -> Attach sibling (rewire_token_attach_sibling rebinds onto
-        // LastCreated). Without the split the attach is silently dropped.
+        // Token -> Attach sibling. Without the split the attach is silently dropped.
         let chunks = clause_texts(
             "create a 1/1 white Halfling creature token and attach this Equipment to it",
         );

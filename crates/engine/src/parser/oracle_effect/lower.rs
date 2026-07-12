@@ -2290,42 +2290,6 @@ pub(super) fn rewire_cross_sentence_token_counter_attach(def: &mut AbilityDefini
     def.sub_ability = Some(Box::new(put_sub));
 }
 
-/// CR 608.2c + CR 301.5b: Token creation followed by a sibling `Attach`
-/// ("create a Kor Soldier token. You may attach an Equipment you control to
-/// it") — the bare-"it" host anaphor must target `LastCreated`, not the
-/// source object or parent trigger subject (the token-creating effect has no
-/// parent target slot).
-pub(super) fn rewire_token_attach_sibling(def: &mut AbilityDefinition) {
-    // Walk the whole sub-ability chain: the token + bare-Attach pair is not
-    // always at the root. Field-Tested Frying Pan ("create a Food token, then
-    // create a 1/1 white Halfling creature token and attach this Equipment to
-    // it") nests the Attach under the *second* token, so a root-only check would
-    // miss it and leave "it" bound to ParentTarget/TriggeringSource (which has no
-    // referent here) instead of the just-created token.
-    let mut node: Option<&mut AbilityDefinition> = Some(def);
-    while let Some(current) = node {
-        if matches!(&*current.effect, Effect::Token { .. }) {
-            if let Some(sub) = current.sub_ability.as_mut() {
-                // Token → PutCounter → Attach is owned by
-                // `rewire_cross_sentence_token_counter_attach`.
-                if !matches!(&*sub.effect, Effect::PutCounter { .. }) {
-                    if let Effect::Attach { target, .. } = sub.effect.as_mut() {
-                        if matches!(
-                            target,
-                            TargetFilter::SelfRef
-                                | TargetFilter::ParentTarget
-                                | TargetFilter::TriggeringSource
-                        ) {
-                            *target = TargetFilter::LastCreated;
-                        }
-                    }
-                }
-            }
-        }
-        node = current.sub_ability.as_deref_mut();
-    }
-}
-
 /// CR 111.3 + CR 702.6a: Intrinsic token statics (Equipment tokens with Equip,
 /// Urza's Saga Construct-style explicit permanent grants) belong on the token's
 /// own `static_abilities`. Transient resolution-time grants — keyword pumps and
