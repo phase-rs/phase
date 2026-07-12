@@ -181,6 +181,7 @@ pub(crate) fn check_swallowed_clauses(
         let evidence = UnitEvidence::of(&scoped);
 
         let mut found = Vec::new();
+        detect_replacement(&cleaned, fragment, &scoped, &evidence, &mut found);
         detect_replacement_instead(&cleaned, fragment, &scoped, &mut found);
         detect_activate_only_during(&cleaned, fragment, &scoped, &mut found);
         detect_activate_limit(&cleaned, fragment, &scoped, &mut found);
@@ -199,6 +200,154 @@ pub(crate) fn check_swallowed_clauses(
         stamp_line(&mut found, unit.first_line);
         diagnostics.append(&mut found);
     }
+}
+
+/// CR 603.2: true when this line's "enters with" is the TRIGGER's event filter
+/// ("Whenever a creature you control enters with a counter on it, ...") rather than a
+/// CR 614.1c replacement. A trigger's condition clause runs up to the comma that closes
+/// it, so an "enters with" ahead of that comma on a `when`/`whenever` line describes
+/// which entries FIRE the ability — it does not replace the entry event.
+fn enters_with_is_trigger_filter(line: &str) -> bool {
+    let l = line.trim_start();
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if !(l.starts_with("whenever ") || l.starts_with("when ")) {
+        return false;
+    }
+    // allow-noncombinator: swallow detector marker scan on classified text
+    // allow-noncombinator: swallow detector marker scan on classified text
+    l.split(',')
+        .next()
+        .is_some_and(|cond| cond.contains("enters with")) // allow-noncombinator: swallow detector marker scan on classified text
+}
+
+// ── Detector N: Replacement (CR 614) ────────────────────────────────────
+
+/// CR 614: an event-modifying effect exists. This is the CR 614 replacement
+/// grammar that does **not** use the word "instead" — `Replacement_Instead`
+/// (CR 614.1a) already owns that one, and the two are deliberately separate
+/// labels so per-detector regression attribution survives.
+///
+/// The two grammars this owns, both verified against the Comprehensive Rules:
+///
+///   CR 614.1b  "Effects that use the word 'skip' are replacement effects."
+///              Carriers: `StaticMode::SkipStep`, `Effect::SkipNextTurn`,
+///              `Effect::SkipNextStep`.
+///   CR 614.1c  "Effects that read '[This permanent] enters with . . . ,'
+///              'As [this permanent] enters . . . ,' or '[This permanent]
+///              enters as . . .' are replacement effects."
+///              Carrier: a `ReplacementDefinition`, or one of the non-`replacements`
+///              carriers the shared helpers below already know about.
+///
+/// CR 614.1d ("[This permanent] enters . . ." / "[Objects] enter . . .") is
+/// deliberately NOT claimed here. Its marker would be the bare word "enters",
+/// which every ETB *trigger* on every creature in the pool also matches — the
+/// expectation would fire on the whole pool and the label would carry no
+/// information. It needs a grammar that distinguishes the replacement reading
+/// from the trigger reading, which is recognizer-bring-up work, not audit work.
+/// Stated rather than silently omitted.
+///
+/// Evidence reuses the SAME carrier helpers as `detect_replacement_instead`:
+/// a replacement is a replacement however its text spelled it, so the two
+/// detectors must not drift apart on what counts as one.
+fn detect_replacement(
+    cleaned: &str,
+    original: &str,
+    parsed: &ParsedAbilities,
+    evidence: &UnitEvidence,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
+    // CR 614.1b: "skip" — scoped to the verb form, so "skipped" / a card NAMED
+    // "Skip" cannot raise the expectation.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    let has_skip = cleaned.contains("skip your ") // allow-noncombinator: swallow detector marker scan on classified text
+        || cleaned.contains("skip their ") // allow-noncombinator: swallow detector marker scan on classified text
+        || cleaned.contains("skip the next ") // allow-noncombinator: swallow detector marker scan on classified text
+        || cleaned.contains("skips their ") // allow-noncombinator: swallow detector marker scan on classified text
+        || cleaned.contains("skips his or her "); // allow-noncombinator: swallow detector marker scan on classified text
+
+    // CR 614.1c: the three explicit enters-replacement templates. "as ~ enters" is
+    // matched per LINE (a line whose first word is "as" and which mentions entering),
+    // because the unit text carries the card's REAL name, not the normalized `~` —
+    // `AuditUnit::text` is sliced from raw `source_text` precisely so the detectors'
+    // marker phrases and the emitted `description` stay raw-text concepts.
+    // CR 614.1c vs CR 603.2: "Whenever a creature you control enters WITH a counter on
+    // it, ..." (Murderous Redcap Avatar) reads "enters with" as a TRIGGER EVENT FILTER —
+    // it describes which entries fire the trigger, and replaces no event. Only the
+    // REPLACEMENT reading raises a CR 614 expectation, so the trigger reading is excluded
+    // per line: when the phrase sits inside the trigger's condition clause (ahead of the
+    // comma that closes it) on a line that opens with "when"/"whenever", it is a filter.
+    let has_enters_with = cleaned
+        .lines()
+        // allow-noncombinator: swallow detector marker scan on classified text
+        .filter(|line| line.contains("enters with "))
+        .any(|line| !enters_with_is_trigger_filter(line)); // allow-noncombinator: swallow detector marker scan on classified text
+                                                           // allow-noncombinator: swallow detector marker scan on classified text
+    let has_enters_as = cleaned.contains(" enters as "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_as_enters = cleaned.lines().any(|line| {
+        let l = line.trim_start();
+        // allow-noncombinator: swallow detector marker scan on classified text
+        l.starts_with("as ") && l.contains(" enters")
+    });
+
+    if !(has_skip || has_enters_with || has_enters_as || has_as_enters) {
+        return;
+    }
+
+    // CR 614: the replacement is represented if this unit produced a
+    // `ReplacementDefinition`, or any of the carriers that hold a replacement
+    // OUTSIDE the `replacements` collection (rider replacements registered at
+    // resolution, effect-chain `*Instead` conditions, replacement-bearing statics).
+    if !parsed.replacements.is_empty()
+        || any_ability_has_target_replacement(parsed)
+        || any_ability_has_replacement_carrier(parsed)
+    {
+        return;
+    }
+    // CR 614.1b carriers: a skip is modelled as a step-skipping static or a
+    // skip-next-turn/step effect rather than a `ReplacementDefinition`.
+    if evidence.any_static_mode(|m| matches!(m, StaticMode::SkipStep { .. }))
+        || evidence.any::<Effect>(|e| {
+            matches!(e, Effect::SkipNextTurn { .. } | Effect::SkipNextStep { .. })
+        })
+    {
+        return;
+    }
+    // CR 614.1c carriers: an "enters with ..." replacement is frequently modelled as a
+    // STATIC or a continuous modification rather than a `ReplacementDefinition` — the
+    // effect is continuous and applies to a CLASS of objects, so it lives in the layer
+    // system. Thunderous Velocipede ("Each other Vehicle and creature you control enters
+    // with an additional +1/+1 counter ...") is the motivating case: it lowers to
+    // `StaticMode::EntersWithAdditionalCounters` and carries no ReplacementDefinition at
+    // all. Completeness grep over the type definitions:
+    //
+    //   $ rg '^    \w*Enter\w*\s*[,{(]' crates/engine/src/types/
+    //     StaticMode::EntersWithAdditionalCounters   StaticMode::CantEnterBattlefieldFrom
+    //     ContinuousModification::AddCounterOnEnter  Effect::AddPendingEntersModifications
+    if evidence.any_static_mode(|m| {
+        matches!(
+            m,
+            StaticMode::EntersWithAdditionalCounters { .. } | StaticMode::CantEnterBattlefieldFrom
+        )
+    }) || evidence.any::<ContinuousModification>(|m| {
+        matches!(m, ContinuousModification::AddCounterOnEnter { .. })
+    }) || evidence.any::<Effect>(|e| matches!(e, Effect::AddPendingEntersModifications { .. }))
+    {
+        return;
+    }
+    // CR 614.1c + CR 614.12: the per-object enters-modifier slots — an "as it enters"
+    // gate the parser folded onto the moving object rather than into a standalone
+    // replacement definition.
+    if evidence.has_slot("enters_modified_if")
+        || evidence.has_slot("conditional_enter_with_counters")
+        || evidence.has_slot("enter_with_counters")
+    {
+        return;
+    }
+    diagnostics.push(OracleDiagnostic::SwallowedClause {
+        detector: OracleSemanticFeature::Replacement.detector_label().into(),
+        description: truncate(original, 140).into(),
+        line_index: 0,
+    });
 }
 
 // ── Detector A: Replacement_Instead ─────────────────────────────────────
