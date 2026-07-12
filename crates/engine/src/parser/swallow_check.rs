@@ -21,9 +21,11 @@
 //!   3. Emits a warning ONLY when the marker is present and the AST has no
 //!      representation.
 
-use super::oracle::ParsedAbilities;
+use super::oracle::{is_draft_matters_sentence, ParsedAbilities};
 use super::oracle_effect::player_lookback_relative_clause_owns_suffix;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
+use super::oracle_ir::doc::OracleItemIr;
+use super::oracle_ir::feature::{audit_units, scope_to_unit, ItemIdTracks};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, Comparator, ContinuousModification,
     CopyRetargetPermission, Effect, FilterProp, ModalSelectionConstraint, OpponentMayScope,
@@ -74,49 +76,111 @@ fn truncate(s: &str, max: usize) -> &str {
     }
 }
 
-/// Run all swallow detectors against the parsed result. Each finding is
-/// pushed onto the caller-provided diagnostics vec as a typed `OracleDiagnostic`.
-pub fn check_swallowed_clauses(
-    oracle_text: &str,
-    parsed: &ParsedAbilities,
+/// Stamp the owning item's source line onto everything that item's detectors
+/// emitted.
+///
+/// Detectors are deliberately provenance-agnostic: a detector knows *evidence*,
+/// not line numbers. Attribution belongs to the loop that scoped the item, because
+/// that loop is the only thing that knows which line it scoped. Threading a
+/// `line_index` parameter through all fourteen detectors instead would mean a
+/// single forgotten call site silently keeps `line_index: 0` — which does not read
+/// as "unattributed", it reads as *line 1*.
+///
+/// Exhaustive on purpose: a future audit-emitted diagnostic variant must make a
+/// deliberate decision about how it carries provenance rather than silently
+/// inheriting line 0.
+fn stamp_line(item_diagnostics: &mut [OracleDiagnostic], first_line: usize) {
+    for diagnostic in item_diagnostics {
+        match diagnostic {
+            OracleDiagnostic::SwallowedClause { line_index, .. } => *line_index = first_line,
+            // The swallow audit emits `SwallowedClause` and nothing else. These
+            // three are parse-time diagnostics that reach the document's channel by
+            // other routes and are never constructed here.
+            OracleDiagnostic::TargetFallback { .. }
+            | OracleDiagnostic::IgnoredRemainder { .. }
+            | OracleDiagnostic::CascadeLoss { .. } => {}
+        }
+    }
+}
+
+/// Run all swallow detectors, once per document item, against **that item's own**
+/// lowered definitions.
+///
+/// The audit's question is per-unit: *does the Oracle text of this item raise a
+/// semantic expectation that the parse of this same item does not represent?*
+/// Previously both halves were card-wide — every detector was handed the whole
+/// card's text and the whole card's `ParsedAbilities` — so evidence never had to
+/// come from the clause that raised the expectation. A card that dropped an
+/// activation limit on line 3 was excused by an unrelated restriction on line 1,
+/// and three detectors (`ActivateLimit`, `Duration_NextTurn`, `APNAP`) were
+/// vacuous by construction as a result. Scoping both halves to the item is the fix.
+///
+/// SINK INVARIANT: `diagnostics` may arrive **non-empty** — it is the document's
+/// one warning channel and already carries the parse-time diagnostics sealed by
+/// `finish()`. The audit never reads it. Each item's detectors emit into a fresh
+/// local vec, which is stamped and appended, so no predicate here can ever match a
+/// diagnostic this audit did not itself emit. (The variant sets are disjoint
+/// besides — the audit only ever constructs `SwallowedClause` — so this is a
+/// type-level fact, not a convention.)
+pub(crate) fn check_swallowed_clauses(
+    items: &[OracleItemIr],
+    result: &ParsedAbilities,
+    tracks: &ItemIdTracks<'_>,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
-    if oracle_text.is_empty() {
-        return;
-    }
-    // Architectural rule: a parser that produced `Effect::Unimplemented` for
-    // any ability has *explicitly* admitted it couldn't parse a line — the
-    // text is preserved on the Unimplemented effect itself and a separate
-    // coverage warning is raised. Suppress all swallow detectors in that
-    // case to avoid double-reporting the same gap. Cards with partial
-    // parses (some abilities ok, some Unimplemented) still get checked
-    // for their parsed portions via the per-detector marker logic below.
-    if any_ability_has_unimplemented(parsed) {
-        return;
-    }
-    let lower_owned = oracle_text.to_ascii_lowercase();
-    let cleaned = strip_parens(&lower_owned);
+    for unit in audit_units(items) {
+        let fragment = unit.fragment;
 
-    // Pre-compute JSON haystack for detectors that introspect AST shape via
-    // serialized field presence. One serialization per card amortizes across
-    // detectors. JSON serialization can fail on pathological data; on
-    // failure we skip those detectors rather than panicking.
-    let ast_json = serde_json::to_string(parsed).unwrap_or_default();
+        // CR 905: draft-time "draft matters" lines are intentionally consumed as
+        // no-ops, so their "you may" / "if you do" / "as long as" markers would
+        // otherwise every one report as a swallowed clause. Previously this was a
+        // whole-card text filter; per-unit it is exactly a skip of the offending
+        // unit, and constructed-play lines on the same card are still audited.
+        if is_draft_matters_sentence(fragment) {
+            continue;
+        }
 
-    detect_replacement_instead(&cleaned, oracle_text, parsed, diagnostics);
-    detect_activate_only_during(&cleaned, oracle_text, parsed, diagnostics);
-    detect_activate_limit(&cleaned, oracle_text, parsed, diagnostics);
-    detect_duration_until_eot(&cleaned, oracle_text, parsed, &ast_json, diagnostics);
-    detect_optional_you_may(&cleaned, oracle_text, parsed, diagnostics);
-    detect_dynamic_qty(&cleaned, oracle_text, &ast_json, diagnostics);
-    detect_condition_if(&cleaned, oracle_text, &ast_json, parsed, diagnostics);
-    detect_condition_unless(&cleaned, oracle_text, &ast_json, diagnostics);
-    detect_condition_as_long_as(&cleaned, oracle_text, &ast_json, parsed, diagnostics);
-    detect_duration_this_turn(&cleaned, oracle_text, &ast_json, diagnostics);
-    detect_duration_next_turn(&cleaned, oracle_text, &ast_json, diagnostics);
-    detect_optional_may_have(&cleaned, oracle_text, &ast_json, diagnostics);
-    detect_apnap(&cleaned, oracle_text, &ast_json, diagnostics);
-    detect_modal_dynamic_max_dropped(&cleaned, oracle_text, &ast_json, diagnostics);
+        let scoped = scope_to_unit(result, tracks, &unit);
+
+        // Architectural rule: a parser that produced `Effect::Unimplemented` has
+        // *explicitly* admitted it couldn't parse this text — the text is preserved
+        // on the Unimplemented effect itself and a separate coverage warning is
+        // raised, so re-reporting it as a swallowed clause would double-count one
+        // defect. Evaluated against an item-scoped `parsed`, this is the plan's
+        // per-unit suppression rule: an unsupported item suppresses **only its own**
+        // expectations. Card-wide, it silenced every detector on 2,563 faces.
+        if any_ability_has_unimplemented(&scoped) {
+            continue;
+        }
+
+        let lower_owned = fragment.to_ascii_lowercase();
+        let cleaned = strip_parens(&lower_owned);
+
+        // JSON haystack for detectors that still introspect AST shape via serialized
+        // field presence, now scoped to this item's definitions. Serialization can
+        // fail on pathological data; on failure those detectors skip rather than
+        // panic. (Deleted in the next commit, in favour of typed predicates.)
+        let ast_json = serde_json::to_string(&scoped).unwrap_or_default();
+
+        let mut found = Vec::new();
+        detect_replacement_instead(&cleaned, fragment, &scoped, &mut found);
+        detect_activate_only_during(&cleaned, fragment, &scoped, &mut found);
+        detect_activate_limit(&cleaned, fragment, &scoped, &mut found);
+        detect_duration_until_eot(&cleaned, fragment, &scoped, &ast_json, &mut found);
+        detect_optional_you_may(&cleaned, fragment, &scoped, &mut found);
+        detect_dynamic_qty(&cleaned, fragment, &ast_json, &mut found);
+        detect_condition_if(&cleaned, fragment, &ast_json, &scoped, &mut found);
+        detect_condition_unless(&cleaned, fragment, &ast_json, &mut found);
+        detect_condition_as_long_as(&cleaned, fragment, &ast_json, &scoped, &mut found);
+        detect_duration_this_turn(&cleaned, fragment, &ast_json, &mut found);
+        detect_duration_next_turn(&cleaned, fragment, &ast_json, &mut found);
+        detect_optional_may_have(&cleaned, fragment, &ast_json, &mut found);
+        detect_apnap(&cleaned, fragment, &ast_json, &mut found);
+        detect_modal_dynamic_max_dropped(&cleaned, fragment, &ast_json, &mut found);
+
+        stamp_line(&mut found, unit.first_line);
+        diagnostics.append(&mut found);
+    }
 }
 
 // ── Detector A: Replacement_Instead ─────────────────────────────────────
@@ -3515,8 +3579,8 @@ fn effect_name(effect: &Effect) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        any_ability_has_unimplemented, check_swallowed_clauses, def_tree_has_optional,
-        def_tree_has_unimplemented, trigger_tree_has_optional,
+        any_ability_has_unimplemented, def_tree_has_optional, def_tree_has_unimplemented,
+        trigger_tree_has_optional,
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -3783,7 +3847,29 @@ mod tests {
             "expected gated damage-prevention replacement, got {:#?}",
             bronze.replacements
         );
-        assert!(!has_swallowed_detector(&bronze, "Condition_AsLongAs"));
+        // KNOWN GAP, pinned deliberately. Bronze Horse DOES report a swallowed
+        // `Condition_AsLongAs` — and did so in the shipped card data long before this
+        // change (verified against the pre-cutover full-pool export). The assertions
+        // above are why: the "as long as you control another creature" gate survives
+        // only inside `description` (a String), and is never lifted into a typed
+        // condition on the replacement. So the condition really is swallowed and the
+        // detector is right.
+        //
+        // This test previously asserted the OPPOSITE and passed — vacuously. It parses
+        // with an empty MTGJSON keyword list, so the "Trample" line fell through to an
+        // `Effect::Unimplemented`, which tripped the CARD-WIDE Unimplemented gate and
+        // silenced all fourteen detectors on the whole card. The green was the gate,
+        // not the parse. Per-unit suppression scopes that gate to the "Trample" line
+        // alone, so line 1 is now audited and the pre-existing gap is visible.
+        //
+        // Flip this assertion when the "as long as" gate is lifted into a typed
+        // replacement condition; until then it is a tripwire, not an endorsement.
+        assert!(
+            has_swallowed_detector(&bronze, "Condition_AsLongAs"),
+            "Bronze Horse's as-long-as gate is description-only, never typed: the swallow \
+             is real. Warnings: {:?}",
+            bronze.parse_warnings
+        );
 
         let helm = parse_named(
             "Equipped creature gets +2/+2.\nAs long as equipped creature is legendary, it has hexproof. (It can't be the target of spells or abilities your opponents control.)\nEquip {1}",
@@ -4665,50 +4751,61 @@ mod tests {
         );
     }
 
-    /// The put-this-way counter guard is text-scoped: a card carrying the
-    /// represented rider PLUS a separate, genuinely-unrepresented " if " must still
-    /// flag Condition_If (mirrors `represented_tiered_counter_pair_does_not_hide_unrelated_if`).
+    /// The put-this-way counter guard must not reach across lines: a card whose
+    /// line 1 carries the *represented* rider AND whose line 2 carries a separate,
+    /// genuinely-unrepresented " if " must still flag Condition_If for line 2.
+    ///
+    /// This is the named witness for the cross-line false-green that per-item
+    /// scoping kills. Under the card-wide audit, line 1's represented rider was
+    /// evidence enough to excuse line 2's unrepresented "if" — the evidence never
+    /// had to come from the clause that raised the expectation. It now does, and the
+    /// warning is attributed to **line 2**, which is asserted here: a `line_index`
+    /// of 0 would not mean "unattributed", it would mean "line 1", i.e. the bug.
     #[test]
     fn conditional_enter_counters_does_not_hide_unrelated_if() {
         let parsed = parse_named(
             "{G}, {T}: You may put a creature or Vehicle card from your hand onto the battlefield. \
-             If you put an artifact onto the battlefield this way, put two +1/+1 counters on it.",
+             If you put an artifact onto the battlefield this way, put two +1/+1 counters on it.\n\
+             Draw a card if the moon is bright.",
             "Oviya, Automech Artisan",
             &["Creature"],
         );
-        let synthetic = format!(
-            "{}\nDraw a card if the moon is bright.",
-            "You may put a creature card from your hand onto the battlefield. \
-             If you put an artifact onto the battlefield this way, put two +1/+1 counters on it."
-        );
-        let mut diagnostics = Vec::new();
 
-        check_swallowed_clauses(&synthetic, &parsed, &mut diagnostics);
-
+        let condition_if: Vec<_> = parsed
+            .parse_warnings
+            .iter()
+            .filter(|warning| {
+                matches!(
+                    warning,
+                    OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+                )
+            })
+            .collect();
         assert!(
-            diagnostics.iter().any(|warning| matches!(
-                warning,
-                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
-            )),
-            "separate unrelated if text must remain visible to Condition_If, got {diagnostics:?}"
+            !condition_if.is_empty(),
+            "a separate unrelated if line must remain visible to Condition_If, got {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            condition_if.iter().all(|warning| warning.line_index() == 1),
+            "the swallow must be attributed to the line that raised it (line 1, 0-based), \
+             not to line 0's represented rider; got {condition_if:?}"
         );
     }
 
     #[test]
     fn represented_tiered_counter_pair_does_not_hide_unrelated_if() {
         let tiered_line = "Each other Vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. Otherwise, it enters with three additional +1/+1 counters on it.";
-        let parsed = parse_named(tiered_line, "Thunderous Velocipede", &["Artifact"]);
-        let synthetic = format!("{tiered_line}\nDraw a card if the moon is bright.");
-        let mut diagnostics = Vec::new();
-
-        check_swallowed_clauses(&synthetic, &parsed, &mut diagnostics);
+        let parsed = parse_named(
+            &format!("{tiered_line}\nDraw a card if the moon is bright."),
+            "Thunderous Velocipede",
+            &["Artifact"],
+        );
 
         assert!(
-            diagnostics.iter().any(|warning| matches!(
-                warning,
-                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
-            )),
-            "separate unrelated if text must remain visible to Condition_If, got {diagnostics:?}"
+            has_swallowed_detector(&parsed, "Condition_If"),
+            "a separate unrelated if line must remain visible to Condition_If, got {:?}",
+            parsed.parse_warnings
         );
     }
 
@@ -5761,7 +5858,20 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             &["Creature"],
         );
 
-        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+        // KNOWN GAP, pinned deliberately — see `condition_as_long_as_accepts_bronze_
+        // horse_and_champions_helm` for the full explanation. Atraxa reports a swallowed
+        // `Optional_YouMay` (and `DynamicQty`), and did so in the shipped card data long
+        // before this change: the per-card-type "you may put a card of that type" choice
+        // is not typed as optional. The test asserted the opposite and passed only
+        // because its empty MTGJSON keyword list turned the "Flying, vigilance,
+        // deathtouch, lifelink" line into an `Effect::Unimplemented`, tripping the
+        // card-wide gate that silenced every detector on the card.
+        assert!(
+            has_swallowed_detector(&parsed, "Optional_YouMay"),
+            "pre-existing gap: the per-card-type 'you may put' optionality is not typed. \
+             Warnings: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     #[test]
@@ -6116,6 +6226,15 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
     }
 
+    /// KNOWN GAP, pinned deliberately — see `condition_as_long_as_accepts_bronze_horse_
+    /// and_champions_helm` for the full explanation of the vacuity this replaces.
+    ///
+    /// Siege Behemoth reports `Optional_MayHave`, `Optional_YouMay` and `DynamicQty` as
+    /// swallowed, and reported all three in the shipped card data long before this
+    /// change (verified against the pre-cutover full-pool export). This test asserted
+    /// the opposite and passed only because its empty MTGJSON keyword list turned the
+    /// "Hexproof" line into an `Effect::Unimplemented`, tripping the card-wide gate that
+    /// silenced every detector on the card.
     #[test]
     fn optional_may_have_siege_behemoth() {
         let parsed = parse_named(
@@ -6124,7 +6243,12 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             "Siege Behemoth",
             &["Creature"],
         );
-        assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
+        assert!(
+            has_swallowed_detector(&parsed, "Optional_MayHave"),
+            "pre-existing gap: the per-creature 'you may have' optionality is not typed. \
+             Warnings: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     #[test]
@@ -6208,7 +6332,20 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             "Dragon Egg",
             &["Creature"],
         );
-        assert!(!has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"));
+        // KNOWN GAP, pinned deliberately — see `condition_as_long_as_accepts_bronze_
+        // horse_and_champions_helm` for the full explanation. Dragon Egg reports a
+        // swallowed `Duration_UntilEndOfTurn`, and did so in the shipped card data long
+        // before this change: the "until end of turn" lives inside the *token's granted*
+        // activated ability, and the duration evidence walker does not descend into a
+        // token grant. The test asserted the opposite and passed only because its empty
+        // MTGJSON keyword list turned the "Defender" line into an `Effect::Unimplemented`,
+        // tripping the card-wide gate that silenced every detector on the card.
+        assert!(
+            has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"),
+            "pre-existing gap: the duration evidence walker does not descend into a \
+             token's granted ability. Warnings: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     #[test]
@@ -6954,11 +7091,13 @@ mod detect_condition_if_replacement_exemption_tests {
         })
     }
 
-    /// Positive, end-to-end through the real parser: Plague Drone's
-    /// represented gain-life replacement must NOT trip Condition_If. This is
-    /// the exact regression the reviewer's original card-wide gate was
-    /// (over-broadly) fixing, exercised here through `parse_oracle_text` +
-    /// `check_swallowed_clauses` exactly as production code calls them.
+    /// Positive, end-to-end through the real parser: Plague Drone's represented
+    /// gain-life replacement must NOT trip Condition_If. This is the exact
+    /// regression the original card-wide gate was (over-broadly) fixing.
+    ///
+    /// Asserts on `parse_warnings` — the audit already ran inside
+    /// `parse_oracle_text`, so re-invoking it by hand would have tested a second,
+    /// non-production invocation rather than the one that ships.
     #[test]
     fn plague_drone_replacement_antecedent_is_not_swallowed_condition() {
         let parsed = parse_oracle_text(
@@ -6968,12 +7107,11 @@ mod detect_condition_if_replacement_exemption_tests {
             &["Creature".to_string()],
             &["Phyrexian".to_string(), "Insect".to_string()],
         );
-        let mut diagnostics = Vec::new();
-        check_swallowed_clauses(PLAGUE_DRONE_TEXT, &parsed, &mut diagnostics);
         assert!(
-            !has_condition_if_swallow(&diagnostics),
+            !has_condition_if_swallow(&parsed.parse_warnings),
             "Plague Drone's represented replacement antecedent must not be flagged \
-             as a swallowed Condition_If; diagnostics: {diagnostics:?}"
+             as a swallowed Condition_If; warnings: {:?}",
+            parsed.parse_warnings
         );
     }
 

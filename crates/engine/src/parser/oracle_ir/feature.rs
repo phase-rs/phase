@@ -149,7 +149,6 @@ impl OracleSemanticFeature {
 /// categories a relation pass can reorder or resynthesize, which is why they need a
 /// track at all; every other category is read straight off the owning item's node.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // production caller lands in the swallow_check cutover commit.
 pub(crate) struct ItemIdTracks<'a> {
     pub(crate) abilities: &'a [OracleItemId],
     pub(crate) triggers: &'a [OracleItemId],
@@ -157,33 +156,94 @@ pub(crate) struct ItemIdTracks<'a> {
     pub(crate) replacements: &'a [OracleItemId],
 }
 
-/// Clone out the slice of `result` that **this item alone** produced.
+/// One auditable unit: a distinct span of Oracle source, and every item that claims
+/// that span.
 ///
-/// This is the evidence side of one item's audit, and it is the whole cutover. The
+/// **The unit is the SPAN, not the item.** A single line routinely lowers to more
+/// than one item — Visions of Ruin's `"Flashback {8}{R}{R}. This spell costs {X}
+/// less to cast this way, where X is the greatest mana value of a commander..."`
+/// emits a `Keyword` item *and* a `ModifyCost` static item — and today **both carry
+/// the whole line as their fragment**, because the substrate cannot yet hand an item
+/// a sub-line fragment.
+///
+/// Auditing such items separately is not merely coarse, it is *wrong*: each sibling
+/// would raise the expectations of the entire shared line while being able to supply
+/// evidence for only its own clause, so the Keyword item would report a swallowed
+/// `DynamicQty` for a quantity the static item represents perfectly. That is a
+/// manufactured false positive, and it would fire on every multi-item line in the
+/// pool.
+///
+/// Grouping by span is therefore the honest granularity given the substrate: the
+/// expectation comes from a piece of text, so the evidence must be everything that
+/// piece of text produced. It also degrades in exactly the right direction — when
+/// the recognizer bring-up gives items real sub-line spans, items stop sharing a
+/// span, the groups split automatically, and the audit gets finer with no change
+/// here.
+#[derive(Debug)]
+pub(crate) struct AuditUnit<'a> {
+    /// The source range this unit occupies: `(first_line, start_byte, end_byte)`.
+    /// Identity of the unit — two items with the same range are the same unit.
+    key: (usize, usize, usize),
+    /// The Oracle text this unit is accountable for. Supplies the expectation half.
+    pub(crate) fragment: &'a str,
+    /// The line this unit's diagnostics are attributed to.
+    pub(crate) first_line: usize,
+    /// Every item claiming this span. Supplies the evidence half.
+    items: Vec<&'a OracleItemIr>,
+}
+
+/// Split a document's items into audit units, one per distinct source span.
+///
+/// Items with no recorded fragment are skipped: there is no text, so there is no
+/// expectation to raise. Inventing one would fabricate a warning.
+pub(crate) fn audit_units(items: &[OracleItemIr]) -> Vec<AuditUnit<'_>> {
+    let mut units: Vec<AuditUnit<'_>> = Vec::new();
+    for item in items {
+        let Some(fragment) = item.source.fragment() else {
+            continue;
+        };
+        let span = item.source.span();
+        let key = (span.first_line, span.start_byte, span.end_byte);
+        match units.iter_mut().find(|unit| unit.key == key) {
+            Some(unit) => unit.items.push(item),
+            None => units.push(AuditUnit {
+                key,
+                fragment,
+                first_line: span.first_line,
+                items: vec![item],
+            }),
+        }
+    }
+    units
+}
+
+/// Clone out the slice of `result` that **this unit alone** produced.
+///
+/// This is the evidence side of one unit's audit, and it is the whole cutover. The
 /// previous audit handed every detector the *card-wide* `ParsedAbilities`, so a
 /// card that dropped an activation limit on line 3 was excused by an unrelated
 /// restriction on line 1 — the evidence never had to come from the clause that
-/// raised the expectation. Handing the same detectors an item-scoped
-/// `ParsedAbilities` makes all ~40 `any_*` / `def_tree_has_*` walkers item-scoped
+/// raised the expectation. Handing the same detectors a unit-scoped
+/// `ParsedAbilities` makes all ~40 `any_*` / `def_tree_has_*` walkers unit-scoped
 /// without touching one of them: the walkers were never the defect, their scope was.
 ///
 /// The four recursive categories are resolved through `tracks` because the relation
 /// passes may have synthesized into or removed from them. Everything else is read
-/// straight off `item.node`: relations never touch those categories, so the node is
-/// already the authority.
+/// straight off each item's node: relations never touch those categories, so the
+/// node is already the authority.
 ///
 /// Returning an owned `ParsedAbilities` rather than a borrowed view is deliberate —
 /// it is what lets the existing detectors be reused verbatim, and it costs one clone
-/// of the definitions a single item produced, at parse time only.
-#[allow(dead_code)] // production caller lands in the swallow_check cutover commit.
-pub(crate) fn scope_to_item(
+/// of the definitions a single unit produced, at parse time only.
+pub(crate) fn scope_to_unit(
     result: &ParsedAbilities,
     tracks: &ItemIdTracks<'_>,
-    item: &OracleItemIr,
+    unit: &AuditUnit<'_>,
 ) -> ParsedAbilities {
+    let owns = |id: OracleItemId| unit.items.iter().any(|item| item.id == id);
     let pick = |ids: &[OracleItemId], len: usize| -> Vec<usize> {
         (0..len)
-            .filter(|k| ids.get(*k).is_some_and(|id| *id == item.id))
+            .filter(|k| ids.get(*k).is_some_and(|id| owns(*id)))
             .collect()
     };
 
@@ -204,12 +264,6 @@ pub(crate) fn scope_to_item(
         .map(|k| result.replacements[k].clone())
         .collect();
 
-    // Non-recursive categories: no relation pass mutates them, so the owning item's
-    // node IS the authority and no id track is needed. Exhaustive on purpose — a new
-    // `OracleNodeIr` variant must make a deliberate attribution decision here rather
-    // than defaulting into invisibility behind a `_` arm. The four IR variants and
-    // the four `PreLowered*` variants contribute through the id tracks above, so they
-    // add nothing further here.
     let mut scoped = ParsedAbilities {
         abilities,
         triggers,
@@ -224,22 +278,34 @@ pub(crate) fn scope_to_item(
         strive_cost: None,
         parse_warnings: Vec::new(),
     };
-    match &item.node {
-        OracleNodeIr::Keyword(kw) => scoped.extracted_keywords.push(kw.clone()),
-        OracleNodeIr::Modal(modal) => scoped.modal = Some(modal.clone()),
-        OracleNodeIr::AdditionalCost(cost) => scoped.additional_cost = Some(cost.clone()),
-        OracleNodeIr::CastingRestriction(r) => scoped.casting_restrictions.push(r.clone()),
-        OracleNodeIr::CastingOption(o) => scoped.casting_options.push(o.clone()),
-        OracleNodeIr::SolveCondition(c) => scoped.solve_condition = Some(c.clone()),
-        OracleNodeIr::StriveCost(c) => scoped.strive_cost = Some(c.clone()),
-        OracleNodeIr::Spell(_)
-        | OracleNodeIr::Trigger(_)
-        | OracleNodeIr::Static(_)
-        | OracleNodeIr::Replacement(_)
-        | OracleNodeIr::PreLoweredSpell(_)
-        | OracleNodeIr::PreLoweredTrigger(_)
-        | OracleNodeIr::PreLoweredStatic(_)
-        | OracleNodeIr::PreLoweredReplacement(_) => {}
+
+    // Non-recursive categories: no relation pass mutates them, so each item's node IS
+    // the authority and no id track is needed. Folded over every item in the unit —
+    // this is precisely what stops one clause of a shared line from raising an
+    // expectation that its sibling clause already satisfies.
+    //
+    // Exhaustive on purpose — a new `OracleNodeIr` variant must make a deliberate
+    // attribution decision here rather than defaulting into invisibility behind a `_`
+    // arm. The four IR variants and the four `PreLowered*` variants contribute
+    // through the id tracks above, so they add nothing further here.
+    for item in &unit.items {
+        match &item.node {
+            OracleNodeIr::Keyword(kw) => scoped.extracted_keywords.push(kw.clone()),
+            OracleNodeIr::Modal(modal) => scoped.modal = Some(modal.clone()),
+            OracleNodeIr::AdditionalCost(cost) => scoped.additional_cost = Some(cost.clone()),
+            OracleNodeIr::CastingRestriction(r) => scoped.casting_restrictions.push(r.clone()),
+            OracleNodeIr::CastingOption(o) => scoped.casting_options.push(o.clone()),
+            OracleNodeIr::SolveCondition(c) => scoped.solve_condition = Some(c.clone()),
+            OracleNodeIr::StriveCost(c) => scoped.strive_cost = Some(c.clone()),
+            OracleNodeIr::Spell(_)
+            | OracleNodeIr::Trigger(_)
+            | OracleNodeIr::Static(_)
+            | OracleNodeIr::Replacement(_)
+            | OracleNodeIr::PreLoweredSpell(_)
+            | OracleNodeIr::PreLoweredTrigger(_)
+            | OracleNodeIr::PreLoweredStatic(_)
+            | OracleNodeIr::PreLoweredReplacement(_) => {}
+        }
     }
     scoped
 }
@@ -329,11 +395,14 @@ mod tests {
             replacements: &[],
         };
 
-        let scoped_a = scope_to_item(&result, &tracks, &items[0]);
+        let units = audit_units(&items);
+        assert_eq!(units.len(), 2, "two distinct spans => two audit units");
+
+        let scoped_a = scope_to_unit(&result, &tracks, &units[0]);
         assert_eq!(scoped_a.abilities.len(), 1);
         assert_eq!(scoped_a.abilities[0], result.abilities[0]);
 
-        let scoped_b = scope_to_item(&result, &tracks, &items[1]);
+        let scoped_b = scope_to_unit(&result, &tracks, &units[1]);
         assert_eq!(scoped_b.abilities.len(), 1);
         assert_eq!(scoped_b.abilities[0], result.abilities[1]);
     }
@@ -404,7 +473,9 @@ mod tests {
             statics: &[],
             replacements: &[],
         };
-        let scoped = scope_to_item(&result, &tracks, &kw_item);
+        let items = vec![kw_item, spell_item];
+        let units = audit_units(&items);
+        let scoped = scope_to_unit(&result, &tracks, &units[0]);
         assert_eq!(scoped.extracted_keywords, vec![Keyword::Flying]);
         assert!(
             scoped.abilities.is_empty(),
