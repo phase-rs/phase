@@ -1,7 +1,9 @@
+use std::ops::Range;
+
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
-use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, verify};
+use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -9,7 +11,7 @@ use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once
 use super::super::oracle_nom::duration::{
     parse_duration, parse_for_as_long_as_condition, parse_until_source_exiles_another_card_body,
 };
-use super::super::oracle_nom::error::{OracleError, OracleResult};
+use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{
@@ -4709,17 +4711,12 @@ pub(crate) fn extract_bounded_target_multi_target(text: &str) -> Option<MultiTar
         else {
             continue;
         };
-        for (prefix, min, max) in [
-            ("one or two ", 1usize, 2usize),
-            ("one, two, or three ", 1, 3),
-        ] {
-            if let Ok((after_prefix, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(after_verb) {
-                if tag::<_, _, OracleError<'_>>("target ")
-                    .parse(after_prefix)
-                    .is_ok()
-                {
-                    return Some(MultiTargetSpec::fixed(min, max));
-                }
+        for &(prefix, min, max) in BOUNDED_TARGET_PREFIX_PHRASES {
+            if tag::<_, _, OracleError<'_>>(prefix)
+                .parse(after_verb)
+                .is_ok()
+            {
+                return Some(MultiTargetSpec::fixed(min, max));
             }
         }
     }
@@ -4964,6 +4961,11 @@ pub(super) const BOUNDED_TARGET_PHRASES: &[(&str, usize, usize)] = &[
     ("one, two, or three targets", 1, 3),
 ];
 
+pub(super) const BOUNDED_TARGET_PREFIX_PHRASES: &[(&str, usize, usize)] = &[
+    ("one or two target ", 1, 2),
+    ("one, two, or three target ", 1, 3),
+];
+
 /// CR 115.1d + CR 601.2c: Strip exact target-count prefix before a targeted
 /// phrase. "two target creatures" and "X target creatures" both set the exact
 /// number of targets, unlike "up to X target creatures".
@@ -5006,7 +5008,7 @@ fn parse_exact_target_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> 
 fn strip_bounded_targets_placeholder(text: &str) -> Option<(&str, MultiTargetSpec)> {
     let lower = text.to_ascii_lowercase();
     for &(phrase, min, max) in BOUNDED_TARGET_PHRASES {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
+        if let Ok((rest, _)) = parse_bounded_target_placeholder(phrase, lower.as_str()) {
             let consumed = lower.len() - rest.len();
             return Some((
                 text[consumed..].trim_start(),
@@ -5022,10 +5024,7 @@ fn strip_bounded_targets_placeholder(text: &str) -> Option<(&str, MultiTargetSpe
 /// players").
 fn strip_bounded_target_prefix(text: &str) -> Option<(&str, MultiTargetSpec)> {
     let lower = text.to_ascii_lowercase();
-    for (prefix, min, max) in [
-        ("one or two target ", 1usize, 2usize),
-        ("one, two, or three target ", 1, 3),
-    ] {
+    for &(prefix, min, max) in BOUNDED_TARGET_PREFIX_PHRASES {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(lower.as_str()) {
             let consumed = lower.len() - rest.len();
             return Some((
@@ -5035,6 +5034,70 @@ fn strip_bounded_target_prefix(text: &str) -> Option<(&str, MultiTargetSpec)> {
         }
     }
     None
+}
+
+fn is_bounded_cardinality_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, ',' | '.' | ';' | ':' | '"' | '/' | '-' | ')' | '(')
+}
+
+fn parse_bounded_target_placeholder<'a>(
+    phrase: &'static str,
+    input: &'a str,
+) -> OracleResult<'a, &'a str> {
+    terminated(
+        tag::<_, _, OracleError<'a>>(phrase),
+        peek(alt((
+            recognize(eof),
+            recognize(satisfy(is_bounded_cardinality_boundary)),
+        ))),
+    )
+    .parse(input)
+}
+
+fn parse_bounded_target_cardinality_phrase(input: &str) -> OracleResult<'_, ()> {
+    for &(phrase, _, _) in BOUNDED_TARGET_PHRASES {
+        if let Ok((rest, _)) = parse_bounded_target_placeholder(phrase, input) {
+            return Ok((rest, ()));
+        }
+    }
+    for &(prefix, _, _) in BOUNDED_TARGET_PREFIX_PHRASES {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(input) {
+            return Ok((rest, ()));
+        }
+    }
+    Err(oracle_err(input))
+}
+
+pub(super) fn selected_separator_inside_bounded_target_cardinality(
+    lower: &str,
+    separator: Range<usize>,
+) -> bool {
+    if separator.is_empty() || separator.end > lower.len() {
+        return false;
+    }
+
+    let mut cursor = lower;
+    let mut base_offset = 0;
+    while let Some((before, _, rest)) =
+        nom_primitives::scan_preceded(cursor, parse_bounded_target_cardinality_phrase)
+    {
+        let matched_start = base_offset + before.len();
+        let matched_end = lower.len() - rest.len();
+        if matched_start <= separator.start && separator.end <= matched_end {
+            return true;
+        }
+        if rest.is_empty() {
+            break;
+        }
+        let next_offset = lower.len() - rest.len();
+        if next_offset <= base_offset {
+            break;
+        }
+        base_offset = next_offset;
+        cursor = rest;
+    }
+
+    false
 }
 
 fn strip_distribute_among_target_quantifier<'a>(
@@ -8971,6 +9034,38 @@ mod tests {
             spec,
             MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 5 })
         );
+    }
+
+    #[test]
+    fn bounded_target_cardinality_separator_span_detection() {
+        assert!(super::selected_separator_inside_bounded_target_cardinality(
+            "one or two target creatures",
+            3..7,
+        ));
+        assert!(super::selected_separator_inside_bounded_target_cardinality(
+            "one, two, or three target creatures",
+            8..13,
+        ));
+        assert!(super::selected_separator_inside_bounded_target_cardinality(
+            "one or two targets",
+            3..7,
+        ));
+        assert!(super::selected_separator_inside_bounded_target_cardinality(
+            "one, two, or three targets.",
+            8..13,
+        ));
+        assert!(!super::selected_separator_inside_bounded_target_cardinality(
+            "tap one or two target creatures, or draw a card",
+            31..36,
+        ));
+        assert!(!super::selected_separator_inside_bounded_target_cardinality(
+            "one or two targetsmiths",
+            3..7,
+        ));
+        assert!(!super::selected_separator_inside_bounded_target_cardinality(
+            "target creature or player",
+            15..19,
+        ));
     }
 
     #[test]

@@ -35310,6 +35310,143 @@ fn choose_one_of_detects_highway_robbery_pattern() {
 }
 
 #[test]
+fn choose_one_of_ignores_bounded_counter_distribution_cardinality() {
+    let ability = parse_effect_chain(
+        "Distribute three +1/+1 counters among one, two, or three target creatures you control.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        !matches!(&*ability.effect, Effect::ChooseOneOf { .. }),
+        "bounded target cardinality must not split into ChooseOneOf"
+    );
+    assert!(
+        !matches!(&*ability.effect, Effect::Unimplemented { .. }),
+        "bounded counter distribution must parse, got {:?}",
+        ability.effect
+    );
+    match &*ability.effect {
+        Effect::PutCounter {
+            counter_type,
+            count,
+            target: TargetFilter::Typed(_),
+        } => {
+            assert_eq!(*counter_type, CounterType::Plus1Plus1);
+            assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+        }
+        other => panic!("expected distributed PutCounter, got {other:?}"),
+    }
+    assert_eq!(
+        ability.distribute,
+        Some(DistributionUnit::Counters("P1P1".to_string()))
+    );
+    assert_eq!(ability.multi_target, Some(MultiTargetSpec::fixed(1, 3)));
+}
+
+#[test]
+fn ajani_mentor_of_heroes_counter_distribution_survives_full_parse() {
+    let parsed = parse_oracle_text(
+        "+1: Distribute three +1/+1 counters among one, two, or three target creatures you control.\n\
++1: Look at the top four cards of your library. You may reveal an Aura, creature, or planeswalker card from among them and put it into your hand. Put the rest on the bottom of your library in any order.\n\
+−8: You gain 100 life.",
+        "Ajani, Mentor of Heroes",
+        &[],
+        &["Planeswalker".to_string()],
+        &["Ajani".to_string()],
+    );
+    let mut matching_ability = None;
+    for ability in &parsed.abilities {
+        if matches!(
+            &*ability.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ) {
+            matching_ability = Some(ability);
+            break;
+        }
+    }
+    let ability = matching_ability
+        .expect("Ajani's first loyalty ability should parse as counter distribution");
+    assert!(
+        !matches!(&*ability.effect, Effect::ChooseOneOf { .. }),
+        "Ajani's counter distribution must not be a ChooseOneOf"
+    );
+    assert_eq!(
+        ability.distribute,
+        Some(DistributionUnit::Counters("P1P1".to_string()))
+    );
+    assert_eq!(ability.multi_target, Some(MultiTargetSpec::fixed(1, 3)));
+}
+
+#[test]
+fn choose_one_of_preserves_external_choice_after_bounded_target_branch() {
+    for (text, expected_multi_target) in [
+        (
+            "tap one or two target creatures, or draw a card",
+            MultiTargetSpec::fixed(1, 2),
+        ),
+        (
+            "tap one, two, or three target creatures, or draw a card",
+            MultiTargetSpec::fixed(1, 3),
+        ),
+    ] {
+        let ability = parse_effect_chain(text, AbilityKind::Spell);
+        match &*ability.effect {
+            Effect::ChooseOneOf { branches, .. } => {
+                assert_eq!(branches.len(), 2);
+                assert!(
+                    !matches!(&*branches[0].effect, Effect::Unimplemented { .. }),
+                    "first branch must parse for {text}"
+                );
+                assert!(
+                    !matches!(&*branches[1].effect, Effect::Unimplemented { .. }),
+                    "second branch must parse for {text}"
+                );
+                assert!(
+                    matches!(&*branches[0].effect, Effect::SetTapState { .. }),
+                    "first branch should tap bounded targets for {text}, got {:?}",
+                    branches[0].effect
+                );
+                assert_eq!(branches[0].multi_target, Some(expected_multi_target));
+                assert!(
+                    matches!(&*branches[1].effect, Effect::Draw { .. }),
+                    "second branch should draw for {text}, got {:?}",
+                    branches[1].effect
+                );
+            }
+            other => panic!("expected external ChooseOneOf for {text}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn choose_one_of_skips_internal_bounded_target_or_to_external_separator() {
+    let ability = parse_effect_chain(
+        "tap one or two target creatures or draw a card",
+        AbilityKind::Spell,
+    );
+    match &*ability.effect {
+        Effect::ChooseOneOf { branches, .. } => {
+            assert_eq!(branches.len(), 2);
+            assert!(
+                matches!(&*branches[0].effect, Effect::SetTapState { .. }),
+                "first branch should tap bounded targets, got {:?}",
+                branches[0].effect
+            );
+            assert_eq!(branches[0].multi_target, Some(MultiTargetSpec::fixed(1, 2)));
+            assert!(
+                matches!(&*branches[1].effect, Effect::Draw { .. }),
+                "second branch should draw, got {:?}",
+                branches[1].effect
+            );
+        }
+        other => panic!("expected external ChooseOneOf after bounded target, got {other:?}"),
+    }
+}
+
+#[test]
 fn choose_one_of_detects_shared_create_token_verb() {
     let ability = parse_effect_chain(
         "Create a Food token or a Treasure token.",

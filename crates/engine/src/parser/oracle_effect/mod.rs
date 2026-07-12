@@ -45,7 +45,8 @@ use lower::{
     extract_switch_pt_multi_target, is_token_creating_effect, parse_damage_player_scope,
     parse_for_each_opponent_target_fanout_clause, rebind_clause_recipients_with,
     rebind_decline_body_recipient, rebind_subject_only_body_recipient,
-    scan_until_next_same_source_exile_invalidation, split_difference_repeat_suffix,
+    scan_until_next_same_source_exile_invalidation, selected_separator_inside_bounded_target_cardinality,
+    split_difference_repeat_suffix,
     strip_any_number_quantifier, strip_each_player_subject, strip_each_scope_who_cant_subject,
     strip_each_scope_who_does_subject, strip_each_scope_who_doesnt_subject,
     strip_for_each_opponent_who_doesnt, strip_for_each_prefix, strip_for_each_repeat_suffix,
@@ -4971,8 +4972,24 @@ fn try_parse_choose_one_of_inline(
     {
         return None;
     }
-    let (before_lower, after_lower) =
-        split_around(tp.lower, ", or ").or_else(|| split_around(tp.lower, " or "))?;
+    let (before_lower, after_lower) = {
+        let mut search_start = 0;
+        loop {
+            let search = &tp.lower[search_start..];
+            let (candidate_before, candidate_after, separator) = split_around(search, ", or ")
+                .map(|(before, after)| (before, after, ", or "))
+                .or_else(|| {
+                    split_around(search, " or ").map(|(before, after)| (before, after, " or "))
+                })?;
+            let separator_start = search_start + candidate_before.len();
+            let separator_range = separator_start..separator_start + separator.len();
+            if selected_separator_inside_bounded_target_cardinality(tp.lower, separator_range.clone()) {
+                search_start = separator_range.end;
+                continue;
+            }
+            break (&tp.lower[..separator_start], candidate_after);
+        }
+    };
 
     // CR 205.2 + CR 112.1: A bare " or " between two card-type words is a TYPE
     // disjunction ("an instant or sorcery spell", "an artifact or creature
