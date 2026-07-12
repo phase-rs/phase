@@ -2228,13 +2228,29 @@ fn starts_they_continuous_clause_lower(input: &str) -> OracleResult<'_, ()> {
 /// ("creature you control", "creature an opponent controls") up to the verb.
 fn starts_target_continuous_clause_lower(s: &str) -> OracleResult<'_, ()> {
     let (rest, _) = tag("target ").parse(s)?;
-    alt((
+    // CR 601.2c: the continuous-modification verb must live in the SAME sentence
+    // as this "target <noun>" subject. Bound the verb scan to before the first
+    // sentence-ending period so a "gets/gains/has/loses" in a LATER sentence is
+    // not pulled back onto this subject. Otherwise the second target of a
+    // two-target DECLARATION — "Choose target creature you control and target
+    // creature you don't control. The creature you control gets +1/+1 ..."
+    // (Tail Swipe / Joust / Blizzard Brawl, #4751) — is mis-read as a
+    // "target <noun> gets +1/+1" continuous clause and the declaration is split,
+    // dropping the second target slot. The verb scan runs on the bounded
+    // segment but the arm still returns `rest` (standard nom discipline; the
+    // boolean caller ignores the remainder).
+    let segment = match take_until::<_, _, OracleError<'_>>(". ").parse(rest) {
+        Ok((_, seg)) => seg,
+        Err(_) => rest,
+    };
+    let _ = alt((
         value((), (take_until(" gets "), tag(" gets "))),
         value((), (take_until(" gains "), tag(" gains "))),
         value((), (take_until(" has "), tag(" has "))),
         value((), (take_until(" loses "), tag(" loses "))),
     ))
-    .parse(rest)
+    .parse(segment)?;
+    Ok((rest, ()))
 }
 
 /// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: a second "each opponent"/"each

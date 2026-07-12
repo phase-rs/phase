@@ -2629,7 +2629,13 @@ fn parse_flash_cleanup_sacrifice_casting_option(
 /// `ParsedAbilities` stays category-grouped because it is the runtime-facing
 /// type; only *within*-category order and explicit cross-item relations are
 /// semantic after lowering.
-pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
+///
+/// Takes `ir` by `&mut` so the swallow audit — whose input is the assembled
+/// result, and which therefore cannot run before the fold — can still emit into
+/// `OracleDocIr.diagnostics`. That keeps the doc IR the single warning channel
+/// (`OracleDocIr.diagnostics` → `ParsedAbilities.parse_warnings`) rather than
+/// letting the audit direct-append to `parse_warnings` behind the doc's back.
+pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     let mut result = ParsedAbilities {
         abilities: Vec::new(),
         triggers: Vec::new(),
@@ -2712,7 +2718,6 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
             }
         }
     }
-    result.parse_warnings = ir.diagnostics.clone();
 
     // ---- Cross-item document relation application (CR 607.2d) -----------------
     // `ir.relations` were recovered at parse time by pairing producer/consumer
@@ -2742,14 +2747,14 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
     // the swallow audit against the parsed result so any unrepresented clause
-    // surfaces as a parse_warning. Post-relocation the audit runs after `finish()`
-    // has sealed `OracleDocIr.diagnostics`, so its warnings DIRECT-APPEND to
-    // `result.parse_warnings` (card-data parity holds — both routes end in
-    // `parse_warnings`, same order: loop diagnostics then swallow diagnostics).
-    // `OracleDocIr.diagnostics` no longer carries swallow warnings until Plan 02
-    // re-homes the audit — see ISSUES.md #17. Source text is the original
-    // (un-normalized) `ir.source_text`, matching today's swallow input.
-    let mut swallow_diags = Vec::new();
+    // surfaces as a parse_warning. The audit's INPUT is the assembled `result`, so
+    // it cannot run before the fold; its OUTPUT nonetheless belongs in the doc's
+    // one warning channel, so it emits into `ir.diagnostics` (the reason this
+    // function borrows `ir` mutably). `parse_warnings` is then assigned ONCE, from
+    // that channel, at the end — no direct-append behind the doc's back.
+    // Source text is the original (un-normalized) `ir.source_text`, matching
+    // today's swallow input.
+    //
     // Draft-time "draft matters" lines (CR 905) are intentionally consumed as
     // no-ops; their "you may"/"if you do"/"as long as" markers would otherwise be
     // reported as swallowed clauses. Strip them before the audit; constructed-play
@@ -2766,8 +2771,7 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
     } else {
         &ir.source_text
     };
-    super::swallow_check::check_swallowed_clauses(swallow_input, &result, &mut swallow_diags);
-    result.parse_warnings.extend(swallow_diags);
+    super::swallow_check::check_swallowed_clauses(swallow_input, &result, &mut ir.diagnostics);
     // ---------------------------------------------------------------------------
 
     // CR 607.1 + CR 610.3: Two-trigger exile-return synthesis (Journey to
@@ -2778,6 +2782,13 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
     // former `synthesize`/`bind` passes ran (the audit reads `result` first).
     apply_etb_exile_ltb_return(&mut result, &ir.relations, &trigger_ids);
     apply_active_player_punisher(&mut result, &ir.relations, &ability_ids);
+
+    // The doc IR's diagnostics channel is the single source of parse warnings.
+    // Assigned once, here, so it carries BOTH the parse-time diagnostics sealed by
+    // `finish()` and the swallow-audit diagnostics emitted above, in that order.
+    // None of the relation passes touch `parse_warnings`, so this placement is
+    // equivalent to assigning before them.
+    result.parse_warnings = ir.diagnostics.clone();
     result
 }
 
@@ -5729,14 +5740,14 @@ pub fn parse_oracle_text(
     types: &[String],
     subtypes: &[String],
 ) -> ParsedAbilities {
-    let ir = parse_oracle_ir(
+    let mut ir = parse_oracle_ir(
         oracle_text,
         card_name,
         mtgjson_keyword_names,
         types,
         subtypes,
     );
-    let mut parsed = lower_oracle_ir(&ir);
+    let mut parsed = lower_oracle_ir(&mut ir);
     scrub_granting_placeholder_descriptions(&mut parsed);
     parsed
 }
