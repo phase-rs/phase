@@ -17,8 +17,17 @@
 #               consults off_zone_characteristics — required for anything that
 #               can run on a non-battlefield object)
 #
+#   (B) Raw zone mutation: the movers in game/zones.rs, direct writes to the
+#       zone containers, and direct `GameObject::zone` assignment. Any of these
+#       skips replacement consultation, `ZoneChanged`, triggers, and draw
+#       bookkeeping. Gameplay zone changes go through zone_pipeline.
+#       Unlike (A), this section is FULL-TREE, not diff-only: it is a ratchet
+#       against a frozen baseline, so a pre-existing site cannot be quietly
+#       duplicated into a new one. See scripts/zone_authority_census.py.
+#
 # Exempt: lines (or the line immediately above) with
-#     // allow-raw-authority: <reason>
+#     // allow-raw-authority: <reason>      (A)
+#     // allow-raw-zone: <reason>           (B)
 # Allowed files (the authorities themselves and the layer/copy machinery that
 # must read raw keyword state): see ALLOWED_KEYWORD_FILES below.
 #
@@ -75,10 +84,9 @@ filter_allow_annotation() {
     printf '%s' "${added%$'\n'}"
 }
 
+# NB: no early exit on an empty diff — section (B) is full-tree and must run
+# even when this change touched no engine source.
 files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" ':(exclude)**/*.md' 2>/dev/null || true)
-if [ -z "$files" ]; then
-    exit 0
-fi
 
 while IFS= read -r file; do
     [ -f "$file" ] || continue
@@ -126,7 +134,11 @@ snapshots), annotate the line with:
     // allow-raw-authority: <one-line reason>
 
 EOF
-    exit 1
 fi
 
-exit 0
+# (B) Raw zone mutation — full-tree ratchet against the frozen baseline.
+if ! python3 "$(dirname "$0")/zone_authority_census.py" --check; then
+    FAIL=1
+fi
+
+exit "$FAIL"
