@@ -156,63 +156,101 @@ pub(crate) struct ItemIdTracks<'a> {
     pub(crate) replacements: &'a [OracleItemId],
 }
 
-/// One auditable unit: a distinct span of Oracle source, and every item that claims
-/// that span.
+/// One auditable unit: a block of Oracle source lines, and every item that starts in
+/// it.
 ///
-/// **The unit is the SPAN, not the item.** A single line routinely lowers to more
-/// than one item — Visions of Ruin's `"Flashback {8}{R}{R}. This spell costs {X}
-/// less to cast this way, where X is the greatest mana value of a commander..."`
-/// emits a `Keyword` item *and* a `ModifyCost` static item — and today **both carry
-/// the whole line as their fragment**, because the substrate cannot yet hand an item
-/// a sub-line fragment.
+/// **The unit is a SOURCE BLOCK, not an item.** Two independent substrate facts force
+/// this, and getting either wrong corrupts the audit in a different direction.
 ///
-/// Auditing such items separately is not merely coarse, it is *wrong*: each sibling
-/// would raise the expectations of the entire shared line while being able to supply
-/// evidence for only its own clause, so the Keyword item would report a swallowed
-/// `DynamicQty` for a quantity the static item represents perfectly. That is a
-/// manufactured false positive, and it would fire on every multi-item line in the
-/// pool.
+/// **(1) A line lowers to several items — false positives.** Visions of Ruin's
+/// `"Flashback {8}{R}{R}. This spell costs {X} less to cast this way, where X is the
+/// greatest mana value of a commander..."` emits a `Keyword` item *and* a `ModifyCost`
+/// static item, and both carry the whole line as their fragment. Audited separately,
+/// each sibling raises the expectations of the entire shared line while supplying
+/// evidence for only its own clause, so the `Keyword` item reports a swallowed
+/// `DynamicQty` for a quantity the static represents perfectly. Grouping the line's
+/// items into one unit — evidence being the union of what they produced — is what
+/// makes the expectation and the evidence describe the same text.
 ///
-/// Grouping by span is therefore the honest granularity given the substrate: the
-/// expectation comes from a piece of text, so the evidence must be everything that
-/// piece of text produced. It also degrades in exactly the right direction — when
-/// the recognizer bring-up gives items real sub-line spans, items stop sharing a
-/// span, the groups split automatically, and the audit gets finer with no change
+/// **(2) An item consumes lines its span never claims — false negatives, the
+/// dangerous direction.** A modal item reports `first_line == last_line == 0` with the
+/// bare header `"Choose one —"` as its fragment, while having actually consumed the
+/// bullet lines beneath it. Drown in the Loch is three source lines; all three of its
+/// items claim line 0 and carry `"Choose one —"`, so both bullets — which hold the
+/// card's entire meaning — are claimed by nothing at all. An audit that trusted
+/// fragments would never scan that text, raise no expectation for it, and silently
+/// *drop* warnings the card-wide audit correctly raised (measured: 21 faces, all modal
+/// blocks or d20 roll tables).
+///
+/// So a unit owns every source line from its own start up to the next unit's start.
+/// Coverage is then **total by construction**: every line belongs to exactly one unit,
+/// and no text can go unaudited. A warning that disappears because nothing claimed its
+/// text is the one delta direction that hides a regression, and this is the invariant
+/// that forecloses it.
+///
+/// It also degrades in the right direction: once the recognizer bring-up gives items
+/// honest spans, units subdivide on their own and the audit gets finer with no change
 /// here.
 #[derive(Debug)]
 pub(crate) struct AuditUnit<'a> {
-    /// The source range this unit occupies: `(first_line, start_byte, end_byte)`.
-    /// Identity of the unit — two items with the same range are the same unit.
-    key: (usize, usize, usize),
-    /// The Oracle text this unit is accountable for. Supplies the expectation half.
-    pub(crate) fragment: &'a str,
+    /// The Oracle source this unit is accountable for. Supplies the expectation half.
+    ///
+    /// Sliced from the document's raw `source_text` rather than read off
+    /// `item.fragment()` — fragments under-report what an item consumed (see above)
+    /// and are normalized (the card's own name is rewritten to `~`), while the
+    /// detectors' marker phrases and the emitted `description` are raw-text concepts.
+    pub(crate) text: String,
     /// The line this unit's diagnostics are attributed to.
     pub(crate) first_line: usize,
-    /// Every item claiming this span. Supplies the evidence half.
+    /// Every item starting in this block. Supplies the evidence half.
     items: Vec<&'a OracleItemIr>,
 }
 
-/// Split a document's items into audit units, one per distinct source span.
+/// Partition a document into audit units: one per source line that starts an item,
+/// each owning the lines up to the next such line.
 ///
-/// Items with no recorded fragment are skipped: there is no text, so there is no
-/// expectation to raise. Inventing one would fabricate a warning.
-pub(crate) fn audit_units(items: &[OracleItemIr]) -> Vec<AuditUnit<'_>> {
-    let mut units: Vec<AuditUnit<'_>> = Vec::new();
+/// Every line of `source_text` lands in exactly one unit — including the continuation
+/// lines (modal bullets, roll-table branches) that no item's span admits to consuming.
+/// Leading lines before the first item join the first unit for the same reason: text
+/// that belongs to no unit raises no expectation, and a warning that vanishes because
+/// nobody claimed its text is indistinguishable from a warning that was fixed.
+pub(crate) fn audit_units<'a>(
+    items: &'a [OracleItemIr],
+    source_text: &'a str,
+) -> Vec<AuditUnit<'a>> {
+    let lines: Vec<&str> = source_text.lines().collect();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    // One unit per distinct starting line, in source order. `ir.items` is already in
+    // Oracle source order (the document is keyed by source position), so a single pass
+    // suffices and the resulting starts are ascending.
+    let mut units: Vec<AuditUnit<'a>> = Vec::new();
     for item in items {
-        let Some(fragment) = item.source.fragment() else {
+        let first_line = item.source.span().first_line;
+        if first_line >= lines.len() {
             continue;
-        };
-        let span = item.source.span();
-        let key = (span.first_line, span.start_byte, span.end_byte);
-        match units.iter_mut().find(|unit| unit.key == key) {
-            Some(unit) => unit.items.push(item),
-            None => units.push(AuditUnit {
-                key,
-                fragment,
-                first_line: span.first_line,
+        }
+        match units.last_mut() {
+            Some(unit) if unit.first_line == first_line => unit.items.push(item),
+            _ => units.push(AuditUnit {
+                text: String::new(),
+                first_line,
                 items: vec![item],
             }),
         }
+    }
+
+    // Give each unit the lines it owns: its own start through the line before the next
+    // unit's start. The first unit absorbs any leading lines, and the last unit runs to
+    // the end of the card, so the partition covers every line.
+    for i in 0..units.len() {
+        let start = if i == 0 { 0 } else { units[i].first_line };
+        let end = units
+            .get(i + 1)
+            .map_or(lines.len(), |next| next.first_line.min(lines.len()));
+        units[i].text = lines[start..end.max(start)].join("\n");
     }
     units
 }
@@ -395,8 +433,12 @@ mod tests {
             replacements: &[],
         };
 
-        let units = audit_units(&items);
-        assert_eq!(units.len(), 2, "two distinct spans => two audit units");
+        let units = audit_units(&items, "line one\nline two");
+        assert_eq!(
+            units.len(),
+            2,
+            "two distinct starting lines => two audit units"
+        );
 
         let scoped_a = scope_to_unit(&result, &tracks, &units[0]);
         assert_eq!(scoped_a.abilities.len(), 1);
@@ -474,7 +516,7 @@ mod tests {
             replacements: &[],
         };
         let items = vec![kw_item, spell_item];
-        let units = audit_units(&items);
+        let units = audit_units(&items, "Flying\ndraw a card");
         let scoped = scope_to_unit(&result, &tracks, &units[0]);
         assert_eq!(scoped.extracted_keywords, vec![Keyword::Flying]);
         assert!(

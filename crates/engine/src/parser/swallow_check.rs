@@ -124,19 +124,30 @@ fn stamp_line(item_diagnostics: &mut [OracleDiagnostic], first_line: usize) {
 /// type-level fact, not a convention.)
 pub(crate) fn check_swallowed_clauses(
     items: &[OracleItemIr],
+    source_text: &str,
     result: &ParsedAbilities,
     tracks: &ItemIdTracks<'_>,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
-    for unit in audit_units(items) {
-        let fragment = unit.fragment;
-
+    for unit in audit_units(items, source_text) {
         // CR 905: draft-time "draft matters" lines are intentionally consumed as
-        // no-ops, so their "you may" / "if you do" / "as long as" markers would
-        // otherwise every one report as a swallowed clause. Previously this was a
-        // whole-card text filter; per-unit it is exactly a skip of the offending
-        // unit, and constructed-play lines on the same card are still audited.
-        if is_draft_matters_sentence(fragment) {
+        // no-ops, so their "you may" / "if you do" / "as long as" markers would every
+        // one otherwise report as a swallowed clause. Filtered per LINE, not per unit:
+        // a unit owns a block of lines, and a draft line sitting in the same block as a
+        // constructed-play line must not take the whole block down with it.
+        let draft_filtered;
+        let fragment: &str = if unit.text.lines().any(is_draft_matters_sentence) {
+            draft_filtered = unit
+                .text
+                .lines()
+                .filter(|line| !is_draft_matters_sentence(line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            &draft_filtered
+        } else {
+            &unit.text
+        };
+        if fragment.trim().is_empty() {
             continue;
         }
 
@@ -4790,6 +4801,38 @@ mod tests {
             condition_if.iter().all(|warning| warning.line_index() == 1),
             "the swallow must be attributed to the line that raised it (line 1, 0-based), \
              not to line 0's represented rider; got {condition_if:?}"
+        );
+    }
+
+    /// TOTAL-COVERAGE INVARIANT — the false-green tripwire.
+    ///
+    /// A modal item's span claims only its header line (`first_line == last_line == 0`,
+    /// fragment `"Choose one -"`), even though the item consumed the bullet lines
+    /// beneath it. If the audit trusted item fragments, the bullets — which hold the
+    /// card's entire meaning — would be claimed by nothing, raise no expectation, and
+    /// their swallowed clauses would silently DISAPPEAR. That is the one delta
+    /// direction that hides a regression, and it was measured at 21 faces before units
+    /// were made to partition the source by line.
+    ///
+    /// Drown in the Loch's dynamic quantity ("less than or equal to the number of cards
+    /// in its controller's graveyard") lives only on the bullets. It is reported as a
+    /// swallowed DynamicQty in the shipped card data; it must stay reported.
+    #[test]
+    fn modal_bullet_lines_are_audited_not_orphaned() {
+        let parsed = parse_named(
+            "Choose one \u{2014}\n\
+             \u{2022} Counter target spell with mana value less than or equal to the number of \
+             cards in its controller's graveyard.\n\
+             \u{2022} Destroy target creature with mana value less than or equal to the number of \
+             cards in its controller's graveyard.",
+            "Drown in the Loch",
+            &["Instant"],
+        );
+        assert!(
+            has_swallowed_detector(&parsed, "DynamicQty"),
+            "the modal bullets' dynamic quantity must still be audited: text no unit \
+             claims raises no expectation, and the warning vanishes. Warnings: {:?}",
+            parsed.parse_warnings
         );
     }
 

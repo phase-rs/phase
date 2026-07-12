@@ -2781,6 +2781,7 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     let mut swallow_diagnostics = Vec::new();
     super::swallow_check::check_swallowed_clauses(
         &ir.items,
+        &ir.source_text,
         &result,
         &tracks,
         &mut swallow_diagnostics,
