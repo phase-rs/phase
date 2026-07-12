@@ -18,10 +18,14 @@
 //! CR 121.1: A player draws a card by putting the top card of their library
 //!           into their hand.
 
+use std::collections::HashSet;
+
 use engine::game::effects;
 use engine::game::zones::create_object;
 use engine::types::ability::{Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter};
-use engine::types::game_state::GameState;
+use engine::types::game_state::{
+    DrainStatus, GameState, PostReplacementDrain, ResidentDrainPolicy,
+};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -52,11 +56,26 @@ fn swans_followup_draws_for_damage_sources_controller() {
         Zone::Battlefield,
     );
 
-    // Simulate the prevention applier's `Prevented` arm having stamped state:
+    // Simulate the state the prevention applier's `Prevented` arm leaves behind at
+    // the moment the follow-up runs:
     // - `last_effect_count` carries the prevented amount (1 damage)
-    // - `post_replacement_event_source` carries the damage source's id
+    // - the drain carries the damage source's id as its prevented-event source
+    //
+    // The drain is `Dispatching`, not `Ready`: production reaches this point with
+    // the continuation already taken (it is the thing currently running) but its
+    // event context still readable, which is exactly what
+    // `PostReplacementSourceController` reads below.
     state.last_effect_count = Some(1);
-    state.post_replacement_event_source = Some(damage_source);
+    state.post_replacement_drains.install(
+        PostReplacementDrain {
+            status: DrainStatus::Dispatching,
+            source: None,
+            applied: HashSet::new(),
+            event_source: Some(damage_source),
+            event_target: None,
+        },
+        ResidentDrainPolicy::Replace,
+    );
 
     let p1_hand_before = state.players[1].hand.len();
     let p0_hand_before = state.players[0].hand.len();

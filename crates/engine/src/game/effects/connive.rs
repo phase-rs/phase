@@ -1443,7 +1443,8 @@ mod tests {
         // leading draw PARKS. No execute => no continuation-slot competition.
         let install_count_modifier = |state: &mut GameState, modification: QuantityModification| {
             let host = make_battlefield_creature(state, PlayerId(0));
-            let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw);
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
             repl.quantity_modification = Some(modification);
             // Retire after the leading draw so the connive's own later draw is
             // not re-parked by these helpers.
@@ -1648,7 +1649,8 @@ mod tests {
         // deterministic).
         let install_draw_prevent = |state: &mut GameState| -> ObjectId {
             let host = make_battlefield_creature(state, PlayerId(0));
-            let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw);
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
             repl.quantity_modification = Some(QuantityModification::Prevent);
             repl.consume_on_apply = true;
             state

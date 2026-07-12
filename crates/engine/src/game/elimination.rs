@@ -1086,8 +1086,8 @@ mod tests {
         };
         // Coupled continuation slots the resume drain would clear on a normal answer.
         state.replacement_may_cost_paused = true;
-        state.post_replacement_continuation = Some(PostReplacementContinuation::Resolved(
-            Box::new(ResolvedAbility::new(
+        state.install_ready_continuation(PostReplacementContinuation::Resolved(Box::new(
+            ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "psrc".into(),
                     description: None,
@@ -1095,11 +1095,23 @@ mod tests {
                 vec![],
                 o,
                 PlayerId(2),
-            )),
-        ));
-        state.post_replacement_source = Some(o);
-        state.post_replacement_event_source = Some(o);
-        state.post_replacement_event_target = Some(TargetRef::Object(o));
+            ),
+        )));
+        state
+            .post_replacement_drains
+            .resident_mut()
+            .expect("a drain must be resident")
+            .source = Some(o);
+        state
+            .post_replacement_drains
+            .resident_mut()
+            .expect("a drain must be resident")
+            .event_source = Some(o);
+        state
+            .post_replacement_drains
+            .resident_mut()
+            .expect("a drain must be resident")
+            .event_target = Some(TargetRef::Object(o));
         // Issue #4886 (review #6): a live Jinnie Fay-class token-choice applied
         // seed, owned by this same abandoned continuation, must be abandoned
         // alongside its siblings — this field was added after the teardown
@@ -1112,14 +1124,10 @@ mod tests {
             count: 1,
             applied: HashSet::new(),
         });
-        // CR 121.6b: a paused multi-card draw owned by the LEAVING chooser
-        // (P2) — single-player-scoped, must clear alongside its siblings via
+        // CR 121.2: a paused draw instruction owned by the LEAVING chooser (P2) —
+        // single-player-scoped, must clear alongside its siblings via
         // `abandon_post_replacement_continuation` (replacement.rs).
-        state.pending_multi_draw = Some(crate::types::game_state::PendingMultiDraw {
-            player: PlayerId(2),
-            remaining: 1,
-            accumulated: 0,
-        });
+        state.draw_sequences.push(PlayerId(2), 1);
         // Coupled spell-resolution ctx owned by the LEAVING chooser (P2) — must clear.
         state.pending_spell_resolution = Some(PendingSpellResolution {
             object_id: o,
@@ -1151,10 +1159,10 @@ mod tests {
         );
         // Every coupled continuation slot the resume drain owns is torn down.
         assert!(!state.replacement_may_cost_paused);
-        assert!(state.post_replacement_continuation.is_none());
-        assert!(state.post_replacement_source.is_none());
-        assert!(state.post_replacement_event_source.is_none());
-        assert!(state.post_replacement_event_target.is_none());
+        assert!(!state.has_post_replacement_drain());
+        assert!(state.post_replacement_source().is_none());
+        assert!(state.post_replacement_event_source().is_none());
+        assert!(state.post_replacement_event_target().is_none());
         assert!(
             state.post_replacement_token_choice_applied.is_none(),
             "abandoning the parked chooser's continuation must also clear the token-choice \
@@ -1162,8 +1170,8 @@ mod tests {
         );
         assert!(state.pending_connive_reentry.is_none());
         assert!(
-            state.pending_multi_draw.is_none(),
-            "CR 121.6b: the leaving chooser's paused multi-card draw must be \
+            state.draw_sequences.is_empty(),
+            "CR 121.2: the leaving chooser's paused draw instruction must be \
              cleared via abandon_post_replacement_continuation, not stranded"
         );
         assert!(
@@ -1214,13 +1222,14 @@ mod tests {
             additional_cost_payments: vec![],
             convoked_creatures: vec![],
         });
-        // CR 121.6b: a paused multi-card draw owned by the LIVING chooser (P0)
+        // CR 121.2: a paused draw instruction owned by the LIVING chooser (P0)
         // must survive a different player's departure — no over-clear.
-        state.pending_multi_draw = Some(crate::types::game_state::PendingMultiDraw {
-            player: PlayerId(0),
-            remaining: 2,
-            accumulated: 1,
-        });
+        let living_frame = state.draw_sequences.push(PlayerId(0), 2);
+        state
+            .draw_sequences
+            .active_if(living_frame)
+            .expect("the frame just pushed is active")
+            .accumulated = 1;
 
         let mut events = Vec::new();
         eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut events);
@@ -1235,14 +1244,15 @@ mod tests {
             state.pending_spell_resolution.is_some(),
             "an opponent leaving must not tear down the living player's spell-resolution ctx"
         );
+        let survivor = state
+            .draw_sequences
+            .active()
+            .expect("an opponent leaving must not clear the living chooser's paused instruction");
         assert_eq!(
-            state.pending_multi_draw,
-            Some(crate::types::game_state::PendingMultiDraw {
-                player: PlayerId(0),
-                remaining: 2,
-                accumulated: 1,
-            }),
-            "an opponent leaving must not clear the living chooser's paused multi-card draw"
+            (survivor.player, survivor.remaining, survivor.accumulated),
+            (PlayerId(0), 2, 1),
+            "the living chooser's paused draw instruction must survive intact — owed units and \
+             already-delivered count both preserved"
         );
         assert!(
             matches!(

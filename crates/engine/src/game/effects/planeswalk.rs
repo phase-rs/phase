@@ -44,7 +44,7 @@ pub fn resolve(
             // fires in this same resolution step (mirrors
             // `draw_through_replacement`'s Execute-arm drain; `replace_event`
             // does not drain — the caller must). No planeswalk occurs.
-            if state.post_replacement_continuation.is_some() {
+            if state.has_post_replacement_drain() {
                 let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                     state, None, None, None, events,
                 );

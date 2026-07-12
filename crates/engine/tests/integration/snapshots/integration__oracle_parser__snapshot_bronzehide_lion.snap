@@ -189,5 +189,13 @@ expression: result
   ],
   "statics": [],
   "replacements": [],
-  "extractedKeywords": []
+  "extractedKeywords": [],
+  "parseWarnings": [
+    {
+      "type": "SwallowedClause",
+      "detector": "Duration_UntilEndOfTurn",
+      "description": "When this creature dies, return it to the battlefield. It's an Aura enchantment with enchant creature you control and \"{G}{W}: Enchanted cre",
+      "line_index": 1
+    }
+  ]
 }

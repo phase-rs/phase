@@ -87,10 +87,10 @@ fn jace_draw_from_nonempty_library_does_not_win_and_does_not_leak() {
     // post-replacement continuation. A leaked `WinTheGame` continuation is what
     // drained against the wrong player on a later turn in the bug report.
     assert!(
-        runner.state().post_replacement_continuation.is_none(),
+        runner.state().post_replacement_continuation().is_none(),
         "a non-empty draw must NOT leak a stashed post-replacement continuation; \
          found {:?}",
-        runner.state().post_replacement_continuation
+        runner.state().post_replacement_continuation()
     );
 }
 
@@ -137,9 +137,9 @@ fn jace_draw_from_empty_library_wins() {
     // CR 704.3: the continuation must drain in the same resolution step — no
     // leak into the next priority pass.
     assert!(
-        runner.state().post_replacement_continuation.is_none(),
+        runner.state().post_replacement_continuation().is_none(),
         "post_replacement_continuation must drain in the same step; found {:?}",
-        runner.state().post_replacement_continuation
+        runner.state().post_replacement_continuation()
     );
 }
 
@@ -186,9 +186,9 @@ fn laboratory_maniac_draw_from_empty_library_wins() {
         "the replaced draw never happens (CR 614.6); empty-library flag must stay false"
     );
     assert!(
-        runner.state().post_replacement_continuation.is_none(),
+        runner.state().post_replacement_continuation().is_none(),
         "post_replacement_continuation must drain in the same step; found {:?}",
-        runner.state().post_replacement_continuation
+        runner.state().post_replacement_continuation()
     );
 }
 
@@ -242,8 +242,8 @@ fn jace_natural_draw_step_from_empty_library_wins() {
         "the replaced draw never happens (CR 614.6); empty-library flag must stay false"
     );
     assert!(
-        runner.state().post_replacement_continuation.is_none(),
+        runner.state().post_replacement_continuation().is_none(),
         "post_replacement_continuation must drain in the same step; found {:?}",
-        runner.state().post_replacement_continuation
+        runner.state().post_replacement_continuation()
     );
 }

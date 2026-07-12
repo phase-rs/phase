@@ -1265,23 +1265,35 @@ pub fn execute_untap_with_choices(
         match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
                 if let ProposedEvent::Untap { object_id, .. } = event {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        // CR 122.1d: If a permanent with a stun counter would become untapped,
-                        // instead remove a stun counter from it.
-                        if let Some(entry) = obj.counters.get_mut(&CounterType::Stun) {
-                            *entry -= 1;
-                            if *entry == 0 {
-                                obj.counters.remove(&CounterType::Stun);
+                    let has_stun = state
+                        .objects
+                        .get(&object_id)
+                        .is_some_and(|o| o.counters.contains_key(&CounterType::Stun));
+                    if has_stun {
+                        // CR 122.1d + CR 101.2: Skip removal when blocked by
+                        // CountersCantBeRemoved (Fear of Sleep Paralysis).
+                        if !super::effects::counters::counter_removal_blocked(
+                            state,
+                            object_id,
+                            &CounterType::Stun,
+                        ) {
+                            if let Some(obj) = state.objects.get_mut(&object_id) {
+                                if let Some(entry) = obj.counters.get_mut(&CounterType::Stun) {
+                                    *entry -= 1;
+                                    if *entry == 0 {
+                                        obj.counters.remove(&CounterType::Stun);
+                                    }
+                                }
                             }
                             events.push(GameEvent::CounterRemoved {
                                 object_id,
                                 counter_type: CounterType::Stun,
                                 count: 1,
                             });
-                        } else {
-                            obj.tapped = false;
-                            events.push(GameEvent::PermanentUntapped { object_id });
                         }
+                    } else if let Some(obj) = state.objects.get_mut(&object_id) {
+                        obj.tapped = false;
+                        events.push(GameEvent::PermanentUntapped { object_id });
                     }
                 }
             }
@@ -1577,23 +1589,35 @@ fn execute_seedborn_statics(state: &mut GameState, events: &mut Vec<GameEvent>, 
             match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
                     if let ProposedEvent::Untap { object_id, .. } = event {
-                        if let Some(obj) = state.objects.get_mut(&object_id) {
-                            // CR 122.1d: Stun-counter removal takes precedence
-                            // over the untap, matching the main untap pass.
-                            if let Some(entry) = obj.counters.get_mut(&CounterType::Stun) {
-                                *entry -= 1;
-                                if *entry == 0 {
-                                    obj.counters.remove(&CounterType::Stun);
+                        let has_stun = state
+                            .objects
+                            .get(&object_id)
+                            .is_some_and(|o| o.counters.contains_key(&CounterType::Stun));
+                        if has_stun {
+                            // CR 122.1d + CR 101.2: Same gate as the main
+                            // untap pass — skip removal when blocked.
+                            if !super::effects::counters::counter_removal_blocked(
+                                state,
+                                object_id,
+                                &CounterType::Stun,
+                            ) {
+                                if let Some(obj) = state.objects.get_mut(&object_id) {
+                                    if let Some(entry) = obj.counters.get_mut(&CounterType::Stun) {
+                                        *entry -= 1;
+                                        if *entry == 0 {
+                                            obj.counters.remove(&CounterType::Stun);
+                                        }
+                                    }
                                 }
                                 events.push(GameEvent::CounterRemoved {
                                     object_id,
                                     counter_type: CounterType::Stun,
                                     count: 1,
                                 });
-                            } else {
-                                obj.tapped = false;
-                                events.push(GameEvent::PermanentUntapped { object_id });
                             }
+                        } else if let Some(obj) = state.objects.get_mut(&object_id) {
+                            obj.tapped = false;
+                            events.push(GameEvent::PermanentUntapped { object_id });
                         }
                     }
                 }
@@ -8218,6 +8242,284 @@ mod tests {
             begin_phase_applied_count >= 1,
             "at least one BeginPhase skip must have fired, got {}",
             begin_phase_applied_count
+        );
+    }
+
+    /// CR 122.1d + CR 101.2: Fear of Sleep Paralysis — stun counters can't be
+    /// removed from permanents your opponents control. When the opponent's
+    /// creature would untap and has a stun counter, the counter stays and the
+    /// creature remains tapped.
+    #[test]
+    fn execute_untap_honors_counters_cant_be_removed_static() {
+        use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
+        use crate::types::counter::CounterType;
+        use crate::types::statics::StaticMode;
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        // Player 1 is the active player (their untap step).
+        state.active_player = PlayerId(1);
+
+        // Player 0 controls Fear of Sleep Paralysis (the source of the static).
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Fear of Sleep Paralysis".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let def = StaticDefinition::new(StaticMode::CountersCantBeRemoved {
+                counter_type: CounterType::Stun,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::Opponent),
+            ));
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Enchantment);
+            obj.static_definitions.push(def);
+        }
+
+        // Player 1 controls a creature with a stun counter, tapped.
+        let stunned = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Stunned Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&stunned).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.tapped = true;
+            obj.counters.insert(CounterType::Stun, 1);
+        }
+
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+
+        // The creature must stay tapped — the stun counter blocks the untap.
+        assert!(
+            state.objects[&stunned].tapped,
+            "creature with blocked stun counter must stay tapped"
+        );
+        // The stun counter must NOT have been removed.
+        assert_eq!(
+            state.objects[&stunned].counters.get(&CounterType::Stun),
+            Some(&1),
+            "stun counter must remain when removal is blocked"
+        );
+        // No CounterRemoved event should have been emitted.
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GameEvent::CounterRemoved { object_id, .. } if *object_id == stunned
+            )),
+            "no CounterRemoved event when removal is blocked"
+        );
+    }
+
+    /// Inverse test: without Fear of Sleep Paralysis, a stunned creature's stun
+    /// counter IS removed at the untap step (CR 122.1d baseline).
+    #[test]
+    fn execute_untap_removes_stun_counter_without_prohibition() {
+        use crate::types::counter::CounterType;
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+
+        let stunned = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Stunned Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&stunned).unwrap();
+            obj.tapped = true;
+            obj.counters.insert(CounterType::Stun, 1);
+        }
+
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+
+        // The creature stays tapped (stun counter was removed instead of untapping).
+        assert!(
+            state.objects[&stunned].tapped,
+            "creature stays tapped when stun counter is removed (CR 122.1d)"
+        );
+        // The stun counter must have been removed.
+        assert!(
+            !state.objects[&stunned]
+                .counters
+                .contains_key(&CounterType::Stun),
+            "stun counter must be removed at untap step (CR 122.1d baseline)"
+        );
+        // A CounterRemoved event must have been emitted.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::CounterRemoved { object_id, counter_type, .. }
+                    if *object_id == stunned && *counter_type == CounterType::Stun
+            )),
+            "CounterRemoved event must fire for baseline stun removal"
+        );
+    }
+
+    /// CR 122.1d + CR 101.2: The Seedborn Muse untap path honors
+    /// `CountersCantBeRemoved` — a stunned opponent permanent protected by the
+    /// prohibition keeps its stun counter even during the Seedborn pass.
+    #[test]
+    fn execute_seedborn_statics_honors_counters_cant_be_removed() {
+        use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
+        use crate::types::counter::CounterType;
+        use crate::types::statics::StaticMode;
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        // Player 0 is the active player (their untap step).
+        state.active_player = PlayerId(0);
+
+        // Player 1 controls Seedborn Muse — untaps their stuff during P0's step.
+        let seedborn = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Seedborn Muse".to_string(),
+            Zone::Battlefield,
+        );
+        install_seedborn_static(&mut state, seedborn);
+        mark_as_creature(&mut state, seedborn);
+
+        // Player 1 also controls a stunned creature.
+        let stunned = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Stunned Bear".to_string(),
+            Zone::Battlefield,
+        );
+        mark_as_creature(&mut state, stunned);
+        state.objects.get_mut(&stunned).unwrap().tapped = true;
+        state
+            .objects
+            .get_mut(&stunned)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        // Player 0 controls the prohibition (Fear of Sleep Paralysis).
+        // Its filter is "permanents your opponents control" — Player 1's
+        // permanents are opponents of Player 0.
+        let prohib = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Fear of Sleep Paralysis".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&prohib)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Enchantment);
+        let def = StaticDefinition::new(StaticMode::CountersCantBeRemoved {
+            counter_type: CounterType::Stun,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::Opponent),
+        ));
+        state
+            .objects
+            .get_mut(&prohib)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+
+        // The stun counter must remain — the Seedborn pass is blocked.
+        assert_eq!(
+            state.objects[&stunned]
+                .counters
+                .get(&CounterType::Stun)
+                .copied(),
+            Some(1),
+            "Seedborn pass must not remove stun counter when blocked by CountersCantBeRemoved"
+        );
+        // The creature must remain tapped (stun counter prevents untap).
+        assert!(
+            state.objects[&stunned].tapped,
+            "stunned creature must stay tapped during Seedborn pass when counter removal is blocked"
+        );
+    }
+
+    /// Inverse: without the prohibition, the Seedborn Muse pass removes the
+    /// stun counter normally per CR 122.1d.
+    #[test]
+    fn execute_seedborn_statics_removes_stun_counter_without_prohibition() {
+        use crate::types::counter::CounterType;
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        // Player 0 is the active player (their untap step).
+        state.active_player = PlayerId(0);
+
+        // Player 1 controls Seedborn Muse.
+        let seedborn = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Seedborn Muse".to_string(),
+            Zone::Battlefield,
+        );
+        install_seedborn_static(&mut state, seedborn);
+        mark_as_creature(&mut state, seedborn);
+
+        // Player 1 also controls a stunned creature.
+        let stunned = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Stunned Bear".to_string(),
+            Zone::Battlefield,
+        );
+        mark_as_creature(&mut state, stunned);
+        state.objects.get_mut(&stunned).unwrap().tapped = true;
+        state
+            .objects
+            .get_mut(&stunned)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+
+        // Without prohibition, the stun counter is removed per CR 122.1d.
+        assert!(
+            !state.objects[&stunned]
+                .counters
+                .contains_key(&CounterType::Stun),
+            "stun counter must be removed during Seedborn pass (CR 122.1d baseline)"
+        );
+        // A CounterRemoved event must have been emitted.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::CounterRemoved { object_id, counter_type, .. }
+                    if *object_id == stunned && *counter_type == CounterType::Stun
+            )),
+            "CounterRemoved event must fire for Seedborn baseline stun removal"
         );
     }
 }

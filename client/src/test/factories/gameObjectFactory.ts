@@ -1,6 +1,6 @@
 import { Factory } from "fishery";
 
-import type { CardType, GameObject } from "../../adapter/types.ts";
+import type { CardType, GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
 
 const defaultCardType: CardType = {
   supertypes: [],
@@ -16,9 +16,108 @@ const mergeCardType = (overrides: Partial<CardType> = {}): CardType => ({
   subtypes: [...(overrides.subtypes ?? defaultCardType.subtypes)],
 });
 
-export const gameObjectFactory = Factory.define<GameObject>(() => ({
-  id: 1,
-  card_id: 1,
+/**
+ * Convenience-method factory for `GameObject`. Methods chain and compose:
+ * `gameObjectFactory.creature(3, 3).legendary().inHand().named("Sigarda").build()`.
+ * Prefer chaining these over passing raw override objects to `.build()`.
+ */
+export class GameObjectFactory extends Factory<GameObject> {
+  // --- Card types (params deep-merge, so `.creature().legendary()` composes) ---
+  creature(power = 2, toughness = 2) {
+    return this.params({
+      card_types: { core_types: ["Creature"] },
+      power,
+      toughness,
+      base_power: power,
+      base_toughness: toughness,
+    });
+  }
+
+  artifact() {
+    return this.params({ card_types: { core_types: ["Artifact"] } });
+  }
+
+  enchantment() {
+    return this.params({ card_types: { core_types: ["Enchantment"] } });
+  }
+
+  land() {
+    return this.params({ card_types: { core_types: ["Land"] } });
+  }
+
+  sorcery() {
+    return this.params({ card_types: { core_types: ["Sorcery"] } });
+  }
+
+  instant() {
+    return this.params({ card_types: { core_types: ["Instant"] } });
+  }
+
+  planeswalker(loyalty = 3) {
+    return this.params({ card_types: { core_types: ["Planeswalker"] }, loyalty });
+  }
+
+  legendary() {
+    return this.params({ card_types: { supertypes: ["Legendary"] } });
+  }
+
+  // --- Zones ---
+  inHand() {
+    return this.params({ zone: "Hand", entered_battlefield_turn: null });
+  }
+
+  onBattlefield() {
+    return this.params({ zone: "Battlefield" });
+  }
+
+  inGraveyard() {
+    return this.params({ zone: "Graveyard", entered_battlefield_turn: null });
+  }
+
+  inExile() {
+    return this.params({ zone: "Exile", entered_battlefield_turn: null });
+  }
+
+  inCommandZone() {
+    return this.params({ zone: "Command", entered_battlefield_turn: null });
+  }
+
+  // --- Object state ---
+  tapped() {
+    return this.params({ tapped: true });
+  }
+
+  named(name: string) {
+    return this.params({ name });
+  }
+
+  withId(id: ObjectId) {
+    return this.params({ id, card_id: id });
+  }
+
+  ownedBy(player: PlayerId) {
+    return this.params({ owner: player, controller: player });
+  }
+
+  controlledBy(player: PlayerId) {
+    return this.params({ controller: player });
+  }
+
+  withCost(shards: string[], generic = 0) {
+    return this.params({ mana_cost: { type: "Cost", shards, generic } });
+  }
+
+  commander() {
+    return this.inCommandZone().legendary().creature(3, 3).params({
+      is_commander: true,
+      commander_tax: 0,
+    });
+  }
+}
+
+export const gameObjectFactory = GameObjectFactory.define(({ sequence }): GameObject => ({
+  id: sequence,
+  card_id: sequence,
   owner: 0,
   controller: 0,
   zone: "Battlefield",

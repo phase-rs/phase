@@ -25398,6 +25398,61 @@ fn crew_contribution_power_and_toughness_modifiers_parse() {
 /// sentences are independent continuous effects (the dual-subject anthem class)
 /// must emit one `StaticDefinition` per sentence, each carrying its own affected
 /// filter and modifications. Regression for Flowering of the White Tree, whose
+// CR 608.2c: In an Aura, a continuation sentence whose subject is the pronoun
+// "It" refers to the ENCHANTED CREATURE, not the Aura object. Spider-Man No More:
+// "Enchanted creature is a Citizen ... It has defender and loses all other
+// abilities." — the second static parses with the right mods but used to bind
+// `SelfRef` (applying to the Aura, which is not on the battlefield as a creature).
+#[test]
+fn aura_it_continuation_binds_to_enchanted_creature() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1. It has defender and loses all other abilities.",
+    );
+    assert_eq!(defs.len(), 2, "both sentences must emit statics: {defs:?}");
+    // EVERY static must be scoped to the enchanted creature — none left on SelfRef.
+    for def in &defs {
+        assert!(
+            matches!(&def.affected,
+                Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::EnchantedBy)),
+            "aura continuation static must bind to the enchanted creature, got {:?}",
+            def.affected
+        );
+    }
+    // The "It" sentence carried its mods correctly (RemoveAllAbilities + Defender).
+    let it_static = defs
+        .iter()
+        .find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::RemoveAllAbilities)
+        })
+        .expect("the 'It has defender and loses all abilities' static must be present");
+    assert!(it_static
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Defender
+        }));
+}
+
+// Regression: a NON-aura multi-sentence anthem (no EnchantedBy scope, no "It"
+// pronoun subject) is untouched by the continuation rebind.
+#[test]
+fn non_aura_multi_sentence_anthem_scope_unchanged() {
+    let defs = parse_static_line_multi(
+        "Creatures you control get +1/+1. Creatures you control have flying.",
+    );
+    assert_eq!(defs.len(), 2);
+    for def in &defs {
+        assert!(
+            matches!(&def.affected,
+                Some(TargetFilter::Typed(tf))
+                    if tf.controller == Some(ControllerRef::You)
+                        && !tf.properties.contains(&FilterProp::EnchantedBy)),
+            "non-aura anthem must stay controller-scoped, got {:?}",
+            def.affected
+        );
+    }
+}
+
 /// first-sentence parse previously swallowed the period, mangled the ward cost,
 /// and dropped the entire second sentence.
 ///
@@ -28250,5 +28305,66 @@ fn rayami_flying_grant_is_conditional_on_matching_exiled_card() {
     assert!(
         !runner.state().objects[&rayami_id].has_keyword(&Keyword::Vigilance),
         "Rayami must not gain vigilance — no exiled card has vigilance"
+    );
+}
+
+/// Digital-only Alchemy: a dynamic P/T pump that scales by the source's own
+/// intensity — Minthara of the Absolute / Teysa of the Ghost Council ("get
+/// +X/+0, where X is ~'s intensity") and Quickbeast Amulet ("gets +X/+X, where
+/// X is this Equipment's intensity"). X binds to `QuantityRef::Intensity {
+/// scope: Source }`, which `game::quantity` evaluates at runtime.
+#[test]
+fn dynamic_pt_pump_scales_by_source_intensity() {
+    let intensity = QuantityExpr::Ref {
+        qty: QuantityRef::Intensity {
+            scope: ObjectScope::Source,
+        },
+    };
+
+    // +X/+0: power scales by intensity, toughness untouched.
+    let s = super::shared::parse_static_line_multi(
+        "Creatures you control get +X/+0, where X is ~'s intensity.",
+    );
+    assert_eq!(s.len(), 1, "Minthara: {s:?}");
+    assert!(
+        s[0].modifications
+            .contains(&ContinuousModification::AddDynamicPower {
+                value: intensity.clone()
+            }),
+        "expected power to scale by source intensity, got {:?}",
+        s[0].modifications
+    );
+    assert!(
+        !s[0]
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
+        "+X/+0 must not pump toughness, got {:?}",
+        s[0].modifications
+    );
+
+    // +X/+X: both axes scale by intensity (Quickbeast Amulet). The card's
+    // printed "this Equipment's intensity" is rewritten to "~'s intensity" by
+    // `normalize_card_name_refs` before the static parser runs (see
+    // `normalize_card_name_refs`), so the AST test feeds the `~` form.
+    let s = super::shared::parse_static_line_multi(
+        "Equipped creature gets +X/+X, where X is ~'s intensity.",
+    );
+    assert_eq!(s.len(), 1, "Quickbeast Amulet: {s:?}");
+    assert!(
+        s[0].modifications
+            .contains(&ContinuousModification::AddDynamicPower {
+                value: intensity.clone()
+            }),
+        "expected power axis, got {:?}",
+        s[0].modifications
+    );
+    assert!(
+        s[0].modifications
+            .contains(&ContinuousModification::AddDynamicToughness {
+                value: intensity.clone()
+            }),
+        "expected toughness axis, got {:?}",
+        s[0].modifications
     );
 }
