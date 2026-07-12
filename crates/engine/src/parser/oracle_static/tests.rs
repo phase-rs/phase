@@ -25399,16 +25399,25 @@ fn crew_contribution_power_and_toughness_modifiers_parse() {
 /// must emit one `StaticDefinition` per sentence, each carrying its own affected
 /// filter and modifications. Regression for Flowering of the White Tree, whose
 // CR 608.2c: In an Aura, a continuation sentence whose subject is the pronoun
-// "It" refers to the ENCHANTED CREATURE, not the Aura object. Spider-Man No More:
-// "Enchanted creature is a Citizen ... It has defender and loses all other
-// abilities." — the second static parses with the right mods but used to bind
-// `SelfRef` (applying to the Aura, which is not on the battlefield as a creature).
+// "It" refers to the ENCHANTED CREATURE, not the Aura object. Exact Oracle text
+// of Spider-Man No More — the FIRST sentence is a type-change ("is a Citizen
+// with base power and toughness 1/1"), which establishes the `EnchantedBy`
+// scope via the type-change path (NOT the simple "gets +N/+N" path); the "It"
+// continuation must inherit that scope. Before the fix its `affected` was
+// `SelfRef` (applying to the Aura, which is not on the battlefield as a
+// creature). The trailing "(It also loses all other creature types.)" is
+// reminder text and is stripped.
 #[test]
 fn aura_it_continuation_binds_to_enchanted_creature() {
     let defs = parse_static_line_multi(
-        "Enchanted creature gets +1/+1. It has defender and loses all other abilities.",
+        "Enchanted creature is a Citizen with base power and toughness 1/1. \
+         It has defender and loses all other abilities. \
+         (It also loses all other creature types.)",
     );
-    assert_eq!(defs.len(), 2, "both sentences must emit statics: {defs:?}");
+    assert!(
+        defs.len() >= 2,
+        "both the type-change and the 'It' continuation must emit statics: {defs:?}"
+    );
     // EVERY static must be scoped to the enchanted creature — none left on SelfRef.
     for def in &defs {
         assert!(
@@ -25430,6 +25439,74 @@ fn aura_it_continuation_binds_to_enchanted_creature() {
         .modifications
         .contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::Defender
+        }));
+}
+
+// CR 608.2c: A second real Aura in the class — exact Oracle text of
+// Retro-Mutation. First sentence is a type-change ("is a Turtle with base power
+// and toughness 0/1"); the "It" continuation ("It can't attack and loses all
+// abilities") must bind to the enchanted creature, not the Aura.
+#[test]
+fn aura_it_continuation_binds_retro_mutation() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature is a Turtle with base power and toughness 0/1. \
+         It can't attack and loses all abilities. \
+         (It also loses all other creature types.)",
+    );
+    assert!(
+        defs.len() >= 2,
+        "type-change + 'It' continuation must both emit statics: {defs:?}"
+    );
+    for def in &defs {
+        assert!(
+            matches!(&def.affected,
+                Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::EnchantedBy)),
+            "every Retro-Mutation static must bind to the enchanted creature, got {:?}",
+            def.affected
+        );
+    }
+    assert!(
+        defs.iter().any(|d| d
+            .modifications
+            .contains(&ContinuousModification::RemoveAllAbilities)),
+        "the 'It ... loses all abilities' static must be present: {defs:?}"
+    );
+}
+
+// CR 608.2c applies identically to Equipment — an "It" continuation binds to the
+// EQUIPPED creature (`FilterProp::EquippedBy`). No printed Equipment currently
+// pairs a scope-establishing first sentence with a bare-"It" static
+// continuation, so this exercises the `EquippedBy` arm of the rebind at the
+// class level with representative grammatical text rather than a single card.
+#[test]
+fn equipment_it_continuation_binds_to_equipped_creature() {
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +1/+1. It has trample and loses all other abilities.",
+    );
+    assert!(
+        defs.len() >= 2,
+        "both Equipment sentences must emit statics: {defs:?}"
+    );
+    for def in &defs {
+        assert!(
+            matches!(&def.affected,
+                Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::EquippedBy)),
+            "every Equipment static (including the 'It' continuation) must bind to \
+             the equipped creature, got {:?}",
+            def.affected
+        );
+    }
+    let it_static = defs
+        .iter()
+        .find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::RemoveAllAbilities)
+        })
+        .expect("the 'It has trample and loses all abilities' static must be present");
+    assert!(it_static
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Trample
         }));
 }
 
