@@ -4155,7 +4155,7 @@ fn parse_unless_player_have_deal_damage_cost(after_unless: &str) -> Option<Abili
     })
 }
 
-/// CR 700.2 + CR 608.2d: "[DEFAULT] unless that player [A] or [B]" —
+/// CR 608.2d: "[DEFAULT] unless that player [A] or [B]" —
 /// three-branch forced choice. The scoped player picks an avoidance option or
 /// accepts the default consequence. Called before `try_parse_choose_one_of_inline`
 /// to prevent the 2-branch splitter from misreading the left half.
@@ -4893,7 +4893,7 @@ fn retarget_put_counter_to_parent(effect: &mut Effect) {
     }
 }
 
-/// CR 700.2 + CR 608.2d: Detect inline binary-choice imperatives of the form
+/// CR 608.2d: Detect inline binary-choice imperatives of the form
 /// "A or B" where both A and B parse independently as supported effects.
 /// Emits `Effect::ChooseOneOf { branches: [A, B] }` so the second branch is
 /// preserved in card data rather than silently dropped by the single-verb
@@ -7274,12 +7274,12 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
-    // CR 700.2 + CR 118.12a: "[DEFAULT] unless a player has ~ deal N to them".
+    // CR 608.2d + CR 118.12a: "[DEFAULT] unless a player has ~ deal N to them".
     if let Some(clause) = try_parse_unless_player_have_deal_damage(tp, ctx) {
         return clause;
     }
 
-    // CR 700.2 + CR 608.2d: Three-branch "[DEFAULT] unless that player A or B"
+    // CR 608.2d: Three-branch "[DEFAULT] unless that player A or B"
     // forced choice — checked BEFORE the two-branch splitter so the more-specific
     // "unless that player" pattern is matched before the left half is misread as
     // just the default consequence (losing the avoidance alternative).
@@ -7314,7 +7314,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
-    // CR 700.2 + CR 608.2d: Inline binary-choice imperative — "discard a card
+    // CR 608.2d: Inline binary-choice imperative — "discard a card
     // or sacrifice a land" (Highway Robbery) and analogous "A or B" patterns
     // that are not bulleted `Choose one —` modals. The split happens BEFORE
     // any single-verb dispatch so the second branch isn't silently dropped

@@ -3718,7 +3718,7 @@ pub enum WaitingFor {
         up_to: bool,
         destination: Zone,
     },
-    /// CR 700.2: Player selects card(s) from a tracked set (e.g., exiled cards).
+    /// CR 608.2d: Player selects card(s) from a tracked set (e.g., exiled cards).
     /// Chosen/unchosen cards flow into sub-abilities via pending_continuation,
     /// unlike DigChoice which moves to fixed zones.
     ChooseFromZoneChoice {

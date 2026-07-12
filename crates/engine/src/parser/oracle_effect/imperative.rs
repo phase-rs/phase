@@ -3766,7 +3766,7 @@ fn try_parse_choose_owned_by_voter(
 fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
     type E<'a> = OracleError<'a>;
 
-    // CR 608.2c + CR 700.2: A standalone "Choose one." / "Choose one card."
+    // CR 608.2c + CR 608.2d: A standalone "Choose one." / "Choose one card."
     // clause (empty tail) in a resolution chain is the impulse-exile reduction
     // idiom — a preceding clause exiled one or more cards and a following clause
     // grants permission to play one of them ("Exile the top three cards of your
@@ -4740,7 +4740,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             choice_optional,
             reveal: true,
         },
-        // CR 700.2: Anaphoric "choose N of them/those" → select from the tracked set
+        // CR 608.2d: Anaphoric "choose N of them/those" → select from the tracked set
         // populated by the preceding effect (RevealTop, RevealHand, ExileTop, etc.).
         ChooseImperativeAst::FromTrackedSet {
             count,
@@ -9136,7 +9136,7 @@ pub(super) fn parse_imperative_family_ast(
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
             }),
 
-        // Choose (CR 700.2)
+        // Choose (CR 608.2d)
         "choose" | "secretly" => parse_choose_discard_rest_of_hand(text, lower)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)))
             .or_else(|| {

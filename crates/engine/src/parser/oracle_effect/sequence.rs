@@ -6336,7 +6336,7 @@ pub(super) fn parse_followup_continuation_ast(
                 parse_put_chosen_cards_at_library_position(&lower)
                     .map(|position| ContinuationAst::PutChosenCardsAtLibraryPosition { position })
             }),
-        // CR 700.2: "Choose/You choose/An opponent chooses/Target opponent chooses one/two/N
+        // CR 608.2d: "Choose/You choose/An opponent chooses/Target opponent chooses one/two/N
         // of them/those" after ChangeZone, ExileTop, RevealTop, or RevealHand →
         // ChooseFromZone building block
         Effect::ChangeZone { .. }

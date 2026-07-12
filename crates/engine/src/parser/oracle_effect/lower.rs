@@ -3416,7 +3416,7 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         return (None, text.to_string());
     }
 
-    // CR 700.2 + CR 701.21a + CR 608.2c: "for each player, you choose …" (Tragic
+    // CR 608.2c + CR 608.2d + CR 701.21a: "for each player, you choose …" (Tragic
     // Arrogance → CategoryChooserScope::ControllerForAll) and "for each player,
     // choose … in that player's graveyard/zone" (Breach the Multiverse →
     // ChooseFromZone { zone_owner: EachPlayer }) have DEDICATED dispatchers that
