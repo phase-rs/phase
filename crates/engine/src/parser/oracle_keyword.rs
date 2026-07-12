@@ -4121,6 +4121,7 @@ mod tests {
         // The Dalek subtype filter must survive (not a Dalek special-case — the
         // subtype canonicalization pass in the cost parser handles it).
         assert!(
+            // allow-noncombinator: test assertion inspects filter Debug output for the subtype, not parser dispatch
             format!("{filter:?}").contains("Dalek"),
             "expected Dalek subtype filter, got {filter:?}"
         );
