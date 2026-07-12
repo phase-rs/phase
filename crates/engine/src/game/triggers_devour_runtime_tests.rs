@@ -145,11 +145,11 @@ fn drive_devour_etb_to_sacrifice_choice(
     move_to_zone(&mut state, object_id, to, &mut events);
 
     assert!(
-        state.post_replacement_continuation.is_some(),
+        state.has_post_replacement_drain(),
         "Devour's non-modifier execute (Effect::Sacrifice) must be \
              stashed as a post-replacement continuation by the pipeline"
     );
-    state.post_replacement_source = None;
+    state.clear_post_replacement_source();
     let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
         &mut state,
         Some(obj_id),

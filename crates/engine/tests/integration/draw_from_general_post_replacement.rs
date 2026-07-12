@@ -458,3 +458,97 @@ fn new_way_forward_combat(db: &CardDatabase, shield: Shield) -> CombatDeltas {
         p1_library_delta: library_len(runner.state(), P1) as i64 - p1_library_before as i64,
     }
 }
+
+/// END-TO-END regression witness for the `install(KeepResident)` guard.
+///
+/// This is the full path the unit tests in `drain_stack_reentrancy_tests` model at
+/// the API level, driven through real cards and the real pipeline:
+///
+/// ```text
+/// combat damage -> Swans prevention -> apply_pending_post_replacement_effect
+///   -> begin_dispatch            (Swans' drain is now resident + DISPATCHING)
+///   -> Swans' continuation DRAWS for the damage source's controller (P1)
+///     -> draw_through_replacement -> replace_event
+///       -> Jace, Wielder of Mysteries matches (P1's library is empty)
+///         -> apply_single_replacement stashes its MANDATORY post-effect (WinTheGame)
+///           -> install(KeepResident)   <-- the seam under test
+/// ```
+///
+/// The stash arrives while Swans' drain is resident but **already dispatching**.
+/// Guarding the install on `!drains.is_empty()` drops it, `draw_through_replacement`
+/// (which gates its drain on `has_ready()`) then never runs it, and **P1 never wins**.
+/// The predecessor slot installed it, because the continuation had been moved out of
+/// the slot before dispatching and the slot read empty.
+///
+/// Jace's replacement is `mode: Mandatory` with `execute: WinTheGame` — verified from
+/// the card data, not recalled. It is exactly the "nested mandatory post-effect" class
+/// the fix exists for.
+///
+/// CR 616.1g + CR 615.5 + CR 104.2a.
+#[test]
+fn nested_mandatory_post_effect_runs_when_a_dispatching_continuation_draws() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // P0 draws normally; only P1's library is empty, so only P1's draw is replaced.
+    scenario.with_library_top(P0, &["Card A", "Card B", "Card C", "Card D", "Card E"]);
+
+    let swans = scenario
+        .add_creature_from_oracle(P0, "Swans of Bryn Argoll", 4, 3, SWANS_TEXT)
+        .id();
+
+    // P1 blocks with a reach creature (Swans has flying). Its damage to Swans is
+    // prevented, and Swans' CR 615.5 rider draws that many for the SOURCE's
+    // controller — P1.
+    let blocker = scenario
+        .add_creature_from_oracle(P1, "Canopy Sentinel", 3, 5, "Reach")
+        .id();
+
+    // P1's library is EMPTY and P1 controls Jace, so P1's very first drawn card is
+    // replaced by "you win the game instead".
+    scenario.add_real_card(P1, "Jace, Wielder of Mysteries", Zone::Battlefield, db);
+
+    let mut runner = scenario.build();
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(swans, AttackTarget::Player(P1))])
+        .expect("P0 attacks with Swans");
+    advance_to_declare_blockers(&mut runner);
+    runner
+        .declare_blockers(&[(blocker, swans)])
+        .expect("P1 blocks Swans with the 3/5 reach creature");
+
+    assert!(
+        runner.state().players[1].library.is_empty(),
+        "precondition: P1's library must be empty, or Jace's replacement never matches \
+         and this test proves nothing"
+    );
+
+    runner.combat_damage();
+    runner.advance_until_stack_empty();
+
+    // The nested mandatory post-effect ran: P1 won.
+    //
+    // Before the `has_ready()` fix this assertion failed — the stash arrived while
+    // Swans' drain was Dispatching, `install(KeepResident)` dropped it on
+    // `!drains.is_empty()`, and WinTheGame never executed.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1)),
+                ..
+            }
+        ),
+        "P1 must win: Swans' prevention rider draws for P1, P1's library is empty, and \
+         Jace, Wielder of Mysteries replaces that draw with a MANDATORY WinTheGame. \
+         Dropping the re-entrant stash strands that post-effect and P1 never wins — \
+         exactly the regression the has_ready() guard fixes. got {:?}",
+        runner.state().waiting_for
+    );
+}

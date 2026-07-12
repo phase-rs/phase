@@ -11210,9 +11210,10 @@ mod tests {
     #[test]
     fn card_face_with_replacement_decline_unimplemented_is_detected() {
         let mut face = make_face();
-        face.replacements
-            .push(ReplacementDefinition::new(ReplacementEvent::Draw).mode(
-                ReplacementMode::Optional {
+        face.replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+                .mode(ReplacementMode::Optional {
                     decline: Some(Box::new(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::Unimplemented {
@@ -11220,8 +11221,8 @@ mod tests {
                             description: None,
                         },
                     ))),
-                },
-            ));
+                }),
+        );
 
         assert!(card_face_has_unimplemented_parts(&face));
     }

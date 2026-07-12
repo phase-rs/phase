@@ -18,7 +18,8 @@ use super::filter::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, PendingReplacement, ReplacementCandidateSummary, ReplacementIndexEntry, WaitingFor,
+    DrainStatus, GameState, PendingReplacement, PostReplacementDrain, ReplacementCandidateSummary,
+    ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -265,6 +266,24 @@ pub enum ApplyResult {
     Prevented,
 }
 
+/// CR 614.6: Install a mandatory post-effect's continuation — the replacement's own
+/// actions, which run as part of the modified event that occurs instead.
+///
+/// Policy is [`ResidentDrainPolicy::KeepResident`]: when a **Ready** continuation
+/// is already pending, the incoming one is discarded.
+///
+/// This is NOT the CR 616.1g case. A replacement applying to an event *contained
+/// within* another nests correctly — the outer drain is `Dispatching` while its
+/// continuation runs, so it is not "pending work" and the inner stash installs
+/// above it.
+///
+/// The discard only fires for **sibling** events (two combat-damage instances in one
+/// batch, CR 510.2; two coin flips of one instruction), where the same definition is
+/// applied once to each — which CR 614.5 licenses, since it grants one opportunity
+/// *per event*. Those sibling continuations are never dispatched today, so nothing
+/// observable is lost; the discard keeps an un-dispatchable drain from pinning
+/// `has_ready()` true forever. That they are stashed at all is the real defect
+/// (issue #5676). See [`ResidentDrainPolicy`] for the measured census.
 fn stash_post_replacement_continuation(
     state: &mut GameState,
     continuation: PostReplacementContinuation,
@@ -273,14 +292,16 @@ fn stash_post_replacement_continuation(
     event_source: Option<ObjectId>,
     event_target: Option<TargetRef>,
 ) {
-    if state.post_replacement_continuation.is_some() {
-        return;
-    }
-    state.post_replacement_continuation = Some(continuation);
-    state.post_replacement_source = Some(source);
-    state.post_replacement_applied = applied;
-    state.post_replacement_event_source = event_source;
-    state.post_replacement_event_target = event_target;
+    state.post_replacement_drains.install(
+        PostReplacementDrain {
+            status: DrainStatus::Ready(continuation),
+            source: Some(source),
+            applied,
+            event_source,
+            event_target,
+        },
+        ResidentDrainPolicy::KeepResident,
+    );
 }
 
 fn ability_tree_creates_tokens(def: &AbilityDefinition) -> bool {
@@ -331,22 +352,24 @@ fn is_copy_token_substitution(def: &AbilityDefinition) -> bool {
 /// (player elimination mid-resolution, `elimination.rs`) precisely because it
 /// was hand-listed there instead of routed through one function.
 pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
-    state.post_replacement_continuation = None;
-    state.post_replacement_source = None;
-    state.post_replacement_event_source = None;
-    state.post_replacement_event_target = None;
+    // The drain owns its source / applied / event-source / event-target, so one
+    // call abandons all four. This is precisely the hand-listing hazard the doc
+    // above describes: those four could no longer be stranded individually.
+    state.post_replacement_drains.abandon_all();
     state.post_replacement_token_choice_applied = None;
     // CR 614.1a: the Moonlit-scoped "that many" copy count is single-authority
     // abandoned alongside the applied seed it rides with.
     state.post_replacement_token_substitution_count = None;
     state.pending_connive_reentry = None;
-    // CR 121.6b + CR 800.4a: `PendingMultiDraw` is single-player-scoped (it
-    // tracks only the departing player's own in-flight multi-card draw), so
-    // it is safe to null outright here — unlike the deliberately-preserved
-    // multi-player queue fields nearby in `elimination.rs`
-    // (`pending_team_draw_step` etc.), which need the interrupted APNAP queue
-    // resumed for the remaining players rather than field-nulling.
-    state.pending_multi_draw = None;
+    // CR 121.2 + CR 800.4a: draw frames are single-player-scoped (each tracks one
+    // player's own in-flight instruction), so the whole stack is abandoned outright
+    // here — unlike the deliberately-preserved multi-player queue fields nearby in
+    // `elimination.rs` (`pending_team_draw_step` etc.), which need the interrupted
+    // APNAP queue resumed for the remaining players rather than field-nulling.
+    //
+    // The frame-ID allocator deliberately does NOT rewind: a `DrawSequenceFrameId`
+    // captured before the abandonment must never alias a frame allocated after it.
+    state.draw_sequences.abandon_all();
 }
 
 pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
@@ -6876,6 +6899,21 @@ fn replacement_definition_for_id(
                 .map(|entry| &entry.object)
         })
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    // CR 121.2: a `debug_assert!(def.validate_draw_scope().is_ok())` belongs here —
+    // this is the single point where the engine resolves a definition it is about to
+    // consult, so it is the one place a producer that forgot `.draw_scope(...)` can be
+    // caught. It is deliberately NOT wired, and the reason is a finding rather than an
+    // oversight: the committed fixture `crates/engine/tests/fixtures/integration_cards.json`
+    // predates the field and carries 7 Draw replacements with no scope (Abundance, Blood
+    // Scrivener, Jace Wielder of Mysteries, Laboratory Maniac, Living Conundrum, Quantum
+    // Riddler, Teferi's Ageless Insight). Wiring the assert fails all 7 until that fixture
+    // is regenerated — a separate, deliberate act, since a regen sweeps in whatever else
+    // has changed in the card pool.
+    //
+    // Production is unaffected: `card-data.json` is regenerated from the parser by CI and
+    // all 6 producers set the scope. The release-build authority is
+    // `draw_replacement_census.py`, which cross-checks every declared scope against an
+    // independently derived one across the full 51-card corpus.
 }
 
 fn pipeline_loop(
@@ -7061,7 +7099,7 @@ pub(crate) fn replace_combat_damage_batch(
         // partial prevention (`Modified` → `Execute`) — so a depletion-shield
         // rider fires "immediately afterward" and never leaks past the batch.
         if !matches!(result, ReplacementResult::NeedsChoice(_))
-            && state.post_replacement_continuation.is_some()
+            && state.has_post_replacement_drain()
         {
             let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                 state, None, None, None, events,
@@ -7233,17 +7271,6 @@ fn continue_replacement_impl(
         // `draw_applier`) can see the continuation slot and suppress the
         // original event when its replacement is a non-modifier chain
         // (CR 614.6: the draw never happens when fully replaced).
-        if post_effect.is_some() {
-            state.post_replacement_source = Some(rid.source);
-            state.post_replacement_applied = proposed.applied_set().clone();
-            // CR 615.5 + CR 609.7: Optional/decline post-effects don't carry
-            // prevention-event-source semantics — clear so a prior prevention
-            // can't leak into a non-prevention stash.
-            state.post_replacement_event_source = None;
-            state.post_replacement_event_target = None;
-        } else {
-            state.post_replacement_applied.clear();
-        }
         // CR 614.12a + CR 616.1: Seed the inherited replacement-applied set ONLY
         // when this replacement originates a token-choice continuation (Jinnie
         // Fay-class `CreateToken -> ChooseOneOf(Token, Token)`). The seed is
@@ -7272,8 +7299,36 @@ fn continue_replacement_impl(
                 state.post_replacement_token_substitution_count = Some(*count as i32);
             }
         }
-        state.post_replacement_continuation =
-            post_effect.map(PostReplacementContinuation::Template);
+        // CR 614.6: install (or clear) the optional branch's continuation — the
+        // replacement's own actions for the branch that was taken.
+        //
+        // Policy is `Replace`: unlike `stash_post_replacement_continuation`, this
+        // path has always OVERWRITTEN a resident continuation rather than
+        // discarding the incoming one. The two policies genuinely disagree; both
+        // are preserved exactly here, and naming them is the point.
+        //
+        // CR 615.5 + CR 609.7: an optional/decline post-effect carries no
+        // prevention-event-source semantics, so `event_source`/`event_target` are
+        // empty — a prior prevention must not leak into a non-prevention drain.
+        // The drain owns those fields, so replacing it clears them by construction.
+        match post_effect {
+            Some(def) => {
+                state.post_replacement_drains.install(
+                    PostReplacementDrain {
+                        status: DrainStatus::Ready(PostReplacementContinuation::Template(def)),
+                        source: Some(rid.source),
+                        applied: proposed.applied_set().clone(),
+                        event_source: None,
+                        event_target: None,
+                    },
+                    ResidentDrainPolicy::Replace,
+                );
+            }
+            // No post-effect: this branch produces no continuation, so any resident
+            // one (and the `applied` set that rode with it) is dropped — exactly
+            // what `continuation = None` + `applied.clear()` did before.
+            None => state.post_replacement_drains.abandon_all(),
+        }
 
         match apply_single_replacement_and_dirty(state, proposed, rid, branch, registry, events) {
             Ok(new_event) => proposed = new_event,
@@ -7447,7 +7502,7 @@ mod tests {
             "chosen-dependent counters must not fold pre-choice"
         );
         assert!(
-            state.post_replacement_continuation.is_some(),
+            state.has_post_replacement_drain(),
             "Choose + chosen-dependent PutCounter must stash post-replacement work"
         );
     }
@@ -7491,7 +7546,7 @@ mod tests {
         assert!(enter_tapped.resolve(false));
         assert_eq!(enter_with_counters, vec![(CounterType::Stun, 1)]);
         assert!(
-            state.post_replacement_continuation.is_none(),
+            !state.has_post_replacement_drain(),
             "pure ETB modifier chains must not be replayed after the event"
         );
     }
@@ -9336,7 +9391,7 @@ mod tests {
             "Gate land should enter the battlefield tapped"
         );
         assert!(
-            state.post_replacement_continuation.is_some(),
+            state.has_post_replacement_drain(),
             "the as-enters color Choose should be stashed as a post-replacement continuation"
         );
     }
@@ -9671,10 +9726,10 @@ mod tests {
         // continuation. A leaked Template here is the same defect class as
         // the Jace empty-library win bug.
         assert!(
-            state.post_replacement_continuation.is_none(),
+            !state.has_post_replacement_drain(),
             "GainLife→GainLife amount-substitution must not leak a post-replacement \
              continuation; found {:?}",
-            state.post_replacement_continuation
+            state.post_replacement_continuation()
         );
     }
 
@@ -9716,8 +9771,9 @@ mod tests {
 
     #[test]
     fn draw_replacement_uses_event_context_amount_with_offset() {
-        let repl =
-            ReplacementDefinition::new(ReplacementEvent::Draw).execute(AbilityDefinition::new(
+        let repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+            .execute(AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Offset {
@@ -9906,7 +9962,8 @@ mod tests {
             },
         );
         mill.sub_ability = Some(Box::new(return_to_hand));
-        let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw);
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
         repl.mode = ReplacementMode::Optional { decline: None };
         repl.execute = Some(Box::new(mill));
         repl
@@ -10040,30 +10097,30 @@ mod tests {
     /// the single dredge outcome, matching "drew no cards" from the report).
     #[test]
     fn multi_draw_dredges_one_of_two_units_other_draws_normally() {
-        use crate::game::effects::draw::resume_multi_draw;
+        use crate::game::effects::draw::start_draw_sequence;
         use crate::types::actions::GameAction;
 
         let mut state = dredge_state(10);
         let mut events = Vec::new();
 
-        let result = resume_multi_draw(&mut state, PlayerId(0), 2, 0, &mut events);
+        let result = start_draw_sequence(&mut state, PlayerId(0), 2, &mut events);
         let ReplacementResult::NeedsChoice(chooser) = result else {
             panic!("expected the first unit's dredge offer to pause, got {result:?}");
         };
         assert_eq!(chooser, PlayerId(0));
+        let parked = state
+            .draw_sequences
+            .active()
+            .expect("the paused instruction must stay on the draw-sequence stack");
         assert_eq!(
-            state.pending_multi_draw,
-            Some(crate::types::game_state::PendingMultiDraw {
-                player: PlayerId(0),
-                remaining: 1,
-                accumulated: 0,
-            }),
-            "one unit must remain queued after the first unit parks"
+            (parked.player, parked.remaining, parked.accumulated),
+            (PlayerId(0), 1, 0),
+            "one unit must remain owed after the first unit parks, with nothing yet delivered"
         );
 
         // Accept the dredge offer for unit 1 through the real production path —
-        // `handle_replacement_choice` applies the accepted event AND drains
-        // `pending_multi_draw` for the remaining unit.
+        // `handle_replacement_choice` settles the accepted event AND resumes the
+        // parked frame for the remaining unit.
         state.priority_player = chooser;
         crate::game::engine::apply_as_current(
             &mut state,
@@ -10072,9 +10129,9 @@ mod tests {
         .expect("resume the dredge choice");
 
         assert!(
-            state.pending_multi_draw.is_none(),
-            "the multi-draw must fully complete once both units resolve, got {:?}",
-            state.pending_multi_draw
+            state.draw_sequences.is_empty(),
+            "the instruction must fully complete once both units resolve, got {:?}",
+            state.draw_sequences
         );
         assert!(
             state.players[0].hand.contains(&ObjectId(10)),
@@ -10093,7 +10150,7 @@ mod tests {
         assert_eq!(
             state.last_effect_count,
             Some(1),
-            "CR 609.3: the TRUE total actually drawn across the whole 2-unit \
+            "CR 608.2c: the TRUE total actually drawn across the whole 2-unit \
              instruction is 1 (unit 1 dredged for 0, unit 2 drew 1 normally) — \
              not 2 (the naive per-unit count) and not 0 (the last unit's count \
              if last_effect_count were wrongly overwritten per-unit)"
@@ -10104,13 +10161,13 @@ mod tests {
     /// — the hostile sibling of the accept case above.
     #[test]
     fn multi_draw_decline_dredge_unit_one_still_draws_unit_two_normally() {
-        use crate::game::effects::draw::resume_multi_draw;
+        use crate::game::effects::draw::start_draw_sequence;
         use crate::types::actions::GameAction;
 
         let mut state = dredge_state(10);
         let mut events = Vec::new();
 
-        let result = resume_multi_draw(&mut state, PlayerId(0), 2, 0, &mut events);
+        let result = start_draw_sequence(&mut state, PlayerId(0), 2, &mut events);
         let ReplacementResult::NeedsChoice(chooser) = result else {
             panic!("expected the first unit's dredge offer to pause, got {result:?}");
         };
@@ -10156,10 +10213,10 @@ mod tests {
         assert_eq!(
             state.last_effect_count,
             Some(2),
-            "CR 609.3: both units drew normally (unit 1's declined draw, folded \
-             into the resumed multi-draw's total, PLUS unit 2's declined draw) \
+            "CR 608.2c: both units drew normally (unit 1's declined draw, folded \
+             into the resumed instruction's frame, PLUS unit 2's declined draw) \
              — the total must be 2, not 1 (which would mean unit 1's own draw \
-             was silently dropped from the accumulator)"
+             was silently dropped from the frame's accumulator)"
         );
     }
 
@@ -10328,6 +10385,7 @@ mod tests {
     #[test]
     fn draw_replacement_does_not_apply_when_quantity_gate_is_false() {
         let repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
             .condition(ReplacementCondition::OnlyIfQuantity {
                 lhs: QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::HandSize {
@@ -10371,8 +10429,9 @@ mod tests {
 
     #[test]
     fn draw_replacement_does_not_apply_to_zero_card_draws() {
-        let repl =
-            ReplacementDefinition::new(ReplacementEvent::Draw).execute(AbilityDefinition::new(
+        let repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+            .execute(AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Offset {
@@ -13190,6 +13249,7 @@ mod tests {
     #[test]
     fn only_if_quantity_is_filtered_for_opponent_draws() {
         let repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
             .condition(ReplacementCondition::OnlyIfQuantity {
                 lhs: QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::HandSize {
@@ -14181,7 +14241,7 @@ mod tests {
         };
 
         assert!(
-            state.post_replacement_continuation.is_none(),
+            !state.has_post_replacement_drain(),
             "token substitution must not stash a post-replacement continuation"
         );
 
@@ -14274,7 +14334,7 @@ mod tests {
         };
         assert_eq!(count, 0, "accepted substitution suppresses original batch");
         assert!(
-            state.post_replacement_continuation.is_some(),
+            state.has_post_replacement_drain(),
             "accepted substitution must park the branch choice as a continuation"
         );
 
@@ -14323,9 +14383,11 @@ mod tests {
         use crate::types::ability::PtValue;
 
         let doubler = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
             .quantity_modification(QuantityModification::DOUBLE);
-        let draw_to_token =
-            ReplacementDefinition::new(ReplacementEvent::Draw).execute(AbilityDefinition::new(
+        let draw_to_token = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+            .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
                     name: "Beast".to_string(),

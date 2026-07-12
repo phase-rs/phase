@@ -119,8 +119,7 @@ pub fn apply_debug_action(
             // continuations (Jace WinTheGame, Abundance reveal-until) still
             // drain in the same step.
             let event_start = events.len();
-            let result =
-                super::effects::draw::resume_multi_draw(state, player_id, count, 0, events);
+            let result = super::effects::draw::start_draw_sequence(state, player_id, count, events);
             // CR 603.2: Mirror the normal draw pipeline — `PassPriority` /
             // `run_post_action_pipeline` scans CardDrawn events after the draw
             // step's turn-based action. Debug draw previously returned without

@@ -3,9 +3,12 @@ import { Factory } from "fishery";
 import type {
   FormatConfig,
   GameAction,
+  GameObject,
   GameState,
   LegalActionsResult,
+  ObjectId,
   PendingCast,
+  Phase,
   Player,
   PlayerId,
   StackEntry,
@@ -13,6 +16,7 @@ import type {
   TargetSelectionSlot,
   WaitingFor,
 } from "../../adapter/types.ts";
+import { buildObjectMap } from "./gameObjectFactory.ts";
 
 type PriorityWaitingFor = Extract<WaitingFor, { type: "Priority" }>;
 type ManaPaymentWaitingFor = Extract<WaitingFor, { type: "ManaPayment" }>;
@@ -24,8 +28,35 @@ type TriggerTargetSelectionWaitingFor = Extract<
 type ChooseXValueWaitingFor = Extract<WaitingFor, { type: "ChooseXValue" }>;
 type AssistPaymentWaitingFor = Extract<WaitingFor, { type: "AssistPayment" }>;
 
-export const playerFactory = Factory.define<Player>(() => ({
-  id: 0,
+/**
+ * Convenience-method factory for `Player`:
+ * `playerFactory.withId(1).withLife(12).withHand(3, 4).build()`.
+ */
+export class PlayerFactory extends Factory<Player> {
+  withId(id: PlayerId) {
+    return this.params({ id });
+  }
+
+  withLife(life: number) {
+    return this.params({ life });
+  }
+
+  withHand(...cards: ObjectId[]) {
+    return this.params({ hand: cards });
+  }
+
+  withLibrary(...cards: ObjectId[]) {
+    return this.params({ library: cards });
+  }
+
+  withGraveyard(...cards: ObjectId[]) {
+    return this.params({ graveyard: cards });
+  }
+}
+
+// Player ids are 0-based seat numbers, so the sequence is shifted down by one.
+export const playerFactory = PlayerFactory.define(({ sequence }): Player => ({
+  id: sequence - 1,
   life: 20,
   poison_counters: 0,
   mana_pool: { mana: [] },
@@ -210,8 +241,62 @@ export const buildAssistPaymentWaitingFor = (
   return { ...assistPaymentWaitingForFactory.build(), ...overrides };
 };
 
-export const stackEntryFactory = Factory.define<StackEntry>(() => ({
-  id: 1,
+interface WaitingForTransient {
+  variant?: WaitingFor;
+}
+
+/**
+ * Convenience-method factory over the `WaitingFor` union — one method per
+ * variant, defaults sourced from the per-variant factories above:
+ *
+ *   waitingForFactory.targetSelection({ player: 1 }).build()
+ *
+ * The variant is carried as a transient param (not `params`) so switching
+ * variants never deep-merges one variant's `data` keys into another's.
+ * Use one variant method per chain.
+ */
+export class WaitingForFactory extends Factory<WaitingFor, WaitingForTransient> {
+  priority(player: PlayerId = 0) {
+    return this.variant(buildPriorityWaitingFor({ data: { player } }));
+  }
+
+  manaPayment(player: PlayerId = 0) {
+    return this.variant(buildManaPaymentWaitingFor({ data: { player } }));
+  }
+
+  targetSelection(data: Partial<TargetSelectionWaitingFor["data"]> = {}) {
+    const base = buildTargetSelectionWaitingFor();
+    return this.variant({ ...base, data: { ...base.data, ...data } });
+  }
+
+  triggerTargetSelection(
+    data: Partial<TriggerTargetSelectionWaitingFor["data"]> = {},
+  ) {
+    const base = buildTriggerTargetSelectionWaitingFor();
+    return this.variant({ ...base, data: { ...base.data, ...data } });
+  }
+
+  chooseXValue(data: Partial<ChooseXValueWaitingFor["data"]> = {}) {
+    const base = buildChooseXValueWaitingFor();
+    return this.variant({ ...base, data: { ...base.data, ...data } });
+  }
+
+  assistPayment(data: Partial<AssistPaymentWaitingFor["data"]> = {}) {
+    const base = buildAssistPaymentWaitingFor();
+    return this.variant({ ...base, data: { ...base.data, ...data } });
+  }
+
+  private variant(variant: WaitingFor) {
+    return this.transient({ variant });
+  }
+}
+
+export const waitingForFactory = WaitingForFactory.define(
+  ({ transientParams }) => transientParams.variant ?? buildPriorityWaitingFor(),
+);
+
+export const stackEntryFactory = Factory.define<StackEntry>(({ sequence }) => ({
+  id: sequence,
   source_id: 1,
   controller: 0,
   kind: {
@@ -242,7 +327,97 @@ export const buildLegalActionsResult = (
 
 export const buildGameActions = (...actions: GameAction[]): GameAction[] => actions;
 
-export const gameStateFactory = Factory.define<GameState>(() => ({
+/**
+ * Convenience-method factory for `GameState`. Methods chain and compose:
+ *
+ *   gameStateFactory
+ *     .withPlayers(0, 1)
+ *     .withObjects(bolt, bear)      // derives objects map, battlefield, next_object_id
+ *     .targetSelection({ player: 0 })
+ *     .build()
+ *
+ * Prefer chaining these over passing raw override objects to `.build()`.
+ */
+export class GameStateFactory extends Factory<GameState> {
+  // --- Turn structure ---
+  activePlayer(player: PlayerId) {
+    return this.params({ active_player: player, priority_player: player });
+  }
+
+  inPhase(phase: Phase) {
+    return this.params({ phase });
+  }
+
+  onTurn(turn: number) {
+    return this.params({ turn_number: turn });
+  }
+
+  // --- Players / objects / stack ---
+  withPlayers(...players: Array<PlayerId | Partial<Player>>) {
+    const built = buildPlayers(players);
+    return this.params({ players: built, seat_order: built.map((p) => p.id) });
+  }
+
+  /** Sets `objects` and derives `battlefield` and `next_object_id` from them. */
+  withObjects(...objects: GameObject[]) {
+    return this.params({
+      objects: buildObjectMap(...objects),
+      battlefield: objects.filter((o) => o.zone === "Battlefield").map((o) => o.id),
+      next_object_id: objects.length
+        ? Math.max(...objects.map((o) => o.id)) + 1
+        : 1,
+    });
+  }
+
+  withStack(...entries: StackEntry[]) {
+    return this.params({ stack: entries });
+  }
+
+  commander() {
+    return this.params({ format_config: buildCommanderFormatConfig() });
+  }
+
+  // --- WaitingFor variants (each replaces `waiting_for` exactly) ---
+  priority(player: PlayerId = 0) {
+    return this.waitingFor(waitingForFactory.priority(player).build());
+  }
+
+  manaPayment(player: PlayerId = 0) {
+    return this.waitingFor(waitingForFactory.manaPayment(player).build());
+  }
+
+  targetSelection(data: Partial<TargetSelectionWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.targetSelection(data).build());
+  }
+
+  triggerTargetSelection(
+    data: Partial<TriggerTargetSelectionWaitingFor["data"]> = {},
+  ) {
+    return this.waitingFor(waitingForFactory.triggerTargetSelection(data).build());
+  }
+
+  chooseXValue(data: Partial<ChooseXValueWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.chooseXValue(data).build());
+  }
+
+  assistPayment(data: Partial<AssistPaymentWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.assistPayment(data).build());
+  }
+
+  /**
+   * Replace `waiting_for` exactly. Uses `afterBuild` instead of `params` so no
+   * keys from the default Priority variant survive a deep-merge into the new
+   * variant's `data`. Note this runs last, so it also wins over a
+   * `waiting_for` passed directly to `.build()` — chain, don't mix.
+   */
+  waitingFor(waitingFor: WaitingFor) {
+    return this.afterBuild((state) => {
+      state.waiting_for = waitingFor;
+    });
+  }
+}
+
+export const gameStateFactory = GameStateFactory.define((): GameState => ({
   turn_number: 1,
   active_player: 0,
   phase: "PreCombatMain",
