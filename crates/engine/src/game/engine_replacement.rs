@@ -1582,7 +1582,7 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // observable behavior is equivalent for as-enters sacrifice/counter mechanics
     // (Devour, Siege protector, Tribute) where the choice doesn't gate entry.
     //
-    // CR 614.12a + CR 615.5: Resident-top dispatch. `begin_dispatch` takes the
+    // CR 615.5 + CR 616.1g: Resident-top dispatch. `begin_dispatch` takes the
     // continuation and marks the drain `Dispatching` WITHOUT removing it, so:
     //   * a nested `has_post_replacement_drain()` taken while the effect runs sees
     //     no ready work and cannot re-drain this one (the old slot was likewise

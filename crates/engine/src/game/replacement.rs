@@ -266,7 +266,8 @@ pub enum ApplyResult {
     Prevented,
 }
 
-/// CR 614.12a: Install a mandatory post-effect's continuation.
+/// CR 614.6: Install a mandatory post-effect's continuation — the replacement's own
+/// actions, which run as part of the modified event that occurs instead.
 ///
 /// Policy is [`ResidentDrainPolicy::KeepResident`], preserving this function's
 /// long-standing behaviour: when a continuation is already resident, the incoming
@@ -7288,7 +7289,8 @@ fn continue_replacement_impl(
                 state.post_replacement_token_substitution_count = Some(*count as i32);
             }
         }
-        // CR 614.12a: install (or clear) the optional branch's continuation.
+        // CR 614.6: install (or clear) the optional branch's continuation — the
+        // replacement's own actions for the branch that was taken.
         //
         // Policy is `Replace`: unlike `stash_post_replacement_continuation`, this
         // path has always OVERWRITTEN a resident continuation rather than
