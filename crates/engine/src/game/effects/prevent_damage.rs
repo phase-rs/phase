@@ -1135,8 +1135,9 @@ mod tests {
             .clone()
             .unwrap();
         state.last_effect_count = Some(prevented);
-        state.post_replacement_continuation =
-            Some(crate::types::ability::PostReplacementContinuation::Resolved(runtime));
+        state.install_ready_continuation(
+            crate::types::ability::PostReplacementContinuation::Resolved(runtime),
+        );
         let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             &mut state,
             None,

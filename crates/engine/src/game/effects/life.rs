@@ -175,7 +175,7 @@ pub fn apply_life_gain(
 /// (CR 615.5 fallback path), which the applier stamps with the prevented
 /// amount before returning.
 fn drain_substitution_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    if state.post_replacement_continuation.is_some() {
+    if state.has_post_replacement_drain() {
         let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             state, None, None, None, events,
         );
@@ -1565,7 +1565,7 @@ mod tests {
         );
         // The post-replacement continuation must be drained.
         assert!(
-            state.post_replacement_continuation.is_none(),
+            !state.has_post_replacement_drain(),
             "post_replacement_continuation must be drained after life-gain replacement"
         );
     }
@@ -1633,10 +1633,10 @@ mod tests {
         // change as a phantom GainLife — same defect class as Jace
         // empty-library win.
         assert!(
-            state.post_replacement_continuation.is_none(),
+            !state.has_post_replacement_drain(),
             "GainLife→GainLife amount-substitution must not leak a post-replacement \
              continuation; found {:?}",
-            state.post_replacement_continuation
+            state.post_replacement_continuation()
         );
     }
 

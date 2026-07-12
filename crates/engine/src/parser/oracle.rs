@@ -64,6 +64,7 @@ use super::oracle_ir::doc::{
     OracleDocBuilder, OracleDocIr, OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan,
     OracleUnitSource, PrintedAbilityIndex, PrintedTriggerIndex,
 };
+use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
@@ -2752,26 +2753,40 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // one warning channel, so it emits into `ir.diagnostics` (the reason this
     // function borrows `ir` mutably). `parse_warnings` is then assigned ONCE, from
     // that channel, at the end — no direct-append behind the doc's back.
-    // Source text is the original (un-normalized) `ir.source_text`, matching
-    // today's swallow input.
     //
-    // Draft-time "draft matters" lines (CR 905) are intentionally consumed as
-    // no-ops; their "you may"/"if you do"/"as long as" markers would otherwise be
-    // reported as swallowed clauses. Strip them before the audit; constructed-play
-    // lines on the same card remain and are still checked.
-    let swallow_text;
-    let swallow_input: &str = if ir.source_text.lines().any(is_draft_matters_sentence) {
-        swallow_text = ir
-            .source_text
-            .lines()
-            .filter(|line| !is_draft_matters_sentence(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        &swallow_text
-    } else {
-        &ir.source_text
+    // The audit is now PER ITEM: each item's own source fragment supplies the
+    // expectation and its own lowered definitions — resolved through the id tracks
+    // below — supply the evidence. It therefore takes the items and the tracks
+    // rather than the whole card's text. The draft-matters (CR 905) filter that used
+    // to strip lines from the whole-card text moves inside as a per-item skip.
+    //
+    // The tracks are sound to zip here: of the four relation passes above, three are
+    // length-preserving and `apply_linked_choice_etb_counter` removes from
+    // `result.replacements` and `replacement_ids` at the same index. This is also
+    // exactly why the audit stays HERE, post-relation: a pre-lowering audit is blind
+    // to relation-synthesized semantics (that pass *synthesizes a replacement*), so
+    // the false-positive wave U1 bounded to 31 faces would be caused, not avoided.
+    //
+    // Emitted into a local vec and appended, rather than passing `&mut
+    // ir.diagnostics` directly: the audit reads `ir.items` and writes the
+    // diagnostics channel, and those are two borrows of the same `ir`. Appending
+    // preserves the ordering the channel guarantees (parse-time diagnostics first,
+    // then swallow findings).
+    let tracks = ItemIdTracks {
+        abilities: &ability_ids,
+        triggers: &trigger_ids,
+        statics: &static_ids,
+        replacements: &replacement_ids,
     };
-    super::swallow_check::check_swallowed_clauses(swallow_input, &result, &mut ir.diagnostics);
+    let mut swallow_diagnostics = Vec::new();
+    super::swallow_check::check_swallowed_clauses(
+        &ir.items,
+        &ir.source_text,
+        &result,
+        &tracks,
+        &mut swallow_diagnostics,
+    );
+    ir.diagnostics.append(&mut swallow_diagnostics);
     // ---------------------------------------------------------------------------
 
     // CR 607.1 + CR 610.3: Two-trigger exile-return synthesis (Journey to

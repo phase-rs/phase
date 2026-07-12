@@ -924,8 +924,34 @@ fn parse_multi_sentence_statics(text: &str) -> Option<Vec<StaticDefinition>> {
         return None;
     }
     let mut defs = Vec::new();
+    let mut attached_scope: Option<TargetFilter> = None;
     for segment in &segments {
-        let segment_defs = parse_static_line_multi_inner(segment);
+        let mut segment_defs = parse_static_line_multi_inner(segment);
+        // CR 608.2c: In an Aura/Equipment, a continuation sentence whose subject is
+        // the pronoun "It" refers to the enchanted/equipped creature, not the
+        // Aura/Equipment object itself. Its static parses with `SelfRef` (the
+        // pronoun resolves to self at the line level, with no attachment context);
+        // rebind it to the attached scope the first sentence established (Spider-Man
+        // No More: "Enchanted creature is a Citizen ... It has defender and loses all
+        // other abilities." — the second sentence applies to the enchanted creature).
+        if let Some(scope) = &attached_scope {
+            if segment_subject_is_pronoun_it(segment) {
+                for def in &mut segment_defs {
+                    if def.affected.as_ref() == Some(&TargetFilter::SelfRef) {
+                        def.affected = Some(scope.clone());
+                    }
+                }
+            }
+        } else {
+            attached_scope = segment_defs
+                .iter()
+                .find_map(|def| {
+                    def.affected
+                        .as_ref()
+                        .filter(|f| affected_is_attached_scope(f))
+                })
+                .cloned();
+        }
         if segment_defs.is_empty() {
             // CR 602.5b + CR 602.5c: An "activate ... only once each turn" rider
             // carries no standalone static — it folds a once-per-turn use-restriction
@@ -945,6 +971,29 @@ fn parse_multi_sentence_statics(text: &str) -> Option<Vec<StaticDefinition>> {
         defs.extend(segment_defs);
     }
     Some(defs)
+}
+
+/// CR 608.2c: True iff the sentence's subject is the bare pronoun "It" — an
+/// Aura/Equipment continuation referring to the enchanted/equipped creature,
+/// distinct from a self-name (`~`) or a typed subject.
+fn segment_subject_is_pronoun_it(segment: &str) -> bool {
+    // `trim_start` normalizes leading whitespace on the pre-split sentence chunk
+    // and `to_lowercase` builds the TextPair lower half — both structural, not
+    // dispatch. The "it " subject test itself runs through nom's `tag()` via the
+    // `nom_tag_tp` bridge so the pronoun match stays on the combinator path.
+    let trimmed = segment.trim_start();
+    let lower = trimmed.to_lowercase();
+    nom_tag_tp(&TextPair::new(trimmed, &lower), "it ").is_some()
+}
+
+/// True iff a filter is scoped to an attached object — the enchanted (Aura,
+/// `EnchantedBy`) or equipped (Equipment, `EquippedBy`) creature.
+fn affected_is_attached_scope(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(tf)
+            if tf.properties.iter().any(|p| matches!(p, FilterProp::EnchantedBy | FilterProp::EquippedBy))
+    )
 }
 
 /// CR 611.3a: Recognize a sentence whose leading connector binds it to the

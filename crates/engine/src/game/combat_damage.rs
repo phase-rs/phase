@@ -1113,9 +1113,14 @@ fn fire_combat_prevention_riders(
             continue;
         };
         state.last_effect_count = Some(total_prevented);
-        state.post_replacement_applied.clear();
-        state.post_replacement_continuation =
-            Some(crate::types::ability::PostReplacementContinuation::Resolved(runtime));
+        // Policy is `Replace`: this path has always overwritten a resident
+        // continuation rather than deferring to it. The rider inherits no applied
+        // set (it is the batch's own aggregate follow-up) — the fresh drain says
+        // that by construction, where the old code had to remember to clear a
+        // parallel field.
+        state.install_ready_continuation(
+            crate::types::ability::PostReplacementContinuation::Resolved(runtime),
+        );
         let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             state, None, None, None, events,
         );

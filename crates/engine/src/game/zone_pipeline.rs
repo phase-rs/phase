@@ -1288,7 +1288,7 @@ pub(crate) fn apply_zone_delivery_tail(
     // only after `apply_pending_spell_resolution` (Phase-B divergence
     // reconciliation — the tail is parameterized instead of copied).
     if matches!(drain, PostReplacementDrainOwner::DeliveryTail)
-        && state.post_replacement_continuation.is_some()
+        && state.has_post_replacement_drain()
     {
         // CR 603.6d + CR 614.12a: For an "as-enters" (battlefield-entry) Moved
         // post-effect, the effect resolves against the zone-changing object (the
@@ -1307,7 +1307,7 @@ pub(crate) fn apply_zone_delivery_tail(
         // must keep the host source slot — its post-effect belongs to the host,
         // not the moved card.
         if to == Zone::Battlefield {
-            state.post_replacement_source = None;
+            state.clear_post_replacement_source();
         }
         let waiting_for = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             state,
