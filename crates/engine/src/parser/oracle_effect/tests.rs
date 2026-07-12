@@ -6892,29 +6892,49 @@ fn blazing_salvo_unless_have_deal_damage() {
     }
 }
 
-/// CR 601.2d (#5613): a counter-distribution clause's target-cardinality list
-/// ("one, two, or three target creatures") embeds a bare " or " that enumerates a
-/// target COUNT, not a disjunction of two clauses. The binary-choice splitter now
-/// bails on the cardinality list (previously it keyed only on the divided-DAMAGE
-/// verb, leaving ~32 counter cards to mis-split), so the distribute-counters
-/// handler claims the whole clause instead of the inline splitter bisecting it.
+/// CR 601.2d (#5613): a divided/distributed cardinality-list clause's bare " or "
+/// ("… among one, two, or three target creatures") is a target-COUNT enumerator.
+/// Before this fix the binary-choice splitter split there and trial-parsed the
+/// orphan tail back through the effect→subject→static→imperative cascade. That
+/// trial parse FAILS and is discarded, so the final parse OUTPUT is identical on
+/// `main` (the pool coverage-parse-diff shows zero card changes) — but it
+/// re-enters the clause parser several frames deep. The regression is stack
+/// DEPTH, not output, so this asserts it on a bounded-stack thread.
+///
+/// Peak stack for this parse (full `parse_oracle_text` pipeline, measured):
+/// ~3.5 MiB on `main` (the wasted trial parse) vs ~1.4 MiB with the guard. A
+/// 2.5 MiB stack thus survives here (~1.1 MiB headroom) and overflows on `main`
+/// (~1 MiB margin): reintroducing the wasted trial parse overflows this thread's
+/// guard page and aborts the test binary — so the test *fails when the fix is
+/// reverted* (AI-CONTRIBUTOR.md §5(i)). The in-thread asserts additionally pin
+/// the parse OUTPUT (`PutCounter` + a captured distribution).
 #[test]
-fn distribute_counters_cardinality_list_is_not_binary_split() {
-    for text in [
-        "Distribute three +1/+1 counters among one, two, or three target creatures.",
-        "Distribute two +1/+1 counters among one or two target creatures.",
-    ] {
-        let def = parse_effect_chain(text, AbilityKind::Spell);
-        assert!(
-            matches!(*def.effect, Effect::PutCounter { .. }),
-            "counter distribution must parse whole as PutCounter, got {:?} for {text:?}",
-            def.effect
-        );
-        assert!(
-            def.distribute.is_some(),
-            "the distribution unit must be captured, not lost to a binary split: {text:?}"
-        );
-    }
+fn distribute_cardinality_clause_parses_within_a_bounded_stack() {
+    let handle = std::thread::Builder::new()
+        .stack_size(2_621_440) // 2.5 MiB — mid-gap between the ~1.4 / ~3.5 MiB floors
+        .spawn(|| {
+            let parsed = parse_oracle_text(
+                "Distribute three +1/+1 counters among one, two, or three target creatures.",
+                "Bounded Stack Test",
+                &[],
+                &["Sorcery".to_string()],
+                &[],
+            );
+            let def = parsed.abilities.first().expect("expected a spell ability");
+            assert!(
+                matches!(*def.effect, Effect::PutCounter { .. }),
+                "counter distribution must parse whole as PutCounter, got {:?}",
+                def.effect
+            );
+            assert!(
+                def.distribute.is_some(),
+                "distribution unit must be captured"
+            );
+        })
+        .expect("spawn bounded-stack parse thread");
+    handle
+        .join()
+        .expect("parsing the cardinality clause must not overflow a 2.5 MiB stack");
 }
 
 #[test]
