@@ -17,13 +17,19 @@ against `scripts/zone-authority-baseline.txt`:
 so the allowlist can only shrink. When the baseline reaches zero rows the
 migration is complete and the gate is zero-tolerance by construction.
 
-Known gap (deliberate): a `&mut <expr>.<zone>` borrow handed to a function that
-mutates it is invisible to the container pattern below. Today every such site is
-`im_ext::shuffle_vector(&mut player.library, rng)` -- a membership-preserving
-library shuffle (CR 701.19), which is not a zone change and would be a permanent
-exemption anyway. Adding a fourth pattern family for it would freeze five rows
-that never migrate. Revisit if a borrow is ever passed to something that adds or
-removes members.
+Pattern families (a hit is classified into exactly one):
+
+    mover        the five raw movers game/zones.rs exports
+    container    direct membership mutation of an im::Vector zone container
+    zone-assign  direct `GameObject::zone = ...`
+    borrow       a `&mut <expr>.<zone>` handed to a callee that is not known to
+                 preserve membership (a shuffle is; anything else must prove it)
+    exempt       any of the above, annotated `// allow-raw-zone: <reason>`
+
+`exempt` is ratcheted like the rest, deliberately. The annotation is the
+cheapest possible way to add a raw zone mutation, so it must cost a review
+rather than a keystroke -- an exemption no instrument counts is an exemption
+nobody revisits. The reason string is mandatory.
 
 Usage:
     scripts/zone_authority_census.py --check      # gate (used by CI)
@@ -54,7 +60,10 @@ AUTHORITY_FILES = {"zones.rs", "zone_pipeline.rs"}
 # check-parser-combinators.sh).
 TEST_SUPPORT_FILES = {"scenario.rs", "scenario_db.rs", "testing.rs"}
 
-ALLOW_ANNOTATION = "allow-raw-zone"
+ALLOW_ANNOTATION = re.compile(r"allow-raw-zone\s*:\s*(?P<reason>\S.*?)\s*$")
+ALLOW_ANNOTATION_BARE = "allow-raw-zone"
+
+ZONES = r"library|hand|graveyard|exile|battlefield|command_zone"
 
 # (A) The five raw movers `game/zones.rs` exports.
 MOVERS = re.compile(
@@ -65,16 +74,25 @@ MOVERS = re.compile(
 
 # (B) Direct mutation of a zone container. Hand-rolling the container write is
 # the same bypass as calling a raw mover -- privacy on the movers alone does not
-# close it.
+# close it. Every `im::Vector` method that can change MEMBERSHIP belongs here:
+# omitting one does not make the bypass safe, it makes the census blind to it.
 CONTAINERS = re.compile(
-    r"\.\s*(library|hand|graveyard|exile|battlefield|command_zone)\s*\.\s*"
+    rf"\.\s*({ZONES})\s*\.\s*"
     r"(push_back|push_front|push|insert|remove|retain|pop_back|pop_front|pop"
-    r"|clear|truncate|split_off)\s*\("
+    r"|clear|truncate|split_off|append|extend|set)\s*\("
 )
 
 # (C) Direct `GameObject::zone` assignment -- relocating an object without
 # moving it. `==` is a comparison, not an assignment.
 ZONE_ASSIGN = re.compile(r"\.zone\s*=\s*[^=]")
+
+# (D) A `&mut` borrow of a zone container handed to a callee, which can mutate
+# membership out of sight of (B). Only callees that provably preserve membership
+# are allowed: a shuffle reorders the library (CR 701.19) and is not a zone
+# change. Anything else is a bypass until proven otherwise.
+BORROW = re.compile(rf"&mut\s+[\w.\[\]()]+\.\s*({ZONES})\b")
+BORROW_CALLEE = re.compile(r"(\w+)\s*\(\s*$")
+MEMBERSHIP_PRESERVING_CALLEES = {"shuffle_vector"}
 
 FAMILIES = (("mover", MOVERS), ("container", CONTAINERS), ("zone-assign", ZONE_ASSIGN))
 
@@ -97,19 +115,73 @@ def is_cfg_test_attr(line: str) -> bool:
     return bool(BARE_TEST.search(pred)) and "not(" not in pred
 
 
-def strip_comment(line: str) -> str:
-    """Return the code part of a line (naive but sufficient: no `//` in the
-    zone patterns, and Rust string literals containing `//` do not appear in
-    the mover/container call sites)."""
-    idx = line.find("//")
-    return line if idx == -1 else line[:idx]
+STRING_LIT = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
+
+
+class CensusError(Exception):
+    """The scanner lost track of the source structure. Never guess -- a census
+    that silently mis-scopes is worse than no census."""
+
+
+def strip_noncode(line: str, in_block: bool) -> tuple[str, bool]:
+    """Return (code, still_in_block_comment).
+
+    Strings and comments are removed before ANY brace counting or pattern
+    matching. Brace counting in particular must not see a stray `{` inside a
+    string literal: inside a skipped `#[cfg(test)]` mod that would extend the
+    skip past the mod's closing brace and silently swallow the production code
+    that follows.
+    """
+    out = []
+    i = 0
+    while i < len(line):
+        if in_block:
+            end = line.find("*/", i)
+            if end == -1:
+                return "".join(out), True
+            i = end + 2
+            in_block = False
+            continue
+        if line.startswith("//", i):
+            break
+        if line.startswith("/*", i):
+            in_block = True
+            i += 2
+            continue
+        m = STRING_LIT.match(line, i)
+        if m:
+            i = m.end()
+            continue
+        out.append(line[i])
+        i += 1
+    return "".join(out), in_block
+
+
+def annotation_reason(line: str) -> str | None:
+    """The reason text of an `// allow-raw-zone: <reason>` annotation, if any."""
+    m = ALLOW_ANNOTATION.search(line)
+    return m.group("reason") if m else None
+
+
+def borrow_hits(code: str) -> int:
+    """Count `&mut <expr>.<zone>` borrows handed to a callee that is not known
+    to preserve membership."""
+    n = 0
+    for m in BORROW.finditer(code):
+        callee = BORROW_CALLEE.search(code[: m.start()])
+        if callee and callee.group(1) in MEMBERSHIP_PRESERVING_CALLEES:
+            continue
+        n += 1
+    return n
 
 
 def census_file(path: Path) -> list[tuple[str, str, str]]:
-    """Classify every non-test, non-annotated hit in one file.
+    """Classify every non-test hit in one file.
 
     Returns (rel_path, enclosing_fn, family) triples -- one per hit, so callers
-    can count multiple distinct branches inside the same function.
+    can count multiple distinct branches inside the same function. An annotated
+    hit is classified into the `exempt` family rather than dropped: an exemption
+    no instrument counts is an exemption nobody revisits.
     """
     rel = str(path.relative_to(REPO_ROOT))
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -119,9 +191,10 @@ def census_file(path: Path) -> list[tuple[str, str, str]]:
     skip_until_depth: int | None = None
     depth = 0
     pending_cfg_test = False
+    in_block = False
 
     for i, raw in enumerate(lines):
-        code = strip_comment(raw)
+        code, in_block = strip_noncode(raw, in_block)
 
         # Track an inline `#[cfg(test)] mod foo { .. }` body and skip it whole.
         # A naive "first #[cfg(test)] wins" is wrong: engine.rs has 10 and
@@ -143,7 +216,15 @@ def census_file(path: Path) -> list[tuple[str, str, str]]:
 
         if skip_until_depth is not None:
             depth += opened - closed
-            if depth <= skip_until_depth:
+            if depth < skip_until_depth:
+                # The mod closed more braces than it opened: brace tracking has
+                # desynced, so every downstream classification in this file is
+                # untrustworthy. Fail loudly rather than under-report.
+                raise CensusError(
+                    f"{rel}:{i + 1}: brace tracking desynced leaving a "
+                    f"#[cfg(test)] mod (depth {depth} < {skip_until_depth})"
+                )
+            if depth == skip_until_depth:
                 skip_until_depth = None
             continue
 
@@ -153,15 +234,28 @@ def census_file(path: Path) -> list[tuple[str, str, str]]:
 
         depth += opened - closed
 
-        # Explicitly classified non-event operation.
-        if ALLOW_ANNOTATION in raw:
+        n = sum(bool(pattern.search(code)) for _, pattern in FAMILIES)
+        n += borrow_hits(code)
+        if not n:
             continue
-        if i > 0 and ALLOW_ANNOTATION in lines[i - 1]:
+
+        # An explicitly classified non-event operation is still counted -- as an
+        # exemption. It is capped by the same ratchet, so the annotation cannot
+        # become the cheap way to add a raw zone mutation.
+        reason = annotation_reason(raw) or (annotation_reason(lines[i - 1]) if i > 0 else None)
+        if reason:
+            hits.extend([(rel, current_fn, "exempt")] * n)
             continue
+        if ALLOW_ANNOTATION_BARE in raw or (i > 0 and ALLOW_ANNOTATION_BARE in lines[i - 1]):
+            raise CensusError(
+                f"{rel}:{i + 1}: `{ALLOW_ANNOTATION_BARE}` needs a reason: "
+                f"`// {ALLOW_ANNOTATION_BARE}: <why this is not a zone event>`"
+            )
 
         for family, pattern in FAMILIES:
             if pattern.search(code):
                 hits.append((rel, current_fn, family))
+        hits.extend([(rel, current_fn, "borrow")] * borrow_hits(code))
 
     return hits
 
@@ -203,9 +297,10 @@ HEADER = """\
 """
 
 
-def render(counts: dict[tuple[str, str, str], int]) -> str:
+def render(counts: dict[tuple[str, str, str], int], header: bool = True) -> str:
     rows = [f"{f}\t{fn}\t{fam}\t{n}" for (f, fn, fam), n in sorted(counts.items())]
-    return HEADER + "\n".join(rows) + ("\n" if rows else "")
+    body = "\n".join(rows) + ("\n" if rows else "")
+    return HEADER + body if header else body
 
 
 def load_baseline() -> dict[tuple[str, str, str], int]:
@@ -229,11 +324,15 @@ def main() -> int:
     g.add_argument("--write", action="store_true", help="regenerate the baseline")
     args = ap.parse_args()
 
-    counts = collect()
+    try:
+        counts = collect()
+    except CensusError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
     total = sum(counts.values())
 
     if args.list:
-        sys.stdout.write(render(counts))
+        sys.stdout.write(render(counts, header=False))
         print(f"\n{total} classified production hits in {len(counts)} (file, fn, family) rows", file=sys.stderr)
         return 0
 
@@ -248,19 +347,30 @@ def main() -> int:
     shrunk = {k: (baseline[k], counts.get(k, 0)) for k in baseline if counts.get(k, 0) < baseline[k]}
 
     if added or grown:
-        print("ERROR: new raw zone mutation bypasses the zone pipeline.\n", file=sys.stderr)
+        bypass = {k: v for k, v in added.items() if k[2] != "exempt"} or {
+            k: v for k, v in grown.items() if k[2] != "exempt"
+        }
+        print("ERROR: raw zone mutation grew.\n", file=sys.stderr)
         for (f, fn, fam), n in sorted(added.items()):
             print(f"  NEW      {f}::{fn} ({fam} x{n})", file=sys.stderr)
         for (f, fn, fam), (was, now) in sorted(grown.items()):
             print(f"  GREW     {f}::{fn} ({fam}) {was} -> {now}", file=sys.stderr)
+        if bypass:
+            print(
+                "\nA gameplay zone change must be proposed through zone_pipeline so that\n"
+                "replacement effects, ZoneChanged events, triggers, and draw bookkeeping\n"
+                "all get their opportunity. Build a ZoneMoveRequest instead.\n\n"
+                "If the operation is genuinely not a replaceable zone event (rollback,\n"
+                "component absorption, in-library reorder, cease-to-exist, test setup),\n"
+                "annotate it with:\n\n"
+                "    // allow-raw-zone: <one-line reason>\n",
+                file=sys.stderr,
+            )
         print(
-            "\nA gameplay zone change must be proposed through zone_pipeline so that\n"
-            "replacement effects, ZoneChanged events, triggers, and draw bookkeeping\n"
-            "all get their opportunity. Build a ZoneMoveRequest instead.\n\n"
-            "If the operation is genuinely not a replaceable zone event (rollback,\n"
-            "component absorption, in-library reorder, cease-to-exist, test setup),\n"
-            "annotate it with:\n\n"
-            "    // allow-raw-zone: <one-line reason>\n",
+            "An `exempt` row means an ANNOTATED site. Exemptions are ratcheted too:\n"
+            "the annotation is the cheapest way to add a raw zone mutation, so a new\n"
+            "one is a reviewed decision, not a local one. If it is genuinely not a\n"
+            "zone event, get the exemption reviewed and run --write.\n",
             file=sys.stderr,
         )
         return 1
