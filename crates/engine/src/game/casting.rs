@@ -14529,6 +14529,11 @@ pub fn can_activate_ability_now_with_restriction_gates(
     ) {
         return false;
     }
+    // CR 702.49: Ninjutsu-family marker abilities are not normal activated
+    // abilities — they must route through `GameAction::ActivateNinjutsu`.
+    if super::keywords::is_ninjutsu_family_marker_ability(&ability_def) {
+        return false;
+    }
 
     // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
     // players can't activate abilities that aren't mana abilities.
@@ -14848,6 +14853,14 @@ pub fn handle_activate_ability(
         ability_def.activator_filter.as_ref(),
     ) {
         return Err(EngineError::NotYourPriority);
+    }
+    // CR 702.49: Ninjutsu-family marker abilities must not use the generic
+    // activated-ability stack path — mana is only paid in `activate_ninjutsu`.
+    if super::keywords::is_ninjutsu_family_marker_ability(&ability_def) {
+        return Err(EngineError::InvalidAction(
+            "Ninjutsu-family abilities must be activated via ActivateNinjutsu (CR 702.49)"
+                .to_string(),
+        ));
     }
     // CR 602.1: Check activation zone — default to battlefield.
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);

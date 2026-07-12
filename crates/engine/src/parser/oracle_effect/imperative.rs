@@ -4908,18 +4908,24 @@ pub(super) fn parse_utility_imperative_ast(
                                 CopyRetargetPermission::KeepOriginalTargets
                             };
                         // CR 406.6 + CR 607.2a + CR 707.10: "copy the exiled
-                        // card" — when no earlier clause in this SAME chain
-                        // exiled a card, the referenced exile happened in an
-                        // earlier, separately-resolved ability (ETB Imprint,
-                        // e.g. Isochron Scepter), so bind durably via
-                        // `ExiledBySource` rather than the ephemeral
-                        // chain-local `TrackedSet{0}` sentinel.
+                        // card" binds durably via `ExiledBySource` in BOTH
+                        // exile-source cases. Cross-resolution (ETB Imprint,
+                        // e.g. Isochron Scepter) always did. Same-chain (#5576
+                        // Saruman of Many Colors: "exile target … card … Copy
+                        // the exiled card") must too: a plain-targeted
+                        // `ChangeZone{Exile}` never publishes a chain-local
+                        // `TrackedSet`, so the old `TrackedSet{0}` sentinel
+                        // resolved to nothing and `copy_source_from_tracked_set`
+                        // fell back to a global scan, copying the wrong card.
+                        // Binding to `ExiledBySource` makes the exile a linked
+                        // consumer (`should_track_exiled_by_source`), publishing
+                        // the `ExileLink` that `copy_source_from_exiled_by_source`
+                        // reads. The distinct CastFromZone "cast the exiled card"
+                        // sites keep their own same-chain bindings.
                         return Some(UtilityImperativeAst::Copy {
                             target: resolve_singular_exiled_card_target(
                                 ctx.chain_has_prior_exile_producer,
-                                TargetFilter::TrackedSet {
-                                    id: crate::types::identifiers::TrackedSetId(0),
-                                },
+                                TargetFilter::ExiledBySource,
                             ),
                             retarget,
                         });
@@ -16733,51 +16739,139 @@ mod tests {
         }
     }
 
-    /// CR 609.7a + CR 705: Desperate Gambit's lose branch bare "it" must thread
-    /// `ChosenDamageSource` when the chain opens with `ChooseDamageSource`.
-    #[test]
-    fn desperate_gambit_lose_branch_threads_chosen_damage_source() {
-        use crate::parser::oracle_effect::parse_effect_chain;
-
-        fn find_flip_coin(def: &AbilityDefinition) -> Option<&Effect> {
-            if matches!(&*def.effect, Effect::FlipCoin { .. }) {
-                return Some(&def.effect);
-            }
-            def.sub_ability
-                .as_deref()
-                .and_then(find_flip_coin)
-                .or_else(|| def.else_ability.as_deref().and_then(find_flip_coin))
+    /// Depth-first search for the first effect matching `pred`, descending
+    /// through `sub_ability`, `else_ability`, AND `FlipCoin` win/lose branches
+    /// (each branch is a boxed `AbilityDefinition`). Needed because the shipped
+    /// Desperate Gambit text produces TWO sibling `FlipCoin` nodes — one per
+    /// "If you win / If you lose" sentence — each with only one populated branch.
+    #[cfg(test)]
+    fn find_effect_in_def<'a>(
+        def: &'a AbilityDefinition,
+        pred: &dyn Fn(&Effect) -> bool,
+    ) -> Option<&'a Effect> {
+        if pred(&def.effect) {
+            return Some(&def.effect);
         }
-
-        let text = "Choose a source you control. Flip a coin. If you win the flip, \
-            the next time that source would deal damage this turn, it deals double that damage instead. \
-            If you lose the flip, the next time it would deal damage this turn, prevent that damage.";
-        let def = parse_effect_chain(text, AbilityKind::Spell);
-        let flip = find_flip_coin(&def).expect("expected FlipCoin in chain");
-        let Effect::FlipCoin {
+        if let Effect::FlipCoin {
             win_effect,
             lose_effect,
             ..
-        } = flip
-        else {
-            unreachable!();
-        };
-        let win = win_effect.as_ref().expect("win branch");
-        let lose = lose_effect.as_ref().expect("lose branch");
-        assert!(matches!(
-            &*win.effect,
-            Effect::CreateDamageReplacement {
-                source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
-                ..
+        } = &*def.effect
+        {
+            for branch in [win_effect, lose_effect] {
+                if let Some(found) = branch.as_deref().and_then(|b| find_effect_in_def(b, pred)) {
+                    return Some(found);
+                }
             }
-        ));
-        assert!(matches!(
-            &*lose.effect,
-            Effect::PreventDamage {
-                damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
-                ..
-            }
-        ));
+        }
+        def.sub_ability
+            .as_deref()
+            .and_then(|s| find_effect_in_def(s, pred))
+            .or_else(|| {
+                def.else_ability
+                    .as_deref()
+                    .and_then(|e| find_effect_in_def(e, pred))
+            })
+    }
+
+    /// CR 609.7a + CR 608.2c + CR 615.1 (#5601): Desperate Gambit's win and lose
+    /// branches share one anaphor — "a source you control" — so both the win
+    /// branch's damage-doubling replacement and the lose branch's prevention must
+    /// bind `ChosenDamageSource`, never `SelfRef` (the Instant on the stack, which
+    /// deals no damage, so the prevention would shield nothing).
+    ///
+    /// This uses the VERBATIM shipped oracle text ("Choose a source you control
+    /// AND flip a coin" — one sentence). That form lowers the head choice to a
+    /// bare target selection rather than `Effect::ChooseDamageSource`, so the
+    /// repair pass's original `ChooseDamageSource`-keyed gate no longer fired and
+    /// the lose branch silently reverted to `SelfRef` (the pass mutated
+    /// 0/35,396 pool-wide). Reverting the flattened-head gate signal flips the
+    /// lose-branch assertion below back to `SelfRef` — this test can fail if the
+    /// fix is removed (AI-CONTRIBUTOR.md §5(i)).
+    ///
+    /// It drives the FULL card pipeline via `parse_oracle_text` — the exact entry
+    /// `database::synthesis` uses to generate `card-data.json` — NOT the
+    /// standalone `parse_effect_chain`, so it exercises the path the shipped card
+    /// actually takes and cannot go green while the card is broken.
+    #[test]
+    fn desperate_gambit_shipped_text_threads_chosen_damage_source_both_branches() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let text = "Choose a source you control and flip a coin. If you win the flip, \
+            the next time that source would deal damage this turn, it deals double that damage instead. \
+            If you lose the flip, the next time it would deal damage this turn, prevent that damage.";
+        let parsed =
+            parse_oracle_text(text, "Desperate Gambit", &[], &["Instant".to_string()], &[]);
+
+        let win = parsed
+            .abilities
+            .iter()
+            .find_map(|d| {
+                find_effect_in_def(d, &|e| matches!(e, Effect::CreateDamageReplacement { .. }))
+            })
+            .expect("win branch must emit a CreateDamageReplacement");
+        assert!(
+            matches!(
+                win,
+                Effect::CreateDamageReplacement {
+                    source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                    ..
+                }
+            ),
+            "win branch must bind ChosenDamageSource, got {win:?}"
+        );
+
+        let lose = parsed
+            .abilities
+            .iter()
+            .find_map(|d| find_effect_in_def(d, &|e| matches!(e, Effect::PreventDamage { .. })))
+            .expect("lose branch must emit a PreventDamage");
+        assert!(
+            matches!(
+                lose,
+                Effect::PreventDamage {
+                    damage_source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+                    ..
+                }
+            ),
+            "lose branch prevention must thread ChosenDamageSource (not SelfRef), got {lose:?}"
+        );
+    }
+
+    /// CR 615.1 no-regression guard for #5601: a prevention whose damage source
+    /// is the source itself ("this creature", Mercenaries) has NO chosen-source
+    /// context, so the #5601 gate must NOT fire — `SelfRef` must be preserved.
+    /// Mercenaries is the only other card in the pool with a `SelfRef`
+    /// damage-source prevention filter, so this pins the gate's blast radius.
+    #[test]
+    fn mercenaries_selfref_prevention_is_not_rewritten() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        // Full card pipeline, activated ability form (Mercenaries' real card).
+        let text = "{3}: The next time this creature would deal damage to you this turn, \
+            prevent that damage. Any player may activate this ability.";
+        let parsed = parse_oracle_text(
+            text,
+            "Mercenaries",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Mercenary".to_string()],
+        );
+        let prevent = parsed
+            .abilities
+            .iter()
+            .find_map(|d| find_effect_in_def(d, &|e| matches!(e, Effect::PreventDamage { .. })))
+            .expect("must emit a PreventDamage");
+        assert!(
+            matches!(
+                prevent,
+                Effect::PreventDamage {
+                    damage_source_filter: Some(TargetFilter::SelfRef),
+                    ..
+                }
+            ),
+            "no chosen-source context: SelfRef must be preserved, got {prevent:?}"
+        );
     }
 
     /// CR 115.1c + CR 608.2c regression: "target X and put a counter on it"

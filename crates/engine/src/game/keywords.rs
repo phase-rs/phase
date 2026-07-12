@@ -5,7 +5,9 @@ use crate::game::combat::AttackTarget;
 use crate::game::game_object::GameObject;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::parser::oracle_util::parse_subtype;
-use crate::types::ability::{AbilityCost, CastVariantPaid, NinjutsuVariant};
+use crate::types::ability::{
+    AbilityCost, AbilityDefinition, CastVariantPaid, Effect, NinjutsuVariant, RuntimeHandler,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
@@ -647,6 +649,25 @@ pub fn returnable_creatures_for_variant(
                 .collect()
         }
     }
+}
+
+/// CR 702.49: Marker activated ability synthesized from a Ninjutsu-family keyword.
+/// Real activation must use `GameAction::ActivateNinjutsu` — the marker's
+/// `AbilityCost::NinjutsuFamily` arm is a no-op in `pay_ability_cost`, so routing
+/// through `GameAction::ActivateAbility` would stack the ability without paying mana.
+pub fn is_ninjutsu_family_marker_ability(ability: &AbilityDefinition) -> bool {
+    if matches!(
+        ability.effect.as_ref(),
+        Effect::RuntimeHandled {
+            handler: RuntimeHandler::NinjutsuFamily
+        }
+    ) {
+        return true;
+    }
+    ability
+        .cost
+        .as_ref()
+        .is_some_and(|cost| matches!(cost, AbilityCost::NinjutsuFamily { .. }))
 }
 
 /// CR 702.49a-c: Resolve Ninjutsu-family activation.
@@ -2572,5 +2593,31 @@ mod tests {
             None,
             "Flashback (compound-cost kind) must be refused by the single authority",
         );
+    }
+
+    /// CR 702.49: synthesized marker must be classified so it cannot stack via
+    /// `ActivateAbility` without paying mana (issue #5338).
+    #[test]
+    fn ninjutsu_family_marker_ability_is_detected() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, RuntimeHandler};
+
+        let marker = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::RuntimeHandled {
+                handler: RuntimeHandler::NinjutsuFamily,
+            },
+        )
+        .cost(AbilityCost::NinjutsuFamily {
+            variant: NinjutsuVariant::Ninjutsu,
+            mana_cost: ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::Blue],
+                generic: 0,
+            },
+        });
+        assert!(is_ninjutsu_family_marker_ability(&marker));
+
+        let ordinary = AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+            .cost(AbilityCost::Tap);
+        assert!(!is_ninjutsu_family_marker_ability(&ordinary));
     }
 }

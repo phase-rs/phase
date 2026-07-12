@@ -1681,6 +1681,7 @@ pub(super) fn handle_resolution_choice(
                 chosen_pile_effect,
                 unchosen_pile_effect,
                 source_id,
+                pile_source,
             },
             GameAction::ChoosePileOpponent { opponent },
         ) => {
@@ -1698,6 +1699,7 @@ pub(super) fn handle_resolution_choice(
                 chosen_pile_effect,
                 unchosen_pile_effect,
                 source_id,
+                pile_source,
             };
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -1718,6 +1720,7 @@ pub(super) fn handle_resolution_choice(
                 chosen_pile_effect,
                 unchosen_pile_effect,
                 source_id,
+                pile_source,
             },
             GameAction::SubmitPilePartition { pile_a },
         ) => {
@@ -1760,6 +1763,7 @@ pub(super) fn handle_resolution_choice(
                     chosen_pile_effect,
                     unchosen_pile_effect: unchosen_pile_effect.clone(),
                     source_id,
+                    pile_source,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {
@@ -1772,6 +1776,7 @@ pub(super) fn handle_resolution_choice(
                     chosen_pile_effect,
                     unchosen_pile_effect,
                     source_id,
+                    pile_source,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
@@ -1790,6 +1795,7 @@ pub(super) fn handle_resolution_choice(
                 chosen_pile_effect,
                 unchosen_pile_effect,
                 source_id,
+                pile_source,
             },
             GameAction::ChoosePile { pile },
         ) => {
@@ -1827,6 +1833,7 @@ pub(super) fn handle_resolution_choice(
                     chosen_pile_effect,
                     unchosen_pile_effect,
                     source_id,
+                    pile_source,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {

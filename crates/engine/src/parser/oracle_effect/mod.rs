@@ -24570,6 +24570,55 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
+        // CR 700.3 + CR 608.2c: Mid-chain pile-separation recognizer —
+        // "An opponent separates those cards into two piles. Put all cards
+        // from the pile of your choice onto the battlefield under your
+        // control and the rest into their owners' graveyards." (Boneyard
+        // Parley). The pile sentence and its disposition form a semantic
+        // unit; join this chunk with remaining chunks and hand to the
+        // dedicated parser which consumes both sentences. Emits a single
+        // `SeparateIntoPiles { pile_source: ExiledThisWay }` clause.
+        {
+            let chunk_lower = normalized_text.to_ascii_lowercase();
+            // allow-noncombinator: pre-tokenized chunk dispatch on IR-classified clause text
+            if chunk_lower.starts_with("an opponent separates")
+                // allow-noncombinator: pre-tokenized chunk dispatch on IR-classified clause text
+                || chunk_lower.starts_with("target opponent separates")
+            {
+                // Join this chunk with all remaining chunks to give the
+                // parser the full multi-sentence text it needs.
+                let joined: String = std::iter::once(normalized_text.to_string())
+                    .chain(
+                        chunks
+                            .iter()
+                            .skip(chunk_idx + 1)
+                            .map(|c| strip_leading_sequence_connector(&c.text).trim().to_string()),
+                    )
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if let Some(pile_def) =
+                    crate::parser::oracle_separate_piles::try_parse_mid_chain_opponent_separates(
+                        &joined, kind,
+                    )
+                {
+                    builder
+                        .clause(
+                            normalized_text,
+                            parsed_clause((*pile_def.effect).clone()),
+                            chunks.last().and_then(|c| c.boundary_after),
+                            ClauseDisposition::Emit {
+                                followup: None,
+                                intrinsic: None,
+                            },
+                        )
+                        .starting_with(starting_with.clone())
+                        .push();
+                    // All remaining chunks were consumed by the pile parser.
+                    break;
+                }
+            }
+        }
+
         // CR 122.1 + CR 122.1f + CR 107.1b: Threshold player-counter top-up
         // rider (Vraska, Betrayal's Sting [-9]: "If target player has fewer
         // than nine poison counters, they get a number of poison counters equal
