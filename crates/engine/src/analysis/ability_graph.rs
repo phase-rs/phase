@@ -159,6 +159,10 @@ impl From<&ResourceAxis> for AxisKey {
             ResourceAxis::EtbTriggers => AxisKey::Etb,
             ResourceAxis::LtbTriggers => AxisKey::Ltb,
             ResourceAxis::SacTriggers => AxisKey::Sac,
+            // CR 704.5c: the per-victim poison axis projects onto the same aggregate
+            // AxisKey the static ability-graph path uses (`add_counter` → Poison/Player),
+            // preserving poison's prior key identity for graph analysis.
+            ResourceAxis::Poison(_) => AxisKey::Counter(CounterClass::Poison, ObjectClass::Player),
         }
     }
 }
@@ -1237,7 +1241,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
 /// [`collect_effects_in_effect`] — the nested-effect payloads that the display
 /// walkers (`build_ability_item`) do *not* descend. Borrows the faces, so the
 /// returned references live as long as the input.
-fn collect_effects<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+pub(crate) fn collect_effects<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
     collect_effects_in_effect(&def.effect, out);
     if let Some(sub) = &def.sub_ability {
         collect_effects(sub, out);
@@ -1316,6 +1320,15 @@ fn collect_effects_in_effect<'a>(effect: &'a Effect, out: &mut Vec<&'a Effect>) 
             for d in branches {
                 collect_effects(d, out);
             }
+        }
+        // CR 614.1a: the heterogeneous substitute Effect installed by a draw /
+        // planeswalk replacement rides in `replacement_effect: Box<Effect>` (not an
+        // `AbilityDefinition` payload), so it is invisible to the sibling recursions
+        // above. Descend it too — otherwise a randomness effect nested inside a
+        // replacement install escapes every `collect_effects` consumer.
+        Effect::CreateDrawReplacement { replacement_effect }
+        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            collect_effects_in_effect(replacement_effect, out);
         }
         _ => {}
     }

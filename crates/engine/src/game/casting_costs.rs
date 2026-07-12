@@ -6731,6 +6731,46 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .unwrap_or_default();
     let convoked_creature_count = convoked_creatures.len();
 
+    // CR 601.2a + CR 702.27a + CR 702.51a: capture the object-growth recast snapshot the
+    // PR-7 Phase 4d-ii loop-shortcut hook replays. Gated to a buyback-paid,
+    // permanent-creating (token) spell so the hook's cheap precondition (`last_recast_context
+    // == Some`) is set ~never. Fail-safe note: a spurious capture from buyback + some OTHER
+    // optional cost only makes the clone-drive run — its cover/abort rejects any non-covering
+    // recast, so this can never false-certify. Cleared (set `None`) on any non-matching cast,
+    // so a stale context never lingers. `ability.effect` is read here before `ability` is
+    // moved into `stack_ability` below.
+    {
+        let is_token_creating =
+            matches!(ability.effect, crate::types::ability::Effect::Token { .. });
+        let (has_buyback, convoke) = state.objects.get(&object_id).map_or((false, None), |obj| {
+            let has_buyback = obj
+                .keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Buyback(_)));
+            let convoke = obj
+                .keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Convoke))
+                .then_some(crate::types::game_state::ConvokeMode::Convoke);
+            (has_buyback, convoke)
+        });
+        // #4603 opt-in gate: OFF (`!samples()`) must be byte-identical to pre-PR-7 on the
+        // SERIALIZED surface too — `last_recast_context` is `skip_serializing_if=is_none`, so a
+        // spurious `Some(..)` in OFF mode would appear in a save/replay/scenario. Gate on the
+        // SAME accessor the consuming hook uses (engine.rs:448) so the mode gate has one source.
+        state.last_recast_context = (state.loop_detection.samples()
+            && additional_cost_paid
+            && has_buyback
+            && is_token_creating)
+            .then_some(crate::types::game_state::RecastContext {
+                card_id,
+                controller: player,
+                from_zone: source_zone,
+                uses_buyback: crate::types::game_state::BuybackUsage::Used,
+                convoke,
+            });
+    }
+
     // Determine whether this spell has a meaningful on-resolve ability.
     // Permanent spells with no Spell-kind AbilityDefinition get a placeholder
     // Unimplemented effect through the cost pipeline (from continue_with_no_ability).

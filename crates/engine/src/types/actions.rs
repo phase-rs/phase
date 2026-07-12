@@ -634,6 +634,13 @@ pub enum GameAction {
     SetMayTriggerAutoChoice {
         op: MayTriggerAutoChoiceOp,
     },
+    /// CR 603.3b: Update the acting player's saved trigger-ordering templates.
+    /// Legal in any WaitingFor state and routed to the acting player (who may only
+    /// mutate their own templates), mirroring `SetMayTriggerAutoChoice`. Pure
+    /// preference propagation — no events, no `WaitingFor` transition.
+    SetTriggerOrderTemplate {
+        op: TriggerOrderTemplateOp,
+    },
     /// CR 510.1c/d: Assign damage from an attacker to its blockers (and optionally
     /// the defending player/PW with trample, plus PW controller with trample-over-PW).
     AssignCombatDamage {
@@ -787,6 +794,27 @@ pub enum GameAction {
     Concede {
         player_id: PlayerId,
     },
+    /// CR 732.2a: the proposer (the loop's determinate winner, holding priority)
+    /// declares the loop shortcut. `count` is the repeat count — Phase 3 only produces
+    /// [`IterationCount::UntilLethal`]. `template` pins the per-iteration choices for a
+    /// choice-bearing loop; it MUST be `None` in Phase 3 (the B3 consumer that reads it
+    /// is Phase 4 — the field is present now so Phase 4 adds no dispatch-signature
+    /// change).
+    DeclareShortcut {
+        count: crate::analysis::decision_template::IterationCount,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        template: Option<crate::analysis::decision_template::DecisionTemplate>,
+    },
+    /// CR 732.2b/c: an opponent answers a proposed loop shortcut (accept, or name an
+    /// earlier stopping point). Routed by the current `RespondToShortcut.player`.
+    RespondToShortcut {
+        response: crate::analysis::loop_check::ShortcutResponse,
+    },
+    /// CR 732.2a: the priority holder MAY decline the auto-offered loop shortcut
+    /// ("the player with priority may suggest a shortcut" — suggesting is optional).
+    /// Restores ordinary priority instead of forcing a proposal. Carries no payload
+    /// (no template/count/response — it is the absence of a proposal).
+    DeclineShortcut,
 }
 
 /// CR 117.3d: The mutation a `GameAction::SetPriorityYield` performs on the
@@ -816,6 +844,25 @@ pub enum PriorityYieldOp {
 #[serde(tag = "type", content = "data")]
 pub enum MayTriggerAutoChoiceOp {
     Remove { key: MayTriggerAutoChoiceKey },
+    ClearAll,
+}
+
+/// CR 603.3b: The mutation a `GameAction::SetTriggerOrderTemplate` performs on the
+/// acting player's saved trigger-ordering templates. `Save` echoes the just-prompted
+/// group's source object ids plus the submitted permutation (the engine resolves each
+/// id to its card identity, mirroring `PriorityYieldOp::Add` — no frontend game-state
+/// computation); `Remove` echoes a stored key verbatim; `ClearAll` drops every saved
+/// (persistent) ordering template belonging to the acting player.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum TriggerOrderTemplateOp {
+    Save {
+        sources: Vec<ObjectId>,
+        order: Vec<usize>,
+    },
+    Remove {
+        key: crate::analysis::decision_template::DecisionGroupKey,
+    },
     ClearAll,
 }
 
@@ -1445,6 +1492,7 @@ impl GameAction {
             | GameAction::SetPhaseStops { .. }
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
+            | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::AssignBlockerDamage { .. }
             | GameAction::DistributeAmong { .. }
@@ -1464,6 +1512,11 @@ impl GameAction {
             | GameAction::Debug(_)
             | GameAction::GrantDebugPermission { .. }
             | GameAction::RevokeDebugPermission { .. }
+            // CR 732.2a/b/c: loop-shortcut protocol actions act on the whole loop, not a
+            // single permanent.
+            | GameAction::DeclareShortcut { .. }
+            | GameAction::RespondToShortcut { .. }
+            | GameAction::DeclineShortcut
             | GameAction::ChooseActivationCostBranch { .. } => None,
         }
     }

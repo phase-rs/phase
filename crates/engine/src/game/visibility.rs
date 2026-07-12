@@ -416,6 +416,93 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 732.2a: redact hidden-info legal targets in a `LoopShortcut` OFFER for a viewer who is
+    // NOT the schema's proposer. The schema is built for the offer's public declaration; this
+    // is the SOLE seam that removes a hidden-zone (hand/library) legal target from a viewer who
+    // cannot legally see it. Public option sets (`ConvokeTaps` battlefield taps,
+    // `TargetRef::Player`) are retained. The per-target drop reuses the EXACT hand-redaction
+    // composite (`!is_visible_revealed_card && !private_look_visible`) keyed on each TARGET
+    // object's owner + private zone — never the controller's visibility.
+    if let WaitingFor::LoopShortcut {
+        proposer,
+        predicted_winner,
+        ref certificate,
+        ref schema,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(proposer) {
+            use crate::analysis::decision_template::{
+                DecisionPoint, DecisionPointKind, ShortcutDecisionSchema,
+            };
+            use crate::types::ability::TargetRef;
+            // A target object is hidden from this viewer iff it sits in a private zone whose
+            // owner the viewer can't privately view AND it isn't otherwise revealed/peeked.
+            let target_hidden = |id: ObjectId| -> bool {
+                state.objects.get(&id).is_some_and(|obj| {
+                    matches!(obj.zone, Zone::Hand | Zone::Library)
+                        && !can_view_private_for_player(obj.owner)
+                        && !is_visible_revealed_card(state, id)
+                        && !private_look_visible.contains(&id)
+                })
+            };
+            let points: Vec<DecisionPoint> = schema
+                .points
+                .iter()
+                .map(|point| {
+                    let kind = match &point.kind {
+                        DecisionPointKind::Targets { legal_targets } => {
+                            DecisionPointKind::Targets {
+                                legal_targets: legal_targets
+                                    .iter()
+                                    .filter(|t| match t {
+                                        TargetRef::Object(id) => !target_hidden(*id),
+                                        TargetRef::Player(_) => true,
+                                    })
+                                    .cloned()
+                                    .collect(),
+                            }
+                        }
+                        DecisionPointKind::ConvokeTaps { tappable } => {
+                            DecisionPointKind::ConvokeTaps {
+                                tappable: tappable.clone(),
+                            }
+                        }
+                        DecisionPointKind::Mode { available_modes } => DecisionPointKind::Mode {
+                            available_modes: available_modes.clone(),
+                        },
+                        DecisionPointKind::MayChoice => DecisionPointKind::MayChoice,
+                        DecisionPointKind::UnlessBreak => DecisionPointKind::UnlessBreak,
+                    };
+                    DecisionPoint {
+                        slot: point.slot.clone(),
+                        kind,
+                    }
+                })
+                .collect();
+            // CR 702.51a: recompute the convoke count from the redacted points so the invariant
+            // "count == sum of this schema's tappable lengths" holds after visibility filtering
+            // (ConvokeTaps are public battlefield objects and are not redacted, so this equals
+            // the pre-filter count today; recomputing keeps it correct if that ever changes).
+            let convoke_tappable_count = points
+                .iter()
+                .filter_map(|p| match &p.kind {
+                    DecisionPointKind::ConvokeTaps { tappable } => Some(tappable.len()),
+                    _ => None,
+                })
+                .sum();
+            filtered.waiting_for = WaitingFor::LoopShortcut {
+                proposer,
+                predicted_winner,
+                certificate: certificate.clone(),
+                schema: ShortcutDecisionSchema {
+                    iteration_count: schema.iteration_count.clone(),
+                    points,
+                    convoke_tappable_count,
+                },
+            };
+        }
+    }
+
     if let WaitingFor::DigChoice {
         player,
         library_owner,
@@ -837,6 +924,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered
         .may_trigger_auto_choices
         .retain(|record| record.key.player == viewer);
+    filtered.decision_templates.retain(|t| t.owner == viewer);
     filtered.priority_yields.retain(|y| y.player == viewer);
     filtered
         .lands_tapped_for_mana
@@ -1599,6 +1687,45 @@ mod tests {
 
         assert_eq!(filtered.may_trigger_auto_choices.len(), 1);
         assert_eq!(filtered.may_trigger_auto_choices[0].key.player, PlayerId(0));
+    }
+
+    /// CR 603.3b: saved trigger-ordering templates are per-player private preference
+    /// state — a viewer sees only their own, never an opponent's saved orderings.
+    #[test]
+    fn filters_other_players_decision_templates() {
+        use crate::analysis::decision_template::{
+            DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
+        };
+        use crate::types::game_state::YieldTarget;
+
+        let template = |owner: PlayerId, card_id: u64| {
+            let src = YieldTarget::AllCopies {
+                card_id: CardId(card_id),
+                trigger_description: None,
+            };
+            DecisionTemplate {
+                owner,
+                decisions: vec![PinnedDecision::Order {
+                    source: src.clone(),
+                    pos: 0,
+                }],
+                replay: ReplayMode::Static,
+                key: DecisionGroupKey::from_sources(&[src], DecisionKind::TriggerOrdering),
+            }
+        };
+
+        let mut state = GameState::new_two_player(42);
+        // Distinct keys (different card ids) so both templates coexist.
+        state.set_trigger_order_template(template(PlayerId(0), 100));
+        state.set_trigger_order_template(template(PlayerId(1), 200));
+        assert_eq!(state.decision_templates.len(), 2);
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+
+        // Own-kept AND other-removed: without the retain, P1's template leaks into P0's
+        // view (len 2) or an inverted retain drops P0's own (len 0) — both fail here.
+        assert_eq!(filtered.decision_templates.len(), 1);
+        assert_eq!(filtered.decision_templates[0].owner, PlayerId(0));
     }
 
     /// CR 117.3d: priority yields are private preference state — a viewer sees

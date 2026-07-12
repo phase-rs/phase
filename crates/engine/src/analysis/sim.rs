@@ -565,12 +565,9 @@ mod tests {
         probe.runner.state_mut().players[1].poison_counters = 4;
         let delta = probe.iteration_delta();
 
-        use crate::analysis::resource::{CounterClass, ObjectClass};
+        // CR 704.5c: poison is per-victim in `delta.poison`, read from the state snapshot.
         assert_eq!(
-            delta
-                .counters
-                .get(&(CounterClass::Poison, ObjectClass::Player))
-                .copied(),
+            delta.poison.get(&PlayerId(1)).copied(),
             Some(4),
             "poison is read from the state snapshot, not the event feed"
         );

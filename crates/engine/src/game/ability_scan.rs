@@ -92,13 +92,15 @@
 //! for the conflict model and its CR 603.3b commutation argument.
 
 use crate::types::ability::{
-    AbilityCondition, ControllerRef, CountScope, Duration, EachDamageRecipient, Effect,
-    ForEachCategoryAction, GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition,
-    ResolvedAbility, StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource,
-    TriggerCondition,
+    AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, ControllerRef,
+    CountScope, Duration, EachDamageRecipient, Effect, FilterProp, ForEachCategoryAction,
+    GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition, ResolvedAbility,
+    StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource, TriggerCondition,
+    TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
+use crate::types::keywords::Keyword;
 
 /// The three independent classification axes, accumulated over one AST walk.
 /// `true` on an axis means "reads (or may read) that dimension"; the fail-safe
@@ -2396,7 +2398,16 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
         // like SelfRef — no event/sibling/projected resource axis.
         TargetFilter::OriginalSource => Axes::NONE,
         TargetFilter::SourceOrPaired => Axes::NONE,
-        TargetFilter::Typed(..) => Axes::CONSERVATIVE,
+        // CR 106.1 / CR 119 / CR 122.1: a Typed target filter reads a PROJECTED
+        // player resource ONLY via a property/controller that references one
+        // (authority: `project_out_resources`, analysis/resource.rs). Pure
+        // type/controller predicates read none. `event`/`sibling` stay CONSERVATIVE
+        // (byte-preserved) — only the projected axis is refined.
+        TargetFilter::Typed(tf) => Axes {
+            event: true,
+            sibling: true,
+            projected: typed_filter_reads_projected(tf),
+        },
         TargetFilter::Not { filter } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(filter));
@@ -3032,6 +3043,180 @@ fn scan_static_condition(x: &StaticCondition) -> Axes {
     }
 }
 
+/// Projected-axis probe for a `TargetFilter::Typed` filter (CR 106.1 / CR 119 /
+/// CR 122.1). `type_filters` are pure card-type predicates (CR 205) and read no
+/// player resource, so only the optional `controller` ref and the `properties`
+/// vector are scanned. Returns just the `.projected` axis — `event`/`sibling` on
+/// the `Typed` arm remain unconditionally CONSERVATIVE.
+fn typed_filter_reads_projected(tf: &TypedFilter) -> bool {
+    let mut acc = tf
+        .controller
+        .as_ref()
+        .map_or(Axes::NONE, scan_controller_ref);
+    for p in &tf.properties {
+        acc = acc.or(scan_filter_prop(p));
+    }
+    acc.projected
+}
+
+/// Classify a single `FilterProp` on the three read axes. **Exhaustive with NO
+/// `_` wildcard** — a NEW `FilterProp` variant fails to compile here until it is
+/// classified (fail-closed to CONSERVATIVE when its read surface is unproven).
+/// Every nested-bearing prop recurses the matching sub-scanner so a projected
+/// read reached through a property (`PtComparison { value: Ref(LifeTotal) }`,
+/// `ControllerMatches { OpponentLostLife }`, `Targets { Typed{..} }`, …) is not
+/// lost. The projected-axis authority is `project_out_resources`
+/// (analysis/resource.rs): a field is projected iff that fn clears it.
+fn scan_filter_prop(x: &FilterProp) -> Axes {
+    match x {
+        // --- board / object / printed-characteristic leaves: no player resource.
+        // Their drift breaks the board-equality gate (item 1), not the item-4 scan.
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::WasPlayed
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Foretold
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedToSource
+        | FilterProp::AttachedToRecipient
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::IsCommander
+        | FilterProp::Other { .. } => Axes::NONE,
+
+        // --- QuantityExpr-bearing: recurse so `Ref(LifeTotal)` / `PlayerCounter`
+        // thresholds surface the projected axis (CR 119 / CR 122.1). Finding A:
+        // `PtComparison` MUST recurse — "power ≤ your life total" is projected.
+        FilterProp::Counters { count, .. } => scan_quantity_expr(count),
+        FilterProp::Cmc { value, .. } => scan_quantity_expr(value),
+        FilterProp::PtComparison { value, .. } => scan_quantity_expr(value),
+
+        // --- Box<TargetFilter>-bearing: recurse (a nested Typed could be projected).
+        FilterProp::CanEnchant { target } => scan_target_filter(target),
+        FilterProp::DifferentNameFrom { filter } => scan_target_filter(filter),
+        FilterProp::DistinctFrom { reference } => scan_target_filter(reference),
+        FilterProp::SharesQuality { reference, .. } => {
+            reference.as_deref().map_or(Axes::NONE, scan_target_filter)
+        }
+        FilterProp::TargetsOnly { filter } => scan_target_filter(filter),
+        FilterProp::Targets { filter } => scan_target_filter(filter),
+
+        // --- Box<PlayerFilter>-bearing: recurse (OpponentLostLife/… is projected).
+        FilterProp::ControllerMatches { player } => scan_player_filter(player),
+
+        // --- FilterProp-nesting: recurse.
+        FilterProp::AnyOf { props } => {
+            let mut acc = Axes::NONE;
+            for p in props {
+                acc = acc.or(scan_filter_prop(p));
+            }
+            acc
+        }
+        FilterProp::Not { prop } => scan_filter_prop(prop),
+
+        // --- ControllerRef-bearing: recurse for self-documentation. Every
+        // `scan_controller_ref` outcome is projected:false, so these never lift the
+        // projected axis; recursing keeps the classifier honest under future
+        // ControllerRef changes.
+        FilterProp::Attacking { defender } => {
+            defender.as_ref().map_or(Axes::NONE, scan_controller_ref)
+        }
+        FilterProp::ProtectorMatches { controller } => scan_controller_ref(controller),
+        FilterProp::Owned { controller } => scan_controller_ref(controller),
+        FilterProp::HasAttachment { controller, .. } => {
+            controller.as_ref().map_or(Axes::NONE, scan_controller_ref)
+        }
+        FilterProp::HasAnyAttachmentOf { controller, .. } => {
+            controller.as_ref().map_or(Axes::NONE, scan_controller_ref)
+        }
+        FilterProp::MostPrevalentCreatureTypeIn { scope, .. } => scan_controller_ref(scope),
+        FilterProp::AttackedThisTurn { defender } => {
+            defender.as_ref().map_or(Axes::NONE, scan_controller_ref)
+        }
+        FilterProp::NameMatchesAnyPermanent { controller } => {
+            controller.as_ref().map_or(Axes::NONE, scan_controller_ref)
+        }
+
+        // --- fail-closed CONSERVATIVE (projected:true):
+        // CR 122.1: reads `counter_added_this_turn`, cleared by
+        // `project_out_resources` — PROVEN projected.
+        FilterProp::CountersPutOnThisTurn { .. } => Axes::CONSERVATIVE,
+        // CR 120: runtime eval reads `state.damage_dealt_this_turn` (NOT the object's
+        // `damage_marked` — the variant doc is stale), which `project_out_resources`
+        // clears and `object_resource_axes_match` does NOT strict-compare (it compares
+        // only `damage_marked` + `counters`). A creature dealt damage then regenerated
+        // has `damage_marked == 0` yet a persistent journal record, so gate (1) cannot
+        // backstop this read — PROVEN projected, fail closed.
+        FilterProp::WasDealtDamageThisTurn => Axes::CONSERVATIVE,
+        // CR 400 / CR 603.6a: runtime eval reads `state.zone_changes_this_turn`, an
+        // append-only event journal a loop pumps, cleared by `project_out_resources`
+        // and strict-compared by nothing in gate (1). A flicker/blink loop keeps the
+        // net board equal each cycle while the journal grows — PROVEN projected, fail
+        // closed.
+        FilterProp::ZoneChangedThisTurn { .. } => Axes::CONSERVATIVE,
+        // reads `player_last_chose_label`; the backing field is NOT proven to be
+        // outside `project_out_resources`'s cleared set, so fail closed.
+        FilterProp::ControllerChoseLabel { .. } => Axes::CONSERVATIVE,
+    }
+}
+
 fn scan_player_filter(x: &PlayerFilter) -> Axes {
     match x {
         PlayerFilter::Controller => Axes::NONE,
@@ -3398,6 +3583,475 @@ pub(crate) fn duration_reads_projected_resource(duration: &Duration) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Axis-2 (sibling-mutable) off-stack read surface — the object-growth firewall
+// (`analysis::resource::loop_states_cover_modulo_object_growth`, PR-7 Phase 4a).
+// Mirrors the projected-resource accessors above but projects `.sibling` (the
+// board-scoped mutable-aggregate axis, CR 603.3b): "reads a source/recipient or
+// board aggregate a sibling copy could mutate" IS "reads the inert growth set
+// |G|" (coarsely — the sibling axis subsumes grown-id specificity, so it is a
+// fail-safe over-approximation of the CR 613.1b object-growth cover bar). Each
+// helper is a thin `.sibling` projection of an existing exhaustive scanner, so a
+// new read-bearing AST field forces classification once, in that scanner.
+// ---------------------------------------------------------------------------
+
+/// Full read-axes of an `AbilityDefinition` (the def-level analogue of
+/// [`resolved_ability_axes`]). Exhaustive no-`..` destructure — a future field
+/// fails to compile until classified. `cost` is bound read-free here because the
+/// object-growth cost surface is scanned separately by
+/// `analysis::resource::cost_surface_references_growing_class` (§5.4).
+fn ability_definition_axes(def: &AbilityDefinition) -> Axes {
+    let AbilityDefinition {
+        // ---- read-bearing ----
+        effect,
+        sub_ability,
+        else_ability,
+        duration,
+        condition,
+        multi_target,
+        target_constraints,
+        modal,
+        mode_abilities,
+        repeat_for,
+        player_scope,
+        starting_with,
+        target_chooser,
+        repeat_until,
+        // ---- conservative-when-present: inner cost/filter payloads the walk does
+        //      not descend into, each able to express a board-scoped read ----
+        unless_pay,
+        distribute,
+        cost_reduction,
+        // ---- read-free: cost scanned separately (§5.4), announce-time metadata,
+        //      flags, and tags — none express a resolution-time dynamic read ----
+        kind: _,
+        cost: _,
+        description: _,
+        target_prompt: _,
+        activation_restrictions: _,
+        activator_filter: _,
+        activation_zone: _,
+        ability_tag: _,
+        optional_targeting: _,
+        optional: _,
+        optional_for: _,
+        target_choice_timing: _,
+        min_x_value: _,
+        cant_be_copied: _,
+        forward_result: _,
+        target_selection_mode: _,
+        sub_link: _,
+        iteration_kind_binding: _,
+    } = def;
+
+    let mut acc = scan_effect(effect);
+    if let Some(sub) = sub_ability {
+        acc = acc.or(ability_definition_axes(sub));
+    }
+    if let Some(else_branch) = else_ability {
+        acc = acc.or(ability_definition_axes(else_branch));
+    }
+    if let Some(duration) = duration {
+        acc = acc.or(scan_duration(duration));
+    }
+    if let Some(condition) = condition {
+        acc = acc.or(scan_ability_condition(condition));
+    }
+    if let Some(MultiTargetSpec { min, max }) = multi_target {
+        acc = acc.or(scan_quantity_expr(min));
+        if let Some(max) = max {
+            acc = acc.or(scan_quantity_expr(max));
+        }
+    }
+    for c in target_constraints {
+        acc = acc.or(scan_target_selection_constraint(c));
+    }
+    if let Some(modal) = modal {
+        acc = acc.or(scan_modal_choice(modal));
+    }
+    for m in mode_abilities {
+        acc = acc.or(ability_definition_axes(m));
+    }
+    if let Some(qty) = repeat_for {
+        acc = acc.or(scan_quantity_expr(qty));
+    }
+    if let Some(ps) = player_scope {
+        acc = acc.or(scan_player_filter(ps));
+    }
+    if let Some(sw) = starting_with {
+        acc = acc.or(scan_controller_ref(sw));
+    }
+    if let Some(chooser) = target_chooser {
+        acc = acc.or(scan_target_filter(chooser));
+    }
+    if let Some(ru) = repeat_until {
+        acc = acc.or(scan_repeat_continuation(ru));
+    }
+    // Conservative fail-closed for present-but-undescended cost/filter payloads:
+    // an `unless pay {1} for each artifact`, a divide/distribute filter, or a
+    // per-condition cost reduction can each express a board-scoped read.
+    if unless_pay.is_some() || distribute.is_some() || cost_reduction.is_some() {
+        acc = acc.or(Axes::CONSERVATIVE);
+    }
+    acc
+}
+
+/// Axis 2 on a def-level `AbilityDefinition` (trigger `execute` bodies, every
+/// `obj.abilities` def regardless of `kind` [S5], granted-ability bodies, and the
+/// pending/delayed store bodies).
+pub(crate) fn ability_definition_reads_sibling_mutable(def: &AbilityDefinition) -> bool {
+    ability_definition_axes(def).sibling
+}
+
+/// Axis 2 on a bare trigger fire-time `condition` (CR 603.4 intervening-if).
+pub(crate) fn trigger_condition_reads_sibling_mutable(condition: &TriggerCondition) -> bool {
+    scan_trigger_condition(condition).sibling
+}
+
+/// Axis 2 on a condition-gated static's `condition` (CR 604.1 / CR 613.1).
+pub(crate) fn static_condition_reads_sibling_mutable(condition: &StaticCondition) -> bool {
+    scan_static_condition(condition).sibling
+}
+
+/// Axis 2 on a replacement effect's `condition` (CR 614.1).
+pub(crate) fn replacement_condition_reads_sibling_mutable(
+    condition: &ReplacementCondition,
+) -> bool {
+    scan_replacement_condition(condition).sibling
+}
+
+/// Axis 2 on a transient `Duration::ForAsLongAs` condition (CR 604.1).
+pub(crate) fn duration_reads_sibling_mutable(duration: &Duration) -> bool {
+    scan_duration(duration).sibling
+}
+
+/// Axis 2 on any cost surface (§5.4 / Finding-2): EXHAUSTIVE `AbilityCost` match,
+/// NO `_`. The five `QuantityExpr`-bearing variants route through
+/// [`scan_quantity_expr`]; the three nested containers recurse; `EffectCost` routes
+/// to [`scan_effect`]; every fixed/bounded/structural variant is read-free (a new
+/// variant fails to compile until classified). Board-referencing cost *keywords*
+/// (Affinity/Convoke/…) are IMPLICIT — they carry no scannable `QuantityExpr`, so
+/// they are classified separately by [`keyword_cost_reads_growing_class`].
+pub(crate) fn ability_cost_references_sibling_mutable(cost: &AbilityCost) -> bool {
+    scan_ability_cost(cost).sibling
+}
+
+/// Axis 2 on a bare `QuantityRef` — the dynamic cost multiplier
+/// (`dynamic_count: Option<QuantityRef>`) carried by CR 601.2f cost-modification
+/// statics (`StaticMode::ModifyCost` / `StaticMode::ReduceAbilityCost`). Thin
+/// `.sibling` projection of the exhaustive [`scan_quantity_ref`] scanner, so a
+/// board-reading `ObjectCount` "for each X you control" multiplier is caught by the
+/// object-growth cost firewall.
+pub(crate) fn quantity_ref_references_sibling_mutable(qty: &QuantityRef) -> bool {
+    scan_quantity_ref(qty).sibling
+}
+
+fn scan_ability_cost(cost: &AbilityCost) -> Axes {
+    match cost {
+        AbilityCost::ManaDynamic { quantity } => scan_quantity_expr(quantity),
+        AbilityCost::PayLife { amount } => scan_quantity_expr(amount),
+        AbilityCost::PayEnergy { amount } => scan_quantity_expr(amount),
+        AbilityCost::PaySpeed { amount } => scan_quantity_expr(amount),
+        AbilityCost::Discard {
+            count,
+            filter: _,
+            selection: _,
+            self_scope: _,
+        } => scan_quantity_expr(count),
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => costs
+            .iter()
+            .fold(Axes::NONE, |acc, c| acc.or(scan_ability_cost(c))),
+        AbilityCost::PerCounter {
+            counter: _,
+            target,
+            base,
+        } => scan_target_filter(target).or(scan_ability_cost(base)),
+        AbilityCost::EffectCost { effect } => scan_effect(effect),
+        // Fixed / bounded / structural costs: no dynamic board read (a
+        // board-reading tap/exile aggregate that varies the *reduction* is caught
+        // by the cost-keyword classifier, not here).
+        AbilityCost::Mana { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::Unimplemented { .. } => Axes::NONE,
+    }
+}
+
+/// §5.4 item (1) — cost-KEYWORD family. Does casting or activating an object that
+/// carries `kw` incur a cost whose MAGNITUDE or PAYABILITY is a function of a
+/// battlefield/graveyard object quantity — i.e. the cost either (a) scales down by a
+/// board/graveyard count, or (b) taps/sacrifices/exiles a member of a board or
+/// graveyard object class? Such an IMPLICIT (keyword-driven) cost reads the inert
+/// growth set |G| and breaks the fixed-cost extrapolation the object-growth cover
+/// relies on (CR 732.2a / §6 keystone: a cast-affordability the `ResourceVector`
+/// does not model).
+///
+/// EXHAUSTIVE no-`_` match on `Keyword` (the repo's no-wildcard scan doctrine): a
+/// new `Keyword` variant is a compile break here until classified. Over-approximation
+/// is fail-CLOSED — an over-broad `true` only suppresses a loop certification
+/// (soundness-preserving); a missed `false` would falsely certify an unbounded loop.
+/// When in doubt, `true`.
+///
+/// TRUE arms (grep-verified CR): Affinity (CR 702.41a, {1} less per matching
+/// permanent); the tap-a-board-aggregate keywords — Convoke (CR 702.51a),
+/// Improvise (CR 702.126a), Conspire (CR 702.78a), Crew (CR 702.122a), Saddle
+/// (CR 702.171a), Station (CR 702.184a), Teamwork (CR 702.194a), Waterbend
+/// (CR 701.67), Harmonize (CR 702.180a, taps a creature and reduces by its power);
+/// Delve (CR 702.66a, exile graveyard cards); Craft (CR 702.167a, exile
+/// battlefield/graveyard materials); the sacrifice-for-reduction keywords — Emerge
+/// (CR 702.119a) and Offering (CR 702.48a, reduce by the sacrificed permanent's
+/// mana value); the sacrifice-a-board-permanent additional costs — Bargain
+/// (CR 702.166a) and Casualty (CR 702.153a); and Assist (CR 702.132a, another
+/// player funds the generic mana the summed `ResourceVector` per CR 106.1 cannot
+/// attribute — fail-closed).
+///
+/// Undaunted (CR 702.125a) is SAFE — it reduces by the OPPONENT count (CR 119 player
+/// axis), never a board object class, so it cannot read |G|. Every combat/evasion/
+/// characteristic keyword, every fixed-mana or self/hand cost keyword, and every
+/// ETB/triggered mechanic (whose board reads, if any, are caught by the §5.3a
+/// trigger/replacement firewall, not the cost surface) is SAFE.
+pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
+    match kw {
+        // (a)/(b): the casting/activation cost reads a battlefield/graveyard object
+        // class — a scaling reduction or a tap/sacrifice/exile board aggregate.
+        Keyword::Affinity(_)
+        | Keyword::Convoke
+        | Keyword::Improvise
+        | Keyword::Conspire
+        | Keyword::Crew { .. }
+        | Keyword::Saddle(_)
+        | Keyword::Station
+        | Keyword::Teamwork(_)
+        | Keyword::Waterbend
+        | Keyword::Harmonize(_)
+        | Keyword::Delve
+        | Keyword::Craft { .. }
+        | Keyword::Emerge(_)
+        | Keyword::Offering(_)
+        | Keyword::Bargain
+        | Keyword::Casualty(_)
+        | Keyword::Assist => true,
+
+        // SAFE: no casting/activation cost that reads a growing board/graveyard class.
+        Keyword::Flying
+        | Keyword::FirstStrike
+        | Keyword::DoubleStrike
+        | Keyword::Trample
+        | Keyword::TrampleOverPlaneswalkers
+        | Keyword::Deathtouch
+        | Keyword::Lifelink
+        | Keyword::Vigilance
+        | Keyword::Haste
+        | Keyword::Reach
+        | Keyword::Defender
+        | Keyword::Menace
+        | Keyword::Indestructible
+        | Keyword::Hexproof
+        | Keyword::HexproofFrom(_)
+        | Keyword::Shroud
+        | Keyword::Flash
+        | Keyword::Fear
+        | Keyword::Intimidate
+        | Keyword::Skulk
+        | Keyword::Shadow
+        | Keyword::Horsemanship
+        | Keyword::Wither
+        | Keyword::Infect
+        | Keyword::Afflict(_)
+        | Keyword::StartingIntensity(_)
+        | Keyword::Prowess
+        | Keyword::Undying
+        | Keyword::Persist
+        | Keyword::Cascade
+        | Keyword::Exalted
+        | Keyword::Flanking
+        | Keyword::Evolve
+        | Keyword::Extort
+        | Keyword::Exploit
+        | Keyword::Explore
+        | Keyword::Ascend
+        | Keyword::StartYourEngines
+        | Keyword::Dredge(_)
+        | Keyword::Modular(_)
+        | Keyword::Renown(_)
+        | Keyword::Graft(_)
+        | Keyword::Fabricate(_)
+        | Keyword::Annihilator(_)
+        | Keyword::Bushido(_)
+        | Keyword::Frenzy(_)
+        | Keyword::Tribute(_)
+        | Keyword::Soulbond
+        | Keyword::BandsWithOther(_)
+        | Keyword::Unearth(_)
+        | Keyword::Devoid
+        | Keyword::Changeling
+        | Keyword::Phasing
+        | Keyword::Battlecry
+        | Keyword::Decayed
+        | Keyword::Unleash
+        | Keyword::Riot
+        | Keyword::Afterlife(_)
+        | Keyword::Enchant(_)
+        | Keyword::EtbCounter { .. }
+        | Keyword::Reconfigure(_)
+        | Keyword::LivingWeapon
+        | Keyword::JobSelect
+        | Keyword::TotemArmor
+        | Keyword::Bestow(_)
+        | Keyword::Embalm(_)
+        | Keyword::Eternalize(_)
+        | Keyword::Fading(_)
+        | Keyword::Vanishing(_)
+        | Keyword::Protection(_)
+        | Keyword::Kicker(_)
+        | Keyword::Cycling(_)
+        | Keyword::Typecycling { .. }
+        | Keyword::Flashback(_)
+        | Keyword::Retrace
+        | Keyword::Ward(_)
+        | Keyword::Equip(_)
+        | Keyword::Landwalk(_)
+        | Keyword::Rampage(_)
+        | Keyword::Absorb(_)
+        | Keyword::Partner(_)
+        | Keyword::Companion(_)
+        | Keyword::CommanderNinjutsu(_)
+        | Keyword::Ninjutsu(_)
+        | Keyword::Sneak(_)
+        | Keyword::Mutate(_)
+        | Keyword::Escape(_)
+        | Keyword::Morph(_)
+        | Keyword::Megamorph(_)
+        | Keyword::Madness(_)
+        | Keyword::Disguise(_)
+        | Keyword::Mayhem(_)
+        | Keyword::Suspend { .. }
+        | Keyword::Blitz(_)
+        | Keyword::Disturb(_)
+        | Keyword::Foretell(_)
+        | Keyword::Miracle(_)
+        | Keyword::Plot(_)
+        | Keyword::Gift(_)
+        | Keyword::Outlast(_)
+        | Keyword::Dash(_)
+        | Keyword::Warp(_)
+        | Keyword::Devour(_)
+        | Keyword::Offspring(_)
+        | Keyword::Splice { .. }
+        | Keyword::Sunburst
+        | Keyword::Champion(_)
+        | Keyword::Training
+        | Keyword::Augment
+        | Keyword::Aftermath
+        | Keyword::JumpStart
+        | Keyword::Cipher
+        | Keyword::Transmute(_)
+        | Keyword::Transfigure(_)
+        | Keyword::Cleave(_)
+        | Keyword::Undaunted
+        | Keyword::Paradigm
+        | Keyword::Replicate(_)
+        | Keyword::Awaken { .. }
+        | Keyword::ForMirrodin
+        | Keyword::MoreThanMeetsTheEye(_)
+        | Keyword::Freerunning(_)
+        | Keyword::Increment
+        | Keyword::Firebending(_)
+        | Keyword::Specialize(_)
+        | Keyword::Escalate(_)
+        | Keyword::Recover(_)
+        | Keyword::Fuse
+        | Keyword::Unknown(_)
+        | Keyword::Amplify(_)
+        | Keyword::Backup(_)
+        | Keyword::Banding
+        | Keyword::Bloodthirst(_)
+        | Keyword::Buyback(_)
+        | Keyword::Compleated
+        | Keyword::CumulativeUpkeep(_)
+        | Keyword::Daybound
+        | Keyword::Demonstrate
+        | Keyword::Dethrone
+        | Keyword::Discover(_)
+        | Keyword::DoubleTeam
+        | Keyword::Echo(_)
+        | Keyword::Encore(_)
+        | Keyword::Enlist
+        | Keyword::Entwine(_)
+        | Keyword::Epic
+        | Keyword::Evoke(_)
+        | Keyword::Fortify(_)
+        | Keyword::Gravestorm
+        | Keyword::Haunt
+        | Keyword::Hideaway(_)
+        | Keyword::Impending { .. }
+        | Keyword::Ingest
+        | Keyword::LevelUp(_)
+        | Keyword::LivingMetal
+        | Keyword::Melee
+        | Keyword::Mentor
+        | Keyword::Mobilize(_)
+        | Keyword::Myriad
+        | Keyword::Nightbound
+        | Keyword::Overload(_)
+        | Keyword::Poisonous(_)
+        | Keyword::Prototype { .. }
+        | Keyword::Provoke
+        | Keyword::Prowl(_)
+        | Keyword::Ravenous
+        | Keyword::ReadAhead
+        | Keyword::Rebound
+        | Keyword::Reinforce { .. }
+        | Keyword::Ripple(_)
+        | Keyword::Scavenge(_)
+        | Keyword::Soulshift(_)
+        | Keyword::Spectacle(_)
+        | Keyword::SplitSecond
+        | Keyword::Spree
+        | Keyword::Squad(_)
+        | Keyword::Storm
+        | Keyword::Surge(_)
+        | Keyword::Totem
+        | Keyword::Toxic(_)
+        | Keyword::WebSlinging(_) => false,
+    }
+}
+
+/// §5.4 item (1) — granted-keyword cost family. A runtime-granted cost keyword
+/// (`ContinuousModification::AddKeyword`) or a granted keyword whose cost is
+/// derived from board state (`AddKeywordWithDerivedCost`) reaches the same
+/// affordability hole as a printed one. Every other modification is not a
+/// cost-keyword grant (read-free on THIS axis; its board reads, if any, are caught
+/// by the §5.3a effect-body firewall).
+pub(crate) fn modification_grants_growing_cost_keyword(m: &ContinuousModification) -> bool {
+    match m {
+        ContinuousModification::AddKeyword { keyword } => keyword_cost_reads_growing_class(keyword),
+        // A derived-cost keyword grant is board-state-driven by construction ⇒
+        // conservatively a |G| reader.
+        ContinuousModification::AddKeywordWithDerivedCost { .. } => true,
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Resolution-time choice-freeness classifier (`analysis::resource` item 6).
 // A separate question family from the three read-axes above — see the module
 // header. Fail-closed default is `MayPrompt`.
@@ -3702,6 +4356,279 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
     }
 }
 
+/// CR 732.2a / CR 705.1 / CR 706.1a / CR 701.9b: does resolving this single
+/// `Effect` draw on game randomness whose outcome determines the next action — a
+/// coin flip (CR 705.1), a die roll (CR 706.1a, incl. the planar / attraction /
+/// contraption dice), or a "the game selects uniformly at random" selection
+/// (CR 701.9a/b)? A CR 732.2a shortcut "can't include conditional actions, where
+/// the outcome of a game event determines the next action," so a loop body
+/// bearing any of these is not a legal shortcut. EXHAUSTIVE over `Effect` with NO
+/// `_` wildcard — a FUTURE random-bearing variant BUILD-BREAKS here, so it can
+/// never be silently offered as deterministic. The false-group is the sibling
+/// `effect_resolution_choice_freedom` variant list minus the randomness arms; the
+/// compiler enforces that the two lists stay in lockstep. (A2 determinism gate —
+/// the static, compile-time-exhaustive half.)
+pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
+    match e {
+        // --- auto-resolved randomness (no `WaitingFor`; the recast injector cannot
+        //     abort on these — they draw the seeded RNG and continue) ---
+        Effect::FlipCoin { .. }
+        | Effect::FlipCoins { .. }
+        | Effect::FlipCoinUntilLose { .. }
+        | Effect::RollDie { .. }
+        | Effect::ChaosEnsues
+        | Effect::RollToVisitAttractions
+        | Effect::AssembleContraptionsFromRollDifference
+        // CR 701.30a: a clash reveals the top card of each player's (shuffled) library — hidden
+        // information the recast injector cannot know at pin time. CR 701.30d: the winner is
+        // decided by comparing those revealed mana values, so the outcome (and any action it
+        // gates) is unpredictable. CR 732.2a bars shortcutting a loop across such a random event,
+        // so a recast body containing a clash is randomness-bearing ⇒ fail-closed reject.
+        | Effect::Clash => true,
+        // --- field-level "game picks at random" (CR 701.9a/b): random ONLY when the
+        //     selection mode is `Random`; a `Chosen` selection is a normal player
+        //     choice, not randomness. All four `CardSelectionMode` carriers share one
+        //     arm; `Choose` (a `TargetSelectionMode`) is a distinct type so it takes
+        //     its own arm. `Bounce`/`MoveCounters` carry no `Random` selection mode. ---
+        Effect::Discard { selection, .. }
+        | Effect::RevealHand { selection, .. }
+        | Effect::CreateTokenCopyFromPool { selection, .. }
+        | Effect::ChooseFromZone { selection, .. } => selection.is_random(),
+        Effect::Choose { selection, .. } => selection.is_random(),
+        // --- everything else: NOT randomness. Grouped so the compiler still enforces
+        //     exhaustiveness (every variant named; no wildcard). ---
+        Effect::GainLife { .. }
+        | Effect::LoseLife { .. }
+        | Effect::StartYourEngines { .. }
+        | Effect::ChangeSpeed { .. }
+        | Effect::DealDamage { .. }
+        | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
+        | Effect::Draw { .. }
+        | Effect::Pump { .. }
+        | Effect::PairWith { .. }
+        | Effect::Destroy { .. }
+        | Effect::Regenerate { .. }
+        | Effect::RemoveAllDamage { .. }
+        | Effect::Counter { .. }
+        | Effect::CounterAll { .. }
+        | Effect::Token { .. }
+        | Effect::SetTapState { .. }
+        | Effect::RemoveCounter { .. }
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
+        | Effect::Sacrifice { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::Mill { .. }
+        | Effect::Scry { .. }
+        | Effect::PumpAll { .. }
+        | Effect::DamageAll { .. }
+        | Effect::DamageEachPlayer { .. }
+        | Effect::EachPlayerCopyChosen { .. }
+        | Effect::DestroyAll { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
+        | Effect::Dig { .. }
+        | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
+        | Effect::ControlNextTurn { .. }
+        | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
+        | Effect::Surveil { .. }
+        | Effect::Fight { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::Explore
+        | Effect::ExploreAll { .. }
+        | Effect::Investigate
+        | Effect::Tribute { .. }
+        | Effect::TimeTravel
+        | Effect::BecomeMonarch
+        | Effect::NoOp
+        | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
+        | Effect::Populate
+        | Effect::Behold { .. }
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
+        | Effect::Vote { .. }
+        | Effect::SeparateIntoPiles { .. }
+        | Effect::SwitchPT { .. }
+        | Effect::CopySpell { .. }
+        | Effect::EpicCopy { .. }
+        | Effect::CastCopyOfCard { .. }
+        | Effect::CopyTokenOf { .. }
+        | Effect::Myriad
+        | Effect::Encore
+        | Effect::CombineHost { .. }
+        | Effect::ChooseAugmentAndCombineWithHost { .. }
+        | Effect::Meld { .. }
+        | Effect::ExileHaunting { .. }
+        | Effect::HideawayConceal { .. }
+        | Effect::CopyTokenBlockingAttacker { .. }
+        | Effect::BecomeCopy { .. }
+        | Effect::GainActivatedAbilitiesOfTarget { .. }
+        | Effect::ChooseCard { .. }
+        | Effect::PutCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::DoublePT { .. }
+        | Effect::DoublePTAll { .. }
+        | Effect::MoveCounters { .. }
+        | Effect::Animate { .. }
+        | Effect::ReturnAsAura { .. }
+        | Effect::RegisterBending { .. }
+        | Effect::GenericEffect { .. }
+        | Effect::Cleanup { .. }
+        | Effect::Mana { .. }
+        | Effect::Shuffle { .. }
+        | Effect::Transform { .. }
+        | Effect::SearchLibrary { .. }
+        | Effect::SearchOutsideGame { .. }
+        | Effect::RevealFromHand { .. }
+        | Effect::Reveal { .. }
+        | Effect::RevealTop { .. }
+        | Effect::ExileTop { .. }
+        | Effect::TargetOnly { .. }
+        | Effect::ChooseDamageSource { .. }
+        | Effect::Suspect { .. }
+        | Effect::Unsuspect { .. }
+        | Effect::Connive { .. }
+        | Effect::PhaseOut { .. }
+        | Effect::PhaseIn { .. }
+        | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
+        | Effect::SolveCase
+        | Effect::BecomePrepared { .. }
+        | Effect::BecomeUnprepared { .. }
+        | Effect::BecomeSaddled { .. }
+        | Effect::BecomeBlocked { .. }
+        | Effect::SetClassLevel { .. }
+        | Effect::CreateDelayedTrigger { .. }
+        | Effect::AddTargetReplacement { .. }
+        | Effect::AddRestriction { .. }
+        | Effect::ReduceNextSpellCost { .. }
+        | Effect::GrantNextSpellAbility { .. }
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
+        | Effect::CreateEmblem { .. }
+        | Effect::PayCost { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
+        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::PreventDamage { .. }
+        | Effect::CreateDamageReplacement { .. }
+        | Effect::CreateDrawReplacement { .. }
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
+        | Effect::RingTemptsYou
+        | Effect::VentureIntoDungeon
+        | Effect::VentureInto { .. }
+        | Effect::TakeTheInitiative
+        | Effect::Planeswalk
+        | Effect::OpenAttractions { .. }
+        | Effect::AssembleContraptions { .. }
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
+        | Effect::ProcessRadCounters
+        | Effect::GrantCastingPermission { .. }
+        | Effect::RememberCard { .. }
+        | Effect::ForEachCategory { .. }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::Exploit { .. }
+        | Effect::GainEnergy { .. }
+        | Effect::GivePlayerCounter { .. }
+        | Effect::LoseAllPlayerCounters { .. }
+        | Effect::ExileFromTopUntil { .. }
+        | Effect::RevealUntil { .. }
+        | Effect::Discover { .. }
+        | Effect::Heist { .. }
+        | Effect::HeistExile
+        | Effect::Cascade
+        | Effect::Ripple { .. }
+        | Effect::MiracleCast { .. }
+        | Effect::MadnessCast { .. }
+        | Effect::PutAtLibraryPosition { .. }
+        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+        | Effect::PutOnTopOrBottom { .. }
+        | Effect::GiftDelivery { .. }
+        | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
+        | Effect::Detain { .. }
+        | Effect::SetRoomDoorLock { .. }
+        | Effect::ExchangeControl { .. }
+        | Effect::ChangeTargets { .. }
+        | Effect::Manifest { .. }
+        | Effect::ManifestDread
+        | Effect::Cloak { .. }
+        | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
+        | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
+        | Effect::SkipNextTurn { .. }
+        | Effect::SkipNextStep { .. }
+        | Effect::AdditionalPhase { .. }
+        | Effect::Double { .. }
+        | Effect::EachSourceDealsDamage { .. }
+        | Effect::RuntimeHandled { .. }
+        | Effect::Incubate { .. }
+        | Effect::Amass { .. }
+        | Effect::Monstrosity { .. }
+        | Effect::Specialize
+        | Effect::Renown { .. }
+        | Effect::Bolster { .. }
+        | Effect::Adapt { .. }
+        | Effect::Learn
+        | Effect::Forage
+        | Effect::Harness
+        | Effect::CollectEvidence { .. }
+        | Effect::Endure { .. }
+        | Effect::BlightEffect { .. }
+        | Effect::Seek { .. }
+        | Effect::SetLifeTotal { .. }
+        | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExchangeLifeTotals { .. }
+        | Effect::SetDayNight { .. }
+        | Effect::GiveControl { .. }
+        | Effect::RemoveFromCombat { .. }
+        | Effect::Conjure { .. }
+        | Effect::ApplyPerpetual { .. }
+        | Effect::Intensify { .. }
+        | Effect::DraftFromSpellbook { .. }
+        | Effect::ChooseCounterAdjustment { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
+        | Effect::RedistributeLifeTotals
+        | Effect::ReverseTurnOrder
+        | Effect::ChooseOneOf { .. }
+        | Effect::Unimplemented { .. } => false,
+    }
+}
+
+/// CR 732.2a: does the recast spell ability (its whole effect tree per CR 608.2,
+/// plus its announce-time target selection) bear any randomness? Reuses the
+/// exhaustive `ability_graph::collect_effects` walker for traversal, then runs
+/// `effect_is_randomness_bearing` over every collected effect. `None`-free /
+/// fail-open is impossible: the caller treats an undeterminable ability as a
+/// no-offer separately. (A2 determinism gate.)
+pub(crate) fn spell_ability_bears_randomness(def: &AbilityDefinition) -> bool {
+    // CR 700.2b / CR 701.9b: "choose ... at random" at the ability announce layer
+    // (`TargetSelectionMode::Random`, e.g. Cult of Skaro) — the walker collects
+    // sub-line effects, not the ability-level selection mode, so check it directly.
+    if def.target_selection_mode.is_random() {
+        return true;
+    }
+    let mut effects = Vec::new();
+    crate::analysis::ability_graph::collect_effects(def, &mut effects);
+    effects.iter().any(|&e| effect_is_randomness_bearing(e))
+}
+
 /// CR 608.2d + CR 732.2a: does resolving this ability (its whole chain) ever
 /// enter a resolution-time player choice? The `ResolvedAbility` destructure is
 /// EXHAUSTIVE with no `..` — the read-walk's `resolved_ability_axes` (:116)
@@ -3835,6 +4762,120 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         )
+    }
+
+    // ---- A2 determinism gate: the randomness classifier (CR 732.2a) ----
+    #[test]
+    fn randomness_classifier_discriminates() {
+        use crate::types::ability::{
+            AbilityKind, CardSelectionMode, ChoiceType, TargetSelectionMode,
+        };
+
+        // Effect-variant randomness (CR 705.1 / CR 706.1a) → true.
+        assert!(effect_is_randomness_bearing(&Effect::FlipCoin {
+            win_effect: None,
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        }));
+        assert!(effect_is_randomness_bearing(&Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 6,
+            results: Vec::new(),
+            modifier: None,
+        }));
+        assert!(effect_is_randomness_bearing(&Effect::FlipCoinUntilLose {
+            win_effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+        }));
+        // Unit dice variants (planar / attraction / contraption) → true.
+        assert!(effect_is_randomness_bearing(&Effect::ChaosEnsues));
+        assert!(effect_is_randomness_bearing(
+            &Effect::RollToVisitAttractions
+        ));
+        assert!(effect_is_randomness_bearing(
+            &Effect::AssembleContraptionsFromRollDifference
+        ));
+
+        // Field-level Random selection (CR 701.9a) → true; Chosen → false. This
+        // exercises the `.is_random()` wiring on the shared `CardSelectionMode` arm.
+        let discard = |sel| Effect::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+            selection: sel,
+            unless_filter: None,
+            filter: None,
+        };
+        assert!(effect_is_randomness_bearing(&discard(
+            CardSelectionMode::Random
+        )));
+        assert!(!effect_is_randomness_bearing(&discard(
+            CardSelectionMode::Chosen
+        )));
+        // Momir (CreateTokenCopyFromPool) — same `CardSelectionMode` arm as Discard,
+        // via a distinct card class.
+        assert!(effect_is_randomness_bearing(
+            &Effect::CreateTokenCopyFromPool {
+                owner: TargetFilter::Controller,
+                type_filter: TargetFilter::Any,
+                mv: Comparator::EQ,
+                mv_bound: QuantityExpr::Fixed { value: 0 },
+                selection: CardSelectionMode::Random,
+                count: QuantityExpr::Fixed { value: 1 },
+                tapped: false,
+                enters_attacking: false,
+            }
+        ));
+        // Choose is the distinct `TargetSelectionMode`-carrier arm.
+        assert!(effect_is_randomness_bearing(&Effect::Choose {
+            choice_type: ChoiceType::OddOrEven,
+            persist: false,
+            selection: TargetSelectionMode::Random,
+        }));
+        assert!(!effect_is_randomness_bearing(&Effect::Choose {
+            choice_type: ChoiceType::OddOrEven,
+            persist: false,
+            selection: TargetSelectionMode::Chosen,
+        }));
+
+        // Non-randomness effects → false. `Effect::Token` (the 51st's body) is
+        // additionally proven not-over-rejected end-to-end by the paired-positive
+        // integration test `object_growth_51st_sprout_swarm_covers_and_offers`.
+        assert!(!effect_is_randomness_bearing(&Effect::NoOp));
+        assert!(!effect_is_randomness_bearing(&Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        }));
+
+        // CR 701.30a/d: a clash reveals the top card of a shuffled library and decides the winner
+        // by comparing revealed mana values — unpredictable at pin time (CR 732.2a) ⇒ true.
+        // Revert-probe: moving `Effect::Clash` back to the non-randomness arm flips this to false.
+        assert!(effect_is_randomness_bearing(&Effect::Clash));
+    }
+
+    #[test]
+    fn spell_ability_randomness_ability_level_and_tree() {
+        use crate::types::ability::{AbilityKind, TargetSelectionMode};
+
+        // Ability-level announce-time Random selection (CR 700.2b) on an otherwise
+        // randomness-free body ⇒ true (proves the `target_selection_mode` axis is wired
+        // independently of the effect-tree walk).
+        let mut announce_random = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        announce_random.target_selection_mode = TargetSelectionMode::Random;
+        assert!(spell_ability_bears_randomness(&announce_random));
+
+        // Randomness reached only through the effect tree (via `collect_effects`) ⇒ true.
+        let coin_body = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        );
+        assert!(spell_ability_bears_randomness(&coin_body));
+
+        // Deterministic body (Chosen announce mode, no random effect) ⇒ false.
+        let plain = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        assert!(!spell_ability_bears_randomness(&plain));
     }
 
     // ---- Axis 3: projected-resource readers (must classify TRUE) ----

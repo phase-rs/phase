@@ -415,6 +415,22 @@ fn resolve_choice(
             actions.first().cloned().unwrap()
         }
 
+        // CR 732.2a: projection must preserve the offer's optionality. Choose the engine's
+        // legal decline action rather than fabricating a mandatory declaration.
+        WaitingFor::LoopShortcut { .. } => actions
+            .iter()
+            .find(|action| matches!(action, GameAction::DeclineShortcut))
+            .cloned()
+            .ok_or_else(|| BailReason::NoLegalAction {
+                waiting_for: format!("{:?}", state.waiting_for),
+            })?,
+        // PR-7 Phase 4c (LOW-2): self-preservation via the single-authority
+        // `smart_shortcut_response` — Shorten when the polled player has a meaningful
+        // way to break the loop, else Accept.
+        WaitingFor::RespondToShortcut { player, .. } => GameAction::RespondToShortcut {
+            response: engine::ai_support::smart_shortcut_response(state, *player),
+        },
+
         _ => {
             // All remaining variants: first legal action.
             actions.first().cloned().unwrap()
@@ -545,6 +561,30 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::identifiers::CardId;
     use engine::types::zones::Zone;
+
+    #[test]
+    fn projection_declines_optional_loop_shortcut_from_legal_actions() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: PlayerId(0),
+            predicted_winner: Some(PlayerId(1)),
+            certificate: engine::analysis::loop_check::LoopCertificate {
+                unbounded: vec![],
+                win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+                mandatory: false,
+                residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            },
+            schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
+        };
+
+        let (_actor, action, is_policy_choice) =
+            resolve_choice(&state, PlayerId(0), PlayerId(1)).expect("the offer has legal actions");
+        assert_eq!(action, GameAction::DeclineShortcut);
+        assert!(
+            is_policy_choice,
+            "declining a shortcut is a policy decision"
+        );
+    }
 
     #[test]
     fn projection_horizon_is_copy_hash() {

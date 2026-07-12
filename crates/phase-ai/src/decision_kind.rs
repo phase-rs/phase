@@ -184,7 +184,11 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ActivationCostOneOfChoice { .. }
         // CR 601.2b: choosing an additional cost's mode (e.g. behold a chosen
         // creature type) is a casting-cost-phase step; route to the ability bucket.
-        | WaitingFor::CostTypeChoice { .. } => DecisionKind::ActivateAbility,
+        | WaitingFor::CostTypeChoice { .. }
+        // CR 732.2a/b/c: loop-shortcut protocol (PR-7 Phase 3) — a forced mid-flow
+        // decision; route to the ability catch-all like the other opt-in choices.
+        | WaitingFor::LoopShortcut { .. }
+        | WaitingFor::RespondToShortcut { .. } => DecisionKind::ActivateAbility,
     }
 }
 

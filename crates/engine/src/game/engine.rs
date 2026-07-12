@@ -5,12 +5,14 @@ use thiserror::Error;
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
-use crate::types::actions::{GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp};
+use crate::types::actions::{
+    GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, TriggerOrderTemplateOp,
+};
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode,
-    CostResume, GameState, LandPlayRecord, MayTriggerAutoChoiceKey, PayCostKind, RetargetScope,
-    StackEntry, StackEntryKind, WaitingFor,
+    CostResume, GameState, LandPlayRecord, LoopDetectionMode, MayTriggerAutoChoiceKey, PayCostKind,
+    RetargetScope, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -328,7 +330,10 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
         // game-changing functionality ships OFF so it can be developed safely
         // (issue #4603). When OFF the ring is also never populated (the sampler is
         // gated identically), so this conjunct is defense-in-depth, not the sole gate.
-        && state.loop_detection.is_on()
+        // PR-7 Phase 3: `samples()` (not `is_on()`) so `Interactive` also enters. For
+        // `Off` (false) and `On` (true) `samples() == is_on()`, so both are unchanged;
+        // only `Interactive` newly enters, dispatched by the mode `match` in the body.
+        && state.loop_detection.samples()
         && !state.stack.is_empty()
         && !state.loop_detect_ring.is_empty()
         // PR-3 Defect-2: loop-shortcut detection is TOP-LEVEL-ONLY. Inside a
@@ -343,75 +348,1649 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
         // explicit and robust to future §9/§2 changes.)
         && !in_simulation_probe()
     {
-        // Clone the Arc handles (cheap refcount bumps) to release the borrow on the
-        // ring before the GameOver mutation below.
+        // PR-7 Phase 3: dispatch the confirmed-loop body by mode. The `On` arm is the
+        // pre-change block VERBATIM — byte-identical event stream, proven by the T-ON
+        // golden captured from HEAD before this wrap. `Interactive` routes to the general
+        // classification bridge (offer + APNAP window + CR 732.4 draw). `Off` is
+        // unreachable: the `samples()` guard above excludes it.
+        match state.loop_detection {
+            LoopDetectionMode::On => {
+                // Clone the Arc handles (cheap refcount bumps) to release the borrow on the
+                // ring before the GameOver mutation below.
+                let priors: Vec<std::sync::Arc<GameState>> =
+                    state.loop_detect_ring.iter().cloned().collect();
+                let cur = crate::analysis::resource::ResourceVector::snapshot(state);
+                // Carry the matching cycle's `delta` out of the scan alongside the winner so
+                // the ∞ producer below can name the loop's unbounded axes without recomputing.
+                // INDEXED scan (not `find_map`) so the matched prior's ring index `k` is known:
+                // the m9 controller-non-dip and R5-B2 faller-simultaneity checks consume the
+                // SAME `frames[k..] ++ live` per-resolution window. On a candidate winner that
+                // fails either seam gate, continue scanning older priors (fail-safe).
+                if let Some((winner, delta)) = priors.iter().enumerate().find_map(|(k, prior)| {
+                    let delta = crate::analysis::resource::ResourceVector::delta(
+                        &crate::analysis::resource::ResourceVector::snapshot(prior),
+                        &cur,
+                    );
+                    let winner = crate::analysis::loop_check::live_mandatory_loop_winner(
+                        prior, state, &delta,
+                    )?;
+                    // The matched window: the prior frame at `k`, every subsequent ring frame,
+                    // then the live state — all per-resolution, no gaps (a non-sampling beat
+                    // clears the ring, so a confirmed window is gap-free).
+                    let mut frames: Vec<&GameState> =
+                        priors[k..].iter().map(|p| p.as_ref()).collect();
+                    frames.push(state);
+                    // CR 704.5a + CR 104.4a (m9): the winner (sole non-faller) must never dip
+                    // across the window — a transient intra-cycle dip a net-delta check cannot
+                    // see would kill it before the extrapolated win.
+                    if !crate::analysis::loop_check::winner_life_never_dips(&frames, winner) {
+                        return None;
+                    }
+                    // CR 704.3 + CR 800.4a + CR 104.2a (R5-B2): with ≥2 fallers, require
+                    // pairwise-equal faller life at every frame so all cross lethal in ONE SBA
+                    // batch (the first elimination is terminal — nothing past it is modeled).
+                    let fallers: Vec<crate::types::player::PlayerId> = state
+                        .players
+                        .iter()
+                        .filter(|p| !p.is_eliminated)
+                        .map(|p| p.id)
+                        .filter(|p| delta.life.get(p).copied().unwrap_or(0) < 0)
+                        .collect();
+                    if fallers.len() >= 2
+                        && !crate::analysis::loop_check::fallers_lives_pairwise_equal(
+                            &frames, &fallers,
+                        )
+                    {
+                        return None;
+                    }
+                    Some((winner, delta))
+                }) {
+                    // CR 732.5: shortcut ONLY a loop NO living player can break. The gate runs
+                    // ONCE after find_map (not per prior). At the per-beat drive this is the
+                    // entire soundness firewall.
+                    if no_living_player_has_meaningful_priority_action(state) {
+                        // CR 732.2a: persist the confirmed loop's unbounded axes so
+                        // `derive_views` projects the `∞` HUD rows. `winner` is the loop's
+                        // controller (the non-faller); `unbounded_axes_for(winner)` returns the
+                        // same axes `detect_loop` records in `LoopCertificate.unbounded`. This is
+                        // the live producer of `unbounded_resources` for a detected loop (the
+                        // debug `SetInfiniteMana` toggle is the only other producer). It runs
+                        // only inside this OFF-gated block, so a default-OFF game never marks ∞.
+                        state.mark_unbounded_loop(winner, &delta.unbounded_axes_for(winner));
+                        result.events.push(GameEvent::GameOver {
+                            winner: Some(winner),
+                        });
+                        state.waiting_for = WaitingFor::GameOver {
+                            winner: Some(winner),
+                        };
+                        result.waiting_for = state.waiting_for.clone();
+                        match_flow::handle_game_over_transition(state);
+                    }
+                }
+            }
+            LoopDetectionMode::Interactive => interactive_loop_bridge(state, result),
+            LoopDetectionMode::Off => {
+                unreachable!("reconcile shortcut body: samples() guard excludes Off")
+            }
+        }
+    }
+
+    // PR-7 Phase 4d-ii (CR 732.2a): the EMPTY-STACK dual of the ring-gated bridge above.
+    // A self-returning (buyback) recast that creates an inert token settles with an EMPTY
+    // stack, so the sampler clears the ring at that beat and the `!stack.is_empty()` bridge
+    // is structurally unreachable for it. Detect it here by driving the captured recast on
+    // a clone. Gated identically (opt-in + top-level-only) plus a cheap `last_recast_context`
+    // precondition (set only on a buyback-paid, token-creating cast — so the clone-drive runs
+    // ~never). INV-2: this OFFERS the interactive shortcut (never auto-resolves — CR 732.2a).
+    if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.stack.is_empty()
+        && state.loop_detection.samples()
+        && !in_simulation_probe()
+        && state.last_recast_context.is_some()
+    {
+        if let Some((certificate, schema)) = try_offer_object_growth_shortcut(state) {
+            let WaitingFor::Priority { player: proposer } = state.waiting_for else {
+                unreachable!("guarded by matches!(Priority) above")
+            };
+            state.waiting_for = WaitingFor::LoopShortcut {
+                proposer,
+                predicted_winner: None,
+                certificate,
+                schema,
+            };
+            result.waiting_for = state.waiting_for.clone();
+        }
+    }
+}
+
+/// PR-7 Phase 3 (CR 732.2a/b/c + CR 732.4 + CR 704.5a): the `Interactive`-mode branch of
+/// the reconcile shortcut block. Routes the SAME confirmed live loop signal the `On` arm
+/// consumes through the GENERAL classification instead of only the lethal auto-win:
+///
+/// - **Path A — determinate lethal single-winner** (constant-depth OR ω growing cascade,
+///   via the reused, UN-widened [`crate::analysis::loop_check::live_mandatory_loop_winner`]):
+///   if the loop is mandatory (CR 732.5: no living player can break it) this AUTO-WINS
+///   exactly as `On` does (mandatory winning drain). If it is OPTIONAL (some player could
+///   respond) it OFFERS the interactive shortcut (CR 732.2a) via `WaitingFor::LoopShortcut`.
+/// - **Path B — CR 732.4 all-mandatory, net-progress, no-loss draw**: a confirmed cycle
+///   with no determinate winner that drives NO player toward a loss and that no living
+///   player can break is a draw (CR 104.4b / 104.4f).
+///
+/// Everything else (staggered-pod losses, optional pure-advantage loops) falls through
+/// with no action — the pre-feature halt/continue behavior. Runs inside the same
+/// top-level-only `!in_simulation_probe()` guard as the `On` arm.
+///
+/// Multiplayer subset-lethality is safe by construction: [`find_live_loop_winner`] delegates
+/// to [`crate::analysis::loop_check::live_mandatory_loop_winner`], which partitions the living
+/// players into life-fallers vs non-fallers and requires EXACTLY one non-faller
+/// (`nonfallers.len() == 1`; CR 104.2a — a winner is determinate only when every other living
+/// player falls). A loop lethal to only SOME opponents leaves a surviving bystander as a
+/// second non-faller ⇒ `None` ⇒ neither Path A (no winner) nor Path B (a life-loss axis is
+/// present, so it is not a CR 732.4 no-loss draw) fires, and it falls through without crowning.
+fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
+    // CR 732.5 / CR 732.2b: is the loop mandatory (no living player has a meaningful
+    // priority action that could break it)? The single mandatory-vs-optional signal the
+    // engine already computes — not a new stored flag.
+    let mandatory = no_living_player_has_meaningful_priority_action(state);
+
+    // Path A: determinate lethal single-winner drain.
+    if let Some((winner, delta, prior)) = find_live_loop_winner(state) {
+        if mandatory {
+            // FIRM #1 — mandatory winning drain: identical to the `On` auto-win.
+            // CR 732.2a: mark the loop's unbounded axes; CR 704.5a: terminal GameOver.
+            state.mark_unbounded_loop(winner, &delta.unbounded_axes_for(winner));
+            result.events.push(GameEvent::GameOver {
+                winner: Some(winner),
+            });
+            state.waiting_for = WaitingFor::GameOver {
+                winner: Some(winner),
+            };
+            result.waiting_for = state.waiting_for.clone();
+            match_flow::handle_game_over_transition(state);
+        } else {
+            // CR 732.2a: OPTIONAL winning drain — only the player with priority may propose
+            // the shortcut. Keep that proposer distinct from the already-measured winner; a
+            // loop can be detected during a different player's priority window.
+            let certificate = build_cert(prior.as_ref(), state, &delta, winner);
+            // CR 732.2a: a non-targeted drain reifies no per-iteration player choice ⇒ carry an
+            // empty pin list; only the `iteration_count` (from `win_kind`) is populated.
+            let WaitingFor::Priority { player: proposer } = state.waiting_for else {
+                unreachable!("interactive bridge only runs during priority")
+            };
+            let schema = build_shortcut_schema(&[], certificate.win_kind, state, proposer);
+            state.waiting_for = WaitingFor::LoopShortcut {
+                proposer,
+                predicted_winner: Some(winner),
+                certificate,
+                schema,
+            };
+            result.waiting_for = state.waiting_for.clone();
+        }
+        return;
+    }
+
+    // Path B: CR 732.4 all-mandatory, net-progress, no-loss draw. Only reached when Path A
+    // found no determinate winner. `mandatory` gates it (CR 732.5); a loss axis or an
+    // optional loop falls through to the pre-feature halt.
+    if mandatory {
         let priors: Vec<std::sync::Arc<GameState>> =
             state.loop_detect_ring.iter().cloned().collect();
         let cur = crate::analysis::resource::ResourceVector::snapshot(state);
-        // Carry the matching cycle's `delta` out of the scan alongside the winner so
-        // the ∞ producer below can name the loop's unbounded axes without recomputing.
-        // INDEXED scan (not `find_map`) so the matched prior's ring index `k` is known:
-        // the m9 controller-non-dip and R5-B2 faller-simultaneity checks consume the
-        // SAME `frames[k..] ++ live` per-resolution window. On a candidate winner that
-        // fails either seam gate, continue scanning older priors (fail-safe).
-        if let Some((winner, delta)) = priors.iter().enumerate().find_map(|(k, prior)| {
+        for prior in &priors {
             let delta = crate::analysis::resource::ResourceVector::delta(
                 &crate::analysis::resource::ResourceVector::snapshot(prior),
                 &cur,
             );
-            let winner =
-                crate::analysis::loop_check::live_mandatory_loop_winner(prior, state, &delta)?;
-            // The matched window: the prior frame at `k`, every subsequent ring frame,
-            // then the live state — all per-resolution, no gaps (a non-sampling beat
-            // clears the ring, so a confirmed window is gap-free).
-            let mut frames: Vec<&GameState> = priors[k..].iter().map(|p| p.as_ref()).collect();
-            frames.push(state);
-            // CR 704.5a + CR 104.4a (m9): the winner (sole non-faller) must never dip
-            // across the window — a transient intra-cycle dip a net-delta check cannot
-            // see would kill it before the extrapolated win.
-            if !crate::analysis::loop_check::winner_life_never_dips(&frames, winner) {
-                return None;
-            }
-            // CR 704.3 + CR 800.4a + CR 104.2a (R5-B2): with ≥2 fallers, require
-            // pairwise-equal faller life at every frame so all cross lethal in ONE SBA
-            // batch (the first elimination is terminal — nothing past it is modeled).
-            let fallers: Vec<crate::types::player::PlayerId> = state
-                .players
-                .iter()
-                .filter(|p| !p.is_eliminated)
-                .map(|p| p.id)
-                .filter(|p| delta.life.get(p).copied().unwrap_or(0) < 0)
-                .collect();
-            if fallers.len() >= 2
-                && !crate::analysis::loop_check::fallers_lives_pairwise_equal(&frames, &fallers)
+            // CR 732.2a board-recurrence (constant-depth OR ω growing cascade) + net
+            // progress + NO loss axis for anyone ⇒ the loop grinds forever with nobody
+            // able to win or lose ⇒ CR 732.4 / 104.4b draw.
+            if (crate::analysis::resource::loop_states_equal_modulo_resources(prior, state)
+                || crate::analysis::resource::loop_states_cover_modulo_growth(prior, state))
+                && delta.is_net_progress()
+                && has_no_loss_axis(&delta)
             {
-                return None;
-            }
-            Some((winner, delta))
-        }) {
-            // CR 732.5: shortcut ONLY a loop NO living player can break. The gate runs
-            // ONCE after find_map (not per prior). At the per-beat drive this is the
-            // entire soundness firewall.
-            if no_living_player_has_meaningful_priority_action(state) {
-                // CR 732.2a: persist the confirmed loop's unbounded axes so
-                // `derive_views` projects the `∞` HUD rows. `winner` is the loop's
-                // controller (the non-faller); `unbounded_axes_for(winner)` returns the
-                // same axes `detect_loop` records in `LoopCertificate.unbounded`. This is
-                // the live producer of `unbounded_resources` for a detected loop (the
-                // debug `SetInfiniteMana` toggle is the only other producer). It runs
-                // only inside this OFF-gated block, so a default-OFF game never marks ∞.
-                state.mark_unbounded_loop(winner, &delta.unbounded_axes_for(winner));
-                result.events.push(GameEvent::GameOver {
-                    winner: Some(winner),
-                });
-                state.waiting_for = WaitingFor::GameOver {
-                    winner: Some(winner),
-                };
+                result.events.push(GameEvent::GameOver { winner: None });
+                state.waiting_for = WaitingFor::GameOver { winner: None };
                 result.waiting_for = state.waiting_for.clone();
                 match_flow::handle_game_over_transition(state);
+                return;
             }
         }
     }
+    // PR-7 Phase 4c (B5): OPTIONAL beneficial (non-winning) loop ⇒ revocable-∞ capability.
+    // CR 104.4b: "Loops that contain an optional action don't result in a draw" — so an
+    // optional net-progress no-loss loop is neither crowned (Path A: no faller) nor drawn
+    // (Path B: !mandatory). It grinds under player control; record the unbounded capability
+    // (mark_unbounded_loop) + its enablers so an enabler's departure REVOKES it (defuse hook
+    // in zones.rs `apply_zone_exit_cleanup`). Reached only when Path A named no winner AND
+    // the loop is OPTIONAL (a player can break it) — the pre-feature halt already applied
+    // when Path B's `mandatory` gate excludes this branch, so this is a NEW arm, not a
+    // narrowing of one.
+    //
+    // CR-FIDELITY NOTE: CR 104.4b grants the controller "no draw + player control", NOT a
+    // persistent resource. The realization here reuses `unbounded_resources` /
+    // `refill_infinite_mana`, which is a DOCUMENTED DEBUG-ONLY DEPARTURE FROM THE RULES
+    // (mana_payment.rs top-up); reusing it for a real detected loop is team-lead's stated
+    // design intent (in-scope). The mark means "this player can grind this axis unboundedly
+    // under their own control", the closest live realization of CR 104.4b's grant.
+    if !mandatory {
+        let controller = state.active_player; // sampler gate is Priority{active_player}: the driver
+        let priors: Vec<std::sync::Arc<GameState>> =
+            state.loop_detect_ring.iter().cloned().collect();
+        let cur = crate::analysis::resource::ResourceVector::snapshot(state);
+        for prior in &priors {
+            let delta = crate::analysis::resource::ResourceVector::delta(
+                &crate::analysis::resource::ResourceVector::snapshot(prior),
+                &cur,
+            );
+            // Same recurrence + net-progress predicate as Path B (byte-reused), minus the
+            // `mandatory` gate. The object-growth disjunct is the SHARED-BUT-DORMANT arm
+            // (empty residual today; lights up under 4a-live with no further edit).
+            //
+            // REDUNDANCY PROOF (R6, team-lead-verified): `has_no_loss_axis` (conjunct 3
+            // below) is UNCONDITIONALLY REDUNDANT at this Path-C call site — every
+            // self-loss axis it checks is already rejected by an EARLIER conjunct, so
+            // removing it changes no Path-C outcome and a discriminating runtime test for
+            // it HERE is unsatisfiable (waived; kept as documented defense-in-depth):
+            //   - library↓ (self-mill): a card leaving the Library zone changes its
+            //     `objects_content_eq` zone, so successive frames compare UNEQUAL and
+            //     recurrence (conjunct 1) fails first — the loop never recurs, so this
+            //     arm is never even reached.
+            //   - life↓ (self-burn): life is a Consumed axis (`ResourceVector::components`),
+            //     so `is_net_progress` (conjunct 2) returns false on any net-negative life
+            //     (resource.rs ~:409, over all players) before conjunct 3 runs.
+            //   - poison↑ (self-poison): `classify_win_kind` (conjunct 4) maps poison>0 to
+            //     `WinKind::PoisonLoss`, not `Advantage`, so the `== Advantage` conjunct
+            //     rejects it.
+            // CONTRAST — the Path-B DRAW gate (:512-516 = recurrence + is_net_progress +
+            // has_no_loss_axis, with NO `== Advantage` backstop) is DIFFERENT: there
+            // `has_no_loss_axis` is the SOLE loss-axis veto and is LOAD-BEARING BY
+            // CONSTRUCTION — it MUST NOT be removed. A poison loop reaching Path B satisfies
+            // recurrence (poison is projected out at resource.rs:1995) AND is_net_progress
+            // (poison is a Gained axis, which cannot make is_net_progress false), so without
+            // this conjunct such a loop would be WRONGLY certified a CR 732.4 draw. (Path C's
+            // poison redundancy comes ENTIRELY from its extra `== Advantage` conjunct, which
+            // Path B lacks.) The Path-B veto is currently NOT runtime-discriminable: a
+            // single-compound-trigger poison loop DOES reach the Path-B bridge, but the
+            // "you gain N life and [each opponent gets a poison counter]" parser drop removes
+            // the poison conjunct (card-build keeps only `GainLife`), so poison is 0 in the loop
+            // delta at the gate → it draws as a benign lifegain loop and never exercises
+            // has_no_loss_axis's poison veto. No constructible fixture carries poison>0 to the
+            // Path-B gate (the 2-trigger form clears `loop_detect_ring` on its OrderTriggers
+            // beats at engine.rs:1307; the single-compound-trigger form drops the poison at
+            // parse). The runtime discriminator is therefore WAIVED as measured-unsatisfiable;
+            // this in-code load-bearing-by-construction proof is the substitute. See the
+            // `interactive_recurring_poison_is_not_drawn` Path-B behavioral test.
+            if (crate::analysis::resource::loop_states_equal_modulo_resources(prior, state)
+                || crate::analysis::resource::loop_states_cover_modulo_growth(prior, state)
+                // CR 122.1 + CR 104.4b: OR a pure preserved-`Generic` counter-growth
+                // cover (proliferate/charge Pentad Prism, burden The One Ring). Live
+                // revocable-∞ mark ONLY — this Path-C arm routes to `mark_unbounded_loop`
+                // + enabler registration below, which NEVER produces a GameOver; an
+                // over-claim is a revocable capability, not a wrongful game-end.
+                || crate::analysis::resource::loop_states_cover_modulo_counter_growth(
+                    prior, state,
+                ))
+                && delta.is_net_progress()
+                && has_no_loss_axis(&delta)
+                && crate::analysis::loop_check::classify_win_kind(controller, &delta)
+                    == crate::analysis::loop_check::WinKind::Advantage
+            {
+                let axes = delta.unbounded_axes_for(controller);
+                if axes.is_empty() {
+                    continue; // no unbounded axis for the driver ⇒ not this player's loop
+                }
+                // CR 104.4b: mark the revocable unbounded capability (idempotent set-union).
+                state.mark_unbounded_loop(controller, &axes);
+                // CR 110.1 + every-enabler: the stable recurring board is the enabler set.
+                // battlefield_ids(prior) ∩ battlefield_ids(state) — complete for battlefield-
+                // permanent enablers of a constant-depth loop, excludes intra-loop churn.
+                let enablers: std::collections::BTreeSet<ObjectId> = prior
+                    .battlefield
+                    .iter()
+                    .copied()
+                    .filter(|id| state.battlefield.contains(id))
+                    .collect();
+                state.register_unbounded_loop_enablers(controller, enablers);
+                return;
+            }
+        }
+    }
+    // else: staggered-pod loss / non-beneficial optional loop ⇒ no auto-resolve; fall
+    // through to the pre-feature behavior (halt / continue).
+}
+
+/// PR-7 Phase 3: scan the live loop-detect ring for a determinate lethal single-winner,
+/// applying the SAME per-frame window gates the `On` reconcile arm uses
+/// ([`crate::analysis::loop_check::winner_life_never_dips`] +
+/// [`crate::analysis::loop_check::fallers_lives_pairwise_equal`]). This is a deliberate,
+/// isolated copy of the `On` arm's `find_map` scan — the `On` arm stays VERBATIM (byte-
+/// identity gate), so it is not refactored to call this. Returns `(winner, per-cycle
+/// delta, cycle-start frame)`; the frame feeds `board_delta` for the offer certificate.
+fn find_live_loop_winner(
+    state: &GameState,
+) -> Option<(
+    PlayerId,
+    crate::analysis::resource::ResourceVector,
+    std::sync::Arc<GameState>,
+)> {
+    let priors: Vec<std::sync::Arc<GameState>> = state.loop_detect_ring.iter().cloned().collect();
+    let cur = crate::analysis::resource::ResourceVector::snapshot(state);
+    priors.iter().enumerate().find_map(|(k, prior)| {
+        let delta = crate::analysis::resource::ResourceVector::delta(
+            &crate::analysis::resource::ResourceVector::snapshot(prior),
+            &cur,
+        );
+        let winner = crate::analysis::loop_check::live_mandatory_loop_winner(prior, state, &delta)?;
+        let mut frames: Vec<&GameState> = priors[k..].iter().map(|p| p.as_ref()).collect();
+        frames.push(state);
+        if !crate::analysis::loop_check::winner_life_never_dips(&frames, winner) {
+            return None;
+        }
+        let fallers: Vec<PlayerId> = state
+            .players
+            .iter()
+            .filter(|p| !p.is_eliminated)
+            .map(|p| p.id)
+            .filter(|p| delta.life.get(p).copied().unwrap_or(0) < 0)
+            .collect();
+        if fallers.len() >= 2
+            && !crate::analysis::loop_check::fallers_lives_pairwise_equal(&frames, &fallers)
+        {
+            return None;
+        }
+        Some((winner, delta, prior.clone()))
+    })
+}
+
+/// PR-7 Phase 3: build the offer certificate for an OPTIONAL winning drain. Fills the
+/// residual via the SINGLE `board_delta` population seam (`loop_check.rs` invariant — NOT
+/// `BoardDelta::default()`); empty for a constant-depth drain, non-empty for the ω growing
+/// cascade where the Phase-4 materialization consumer reads it.
+fn build_cert(
+    prior: &GameState,
+    state: &GameState,
+    delta: &crate::analysis::resource::ResourceVector,
+    winner: PlayerId,
+) -> crate::analysis::loop_check::LoopCertificate {
+    crate::analysis::loop_check::LoopCertificate {
+        unbounded: delta.unbounded_axes_for(winner),
+        win_kind: crate::analysis::loop_check::classify_win_kind(winner, delta),
+        // The offer is only reached for an OPTIONAL loop.
+        mandatory: false,
+        residual_board_delta: crate::analysis::resource::board_delta(prior, state),
+    }
+}
+
+/// CR 704.5a / CR 704.5c: a determinate lethal drain (0-or-less life / 10-poison) repeats
+/// UntilLethal; every other CR 732.1b win seeds a `Fixed(1)` frontend count picker. Extracted
+/// as a pure classifier so the exhaustive `WinKind` mapping is unit-testable without a
+/// `GameState`.
+fn shortcut_iteration_count(
+    win_kind: crate::analysis::loop_check::WinKind,
+) -> crate::analysis::decision_template::IterationCount {
+    use crate::analysis::decision_template::IterationCount;
+    use crate::analysis::loop_check::WinKind;
+    match win_kind {
+        WinKind::LethalDamage | WinKind::PoisonLoss => IterationCount::UntilLethal,
+        WinKind::Decking | WinKind::ExtraTurns | WinKind::ImmediateWin | WinKind::Advantage => {
+            IterationCount::Fixed(1)
+        }
+    }
+}
+
+/// CR 732.2a: build the READ-side decision schema for a loop-shortcut offer. `pins` is the
+/// carried single-authority decision list (`build_recast_template` output for the object-growth
+/// path; `&[]` for a non-targeted drain) — never re-derived here. Legal sets come from live
+/// engine queries (`is_convoke_eligible`); the frontend computes nothing.
+fn build_shortcut_schema(
+    pins: &[crate::analysis::decision_template::PinnedDecision],
+    win_kind: crate::analysis::loop_check::WinKind,
+    state: &GameState,
+    controller: PlayerId,
+) -> crate::analysis::decision_template::ShortcutDecisionSchema {
+    use crate::analysis::decision_template::{
+        DecisionPoint, DecisionPointKind, PinnedDecision, ShortcutDecisionSchema,
+    };
+    let points: Vec<DecisionPoint> = pins
+        .iter()
+        .filter_map(|pin| match pin {
+            // CR 603.3b: trigger ordering is not a loop-declaration choice — no read-side peer.
+            PinnedDecision::Order { .. } => None,
+            // CR 702.51a: the untapped creatures the controller may tap for convoke. Sorted by
+            // the public inner id: `im::HashMap::values()` order is nondeterministic and this Vec
+            // serializes to the wire (cf. `resolve_source`'s `min_by_key` for the same reason).
+            PinnedDecision::ConvokeTaps { slot } => {
+                let mut tappable: Vec<crate::types::identifiers::ObjectId> = state
+                    .objects
+                    .values()
+                    .filter(|o| o.is_convoke_eligible(controller))
+                    .map(|o| o.id)
+                    .collect();
+                tappable.sort_by_key(|id| id.0);
+                Some(DecisionPoint {
+                    slot: slot.clone(),
+                    kind: DecisionPointKind::ConvokeTaps { tappable },
+                })
+            }
+            // No Stage-1 offer path reifies a targeted / modal / may / unless decision (targeted
+            // loops reach the offer only after the Stage-2 gate-relax). Fail-loud in dev,
+            // fail-safe (drop) in prod — no producer emits one yet.
+            PinnedDecision::Targets { .. }
+            | PinnedDecision::Mode { .. }
+            | PinnedDecision::MayChoice { .. }
+            | PinnedDecision::UnlessBreak { .. } => {
+                debug_assert!(
+                    false,
+                    "Stage-1 schema builder: only ConvokeTaps is reified; Targets/Mode/MayChoice/UnlessBreak are Stage-2 producers"
+                );
+                None
+            }
+        })
+        .collect();
+    // CR 702.51a: engine-owned total of untapped convoke-eligible creatures across every
+    // ConvokeTaps point — the frontend renders this directly instead of re-deriving it from
+    // `points` (display-layer purity). Identical predicate/sum to the deleted React reduce.
+    let convoke_tappable_count = points
+        .iter()
+        .filter_map(|p| match &p.kind {
+            DecisionPointKind::ConvokeTaps { tappable } => Some(tappable.len()),
+            _ => None,
+        })
+        .sum();
+    ShortcutDecisionSchema {
+        iteration_count: shortcut_iteration_count(win_kind),
+        points,
+        convoke_tappable_count,
+    }
+}
+
+/// CR 732.4 + CR 104.4b: a net-progress mandatory loop draws ONLY if it drives NO player
+/// toward a loss — no life drain, no poison, no decking. Any loss axis means a determinate
+/// loser (Path A) or a staggered pod (fall through), never a draw. The live delta comes
+/// from two `snapshot`s, so `damage_dealt` is empty (state-fed) and life loss surfaces as
+/// a negative `life` delta.
+fn has_no_loss_axis(delta: &crate::analysis::resource::ResourceVector) -> bool {
+    // CR 704.5c: poison is now per-victim (`delta.poison`); a rising poison on ANY
+    // player is a loss axis that vetoes the CR 732.4 draw.
+    delta.life.values().all(|&n| n >= 0)
+        && delta.library_delta.values().all(|&n| n >= 0)
+        && delta.poison.values().all(|&n| n <= 0)
+}
+
+/// CR 800.4a: the seat that should receive priority when a loop-shortcut resolution hands
+/// priority back. Priority passes to the next player in turn order still in the game — the
+/// active player if it is still in the game, otherwise the next living seat in turn order
+/// (elimination does not advance `active_player` when a non-acting seat concedes during the
+/// APNAP window, so `active_player` may be a departed player).
+fn living_priority_seat(state: &GameState) -> PlayerId {
+    if crate::game::players::is_alive(state, state.active_player) {
+        state.active_player
+    } else {
+        crate::game::players::next_player_in_turn_order(state, state.active_player)
+    }
+}
+
+/// CR 732.2c + CR 704.5a: apply a confirmed loop shortcut. Reached ONLY on the Accept path
+/// (every living opponent accepted). CR 608.2b re-validation is satisfied BY CONSTRUCTION:
+/// the offer confirmed `proposal.predicted_winner` as the determinate winner over public board
+/// state, and between the offer and the final Accept the dispatch admits ONLY the protocol
+/// actions (`DeclareShortcut`/`RespondToShortcut`), none of which touch the board — so the
+/// loop is provably still intact and the predicted winner remains valid. (A live ring re-scan
+/// here is unsound: intervening finalize/SBA/layer steps drift the paused state away from the
+/// sampled ring frames. The Shorten path — where a real board action CAN break the loop —
+/// deliberately hands priority instead of reaching here, and re-detection re-fires the bridge
+/// LIVE on a later beat.) `UntilLethal` ⇒ mark the unbounded axes + declare the terminal win;
+/// `Fixed(N)` ⇒ Phase-4b finite materialization (`materialize_fixed_shortcut`), which drives
+/// N whole cycles atomically, commits + stops early on a cross-lethal `GameOver` mid-drive, and
+/// falls back to manual play (priority to `living_priority_seat`) on any abort.
+///
+/// The consumption-time proposer/winner-liveness guard below catches a `Concede` (CR 104.3a)
+/// or a `Debug` that ELIMINATES either authority inside the still-open APNAP window. A `Debug` action
+/// that drifts the board WITHOUT killing the proposer (e.g. debug-removing a loop permanent)
+/// is deliberately out of scope: `debug_mode` is sandbox god-mode that can already produce
+/// arbitrarily inconsistent states, so loop-shortcut soundness under arbitrary debug mutation
+/// is not a competitive-correctness obligation.
+fn apply_confirmed_shortcut(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
+) {
+    // CR 104.3a / CR 104.2a / CR 800.4a: re-validate the proposer and any latched winner at
+    // consumption. `GameAction::Concede` (and a board-mutating `Debug`) bypass the WaitingFor
+    // dispatch, so either authority can leave during the APNAP window. A departed proposer
+    // invalidates the sequence they suggested; a departed predicted winner cannot be crowned.
+    if !crate::game::players::is_alive(state, proposal.proposer)
+        || proposal
+            .predicted_winner
+            .is_some_and(|winner| !crate::game::players::is_alive(state, winner))
+    {
+        priority::reset_priority(state);
+        // CR 800.4a: priority passes to the next player in turn order still in the game.
+        // The departed proposer may have been the active player (elimination does not advance
+        // `active_player` when a non-acting seat concedes during the APNAP window), so route to
+        // a LIVING holder rather than a possibly-departed `active_player`.
+        let holder = living_priority_seat(state);
+        state.waiting_for = WaitingFor::Priority { player: holder };
+        result.waiting_for = state.waiting_for.clone();
+        return;
+    }
+    match proposal.count {
+        crate::analysis::decision_template::IterationCount::UntilLethal => {
+            apply_until_lethal_shortcut(state, result, proposal)
+        }
+        crate::analysis::decision_template::IterationCount::Fixed(n) => {
+            materialize_fixed_shortcut(state, result, proposal, n)
+        }
+    }
+}
+
+/// PR-7 Combo-UI Stage 2 (SOUNDNESS #2 — the E1 crown): CR 732.2a / CR 704.5a / CR 104.2a
+/// win-derivation for a confirmed `UntilLethal` loop shortcut. NEVER an unconditional crown.
+/// DRIVES one pin-faithful cycle of the confirmed loop, MEASURES the per-cycle
+/// `ResourceVector::delta`, and re-runs the SAME offer-time authority
+/// (`live_mandatory_loop_winner`) on the driven states. Crowns ONLY when that authority
+/// names the proposer as the sole determinate winner; every other outcome (a subset-lethal
+/// loop with >1 non-faller, an Advantage token-growth loop with no faller, an aborted drive)
+/// falls back to manual play (CR 800.4a) — no wrong crown.
+///
+/// F2 hardening (crown SELF-soundness — a GameOver path must not depend on a future
+/// hard-gated PR): for the ≥2-faller case, RE-VERIFY the offer's own
+/// `fallers_lives_pairwise_equal` (CR 704.3 simultaneity) on the boundary/pre-drive faller
+/// lives — a staggered-death unequal-absolute drain does NOT crown even though
+/// `live_mandatory_loop_winner`'s ≥2-faller floor checks only per-cycle DELTAS.
+///
+/// SOUNDNESS FLAG (#20, belt+suspenders): when the PR-8 targeted-offer trigger reifies >2p
+/// targeted loops, it should ALSO carry `fallers_lives_pairwise_equal` at OFFER time.
+fn apply_until_lethal_shortcut(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
+) {
+    // The board is unchanged since the offer (apply_confirmed_shortcut doc): `committed` is
+    // the fully-committed pre-drive state to roll back to on any non-crown.
+    let committed = state.clone();
+    // The recurrence boundary: the loop's canonical per-cycle SETTLE beat
+    // (`Priority{active_player}`), normalized — the same construction `materialize_fixed_shortcut`
+    // captures (the cover/equal-modulo checks normalize internally, so this is a
+    // self-contained canonical frame). `snapshot`'s life/poison/library axes are unaffected by
+    // `normalize_for_loop`, so `before` is the pre-drive resource baseline.
+    let boundary = {
+        let mut seed = committed.clone();
+        priority::reset_priority(&mut seed);
+        seed.waiting_for = WaitingFor::Priority {
+            player: seed.active_player,
+        };
+        seed.normalize_for_loop()
+    };
+    let before = crate::analysis::resource::ResourceVector::snapshot(&boundary);
+    let period = shortcut_drive_period(proposal.template.as_ref());
+
+    // DRIVE one representative cycle to produce the measured post-drive `work` state.
+    let work: GameState = if let Some(ctx) = committed.last_recast_context.clone() {
+        // Object-growth recast loop (buyback + convoke + affinity) declared `UntilLethal`
+        // by the AI (which hardcodes it for every optional offer). Drive one real recast on a
+        // clone under the re-entrancy guard; an inert Advantage token loop has NO life/poison
+        // faller ⇒ `live_mandatory_loop_winner` returns None below ⇒ manual fallback (this is
+        // the latent AI-mis-crown fix, first-class).
+        let template = build_recast_template(&ctx);
+        let _probe = SimulationProbeGuard::enter();
+        let mut w = committed.clone();
+        priority::reset_priority(&mut w);
+        w.waiting_for = WaitingFor::Priority {
+            player: ctx.controller,
+        };
+        match drive_recast_iteration(&mut w, &template, &ctx, 0) {
+            Ok(()) => w,
+            Err(RecastAbort) => {
+                return until_lethal_fallback(state, result, committed);
+            }
+        }
+    } else {
+        // Drain loop (targeted Vito class, non-targeted Cleric class, ω-covering cascade).
+        // Drive `period` whole cycles, injecting the pinned answers (CR 603.3b ordering / CR
+        // 608.2b targets) at each mid-cycle prompt. A cross-lethal mid-drive already applies
+        // the win to `work` (CR 704.5a SBA).
+        let cap = auto_pass_loop_max_iterations(&committed);
+        let mut running = committed.clone();
+        for i in 0..period {
+            match drive_one_shortcut_cycle(&running, &boundary, proposal.template.as_ref(), i, cap)
+            {
+                CycleOutcome::Recurred { state: s, .. } => running = *s,
+                CycleOutcome::CrossLethal {
+                    state: s,
+                    winner,
+                    mut events,
+                } => {
+                    // Commit + stop ONLY when the mid-drive lethal matches the winner measured
+                    // at offer time; any other winner (or a draw) rolls back to manual play. `UntilLethal`
+                    // IS unbounded ⇒ mark the axes on the committed state (contrast the
+                    // finite `Fixed(N)` cross-lethal, which does not).
+                    if let Some(winner) =
+                        winner.filter(|winner| Some(*winner) == proposal.predicted_winner)
+                    {
+                        let mut w = *s;
+                        w.mark_unbounded_loop(winner, &proposal.unbounded);
+                        *state = w;
+                        result.events.append(&mut events);
+                        state.waiting_for = WaitingFor::GameOver {
+                            winner: Some(winner),
+                        };
+                        result.waiting_for = state.waiting_for.clone();
+                    } else {
+                        until_lethal_fallback(state, result, committed);
+                    }
+                    return;
+                }
+                CycleOutcome::Abort => {
+                    return until_lethal_fallback(state, result, committed);
+                }
+            }
+        }
+        running
+    };
+
+    // MEASURE + derive the winner via the offer-time authority, VERBATIM.
+    let delta = crate::analysis::resource::ResourceVector::delta(
+        &before,
+        &crate::analysis::resource::ResourceVector::snapshot(&work),
+    );
+    match crate::analysis::loop_check::live_mandatory_loop_winner(&boundary, &work, &delta) {
+        Some(winner) if Some(winner) == proposal.predicted_winner => {
+            // F2 (CR 704.3 simultaneity): for ≥2 fallers, re-verify the offer's own pairwise
+            // life-equality on the pre-drive faller lives. `live_mandatory_loop_winner`'s
+            // ≥2-faller floor checks only per-cycle DELTAS, so a staggered-death unequal
+            // ABSOLUTE-life drain would pass it — the offer's `fallers_lives_pairwise_equal`
+            // is the missing absolute-life gate. Single-faller (2p) skips it (no simultaneity
+            // to enforce); a non-targeted symmetric drain was certified pairwise-equal on the
+            // frozen board, so it still passes.
+            let fallers = fallers_of(&work, &delta);
+            if fallers.len() >= 2
+                && !crate::analysis::loop_check::fallers_lives_pairwise_equal(
+                    &[&boundary],
+                    &fallers,
+                )
+            {
+                until_lethal_fallback(state, result, committed);
+            } else {
+                crown_until_lethal(state, result, proposal, winner);
+            }
+        }
+        _ => until_lethal_fallback(state, result, committed),
+    }
+}
+
+/// The faller partition of a measured per-cycle `delta`, over the living players of
+/// `cycle_end` — EXACTLY the partition `live_mandatory_loop_winner` computes internally
+/// (`delta.life<0 || delta.poison>0`). Exposed for the F2 ≥2-faller re-verification; NOT a
+/// re-architecting of the win authority.
+fn fallers_of(
+    cycle_end: &GameState,
+    delta: &crate::analysis::resource::ResourceVector,
+) -> Vec<PlayerId> {
+    cycle_end
+        .players
+        .iter()
+        .filter(|p| !p.is_eliminated)
+        .map(|p| p.id)
+        .filter(|p| {
+            delta.life.get(p).copied().unwrap_or(0) < 0
+                || delta.poison.get(p).copied().unwrap_or(0) > 0
+        })
+        .collect()
+}
+
+/// CR 732.2a + CR 704.5a: crown the measured winner of the confirmed
+/// unbounded drain (the former UntilLethal-arm body). Persists the unbounded axes (the ∞ HUD
+/// producer) and declares the CR 704.5a win.
+fn crown_until_lethal(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
+    winner: PlayerId,
+) {
+    state.mark_unbounded_loop(winner, &proposal.unbounded);
+    result.events.push(GameEvent::GameOver {
+        winner: Some(winner),
+    });
+    state.waiting_for = WaitingFor::GameOver {
+        winner: Some(winner),
+    };
+    result.waiting_for = state.waiting_for.clone();
+    match_flow::handle_game_over_transition(state);
+}
+
+/// CR 800.4a: the E1 crown refused (no determinate winner / aborted drive) ⇒ roll back to the
+/// pre-drive committed board and hand priority to the living seat for manual play. Clears the
+/// loop-detect ring so this same `apply()` does not instantly re-offer the (now-declined)
+/// loop; a later beat re-detects genuinely. Mirrors the `materialize_fixed_shortcut` abort
+/// tail.
+fn until_lethal_fallback(state: &mut GameState, result: &mut ActionResult, committed: GameState) {
+    *state = committed;
+    // CR 732.2c: a declined shortcut must not instantly re-offer the SAME loop in this same
+    // `apply()`. Clear both re-offer signals: the drain offer's `loop_detect_ring` AND the
+    // object-growth offer's `last_recast_context` routing signal (a non-drain object-growth
+    // loop, e.g. an AI-declared UntilLethal on an inert Advantage recast, would otherwise
+    // re-fire `try_offer_object_growth_shortcut` on the next reconcile and livelock). A later
+    // real re-cast re-captures the context and re-detects genuinely.
+    state.loop_detect_ring.clear();
+    state.last_recast_context = None;
+    priority::reset_priority(state);
+    state.waiting_for = WaitingFor::Priority {
+        player: living_priority_seat(state),
+    };
+    result.waiting_for = state.waiting_for.clone();
+}
+
+/// CR 732.2a: how many whole cycles one shortcut drive must aggregate before the measured
+/// delta is complete. A `RoundRobin`/`Piecewise` target schedule rotates its OBJECT sources
+/// over its length, so a full period is that length; every other pin (a `Constant` target, a
+/// `Player` pin, a non-target pin, or no template at all) settles in ONE cycle. Returns the
+/// max schedule length over the template's `Targets` pins, defaulting to 1.
+///
+/// DORMANT for every Stage-2 crownable loop (Ruling B): `TargetSchedule` rotates DecisionSource
+/// objects, not players, and `live_mandatory_loop_winner` crowns on PLAYER fallers — an
+/// object-rotating loop produces no player faller, so it never crowns; the only crownable >2p
+/// player drain pins ALL opponents every cycle (`TargetPin::Player` is constant, period 1). The
+/// seam is built for generality; a multi-cycle aggregation is fail-safe (an object loop reaching
+/// the arm measures 1 cycle, finds no faller, does not crown).
+fn shortcut_drive_period(
+    template: Option<&crate::analysis::decision_template::DecisionTemplate>,
+) -> crate::analysis::decision_template::IterationIndex {
+    use crate::analysis::decision_template::{PinnedDecision, TargetPin, TargetSchedule};
+    let Some(t) = template else { return 1 };
+    t.decisions
+        .iter()
+        .filter_map(|pin| match pin {
+            PinnedDecision::Targets { targets, .. } => targets
+                .iter()
+                .map(|tp| match tp {
+                    TargetPin::Scheduled(TargetSchedule::RoundRobin(v)) => v.len() as u32,
+                    TargetPin::Scheduled(TargetSchedule::Piecewise(v)) => v.len() as u32,
+                    TargetPin::Scheduled(TargetSchedule::Constant(_))
+                    | TargetPin::ByIdentity(_)
+                    | TargetPin::Player(_) => 1,
+                })
+                .max(),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(1)
+        .max(1)
+}
+
+/// PR-7 Combo-UI Stage 2: the typed result of driving ONE whole loop-shortcut cycle on a
+/// clone. Exhaustive at both call sites (`materialize_fixed_shortcut`, `apply_until_lethal_
+/// shortcut`) — no silent `_` that could crown or roll back on an unhandled outcome.
+enum CycleOutcome {
+    /// The cycle recurred (constant-depth equal-modulo-resources or ω-covering) ⇒ `state` is
+    /// the committed post-cycle board; `events` are its accumulated events.
+    Recurred {
+        state: Box<GameState>,
+        events: Vec<GameEvent>,
+    },
+    /// CR 704.5a: the cycle crossed lethal mid-drive ⇒ the win is already applied to `state`
+    /// (`waiting_for = GameOver{winner}`); `events` include the terminal `GameOver`.
+    CrossLethal {
+        state: Box<GameState>,
+        winner: Option<PlayerId>,
+        events: Vec<GameEvent>,
+    },
+    /// Runaway beat cap, an unpinned prompt, or an engine error ⇒ abort to manual play.
+    Abort,
+}
+
+/// PR-7 Combo-UI Stage 2: drive ONE whole cycle of a confirmed loop shortcut on a fresh clone
+/// of `committed`, seeded to the canonical settle beat (`Priority{active_player}`, the same
+/// beat the detector ring samples). Recurrence is detected against `boundary` (normalized).
+/// Behavior-identical to the former inline `materialize_fixed_shortcut` beat loop EXCEPT the
+/// old `Ok(_) => break 'cycles` abort on a mid-cycle prompt now delegates to
+/// [`inject_pinned_answer`] (CR 603.3b ordering / CR 608.2b pinned targets) and continues.
+/// Uses the INTERNAL `apply_action` path throughout (via `pass_priority_once_with_pipeline`
+/// and the injector), never the top-level reconcile boundary, so the detection hook cannot
+/// recurse mid-drive.
+fn drive_one_shortcut_cycle(
+    committed: &GameState,
+    boundary: &GameState,
+    template: Option<&crate::analysis::decision_template::DecisionTemplate>,
+    iteration: crate::analysis::decision_template::IterationIndex,
+    cycle_beat_cap: usize,
+) -> CycleOutcome {
+    let mut work = committed.clone();
+    priority::reset_priority(&mut work);
+    work.waiting_for = WaitingFor::Priority {
+        player: work.active_player,
+    };
+    let mut ev: Vec<GameEvent> = Vec::new();
+    let mut beat = 0usize;
+
+    loop {
+        beat += 1;
+        if beat > cycle_beat_cap {
+            return CycleOutcome::Abort; // runaway backstop
+        }
+        // A FRESH per-beat buffer (see the former inline note): reusing one growing buffer
+        // would make `run_post_action_pipeline` re-scan prior beats' events and re-fire
+        // already-consumed triggers.
+        let mut beat_events: Vec<GameEvent> = Vec::new();
+        match pass_priority_once_with_pipeline(&mut work, &mut beat_events, None) {
+            // Cross-lethal: COMMIT + STOP. The GameOver event + transition are already in
+            // `work`/`beat_events`.
+            Ok(WaitingFor::GameOver { winner }) => {
+                ev.append(&mut beat_events);
+                return CycleOutcome::CrossLethal {
+                    state: Box::new(work),
+                    winner,
+                    events: ev,
+                };
+            }
+            // Active-player settle beat: cycle complete iff the board recurred (constant-depth
+            // equal-modulo-resources OR ω-covering growth).
+            Ok(WaitingFor::Priority { player }) if player == work.active_player => {
+                ev.append(&mut beat_events);
+                let norm = work.normalize_for_loop();
+                if crate::analysis::resource::loop_states_equal_modulo_resources(boundary, &norm)
+                    || crate::analysis::resource::loop_states_cover_modulo_growth(boundary, &norm)
+                {
+                    return CycleOutcome::Recurred {
+                        state: Box::new(work),
+                        events: ev,
+                    };
+                }
+                continue; // active beat, not yet recurred ⇒ keep driving within the cap
+            }
+            // Opponent's mid-cycle priority window ⇒ keep driving.
+            Ok(WaitingFor::Priority { .. }) => {
+                ev.append(&mut beat_events);
+                continue;
+            }
+            // Any OTHER prompt (OrderTriggers / TriggerTargetSelection / …): answer it from the
+            // pins and continue. An unpinned prompt fails closed ⇒ abort to manual.
+            Ok(other) => {
+                ev.append(&mut beat_events);
+                match inject_pinned_answer(&mut work, template, iteration, &other) {
+                    Ok(()) => continue,
+                    Err(RecastAbort) => return CycleOutcome::Abort,
+                }
+            }
+            Err(_) => return CycleOutcome::Abort, // engine error ⇒ abort to manual
+        }
+    }
+}
+
+/// PR-7 Combo-UI Stage 2: answer ONE mid-drive prompt during a loop-shortcut cycle, using the
+/// INTERNAL reconcile-free `apply_action` path (mirrors `drive_recast_iteration`, so the
+/// detection hook cannot recurse mid-drive). Fail-closed: any prompt kind with no Stage-2
+/// producer ⇒ `Err(RecastAbort)`.
+///
+/// There is deliberately NO top-level `template.ok_or(...)` guard: the `OrderTriggers` arm is
+/// TEMPLATE-INDEPENDENT (the real 2p Vito drive raises OrderTriggers with a `template = None`
+/// declaration, and the forced-unique target auto-selects at dispatch), so a top guard would
+/// wrongly abort it. The template guard lives INSIDE the `TriggerTargetSelection` arm, the only
+/// arm that consumes pins.
+fn inject_pinned_answer(
+    work: &mut GameState,
+    template: Option<&crate::analysis::decision_template::DecisionTemplate>,
+    iteration: crate::analysis::decision_template::IterationIndex,
+    prompt: &WaitingFor,
+) -> Result<(), RecastAbort> {
+    use crate::analysis::decision_template::{ConcreteDecision, ConcreteTarget};
+    match prompt {
+        // CR 603.3b / CR 732.2a: auto-order the confirmed shortcut's simultaneous
+        // same-controller triggers by identity order (0..len). Template-INDEPENDENT and
+        // delta-safe: the per-cycle net drain is order-invariant (both opponents drain
+        // regardless of order; pins fix WHICH opponent, not the ordering). Answered via the
+        // INTERNAL `handle_order_triggers` (`apply_action`), NOT `drain_order_triggers_with_
+        // identity` — the latter routes through `reconcile_terminal_result`, which would
+        // re-enter the loop-detection/offer hook mid-drive and could crown via a different
+        // authority, bypassing E1's own measure.
+        WaitingFor::OrderTriggers { player, triggers } => {
+            let order: Vec<usize> = (0..triggers.len()).collect();
+            apply_action(work, *player, GameAction::OrderTriggers { order }, None)
+                .map_err(|_| RecastAbort)?;
+            Ok(())
+        }
+        // CR 608.2b: choose this trigger's targets from the pin whose source matches the
+        // prompt's `source_id` (per-source, so two distinct drainers pinned to distinct
+        // opponents each receive the correct target). The template guard lives HERE.
+        WaitingFor::TriggerTargetSelection {
+            player, source_id, ..
+        } => {
+            let template = template.ok_or(RecastAbort)?;
+            let source_id = source_id.ok_or(RecastAbort)?;
+            let decisions = crate::analysis::decision_template::resolve(template, iteration, work)
+                .map_err(|_| RecastAbort)?;
+            let targets = decisions
+                .into_iter()
+                .find_map(|d| match d {
+                    ConcreteDecision::Targets { slot, targets }
+                        if crate::analysis::decision_template::resolve_source(
+                            &slot.source,
+                            work,
+                        ) == Some(source_id) =>
+                    {
+                        Some(targets)
+                    }
+                    _ => None,
+                })
+                .ok_or(RecastAbort)?;
+            let refs: Vec<TargetRef> = targets
+                .into_iter()
+                .map(|t| match t {
+                    ConcreteTarget::Object(id) => TargetRef::Object(id),
+                    ConcreteTarget::Player(p) => TargetRef::Player(p),
+                })
+                .collect();
+            apply_action(
+                work,
+                *player,
+                GameAction::SelectTargets { targets: refs },
+                None,
+            )
+            .map_err(|_| RecastAbort)?;
+            Ok(())
+        }
+        // CR 732.2a "no conditional actions": any other prompt (mode / may / unless / X) has
+        // no Stage-2 pin producer ⇒ fail-closed.
+        _ => Err(RecastAbort),
+    }
+}
+
+/// PR-7 Phase 4b: CR 732.2a finite materialization of a confirmed `Fixed(N)` loop
+/// shortcut. Drives `n` whole cycles of the constant-depth (or ω-covering) loop,
+/// committing atomically per cycle. If a cycle crosses lethal, the win arrives
+/// mid-drive already applied to `work` (CR 704.5a via `run_post_action_pipeline`'s
+/// SBA pass) ⇒ COMMIT + STOP, un-clamped — `n` may be ≥ the true cycles-to-lethal
+/// (CR 732.2a "a specified number of times" places no upper bound relative to the
+/// board). Any unexpected prompt / stale-incarnation replay failure (CR 400.7) /
+/// runaway beat count ⇒ abort to manual play: roll back to the last fully-committed
+/// cycle and hand priority to the living seat (CR 800.4a) — exactly the pre-4b
+/// decline-stub behavior, never a wrong crown.
+fn materialize_fixed_shortcut(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
+    n: u32,
+) {
+    // PR-7 Phase 4d-ii (CR 732.2a): an object-growth recast loop (buyback + convoke +
+    // affinity) settles with an EMPTY stack and grows the board, so the per-beat
+    // auto-pass drive below never recognizes its recurrence. Route it to the recast
+    // INJECTOR instead, which drives one real recast per cycle on a clone. The presence
+    // of `last_recast_context` (set only on a buyback-paid, token-creating cast) is the
+    // routing signal; the `ctx` rides `state.last_recast_context` (carried on the clone
+    // since the offer). The drain path below is left byte-identical for every other loop.
+    if let Some(ctx) = state.last_recast_context.clone() {
+        materialize_object_growth_shortcut(state, result, &ctx, n);
+        return;
+    }
+
+    let template = proposal.template.clone();
+
+    // Last fully-completed cycle (clean owned O(1) rollback); starts at the offer state —
+    // `apply_confirmed_shortcut`'s doc comment establishes the board is unchanged since the
+    // offer (Declare/Accept touch only the protocol, never the board).
+    let mut committed = state.clone();
+
+    // The recurrence boundary is the loop's canonical per-cycle SETTLE beat —
+    // `Priority{active_player}` — the same beat-kind the detector ring samples
+    // (`resolved_this_beat` gate above). `committed.waiting_for` is still
+    // `RespondToShortcut`/`LoopShortcut` at entry (never `Priority`), so seed a settled
+    // priority beat before capturing the boundary. `reset_priority` zeroes
+    // `priority_pass_count` and sets `priority_player`; `waiting_for` is set explicitly
+    // here (reset_priority does not touch it). `loop_states_equal_modulo_resources` /
+    // `loop_states_cover_modulo_growth` both normalize internally (`project_out_resources`
+    // → `normalize_for_loop`), so the extra `.normalize_for_loop()` here is redundant with
+    // that internal call but harmless (idempotent) — kept for a self-contained boundary
+    // value whose `waiting_for`/ring fields are already canonical at the call sites below.
+    let boundary = {
+        let mut seed = committed.clone();
+        priority::reset_priority(&mut seed);
+        seed.waiting_for = WaitingFor::Priority {
+            player: seed.active_player,
+        };
+        seed.normalize_for_loop()
+    };
+
+    let cycle_beat_cap = auto_pass_loop_max_iterations(&committed);
+
+    'cycles: for i in 0..n {
+        // CR 732.2a predictability firewall: `predictability_gate(t, &[])` is a WIRED
+        // FORMAL no-op this phase — empty `required_slots` ⇒ always `Ok`
+        // (decision_template.rs). The loop-body slot enumerator that would populate
+        // `required_slots` ships with the deferred mid-drive injector; a choice-free
+        // drain has no slots to pin. The REAL load-bearing firewall is `resolve` below.
+        if let Some(t) = &template {
+            if crate::analysis::decision_template::predictability_gate(t, &[]).is_err() {
+                break 'cycles; // unreachable with &[]; wired for the injector phase
+            }
+            // CR 608.2b (target-legality re-check) + CR 400.7 (object incarnation
+            // re-bind): re-resolve every pinned decision against the last COMMITTED
+            // board before driving this cycle. Stale/absent source ⇒ IllegalTarget /
+            // MissingSource ⇒ abort to manual play.
+            if crate::analysis::decision_template::resolve(t, i, &committed).is_err() {
+                break 'cycles;
+            }
+        }
+
+        // Drive one whole cycle via the shared driver. Behavior-identical to the former
+        // inline beat loop for a non-targeted `Fixed(N)` drain (which raises no mid-cycle
+        // prompt, so the injector is inert); a targeted drive additionally answers each
+        // OrderTriggers / target prompt from the pins.
+        match drive_one_shortcut_cycle(&committed, &boundary, template.as_ref(), i, cycle_beat_cap)
+        {
+            CycleOutcome::Recurred {
+                state: s,
+                mut events,
+            } => {
+                committed = *s; // ATOMIC: commit state ...
+                result.events.append(&mut events); // ... with its events together
+                continue 'cycles;
+            }
+            // Cross-lethal: COMMIT + STOP. CR 704.5a: the win is already applied to `work`
+            // (SBA → GameOver in `events`, `waiting_for = GameOver`). Do NOT roll back, NOT
+            // `mark_unbounded_loop` (finite ≠ unbounded — contrast the UntilLethal arm).
+            CycleOutcome::CrossLethal {
+                state: s,
+                winner,
+                mut events,
+            } => {
+                *state = *s;
+                result.events.append(&mut events);
+                result.waiting_for = WaitingFor::GameOver { winner };
+                return;
+            }
+            // Runaway cap / unpinned prompt / engine error ⇒ abort to manual. The aborting
+            // cycle's events were already dropped (no partial-cycle event leak).
+            CycleOutcome::Abort => break 'cycles,
+        }
+    }
+
+    // Reached by: n cycles done with no cross-lethal, OR any abort (`break 'cycles`).
+    // Commit the last WHOLE cycle; the aborting iteration's `ev` was already dropped (no
+    // partial-cycle event leak). Ring-clear BEFORE handback so this same `apply()` does
+    // not instantly re-emit a fresh offer for the same (now-interrupted) loop; a later
+    // beat re-detects genuinely.
+    *state = committed;
+    state.loop_detect_ring.clear();
+    priority::reset_priority(state);
+    state.waiting_for = WaitingFor::Priority {
+        player: living_priority_seat(state),
+    };
+    result.waiting_for = state.waiting_for.clone();
+}
+
+/// PR-7 Phase 4d-ii: the injector aborted a driven recast cycle ⇒ fall closed to manual
+/// play. No payload — a marker so the drive loop is exhaustive over `WaitingFor` with an
+/// explicit `Err` on any unpinned prompt (S1, CR 732.2a "no conditional actions").
+#[derive(Debug)]
+struct RecastAbort;
+
+/// CR 601.2b + CR 608.2b + CR 400.7: drive ONE full recast iteration on the clone by
+/// answering each mid-cast prompt from `template` (the ConvokeTaps pin) + `ctx` (the
+/// buyback decision). Reuses the ENTIRE cast state machine via the INTERNAL `apply_action`
+/// path (never the top-level `apply`/reconcile boundary, so the detection hook cannot
+/// recurse), adding ZERO casting rules. EXHAUSTIVE over `WaitingFor`: any unpinned prompt
+/// ⇒ `Err(RecastAbort)` ⇒ fail-closed to manual (no silent `_` that would fabricate a
+/// bogus offer). `clone` MUST be at `Priority{ctx.controller}` with an empty stack.
+fn drive_recast_iteration(
+    clone: &mut GameState,
+    template: &crate::analysis::decision_template::DecisionTemplate,
+    ctx: &crate::types::game_state::RecastContext,
+    iteration: crate::analysis::decision_template::IterationIndex,
+) -> Result<(), RecastAbort> {
+    // CR 400.7: re-find the recast card LIVE in its castable zone (a fresh incarnation on
+    // each hand-return). Absent ⇒ abort (B3: a no-buyback recast went to the graveyard, so
+    // the card is not here). Lowest ObjectId ⇒ deterministic.
+    let recast_id = clone
+        .objects
+        .values()
+        .filter(|o| {
+            o.card_id == ctx.card_id && o.zone == ctx.from_zone && o.controller == ctx.controller
+        })
+        .map(|o| o.id)
+        .min_by_key(|id| id.0)
+        .ok_or(RecastAbort)?;
+    apply_action(
+        clone,
+        ctx.controller,
+        GameAction::CastSpell {
+            object_id: recast_id,
+            card_id: ctx.card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+        None,
+    )
+    .map_err(|_| RecastAbort)?;
+
+    let beat_cap = auto_pass_loop_max_iterations(clone);
+    for _ in 0..beat_cap {
+        let actor = crate::game::turn_control::authorized_submitter(clone).ok_or(RecastAbort)?;
+        match clone.waiting_for.clone() {
+            // CR 601.2f/702.27a: re-pay (or decline) the buyback additional cost.
+            WaitingFor::OptionalCostChoice { .. } => {
+                apply_action(
+                    clone,
+                    actor,
+                    GameAction::DecideOptionalCost {
+                        pay: ctx.uses_buyback.pays(),
+                    },
+                    None,
+                )
+                .map_err(|_| RecastAbort)?;
+            }
+            // CR 601.2h + CR 702.51a/b: resolve the ConvokeTaps pin LIVE, tap each chosen
+            // creature, then finalize the (now convoke-paid) cost. Affinity auto-reduces
+            // the generic against the grown board with NO pin (CR 702.41a).
+            WaitingFor::ManaPayment { .. } => {
+                let decisions =
+                    crate::analysis::decision_template::resolve(template, iteration, clone)
+                        .map_err(|_| RecastAbort)?;
+                use crate::analysis::decision_template::ConcreteDecision;
+                for d in decisions {
+                    // EXHAUSTIVE (mirrors the same-diff triggers.rs precedent): a recast
+                    // template emits ONLY ConvokeTaps pins, so every other decision kind is
+                    // unpinned for this class ⇒ fail-CLOSED abort. Listing the variants (no
+                    // `_`) makes a future ConcreteDecision variant BUILD-BREAK here rather than
+                    // be silently dropped.
+                    match d {
+                        ConcreteDecision::ConvokeTaps { creatures, .. } => {
+                            for (object_id, mana_type) in creatures {
+                                apply_action(
+                                    clone,
+                                    actor,
+                                    GameAction::TapForConvoke {
+                                        object_id,
+                                        mana_type,
+                                    },
+                                    None,
+                                )
+                                .map_err(|_| RecastAbort)?;
+                            }
+                        }
+                        ConcreteDecision::Order { .. }
+                        | ConcreteDecision::Targets { .. }
+                        | ConcreteDecision::Mode { .. }
+                        | ConcreteDecision::MayChoice { .. }
+                        | ConcreteDecision::UnlessBreak { .. } => return Err(RecastAbort),
+                    }
+                }
+                apply_action(clone, actor, GameAction::PassPriority, None)
+                    .map_err(|_| RecastAbort)?;
+            }
+            // CR 601.2i: the spell is on the stack ⇒ pass to let it resolve; an empty stack
+            // at a priority beat is the per-cycle SETTLE boundary — iteration complete.
+            WaitingFor::Priority { .. } => {
+                if clone.stack.is_empty() {
+                    return Ok(());
+                }
+                apply_action(clone, actor, GameAction::PassPriority, None)
+                    .map_err(|_| RecastAbort)?;
+            }
+            // CR 732.2a "no conditional actions": any other prompt (target / mode / X /
+            // may) is unpinned for this recast class ⇒ fail-closed abort.
+            _ => return Err(RecastAbort),
+        }
+    }
+    Err(RecastAbort)
+}
+
+/// CR 601.2h + CR 702.51a: the CR 732.2a decision template for a buyback+convoke recast
+/// loop. Carries a single `ConvokeTaps` pin (when the recast pays convoke) whose slot is
+/// the CARD-identity source (`AllCopies` — survives the per-iteration incarnation churn,
+/// CR 400.7). The presence of the pin is the object-growth routing signal.
+fn build_recast_template(
+    ctx: &crate::types::game_state::RecastContext,
+) -> crate::analysis::decision_template::DecisionTemplate {
+    use crate::analysis::decision_template::{
+        DecisionGroupKey, DecisionKind, DecisionSlot, IterationCount, PinnedDecision, ReplayMode,
+    };
+    let source = crate::types::game_state::YieldTarget::AllCopies {
+        card_id: ctx.card_id,
+        trigger_description: None,
+    };
+    let decisions = if ctx.convoke.is_some() {
+        vec![PinnedDecision::ConvokeTaps {
+            slot: DecisionSlot {
+                source: source.clone(),
+                index: 0,
+            },
+        }]
+    } else {
+        vec![]
+    };
+    crate::analysis::decision_template::DecisionTemplate {
+        owner: ctx.controller,
+        decisions,
+        // The count is a placeholder — the real `Fixed(N)` comes from the proposer's
+        // `DeclareShortcut`; nothing reads `template.replay.count`.
+        replay: ReplayMode::Scheduled {
+            count: IterationCount::Fixed(0),
+        },
+        key: DecisionGroupKey::from_sources(&[source], DecisionKind::LoopChoice),
+    }
+}
+
+/// CR 400.7: normalize a settle frame for the object-growth board cover — strip the
+/// self-returning recast card and clear the per-cycle token-id bookkeeping. Both churn a
+/// FRESH ObjectId every cycle (the card via its hand→stack→hand round-trip; the
+/// `last_created_token_ids` anaphora slot via each new token), which the id-keyed
+/// stable-engine compare would read as a false board drift. The recast card's presence in
+/// `ctx.from_zone` is a verified loop invariant (the hook precondition + the injector's
+/// per-cycle re-find), and `last_created_token_ids` is pure ephemeral anaphora bookkeeping
+/// (no observer reads it at the empty-stack settle beat), so clearing them identically from
+/// every frame is fail-safe — any OTHER stable object still compares by id.
+fn normalize_recast_frame(
+    state: &GameState,
+    ctx: &crate::types::game_state::RecastContext,
+) -> GameState {
+    let mut s = state.clone();
+    let ids: Vec<ObjectId> = s
+        .objects
+        .values()
+        .filter(|o| {
+            o.card_id == ctx.card_id && o.zone == ctx.from_zone && o.controller == ctx.controller
+        })
+        .map(|o| o.id)
+        .collect();
+    for id in &ids {
+        s.objects.remove(id);
+    }
+    if let Some(p) = s.players.iter_mut().find(|p| p.id == ctx.controller) {
+        p.hand.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+        p.graveyard.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+        p.library.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+    }
+    // CR 608.2 anaphora / display bookkeeping: the "last created token / revealed /
+    // zone-changed" id slots churn a fresh id each cycle. No observer reads them at the
+    // empty-stack settle beat, so clearing them is fail-safe for the board cover.
+    s.last_created_token_ids.clear();
+    s.last_revealed_ids.clear();
+    s.last_zone_changed_ids.clear();
+    s
+}
+
+/// CR 111.10: the content class of the reproduced token — the single battlefield object
+/// present in `after` but absent from `before` (the one predefined token the recast
+/// creates). `None` unless EXACTLY one new battlefield object appeared (the target class
+/// creates one Saproling; zero or several ⇒ not this shape ⇒ fail-closed).
+fn derived_fodder_class(
+    before: &GameState,
+    after: &GameState,
+) -> Option<crate::game::game_object::GameObject> {
+    let mut new_ids = after
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| !before.battlefield.contains(id));
+    let id = new_ids.next()?;
+    if new_ids.next().is_some() {
+        return None;
+    }
+    after.objects.get(&id).cloned()
+}
+
+/// CR 732.2a: detect an object-growth recast loop by driving TWO iterations on a clone;
+/// on success returns the offer certificate for the CALLER to install. Takes a SHARED
+/// `&GameState` ⇒ a live write is TYPE-IMPOSSIBLE (INV-1); the sole live write
+/// (`waiting_for = LoopShortcut`) is done by the mutable-borrow caller (INV-2: OFFER,
+/// never auto-resolve, CR 732.2a). Both driven iterations run inside ONE
+/// `SimulationProbeGuard` so the injector's internal `apply_action` never recurses into
+/// this hook or any `!in_simulation_probe()`-gated shortcut logic.
+fn try_offer_object_growth_shortcut(
+    state: &GameState,
+) -> Option<(
+    crate::analysis::loop_check::LoopCertificate,
+    crate::analysis::decision_template::ShortcutDecisionSchema,
+)> {
+    let ctx = state.last_recast_context.clone()?;
+    let WaitingFor::Priority { player: caster } = state.waiting_for else {
+        return None;
+    };
+    if ctx.controller != caster {
+        return None;
+    }
+    // The recast card must be in its castable origin zone right now (recastable) —
+    // capture it so the recast spell ability can be scanned for randomness below.
+    let recast_obj = state.objects.values().find(|o| {
+        o.card_id == ctx.card_id && o.zone == ctx.from_zone && o.controller == ctx.controller
+    })?;
+    // CR 732.2a: a shortcut "can't include conditional actions, where the outcome of a
+    // game event determines the next action." A recast whose spell body bears an
+    // auto-resolved coin flip (CR 705.1) / die roll (CR 706.1a) / random selection
+    // (CR 701.9a/b) has more than one equally-likely outcome ⇒ not a legal shortcut.
+    // Reject it STATICALLY, before driving (cheap + compile-time exhaustive over
+    // `Effect`). Fail-closed: an undeterminable spell ability (no combined Spell def)
+    // also does not offer. (A2 determinism gate — the static half; the post-drive
+    // rng-position check below is the complete runtime backstop that additionally
+    // catches external triggered/replacement randomness firing in the cycle.)
+    let spell_def = crate::game::casting::combined_spell_ability_def(recast_obj)?;
+    if crate::game::ability_scan::spell_ability_bears_randomness(&spell_def) {
+        return None;
+    }
+
+    // Drive two iterations (three settle frames) under the re-entrancy guard.
+    let _probe = SimulationProbeGuard::enter();
+    let template = build_recast_template(&ctx);
+    let s_n = state.clone();
+    let mut clone = state.clone();
+    drive_recast_iteration(&mut clone, &template, &ctx, 0).ok()?;
+    let s_n1 = clone.clone();
+    drive_recast_iteration(&mut clone, &template, &ctx, 1).ok()?;
+    let s_n2 = clone;
+
+    // CR 732.2a: any randomness CONSUMED during the deterministic detection drive means the
+    // real loop is outcome-dependent (a coin flip CR 705.1 / die roll CR 706.1a / random
+    // selection CR 701.9b / shuffle) and is not a predictable shortcut. The seeded ChaCha20
+    // stream position advances iff randomness was drawn; the driven clone started as
+    // `state.clone()` (an equal baseline), so a word-position delta disqualifies the offer.
+    // This is the RUNTIME backstop to the static scan above: the fodder-cover's
+    // `fire_time_conditions_read_growing_class` already rejects a randomness-bearing *permanent*
+    // ability whose effect classifies `Axes::CONSERVATIVE` (`FlipCoin`/`RollDie`; a few
+    // dice-adjacent effects like `RollToVisitAttractions` classify `Axes::NONE` and slip the
+    // cover — this check catches those too), but it does NOT scan the resolving
+    // recast *spell's* own body — so a coin flip in the recast body advances the RNG yet passes
+    // the cover. This check closes that gap even when the static scan's `collect_effects` walk
+    // misses a nested payload. Fail-closed / strictly-more-conservative (only turns OFFERs into
+    // NO-OFFERs). (A2 determinism gate — discharges the b132ad9f8 "fail-closed-modulo-auto-
+    // randomness" carry.)
+    if s_n2.rng.get_word_pos() != state.rng.get_word_pos() {
+        return None;
+    }
+
+    // CR 111.10: derive the reproduced token class from the first driven cycle, normalized
+    // through the same per-object projection the cover applies to its frames (so the class
+    // compares in the P/T-zeroed form, not the raw Some(1) form).
+    let mut fodder = derived_fodder_class(&s_n, &s_n1)?;
+    crate::analysis::resource::project_object_for_loop(&mut fodder);
+
+    // CR 732.2a board recurrence on BOTH pairs: pure inert tapped-fodder growth. Normalize
+    // each frame first (strip the self-returning recast card + clear churning token-id
+    // bookkeeping, CR 400.7) so the id-keyed stable compare does not read fresh-each-cycle
+    // ObjectIds as a board drift.
+    let (cs_n, cs_n1, cs_n2) = (
+        normalize_recast_frame(&s_n, &ctx),
+        normalize_recast_frame(&s_n1, &ctx),
+        normalize_recast_frame(&s_n2, &ctx),
+    );
+    if !crate::analysis::resource::loop_states_cover_modulo_fodder_growth(&cs_n, &cs_n1, &fodder)
+        || !crate::analysis::resource::loop_states_cover_modulo_fodder_growth(
+            &cs_n1, &cs_n2, &fodder,
+        )
+    {
+        return None;
+    }
+
+    // CR 119 / CR 122.1 / CR 704.5g sign-check on the second pair (RAW un-projected frames):
+    // net progress for the caster, no loss axis for anyone, every driving consumable
+    // non-decreasing (energy / poison / player-counters / object-counters) and no
+    // damage_marked increase.
+    let mut delta = crate::analysis::resource::ResourceVector::delta(
+        &crate::analysis::resource::ResourceVector::snapshot(&s_n1),
+        &crate::analysis::resource::ResourceVector::snapshot(&s_n2),
+    );
+    // CR 111.10: `tokens_created` is an EVENT-fed axis (0 under a snapshot diff), but the
+    // cover above already proved the battlefield grows ONLY by inert reproduced tokens, so
+    // the battlefield growth IS the per-cycle tokens-created count — the unbounded axis. Feed
+    // it so `net_progress_for` sees the progress and the certificate names TokensCreated.
+    let board_growth = s_n2.battlefield.len() as i64 - s_n1.battlefield.len() as i64;
+    if board_growth > 0 {
+        delta.tokens_created += board_growth;
+    }
+    if !delta.net_progress_for(caster)
+        || !has_no_loss_axis(&delta)
+        || !crate::analysis::resource::driving_resources_non_decreasing(&s_n1, &s_n2, caster)
+    {
+        return None;
+    }
+
+    // CR 104.4b: only OFFER an OPTIONAL loop (a player could choose not to repeat it). A
+    // mandatory board-growth loop would draw (Path B) / be handled elsewhere, not offered.
+    if no_living_player_has_meaningful_priority_action(state) {
+        return None;
+    }
+
+    let certificate = build_cert(&s_n1, &s_n2, &delta, caster);
+    // CR 732.2a (CARRY, don't re-derive): the schema's decision list is the SAME
+    // `build_recast_template` output driven above — `[ConvokeTaps]` when the recast has convoke,
+    // else `[]`. Legal sets are derived against the live offer-time board.
+    let schema = build_shortcut_schema(&template.decisions, certificate.win_kind, state, caster);
+    Some((certificate, schema))
+}
+
+/// PR-7 Phase 4d-ii (CR 732.2a): materialize a confirmed `Fixed(N)` object-growth recast
+/// shortcut by driving N real recast cycles on a clone via the injector, committing each
+/// completed cycle atomically. The recurrence boundary is the injector's OWN settle
+/// condition (`Priority` + empty stack) — one successful `drive_recast_iteration` IS one
+/// materialized cycle of real game actions, so the result is ground-truth (contrast the
+/// drain path, which re-derives recurrence from `loop_states_*`). Any injector abort
+/// (e.g. the loop stopped being sustainable — CR 702.51b unpayable convoke) ⇒ commit the
+/// completed cycles + hand priority back (CR 800.4a). Runs under the re-entrancy guard.
+fn materialize_object_growth_shortcut(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    ctx: &crate::types::game_state::RecastContext,
+    n: u32,
+) {
+    let template = build_recast_template(ctx);
+    let _probe = SimulationProbeGuard::enter();
+    // Last fully-completed cycle (owned O(1) rollback); the board is unchanged since the
+    // offer (Declare/Accept touch only the protocol).
+    let mut committed = state.clone();
+
+    for i in 0..n {
+        // Seed the caster's settle priority beat so the injector's first action (CastSpell)
+        // is authorized (the entry `waiting_for` is RespondToShortcut / LoopShortcut).
+        let mut work = committed.clone();
+        priority::reset_priority(&mut work);
+        work.priority_player = ctx.controller;
+        work.waiting_for = WaitingFor::Priority {
+            player: ctx.controller,
+        };
+        if drive_recast_iteration(&mut work, &template, ctx, i).is_err() {
+            break; // loop no longer sustainable ⇒ keep the completed cycles
+        }
+        committed = work; // ATOMIC: one real recast cycle committed
+    }
+
+    *state = committed;
+    // Ring-clear + consume the recast context BEFORE handback so this same `apply()` does
+    // not instantly re-offer the just-materialized loop; a later manual recast re-arms the
+    // context and a later beat re-detects genuinely.
+    state.loop_detect_ring.clear();
+    state.last_recast_context = None;
+    priority::reset_priority(state);
+    state.waiting_for = WaitingFor::Priority {
+        player: living_priority_seat(state),
+    };
+    result.waiting_for = state.waiting_for.clone();
+}
+
+/// Immutable data from a `WaitingFor::LoopShortcut` offer, grouped for declaration handling.
+struct LoopShortcutOffer<'a> {
+    proposer: PlayerId,
+    predicted_winner: Option<PlayerId>,
+    certificate: &'a crate::analysis::loop_check::LoopCertificate,
+    schema: &'a crate::analysis::decision_template::ShortcutDecisionSchema,
+}
+
+/// CR 732.2a: the proposer declared the loop shortcut. Build the public proposal and open
+/// the APNAP accept-or-shorten window over the proposer's living opponents (turn order). No
+/// opponents (solitaire / all eliminated) ⇒ take the shortcut immediately.
+fn handle_declare_shortcut(
+    state: &mut GameState,
+    offer: LoopShortcutOffer<'_>,
+    count: crate::analysis::decision_template::IterationCount,
+    template: Option<crate::analysis::decision_template::DecisionTemplate>,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let mut result = ActionResult {
+        events: std::mem::take(events),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: vec![],
+    };
+    // CR 732.2a fail-closed firewall: validate the declared pins against the offered schema
+    // BEFORE `template` is moved into `proposal` and BEFORE APNAP opens. Coverage
+    // (`predictability_gate`) and value-legality (`validate_pins`) both consult the SAME
+    // single authority — the schema's exposed slots — so a rejection lands cleanly at a
+    // manual-play handback (Priority to the living seat, no APNAP, no drive, no crown). The
+    // offer window closes; a later beat re-detects the loop if it still closes. Validating
+    // once at declare suffices: the board is frozen through Accept (apply_confirmed_shortcut
+    // doc), and the drive's per-iteration `resolve` (CR 608.2b) is the runtime backstop.
+    //
+    // A CHOICE-FREE offer (empty schema — a non-targeted drain) exposes no decisions to
+    // validate: its win derivation is pin-independent (the E1 measure is the authority), and
+    // any template the caller supplies is inert for the drive (the loop raises no target
+    // prompt). This preserves the established `Fixed(N)` drain behavior (the resolve-firewall
+    // materialize tests drive a synthetic pin against the empty drain schema).
+    if let Some(t) = &template {
+        if !offer.schema.points.is_empty() {
+            let required: Vec<crate::analysis::decision_template::DecisionSlot> =
+                offer.schema.points.iter().map(|p| p.slot.clone()).collect();
+            let period = shortcut_drive_period(Some(t));
+            if crate::analysis::decision_template::predictability_gate(t, &required).is_err()
+                || crate::analysis::decision_template::validate_pins(offer.schema, t, period, state)
+                    .is_err()
+            {
+                priority::reset_priority(state);
+                // CR 800.4a: hand priority to the next living seat.
+                state.waiting_for = WaitingFor::Priority {
+                    player: living_priority_seat(state),
+                };
+                result.waiting_for = state.waiting_for.clone();
+                return Ok(result);
+            }
+        }
+    }
+    let proposal = crate::analysis::loop_check::ShortcutProposal {
+        proposer: offer.proposer,
+        predicted_winner: offer.predicted_winner,
+        count,
+        unbounded: offer.certificate.unbounded.clone(),
+        win_kind: offer.certificate.win_kind,
+        template,
+    };
+    // CR 732.2b: living opponents in APNAP turn order, starting after the proposer.
+    let opps: Vec<PlayerId> = crate::game::players::apnap_order_from(
+        state,
+        Some(crate::types::ability::ControllerRef::You),
+        offer.proposer,
+    )
+    .into_iter()
+    .filter(|&p| p != offer.proposer)
+    .collect();
+    if let Some((&first, rest)) = opps.split_first() {
+        state.waiting_for = WaitingFor::RespondToShortcut {
+            player: first,
+            remaining_players: rest.to_vec(),
+            proposal,
+        };
+        result.waiting_for = state.waiting_for.clone();
+    } else {
+        // CR 732.2c: nobody else to poll ⇒ take the shortcut.
+        apply_confirmed_shortcut(state, &mut result, &proposal);
+    }
+    Ok(result)
+}
+
+/// CR 732.2a: the priority holder MAY decline the auto-offered loop shortcut — "the player
+/// with priority may suggest a shortcut" makes suggesting optional, so forcing a proposal is
+/// wrong. Restore ordinary priority (the living seat, mirroring the `handle_declare_shortcut`
+/// pin-rejection handback) so the post-return reconcile hands the controller a normal window
+/// instead of re-nagging the SAME offer. This is the `until_lethal_fallback` tail minus the
+/// board rollback: decline is pre-drive, so no board mutation ever occurred.
+///
+/// Re-offer suppression, by seam:
+/// - Interactive bridge (Seam 1, `find_live_loop_winner` reads `loop_detect_ring`, gated by
+///   `!stack.is_empty()`): suppressed by the GENERAL deliberate-action invariant, not by this
+///   handler. `apply_action` (engine.rs:3006-3011) invalidates `loop_detect_ring` for every
+///   deliberate (non-`PassPriority`/`OrderTriggers`) action; `DeclineShortcut` is a deliberate
+///   break, so the ring is already empty before this handler runs. Seam-1 suppression is the
+///   shared invariant every cast/activate/play-land relies on — the handler does NOT re-clear
+///   the ring (re-clearing would special-case `DeclineShortcut` to distrust an engine-wide
+///   invariant). The interactive e2e's "no re-offer" assertion guards this end-to-end: a future
+///   regression excluding `DeclineShortcut` from that allowlist would fail it loudly.
+/// - Object-growth (Seam 2, gated by `last_recast_context.is_some()`): the deliberate-action
+///   clear does NOT touch `last_recast_context`, so `state.last_recast_context = None` here is
+///   the genuinely load-bearing suppressor — without it the post-return reconcile re-fires
+///   `try_offer_object_growth_shortcut` within this same `apply()`.
+///
+/// A genuine re-recurrence or a fresh re-cast re-arms the offer naturally. Proposer-only
+/// authorization is enforced upstream by `check_actor_authorization`
+/// (`WaitingFor::acting_player` == `LoopShortcut.proposer`), so offer fields are unused here.
+fn handle_decline_shortcut(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let mut result = ActionResult {
+        events: std::mem::take(events),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: vec![],
+    };
+    // Seam 1 (loop_detect_ring) is already invalidated by apply_action's deliberate-action
+    // ring-clear (engine.rs:3006-3011) — see doc. Only Seam 2 is the handler's gap:
+    state.last_recast_context = None; // Seam 2: load-bearing object-growth offer-gate clear (CR 732.2a)
+    priority::reset_priority(state);
+    state.waiting_for = WaitingFor::Priority {
+        player: living_priority_seat(state),
+    };
+    result.waiting_for = state.waiting_for.clone();
+    Ok(result)
+}
+
+/// CR 732.2b/c: one opponent answered the shortcut offer. Mirrors the
+/// `OpponentMayChoice`/`UnlessPayment` APNAP fan-out (drain-one-advance via
+/// `remaining_players`). Accept advances to the next opponent, or — when the last accepts —
+/// takes the shortcut. Shorten conservatively hands THAT opponent a real priority window
+/// (CR 732.2c "a different choice"); the shortcut is NOT auto-applied, and a later beat
+/// re-detects the loop (a fresh offer if it still closes, normal play if broken).
+fn handle_respond_to_shortcut(
+    state: &mut GameState,
+    player: PlayerId,
+    remaining_players: Vec<PlayerId>,
+    proposal: crate::analysis::loop_check::ShortcutProposal,
+    response: crate::analysis::loop_check::ShortcutResponse,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let mut result = ActionResult {
+        events: std::mem::take(events),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: vec![],
+    };
+    match response {
+        crate::analysis::loop_check::ShortcutResponse::Accept => {
+            // CR 800.4a: never advance the offer onto a player who has left the game. A
+            // queued opponent can concede AFTER the window opened (Concede bypasses the
+            // `WaitingFor` dispatch, so `remaining_players` is never self-healed), so drop
+            // any departed seats before advancing. CR 732.2b: the queue is already in APNAP
+            // turn order, so the first surviving remainder is the next living opponent.
+            let mut living = remaining_players
+                .into_iter()
+                .filter(|&p| crate::game::players::is_alive(state, p));
+            if let Some(next) = living.next() {
+                state.waiting_for = WaitingFor::RespondToShortcut {
+                    player: next,
+                    remaining_players: living.collect(),
+                    proposal,
+                };
+                result.waiting_for = state.waiting_for.clone();
+            } else {
+                // CR 732.2c: the last living opponent accepted ⇒ take the shortcut
+                // (F1 re-validates the proposer's own liveness before crowning).
+                apply_confirmed_shortcut(state, &mut result, &proposal);
+            }
+        }
+        crate::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
+            // CR 732.2c (Phase-3 conservative): hand this opponent a real priority window
+            // instead of taking the shortcut. Finite-K materialization is Phase 4.
+            priority::reset_priority(state);
+            state.priority_player = player;
+            state.waiting_for = WaitingFor::Priority { player };
+            result.waiting_for = state.waiting_for.clone();
+        }
+    }
+    Ok(result)
 }
 
 fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
@@ -454,6 +2033,7 @@ fn check_actor_authorization(
         GameAction::SetPhaseStops { .. }
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
+            | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::CancelAutoPass
             | GameAction::Debug(_)
             | GameAction::GrantDebugPermission { .. }
@@ -678,7 +2258,9 @@ fn pass_priority_once_with_pipeline(
     // is never populated, so the engine pays none of the per-resolution
     // `normalize_for_loop` clone cost and the reconcile-seam shortcut (which guards on
     // a non-empty ring AND the same flag) can never fire — exact pre-detector behavior.
-    if resolved_this_beat && !in_simulation_probe() && state.loop_detection.is_on() {
+    // PR-7 Phase 3: `samples()` so `Interactive` populates the ring identically to `On`;
+    // `Off` (false) and `On` (true) are byte-preserved (`samples() == is_on()` for both).
+    if resolved_this_beat && !in_simulation_probe() && state.loop_detection.samples() {
         // REFILL gate: a self-refilling MANDATORY cascade holds the stack non-empty and
         // non-shrinking across the resolution, settling at a non-interactive priority
         // window reset to the active player (the canonical modulo-comparison point —
@@ -690,9 +2272,14 @@ fn pass_priority_once_with_pipeline(
             && matches!(wf, WaitingFor::Priority { player } if player == state.active_player)
         {
             state.record_loop_detect_sample();
-        } else {
+        } else if !matches!(wf, WaitingFor::OrderTriggers { .. }) {
             state.loop_detect_ring.clear();
         }
+        // CR 603.3b + CR 732.2a: leave the ring intact on the mandatory trigger-ordering
+        // window — ordering simultaneous triggers is a forced step of putting them on the
+        // stack (staged in pending_trigger_order, so the stack is momentarily shrunk/empty
+        // here), not a settle or deliberate break. Preserving the Priority{active} samples
+        // across the beat lets a self-refilling multi-trigger loop reach CR 732.2a detection.
     }
     // No else-branch: a bare handoff or an empty-stack pass-to-advance-phase does NOT
     // touch the ring (leave-intact), so accumulation survives the inter-resolution beats.
@@ -1209,6 +2796,69 @@ fn apply_action(
         });
     }
 
+    // CR 603.3b: SetTriggerOrderTemplate propagates the actor's saved trigger-ordering
+    // templates (persistent, `AllCopies`-keyed). Mirrors SetMayTriggerAutoChoice: pure
+    // preference state, routed by `actor`, handled before the loop-ring / auto-pass
+    // teardown so it is a legal any-state mutation. Actor scoping is enforced by forcing
+    // `owner`/key player to `actor`, so a player can only mutate their own templates.
+    if let GameAction::SetTriggerOrderTemplate { op } = &action {
+        use crate::analysis::decision_template::{
+            DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
+        };
+        use crate::types::game_state::YieldTarget;
+        match op {
+            TriggerOrderTemplateOp::Save { sources, order } => {
+                // `order[pos]` = index into `sources` of the trigger the player placed
+                // at ordering position `pos` (same convention as `OrderTriggers`).
+                // Resolve each source id → its `AllCopies` card identity (CR 704.5d, so
+                // the template survives token death / re-entry) and pin it at `pos`. A
+                // source that no longer resolves is skipped defensively — a divergent
+                // template simply won't cover a future batch (re-prompt), never a wrong
+                // order.
+                let mut decisions = Vec::with_capacity(order.len());
+                let mut key_sources = Vec::with_capacity(order.len());
+                for (pos, &src_idx) in order.iter().enumerate() {
+                    let Some(&source_id) = sources.get(src_idx) else {
+                        continue;
+                    };
+                    let Some(card_id) = state.objects.get(&source_id).map(|o| o.card_id) else {
+                        continue;
+                    };
+                    let src = YieldTarget::AllCopies {
+                        card_id,
+                        trigger_description: None,
+                    };
+                    decisions.push(PinnedDecision::Order {
+                        source: src.clone(),
+                        pos: pos as u8,
+                    });
+                    key_sources.push(src);
+                }
+                let tmpl = DecisionTemplate {
+                    owner: actor,
+                    decisions,
+                    replay: ReplayMode::Static,
+                    key: DecisionGroupKey::from_sources(
+                        &key_sources,
+                        DecisionKind::TriggerOrdering,
+                    ),
+                };
+                state.set_trigger_order_template(tmpl);
+            }
+            TriggerOrderTemplateOp::Remove { key } => {
+                state.remove_trigger_order_template(actor, key);
+            }
+            TriggerOrderTemplateOp::ClearAll => {
+                state.clear_trigger_order_templates(actor);
+            }
+        }
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+
     // CR 402.3: Hand order has no game-rules significance — ReorderHand is a
     // display-preference update on the actor's own hand. Validated as a strict
     // permutation of the current hand and applied with no event emission, no
@@ -1362,11 +3012,20 @@ fn apply_action(
     // cascade, so the accumulated detection window is stale and must be dropped.
     // Placed AFTER every preference early-return (CancelAutoPass / SetPhaseStops /
     // ReorderHand / Debug / Grant- & RevokeDebugPermission) so a no-op preference
-    // toggle never reaches here; PassPriority is the only action that CONTINUES a
-    // cascade and so must NOT clear. `run_auto_pass_loop` and `resolve_all_fast_forward`
+    // toggle never reaches here; PassPriority and OrderTriggers are the only actions
+    // that CONTINUE a cascade and so must NOT clear (see the CR 603.3b note below).
+    // `run_auto_pass_loop` and `resolve_all_fast_forward`
     // call the resolution seam directly (not via `apply_action`), so this clear does
     // not fire during their internal iterations — the ring accumulates correctly there.
-    if !matches!(action, GameAction::PassPriority) {
+    //
+    // CR 603.3b + CR 732.2a: PassPriority AND OrderTriggers both CONTINUE a mandatory
+    // cascade (OrderTriggers is the forced CR 603.3b placement of simultaneous triggers,
+    // not a deliberate action). Every other action (cast/activate/play-land) is a
+    // deliberate break and still invalidates the ring.
+    if !matches!(
+        action,
+        GameAction::PassPriority | GameAction::OrderTriggers { .. }
+    ) {
         state.loop_detect_ring.clear();
     }
 
@@ -2625,6 +4284,55 @@ fn apply_action(
                 state,
                 waiting_for.clone(),
                 accept,
+                &mut events,
+            );
+        }
+        // CR 732.2a: the proposer declares the loop shortcut. The offered `schema` (the
+        // declared-choices contract the fail-closed firewall validates the pins against) is
+        // threaded through — no longer dropped by `..`.
+        (
+            WaitingFor::LoopShortcut {
+                proposer,
+                predicted_winner,
+                certificate,
+                schema,
+            },
+            GameAction::DeclareShortcut { count, template },
+        ) => {
+            return handle_declare_shortcut(
+                state,
+                LoopShortcutOffer {
+                    proposer: *proposer,
+                    predicted_winner: *predicted_winner,
+                    certificate,
+                    schema,
+                },
+                count,
+                template,
+                &mut events,
+            );
+        }
+        // CR 732.2a: the proposer DECLINES the offered shortcut (suggesting is optional).
+        // Proposer-only authorization is enforced upstream by `check_actor_authorization`, so
+        // `proposer`/`certificate`/`schema` are unused here (`..`).
+        (WaitingFor::LoopShortcut { .. }, GameAction::DeclineShortcut) => {
+            return handle_decline_shortcut(state, &mut events);
+        }
+        // CR 732.2b/c: an opponent answers the loop-shortcut offer.
+        (
+            WaitingFor::RespondToShortcut {
+                player,
+                remaining_players,
+                proposal,
+            },
+            GameAction::RespondToShortcut { response },
+        ) => {
+            return handle_respond_to_shortcut(
+                state,
+                *player,
+                remaining_players.clone(),
+                proposal.clone(),
+                response,
                 &mut events,
             );
         }
@@ -7436,3 +9144,365 @@ mod keyword_action_stack_tests;
 #[cfg(test)]
 #[path = "engine_mdfc_land_tests.rs"]
 mod mdfc_land_tests;
+
+#[cfg(test)]
+mod shortcut_schema_tests {
+    use super::shortcut_iteration_count;
+    use crate::analysis::decision_template::IterationCount;
+    use crate::analysis::loop_check::WinKind;
+
+    /// T3: `iteration_count` is exhaustive over all six `WinKind`s — the two determinate-lethal
+    /// axes (CR 704.5a life / CR 704.5c poison) map to `UntilLethal`; every other win seeds
+    /// `Fixed(1)`. Revert-probe: swapping any arm flips the corresponding assertion.
+    #[test]
+    fn iteration_count_maps_every_win_kind() {
+        assert_eq!(
+            shortcut_iteration_count(WinKind::LethalDamage),
+            IterationCount::UntilLethal
+        );
+        assert_eq!(
+            shortcut_iteration_count(WinKind::PoisonLoss),
+            IterationCount::UntilLethal
+        );
+        assert_eq!(
+            shortcut_iteration_count(WinKind::Decking),
+            IterationCount::Fixed(1)
+        );
+        assert_eq!(
+            shortcut_iteration_count(WinKind::ExtraTurns),
+            IterationCount::Fixed(1)
+        );
+        assert_eq!(
+            shortcut_iteration_count(WinKind::ImmediateWin),
+            IterationCount::Fixed(1)
+        );
+        assert_eq!(
+            shortcut_iteration_count(WinKind::Advantage),
+            IterationCount::Fixed(1)
+        );
+    }
+}
+
+/// PR-7 Combo-UI Stage 2: the mid-drive pin injector (item 4) + the drive-period seam (item 6).
+#[cfg(test)]
+mod stage2_injector_tests {
+    use super::*;
+    use crate::analysis::decision_template::{
+        DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate, IterationCount,
+        PinnedDecision, ReplayMode, TargetPin, TargetSchedule,
+    };
+    use crate::game::scenario::GameScenario;
+    use crate::types::game_state::{LoopDetectionMode, YieldTarget};
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+    const P2: PlayerId = PlayerId(2);
+    const TARGET_DRAIN: &str = "Whenever you gain life, target opponent loses that much life.";
+    const FEEDBACK: &str = "Whenever an opponent loses life, you gain that much life.";
+    const KICKOFF: &str = "You gain 1 life.";
+
+    fn life(state: &GameState, p: PlayerId) -> i32 {
+        state.players.iter().find(|pl| pl.id == p).unwrap().life
+    }
+
+    fn this_object(id: ObjectId) -> YieldTarget {
+        YieldTarget::ThisObject {
+            source_id: id,
+            incarnation: None,
+            trigger_description: None,
+        }
+    }
+
+    /// A template routing two distinct drainers to two distinct opponents by source identity.
+    fn two_drainer_template(
+        d0: ObjectId,
+        opp0: PlayerId,
+        d1: ObjectId,
+        opp1: PlayerId,
+    ) -> DecisionTemplate {
+        let s0 = this_object(d0);
+        let s1 = this_object(d1);
+        DecisionTemplate {
+            owner: P0,
+            decisions: vec![
+                PinnedDecision::Targets {
+                    slot: DecisionSlot {
+                        source: s0.clone(),
+                        index: 0,
+                    },
+                    targets: vec![TargetPin::Player(opp0)],
+                },
+                PinnedDecision::Targets {
+                    slot: DecisionSlot {
+                        source: s1.clone(),
+                        index: 0,
+                    },
+                    targets: vec![TargetPin::Player(opp1)],
+                },
+            ],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::UntilLethal,
+            },
+            key: DecisionGroupKey::from_sources(&[s0, s1], DecisionKind::LoopChoice),
+        }
+    }
+
+    /// Test F ⭐ (item 4 — per-source target routing, the two-authority claim): a 3p loop with
+    /// TWO targeted drainers raises a `TriggerTargetSelection` per drainer (two legal opponents
+    /// ⇒ not forced-unique) plus `OrderTriggers`. `inject_pinned_answer` matches EACH prompt's
+    /// `source_id` to the pin for THAT drainer (not the first pin), so the two drainers hit
+    /// DISTINCT opponents. Discriminator: P2 dropping proves per-source routing — a first-pin
+    /// injector would drain only P1.
+    #[test]
+    fn injector_routes_pinned_targets_per_source() {
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.with_life(P0, 20);
+        scenario.with_life(P1, 500);
+        scenario.with_life(P2, 500);
+        let drainer_a = scenario
+            .add_creature_from_oracle(P0, "Drainer A", 1, 4, TARGET_DRAIN)
+            .id();
+        let drainer_b = scenario
+            .add_creature_from_oracle(P0, "Drainer B", 2, 2, TARGET_DRAIN)
+            .id();
+        scenario.add_creature_from_oracle(P0, "Feedback", 3, 4, FEEDBACK);
+        let kickoff = scenario
+            .add_spell_to_hand_from_oracle(P0, "Kickoff", false, KICKOFF)
+            .id();
+        let mut runner = scenario.build();
+        // Off: drive the raw cascade directly through the injector (no offer/auto-win path).
+        runner.state_mut().loop_detection = LoopDetectionMode::Off;
+        // Cast the seed lifegain via the INTERNAL path (the CastBuilder's auto-resolver cannot
+        // satisfy the non-forced-unique 2-opponent target prompt — that is exactly the arm the
+        // injector is under test for).
+        let card_id = runner.state().objects.get(&kickoff).unwrap().card_id;
+        apply_action(
+            runner.state_mut(),
+            P0,
+            GameAction::CastSpell {
+                object_id: kickoff,
+                card_id,
+                targets: vec![],
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+            None,
+        )
+        .expect("cast the seed lifegain");
+
+        let template = two_drainer_template(drainer_a, P1, drainer_b, P2);
+
+        // The target each drainer's trigger actually got, read off the stack right after the
+        // injector answered its prompt (independent of drain-resolution order).
+        let target_on_stack = |state: &GameState, src: ObjectId| -> Option<Vec<TargetRef>> {
+            state
+                .stack
+                .iter()
+                .find(|e| e.source_id == src)
+                .and_then(|e| match &e.kind {
+                    crate::types::game_state::StackEntryKind::TriggeredAbility {
+                        ability, ..
+                    } => Some(ability.targets.clone()),
+                    _ => None,
+                })
+        };
+        let mut a_target: Option<Vec<TargetRef>> = None;
+        let mut b_target: Option<Vec<TargetRef>> = None;
+
+        for _ in 0..40 {
+            let wf = runner.state().waiting_for.clone();
+            match wf {
+                WaitingFor::Priority { player } => {
+                    apply_action(runner.state_mut(), player, GameAction::PassPriority, None)
+                        .expect("pass priority");
+                }
+                WaitingFor::OrderTriggers { .. } => {
+                    inject_pinned_answer(runner.state_mut(), None, 0, &wf)
+                        .expect("OrderTriggers arm is template-INDEPENDENT (None is fine)");
+                }
+                WaitingFor::TriggerTargetSelection { source_id, .. } => {
+                    // Guard: at a target prompt, a None template fails CLOSED (the guard lives
+                    // in THIS arm, not at the top of the injector).
+                    assert!(
+                        inject_pinned_answer(&mut runner.state().clone(), None, 0, &wf).is_err(),
+                        "template=None must abort the TriggerTargetSelection arm"
+                    );
+                    inject_pinned_answer(runner.state_mut(), Some(&template), 0, &wf)
+                        .expect("pinned target injected");
+                    let src = source_id.expect("targeted trigger has a source");
+                    if src == drainer_a {
+                        a_target = target_on_stack(runner.state(), src);
+                    } else if src == drainer_b {
+                        b_target = target_on_stack(runner.state(), src);
+                    }
+                }
+                _ => break,
+            }
+            if a_target.is_some() && b_target.is_some() {
+                break;
+            }
+        }
+
+        // Per-source routing: each drainer's trigger got ITS OWN pinned opponent — a first-pin
+        // injector would route both to P1.
+        assert_eq!(
+            a_target,
+            Some(vec![TargetRef::Player(P1)]),
+            "Drainer A's trigger routed to its pinned P1"
+        );
+        assert_eq!(
+            b_target,
+            Some(vec![TargetRef::Player(P2)]),
+            "Drainer B's trigger routed to its pinned P2 (per-source, not first-pin)"
+        );
+    }
+
+    /// Test F (production-path twin, item 4): drive a primed 3p targeted loop through the REAL
+    /// `drive_one_shortcut_cycle` and confirm its `Ok(other)` arm routes to the injector. Both
+    /// pinned opponents drain to death in the driven cycle ⇒ `CrossLethal{winner: Some(P0)}`,
+    /// which is REACHABLE ONLY if each drainer's trigger hit its OWN pinned opponent (a
+    /// first-pin injector would drain only P1, leaving P2 alive and no single winner).
+    #[test]
+    fn drive_one_cycle_reaches_injector_for_3p_targeted() {
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.with_life(P0, 20);
+        scenario.with_life(P1, 400);
+        scenario.with_life(P2, 400);
+        let drainer_a = scenario
+            .add_creature_from_oracle(P0, "Drainer A", 1, 4, TARGET_DRAIN)
+            .id();
+        let drainer_b = scenario
+            .add_creature_from_oracle(P0, "Drainer B", 2, 2, TARGET_DRAIN)
+            .id();
+        scenario.add_creature_from_oracle(P0, "Feedback", 3, 4, FEEDBACK);
+        let kickoff = scenario
+            .add_spell_to_hand_from_oracle(P0, "Kickoff", false, KICKOFF)
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Off;
+        let card_id = runner.state().objects.get(&kickoff).unwrap().card_id;
+        apply_action(
+            runner.state_mut(),
+            P0,
+            GameAction::CastSpell {
+                object_id: kickoff,
+                card_id,
+                targets: vec![],
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+            None,
+        )
+        .expect("cast seed");
+
+        // Prime: drive (targeting P1 for anything) until a Priority{P0} beat with a pending
+        // cascade — the settle beat the drive re-fires from.
+        let prime = two_drainer_template(drainer_a, P1, drainer_b, P1);
+        let mut primed = false;
+        for _ in 0..40 {
+            let wf = runner.state().waiting_for.clone();
+            match wf {
+                WaitingFor::Priority { player }
+                    if player == P0 && !runner.state().stack.is_empty() =>
+                {
+                    primed = true;
+                    break;
+                }
+                WaitingFor::Priority { player } => {
+                    apply_action(runner.state_mut(), player, GameAction::PassPriority, None)
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                    inject_pinned_answer(runner.state_mut(), Some(&prime), 0, &wf).unwrap();
+                }
+                _ => break,
+            }
+        }
+        assert!(primed, "must reach a primed Priority{{P0}} settle beat");
+
+        // Reset opponents to equal LOW life so the driven cycle crosses lethal (both die) —
+        // reachable only if each drainer hits its own pinned opponent.
+        for p in [P1, P2] {
+            runner
+                .state_mut()
+                .players
+                .iter_mut()
+                .find(|pl| pl.id == p)
+                .unwrap()
+                .life = 8;
+        }
+        let committed = runner.state().clone();
+        let boundary = {
+            let mut seed = committed.clone();
+            priority::reset_priority(&mut seed);
+            seed.waiting_for = WaitingFor::Priority {
+                player: seed.active_player,
+            };
+            seed.normalize_for_loop()
+        };
+        let template = two_drainer_template(drainer_a, P1, drainer_b, P2);
+        let cap = auto_pass_loop_max_iterations(&committed);
+
+        match drive_one_shortcut_cycle(&committed, &boundary, Some(&template), 0, cap) {
+            CycleOutcome::CrossLethal { winner, state, .. } => {
+                assert_eq!(
+                    winner,
+                    Some(P0),
+                    "both pinned opponents drained to death ⇒ P0 sole winner (per-source \
+                     routing through the production drive)"
+                );
+                assert!(
+                    life(&state, P1) <= 0 && life(&state, P2) <= 0,
+                    "both opponents at 0-or-less"
+                );
+            }
+            CycleOutcome::Recurred { state, .. } => {
+                assert!(
+                    life(&state, P1) < 8 && life(&state, P2) < 8,
+                    "both pinned opponents drained through drive_one_shortcut_cycle"
+                );
+            }
+            CycleOutcome::Abort => panic!("the pinned drive must not abort"),
+        }
+    }
+
+    /// Item 6: `shortcut_drive_period` = the max schedule length over the template's target
+    /// pins (Constant/Player/ByIdentity ⇒ 1), defaulting to 1 (no template / non-target pins).
+    #[test]
+    fn shortcut_drive_period_is_schedule_max() {
+        assert_eq!(shortcut_drive_period(None), 1, "no template ⇒ period 1");
+
+        let a = this_object(ObjectId(1));
+        let b = this_object(ObjectId(2));
+        let c = this_object(ObjectId(3));
+        let slot = DecisionSlot {
+            source: a.clone(),
+            index: 0,
+        };
+        let mk = |targets: Vec<TargetPin>| DecisionTemplate {
+            owner: P0,
+            decisions: vec![PinnedDecision::Targets {
+                slot: slot.clone(),
+                targets,
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::UntilLethal,
+            },
+            key: DecisionGroupKey::from_sources(std::slice::from_ref(&a), DecisionKind::LoopChoice),
+        };
+
+        let constant = mk(vec![TargetPin::Player(P1)]);
+        assert_eq!(shortcut_drive_period(Some(&constant)), 1, "Player pin ⇒ 1");
+
+        let rr = mk(vec![TargetPin::Scheduled(TargetSchedule::RoundRobin(
+            vec![a.clone(), b.clone(), c.clone()],
+        ))]);
+        assert_eq!(shortcut_drive_period(Some(&rr)), 3, "RoundRobin(3) ⇒ 3");
+
+        let pw = mk(vec![TargetPin::Scheduled(TargetSchedule::Piecewise(vec![
+            (0, a.clone()),
+            (5, b.clone()),
+        ]))]);
+        assert_eq!(shortcut_drive_period(Some(&pw)), 2, "Piecewise(2) ⇒ 2");
+    }
+}
