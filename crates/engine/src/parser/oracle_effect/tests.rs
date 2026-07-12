@@ -911,6 +911,72 @@ fn multi_source_each_power_damage_back_reference_shape() {
     );
 }
 
+/// CR 120.4a + CR 608.2c + CR 702: Ram Through's conditional excess-damage
+/// rider patches the preceding target-source damage effect without making the
+/// damage instruction itself conditional.
+#[test]
+fn ram_through_trample_gated_excess_rider_patches_damage() {
+    let def = parse_effect_chain(
+        "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has trample, excess damage is dealt to that creature's controller instead.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::DealDamage {
+        damage_source,
+        excess,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected DealDamage, got {:?}", def.effect);
+    };
+    assert_eq!(*damage_source, Some(DamageSource::Target));
+    assert_eq!(
+        *excess,
+        Some(ExcessRecipient::TargetControllerIfSourceHasKeyword {
+            keyword: crate::types::keywords::KeywordKind::Trample,
+        })
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "conditional excess rider must be absorbed, got {:?}",
+        def.sub_ability
+    );
+}
+
+/// CR 120.4a: Existing unconditional excess-damage riders still patch to the
+/// plain target-controller redirect.
+#[test]
+fn unconditional_excess_rider_still_patches_damage() {
+    let def = parse_effect_chain(
+        "~ deals 4 damage to target creature. Excess damage is dealt to that creature's controller instead.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::DealDamage { excess, .. } = &*def.effect else {
+        panic!("expected DealDamage, got {:?}", def.effect);
+    };
+    assert_eq!(*excess, Some(ExcessRecipient::TargetController));
+}
+
+/// CR 120.4a + CR 608.2c: Partial or misspelled conditional riders must fail
+/// closed instead of broadly matching on loose excess-damage words.
+#[test]
+fn partial_conditional_excess_rider_does_not_patch_damage() {
+    let def = parse_effect_chain(
+        "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has tramplers, excess damage is dealt to that creature's controller instead.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::DealDamage { excess, .. } = &*def.effect else {
+        panic!("expected DealDamage head, got {:?}", def.effect);
+    };
+    assert_eq!(*excess, None);
+    assert!(
+        def.sub_ability.is_some(),
+        "invalid rider should remain visible as an unparsed follow-up"
+    );
+}
+
 // CR 120.1 + CR 115.1d: "Up to two target creatures you control each deal
 // damage equal to their power to target creature" (Band Together) parses to
 // `EachDealsDamageEqualToPower` with a you-control creature source filter and
