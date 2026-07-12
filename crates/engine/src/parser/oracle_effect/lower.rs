@@ -1665,9 +1665,33 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
 /// "those creatures fight each other" object is `ParentTarget` by design
 /// (`parse_fight_target`), so the fight itself needs no rekey.
 pub(super) fn rewrite_two_target_counter_chain(def: &mut AbilityDefinition) {
-    if count_typed_target_only_slots(def) >= 2 {
+    // CR 611.2c + CR 701.14a: gate on the class's ACTUAL signature — a chain that
+    // both declares >= 2 typed target slots AND contains an `Effect::Fight`. The
+    // slot count alone is a proxy for "two-target declaration"; it says nothing
+    // about a fight, so on its own it would let the widened `Pump`/`GenericEffect`
+    // rekey fire on any future >= 2-target chain that happens to route an unscoped
+    // buff here. Requiring the `Fight` node makes the guard encode the two-target
+    // FIGHT class the function is named for, so the rekey is safe by construction
+    // rather than by the current pool happening not to trip it (matthewevans
+    // review, #4751). All six class cards (Malamet Battle Glyph, Longstalk Brawl,
+    // Duel for Dominance, Tail Swipe, Joust, Blizzard Brawl) carry "those
+    // creatures fight each other" as a later node in the same chain.
+    if count_typed_target_only_slots(def) >= 2 && chain_contains_fight(def) {
         rekey_counter_slot_in_chain(def);
     }
+}
+
+/// True if this definition or any node reachable through its `sub_ability` /
+/// `else_ability` chain is an `Effect::Fight` (CR 701.14a). The two-target fight
+/// class always emits the fight as a later node in the same chain, so a linear
+/// descent suffices.
+fn chain_contains_fight(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::Fight { .. })
+        || def.sub_ability.as_deref().is_some_and(chain_contains_fight)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_contains_fight)
 }
 
 fn count_typed_target_only_slots(def: &AbilityDefinition) -> usize {

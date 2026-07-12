@@ -325,6 +325,77 @@ fn two_target_fight_pump_keeps_both_slots_and_buffs_slot_zero() {
     }
 }
 
+/// #4751 review (matthewevans): part 1's sentence-bounding drops only a STRAY
+/// `Effect::unimplemented("you")` head from Life at Stake — it does NOT remove a
+/// functional chooser. "You and target creature's controller each secretly
+/// choose a number" is unimplemented on BOTH `main` and this branch: the real
+/// mechanic is a `Choose { NumberRange }` (with the exile + lose-life tail),
+/// byte-identical either way. On `main` the leading "You" was split off its "and"
+/// by a coincidental " loses " in a LATER sentence into a bare
+/// `Unimplemented { name: "you", description: "You" }`; bounding the verb scan to
+/// the first sentence stops that coincidental split, so the chain now heads at
+/// the real `Choose` node instead of the stray "you" fragment. This pins that the
+/// card's actual choose-a-number mechanic survives (no regression) — the
+/// controller was never a *parsed* chooser to lose (that stays a pre-existing gap
+/// on both, orthogonal to this PR).
+#[test]
+fn life_at_stake_keeps_choose_mechanic_and_drops_only_the_stray_you_stub() {
+    use crate::types::ability::ChoiceType;
+
+    fn collect(a: &AbilityDefinition, out: &mut Vec<Effect>) {
+        out.push((*a.effect).clone());
+        if let Some(s) = a.sub_ability.as_deref() {
+            collect(s, out);
+        }
+        if let Some(e) = a.else_ability.as_deref() {
+            collect(e, out);
+        }
+    }
+
+    let text = "You and target creature's controller each secretly choose a number 0 or greater. \
+         Then, reveal the chosen numbers. If your number was highest or tied for the highest, \
+         exile that creature. Each player who chose the highest number loses that much life.";
+    let parsed = parse_oracle_text(text, "Life at Stake", &[], &["Instant".to_string()], &[]);
+    let ability = parsed.abilities.first().expect("expected a spell ability");
+
+    // The real mechanic — Choose a number — heads the chain (not a stray
+    // `Unimplemented("you")` fragment).
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::NumberRange { .. },
+                ..
+            }
+        ),
+        "Life at Stake must head at a NumberRange Choose, not a stray you-stub; got {:#?}",
+        ability.effect
+    );
+
+    let mut effects = Vec::new();
+    collect(ability, &mut effects);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        )),
+        "the exile-the-creature tail must survive: {effects:#?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::LoseLife { .. })),
+        "the lose-life tail must survive: {effects:#?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { name, .. } if name == "you")),
+        "the stray Unimplemented(\"you\") head must be gone: {effects:#?}"
+    );
+}
+
 /// Recursively walk an ability chain (root effect + `sub_ability` + `else_ability`)
 /// for any `Effect::Unimplemented` node — the coverage-gap sentinel the one-shot
 /// effect pipeline emits when a clause matches no combinator.
