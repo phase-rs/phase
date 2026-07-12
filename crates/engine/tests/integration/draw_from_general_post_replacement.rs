@@ -8,38 +8,48 @@
 //! completion (including its own replacements and any Miracle pause), and only
 //! then wake the general parent — instead of starting an independent draw root.
 //!
-//! These two tests exist so that edge cannot change silently. They encode what
-//! the engine does TODAY, on real cards, through the real parser and the real
+//! These tests exist so that edge cannot change silently. They encode what the
+//! engine does TODAY, on real cards, through the real parser and the real
 //! pipeline. They are not a specification of the new design; they are the
 //! before-picture the rewrite must reproduce.
 //!
-//! Both witnesses reach `Effect::Draw` through
+//! The draw arrives through
 //! `engine_replacement::apply_pending_post_replacement_effect`, whose two arms
-//! (`Resolved` / `Template`) are the seam Plan 03 rewrites. Neither arm filters on
+//! (`Template` / `Resolved`) are the seam Plan 03 rewrites. Neither arm filters on
 //! effect kind, which is exactly why `Effect::Draw` can arrive here at all.
 //!
-//!  1. **Swans of Bryn Argoll** — a *prevention rider* (CR 615.5): the damage is
-//!     prevented and the rider draws that many cards for the source's controller.
-//!     The count rides `EventContextAmount`.
+//!  1. **Swans of Bryn Argoll** — `Template`. A static prevention rider
+//!     (CR 615.5): damage to it is prevented and the rider draws that many cards
+//!     for the source's controller. Count rides `EventContextAmount`.
 //!
-//!  2. **Nefarious Lich** — an ordinary *substitution* (CR 614.6): the life gain
-//!     never happens and an equal-sized draw happens instead.
+//!  2. **Nefarious Lich** — `Template`. An ordinary substitution (CR 614.6): the
+//!     life gain never happens and an equal-sized draw happens instead.
 //!
-//! # Coverage boundary: both of these take the `Template` arm
+//!  3. **New Way Forward** — the card that *should* be the `Resolved` witness,
+//!     pinned at the point where it fails to be one. See its test.
 //!
-//! Verified by instrumenting both arms and running these tests: each prints
-//! `Template`, and `Resolved` never fires. A static permanent ability parsed from
-//! Oracle text carries only an `execute` AST — never a `runtime_execute` — and
-//! `replacement.rs::apply_single_replacement` builds `Resolved` *only* from
-//! `runtime_execute` (the `batched_combat_all_shield` branch requires it). So
-//! Swans, despite being a combat prevention rider, does **not** reach
-//! `combat_damage.rs::fire_combat_prevention_riders`.
+//! # Which arm a card takes — and why `Resolved` has no draw witness at all
 //!
-//! The `Resolved` arm is built by resolving *spells* that install a shield with a
-//! runtime rider (`effects/prevent_damage.rs`). The only card in the pool whose
-//! prevention rider then draws is **New Way Forward** ("When damage is prevented
-//! this way, ... you draw that many cards"). It is the genuine `Resolved`→`Draw`
-//! witness and is **not** pinned here — a gap the rewrite should close.
+//! `apply_single_replacement` builds `Resolved` **only** from a shield's
+//! `runtime_execute`, and otherwise falls back to `Template` from the `execute`
+//! AST. A static permanent ability parsed from Oracle text carries only an
+//! `execute` — never a `runtime_execute`. So every parsed static shield takes
+//! `Template`; only a resolving *spell* that installs a shield with a rider
+//! (`effects/prevent_damage.rs`) can take `Resolved`.
+//!
+//! The Plan 03 census named Swans as the `Resolved` witness, reasoning that a
+//! combat prevention rider must reach
+//! `combat_damage.rs::fire_combat_prevention_riders`. It does not: that path is
+//! gated on `runtime_execute.is_some()`, which Swans never has. Instrumenting both
+//! arms confirms it — Swans and Nefarious Lich print `Template`, and `Resolved`
+//! never fires.
+//!
+//! New Way Forward is the only card in the pool whose prevention rider draws, and
+//! its rider is never installed (it parses as `SequentialSibling` rather than
+//! `ContinuationStep`, which is what `prevent_damage.rs` requires). So the
+//! `Resolved` -> `Effect::Draw` edge is **type-reachable but not
+//! production-reachable**: no card exercises it today. Test 3 pins that, and goes
+//! red the moment it stops being true.
 //!
 //! CR 121.2 + CR 614.6 + CR 615.1 + CR 615.5 + CR 119.3.
 
@@ -47,6 +57,7 @@ use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -80,7 +91,7 @@ fn advance_to_declare_blockers(runner: &mut GameRunner) {
             WaitingFor::DeclareBlockers { .. } => return,
             WaitingFor::Priority { .. } => {
                 runner
-                    .act(engine::types::actions::GameAction::PassPriority)
+                    .act(GameAction::PassPriority)
                     .expect("passing priority before blockers must succeed");
             }
             ref other => panic!("expected DeclareBlockers or Priority, got {other:?}"),
@@ -297,4 +308,165 @@ fn nefarious_lich_case(db: &CardDatabase) {
         library_before - 5,
         "P0's library must lose exactly the 5 cards drawn"
     );
+}
+
+/// New Way Forward — the only card in the pool that could reach the `Resolved`
+/// arm with a Draw. It does not, today. This test pins that.
+///
+/// Oracle (pool-verified): "The next time a source of your choice would deal
+/// damage to you this turn, prevent that damage. When damage is prevented this
+/// way, New Way Forward deals that much damage to that source's controller and
+/// you draw that many cards."
+///
+/// # What runs, and what silently does not
+///
+/// The prevention half works: the chosen source's combat damage is prevented
+/// (CR 615.1). The CR 615.5 rider half — deal that much back, draw that many —
+/// never fires.
+///
+/// `effects/prevent_damage.rs` installs a shield's rider as its `runtime_execute`
+/// **only** when the sub-ability is linked `SubAbilityLink::ContinuationStep`.
+/// New Way Forward's rider chain (`DealDamage` -> `Draw`) parses as
+/// `SequentialSibling` — an independent instruction — so it is never installed.
+/// `combat_damage.rs::fire_combat_prevention_riders` then finds the shield in the
+/// prevention tally (3 damage prevented, definition found) but bails on
+/// `repl_def.runtime_execute.clone()` returning `None`. Verified by instrumenting
+/// that loop: it prints `has_runtime=false`.
+///
+/// The consequence for Plan 03 is the point of this test. `Resolved` is built
+/// only from a `runtime_execute`; parsed static shields never carry one (they
+/// take `Template` — see the file header); and New Way Forward is the ONLY pool
+/// card whose prevention rider draws. So **the `Resolved` -> `Effect::Draw` edge
+/// has no working production witness at all**. It is type-reachable, not
+/// production-reachable. Anyone rewriting `apply_pending_post_replacement_effect`
+/// should know that its `Resolved` arm is, for draws, currently dead in practice.
+///
+/// The BUG-PIN assertions below encode today's (wrong) zeroes. Fixing the
+/// `sub_link` classification SHOULD turn them red — at which point this test
+/// becomes the real `Resolved`->`Draw` pin, and the two marked values become 3.
+#[test]
+fn new_way_forward_prevents_damage_but_its_draw_rider_never_fires() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    // Control first: the SAME combat with no shield. It proves the attack really
+    // connects for 3, so the "P1 took no damage" assertion below is measuring a
+    // prevention rather than an attack that silently never happened.
+    let control = new_way_forward_combat(db, Shield::NotCast);
+    assert_eq!(
+        control.p1_life_delta, -3,
+        "control: with no shield, the 3/3 attacker's combat damage must reach P1. \
+         If this is 0 the scenario is broken and the shielded case proves nothing."
+    );
+
+    let shielded = new_way_forward_combat(db, Shield::Cast);
+
+    // ── The prevention half works (CR 615.1). Non-vacuous: the control above
+    //    shows this same attack otherwise deals 3.
+    assert_eq!(
+        shielded.p1_life_delta, 0,
+        "New Way Forward prevents the chosen source's damage: P1 takes none"
+    );
+
+    // ── BUG-PIN: the CR 615.5 rider never fires. ──
+    // CORRECT: p0_life_delta == -3 (New Way Forward deals the prevented amount
+    // back to the source's controller) and p1_library_delta == -3 (P1 draws that
+    // many). Both are 0 because the rider parsed as `SequentialSibling` and was
+    // never installed as the shield's `runtime_execute`.
+    assert_eq!(
+        shielded.p0_life_delta, 0,
+        "BUG-PIN: the rider does not deal the prevented damage back to the \
+         source's controller. Correct value is -3."
+    );
+    assert_eq!(
+        shielded.p1_library_delta, 0,
+        "BUG-PIN: the rider does not draw. Correct value is -3 — and this is the \
+         `Resolved`->`Effect::Draw` edge, which therefore has NO working \
+         production witness today."
+    );
+}
+
+/// Whether the New Way Forward scenario casts the shield spell.
+enum Shield {
+    Cast,
+    NotCast,
+}
+
+struct CombatDeltas {
+    p0_life_delta: i32,
+    p1_life_delta: i32,
+    p1_library_delta: i64,
+}
+
+/// P0 (the active player) attacks P1 with a 3/3. With `Shield::Cast`, P1 first
+/// casts New Way Forward and names that attacker as the damage source.
+///
+/// The roles are this way round because New Way Forward protects *its
+/// controller*: the shield has to sit with the player the damage is aimed at, and
+/// only the non-active player can be that. Do NOT instead rewrite
+/// `active_player` after `build()` to make P1 attack — that desynchronises
+/// combat, the attack never happens, and every "took no damage" assertion then
+/// passes while measuring nothing.
+fn new_way_forward_combat(db: &CardDatabase, shield: Shield) -> CombatDeltas {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for &pid in &[P0, P1] {
+        scenario.with_library_top(pid, &["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]);
+    }
+
+    let attacker = scenario.add_creature(P0, "Charging Badger", 3, 3).id();
+
+    // New Way Forward is {2}{U}{R}{W}: 2 generic + one each of U/R/W.
+    let nwf = scenario.add_real_card(P1, "New Way Forward", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P1,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+
+    if let Shield::Cast = shield {
+        // Hand P1 the priority window to cast the instant on P0's turn, and
+        // nothing else. `waiting_for` is the engine's authority: set only
+        // `priority_player` and the cast is rejected with `NotYourPriority`.
+        runner.state_mut().priority_player = P1;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+
+        let cast = runner.cast(nwf).resolve();
+        assert!(
+            matches!(
+                cast.final_waiting_for(),
+                WaitingFor::DamageSourceChoice { .. }
+            ),
+            "New Way Forward must prompt for the damage source (CR 609.7a), got {:?}",
+            cast.final_waiting_for()
+        );
+        runner
+            .act(GameAction::ChooseDamageSource { source: attacker })
+            .expect("choose P0's attacker as the damage source");
+    }
+
+    let p0_life_before = runner.life(P0);
+    let p1_life_before = runner.life(P1);
+    let p1_library_before = library_len(runner.state(), P1);
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("P0 attacks P1");
+    runner.combat_damage();
+    runner.advance_until_stack_empty();
+
+    CombatDeltas {
+        p0_life_delta: runner.life(P0) - p0_life_before,
+        p1_life_delta: runner.life(P1) - p1_life_before,
+        p1_library_delta: library_len(runner.state(), P1) as i64 - p1_library_before as i64,
+    }
 }
