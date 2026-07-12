@@ -8,13 +8,11 @@
 //! for item identity, ordering, and span invariants. Nothing constructs an
 //! `OracleItemIr` directly.
 //!
-//! **Unit-3a status.** The builder orders items by `(first_line, ordinal)` and is
-//! ready to receive exact spans, but its only current producer is
-//! `parsed_abilities_to_doc_ir`, which runs after lowering and can supply only a
-//! whole-document containing span (see `OracleSourceSpan::whole_document`). So
-//! today's item order still reproduces the category order of `ParsedAbilities`.
-//! Unit 3b moves emission into the dispatch loop, at which point items become
-//! genuinely source-ordered with exact spans and this note is deleted.
+//! The builder orders items by `(first_line, ordinal)`, and every producer —
+//! the dispatch loop and every preprocessor, Class included — emits through
+//! `DocEmitter` at the item's printed source line. Items are therefore genuinely
+//! source-ordered, and every span is `SpanPrecision::Exact` or the honest
+//! chain-local `SpanPrecision::ChainRelative`.
 
 // NOTE ON `dead_code`: suppression in this module is **per item**, never
 // module-wide. A module-wide `#![allow(dead_code)]` also silences code not yet
@@ -64,26 +62,19 @@ pub(crate) struct OracleUnitId {
 /// How precisely a span locates its unit.
 ///
 /// A span is always *true* — it always contains its unit — but it is not always
-/// *minimal*. A consumer that renders a position (Plan 02's per-unit
-/// diagnostics) must be able to tell the difference, because `first_line == 0`
-/// on a whole-document span is not the claim "this unit is on line 0"; it is the
-/// claim "we do not yet know which line". Rendering the former as the latter is
-/// a precise-looking wrong answer, which is worse than an admittedly coarse one.
+/// *card-absolute*. A consumer that renders a position (Plan 02's per-unit
+/// diagnostics) must be able to tell the difference: printing a chain-local byte
+/// offset as a card position is a precise-looking wrong answer, which is worse
+/// than an admittedly coarse one.
 ///
 /// Typed rather than a `bool` per CLAUDE.md: a future `LineOnly` precision (line
 /// known, byte range not) is an enum value, not a second flag.
-// No `Ord`: `Exact < WholeDocument` would be a meaningless magnitude claim on a
+// No `Ord`: `Exact < ChainRelative` would be a meaningless magnitude claim on a
 // qualifier this enum's own docs call orthogonal to containment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub(crate) enum SpanPrecision {
     /// The span is the unit's exact byte/line extent. Safe to render.
     Exact,
-    /// The span is the whole Oracle document: a true containing range whose
-    /// bounds carry no per-unit information. A renderer must NOT print
-    /// `first_line`/`start_byte` as this unit's position.
-    ///
-    /// UNIT-3B DEBT — emitted only by `OracleSourceSpan::whole_document`.
-    WholeDocument,
     /// The span's byte range is exact **within the effect chain** it was parsed
     /// from, but NOT card-absolute: it is an offset into a single
     /// `parse_effect_chain_ir` invocation's text, not into the whole Oracle
@@ -97,7 +88,7 @@ pub(crate) enum SpanPrecision {
     /// `SpanPrecision::Exact` by adding the chain's base offset — or, if
     /// preprocessing was not offset-linear, by re-locating the fragment in the
     /// card text. A renderer must NOT print `first_line`/`start_byte` as a
-    /// card-absolute position, exactly as for `WholeDocument`.
+    /// card-absolute position.
     ///
     /// U5 DEBT — upgrades to `Exact` when the allocator is threaded.
     ChainRelative,
@@ -127,35 +118,6 @@ pub(crate) struct OracleSourceSpan {
 }
 
 impl OracleSourceSpan {
-    /// The whole Oracle document, distinguished only by `ordinal_within_span`.
-    ///
-    /// UNIT-3B DEBT, and deliberately coarse rather than fabricated. Items are
-    /// currently emitted by `parsed_abilities_to_doc_ir`, which runs *after*
-    /// lowering and never sees the line cursor, so no exact position is
-    /// recoverable there. Recovering one by searching `source_text` for a
-    /// lowered definition's `description` would be precisely the lowered-shape
-    /// scan this plan exists to delete.
-    ///
-    /// This span is *true* — the document does contain the item — merely not
-    /// minimal. Unit 3b moves emission into the dispatch loop, where the exact
-    /// line/byte range is in hand, and this constructor disappears.
-    ///
-    /// Invariants still hold: `is_contained_by` is satisfied by construction,
-    /// and `conflicts_with` cannot fire because ordinals are distinct.
-    ///
-    /// Carries `SpanPrecision::WholeDocument` so a consumer cannot mistake
-    /// `first_line == 0` for "this unit is on line 0".
-    pub(crate) fn whole_document(source_text: &str, ordinal_within_span: u32) -> Self {
-        Self {
-            first_line: 0,
-            last_line: source_text.lines().count().saturating_sub(1),
-            start_byte: 0,
-            end_byte: source_text.len(),
-            precision: SpanPrecision::WholeDocument,
-            ordinal_within_span,
-        }
-    }
-
     /// An exactly-located span. The constructor unit 3b uses once emission moves
     /// into the dispatch loop and the real line/byte range is in hand.
     #[allow(dead_code)] // production caller lands in unit 3b.
@@ -215,13 +177,15 @@ impl OracleSourceSpan {
 
     /// True when this precision tier is allowed to carry a verbatim `fragment`.
     ///
-    /// Both `Exact` (card-absolute) and `ChainRelative` (chain-local honest)
-    /// address a concrete byte range and therefore have a real verbatim
-    /// fragment; only `WholeDocument`, whose sole honest "fragment" would be the
-    /// entire card, must not. This is the single authority the fail-closed
-    /// `check_fragment_precision` guard consults — widened (not loosened) from
-    /// `is_exact` so the ChainRelative tier can carry its fragment without
-    /// reopening the whole-document-fragment hole `SpanPrecision` closed.
+    /// Both live tiers — `Exact` (card-absolute) and `ChainRelative` (chain-local
+    /// but honest) — address a concrete byte range and therefore have a real
+    /// verbatim fragment, so this is currently true for every span. That is not a
+    /// tautology to be collapsed into `true`: it is the single authority the
+    /// fail-closed `check_fragment_precision` guard consults, and because the
+    /// match is exhaustive, a future non-locating tier (the `LineOnly` this
+    /// enum's docs anticipate) cannot be added without deciding here whether it
+    /// may carry a fragment. The retired `WholeDocument` tier was the `false`
+    /// case: its sole honest "fragment" would have been the entire card.
     pub(crate) fn carries_fragment(&self) -> bool {
         matches!(
             self.precision,
@@ -251,14 +215,14 @@ impl OracleSourceSpan {
 pub(crate) struct OracleUnitSource {
     id: OracleUnitId,
     span: OracleSourceSpan,
-    /// The verbatim Oracle text this unit covers — **only** when `span.precision`
-    /// is `Exact`.
+    /// The verbatim Oracle text this unit covers — present exactly when
+    /// `span.precision.carries_fragment()`, which today is every tier.
     ///
-    /// `None` under `WholeDocument`, because the only "fragment" such a span could
-    /// honestly report is the entire card. Handing a diagnostic renderer the whole
-    /// card as "the offending clause" is a precise-looking wrong answer, exactly
-    /// what `SpanPrecision` exists to prevent — guarding the span while leaving the
-    /// fragment lying would move the lie, not remove it.
+    /// A tier that cannot locate the unit must NOT report a fragment: handing a
+    /// diagnostic renderer the whole card as "the offending clause" is a
+    /// precise-looking wrong answer, exactly what `SpanPrecision` exists to
+    /// prevent — guarding the span while leaving the fragment lying would move
+    /// the lie, not remove it. (This was the retired `WholeDocument` tier's case.)
     ///
     /// `emit` rejects any unit whose fragment presence disagrees with its precision.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -728,19 +692,19 @@ impl OracleDocBuilder {
     /// The printed slot the next emitted ability will occupy (CR 707.9a). Read
     /// before emission. This — not `Vec::len()` — is the authority in unit 3b.
     ///
-    /// **UNIT-3B PRECONDITION, do not lose this.** An ability's *real* printed slot
-    /// is its source rank among spells: `lower_oracle_ir` fills `result.abilities`
-    /// by iterating `ir.items`, which is key-ordered by source position. This
-    /// counter instead reports the *emission* rank. The two agree only while `emit`
-    /// is called in nondecreasing `first_line` order — which unit 3a satisfies by
-    /// accident (every span is `WholeDocument`, so the key degenerates to the
-    /// emission ordinal) and which unit 3b's dispatch-loop emission must either
-    /// guarantee or replace.
+    /// **PRECONDITION, do not lose this.** An ability's *real* printed slot is its
+    /// source rank among spells: `lower_oracle_ir` fills `result.abilities` by
+    /// iterating `ir.items`, which is key-ordered by source position. This counter
+    /// instead reports the *emission* rank. The two agree only while `emit` is
+    /// called in nondecreasing `first_line` order, which no producer is required
+    /// to guarantee — a preprocessor may legitimately emit a later line before the
+    /// dispatch loop reaches an earlier one.
     ///
-    /// So unit 3b must do one of: (a) assert `emit` is called in nondecreasing
-    /// `first_line` order, or (b) derive both counters at `finish()` from the
-    /// source-ordered item vector rather than at `emit()`. Option (b) is the honest
-    /// one; (a) merely re-states today's accident as a rule.
+    /// That is why the live CR 707.9a authority is NOT this counter but the
+    /// per-category stamping walk in `finish()`, which derives each slot from the
+    /// source-ordered item map after all emission is done. These accessors remain
+    /// only as the read-before-emission form; anything that needs a *true* printed
+    /// slot must go through `finish()`.
     #[allow(dead_code)] // becomes the sole index authority in unit 3b.
     pub(crate) fn ability_index(&self) -> PrintedAbilityIndex {
         PrintedAbilityIndex(self.spells_emitted.len())
@@ -917,18 +881,18 @@ impl OracleDocBuilder {
     ) -> OracleDocIr {
         // CR 707.9a: resolve every "…except it has this ability" printed slot now.
         //
-        // The load-bearing invariant is PER-CATEGORY COUNTING, not source order:
-        // `parsed_abilities_to_doc_ir` still emits items in CATEGORY order today
-        // (all abilities, then all triggers, …) — see its own note — so
-        // `values_mut()` does NOT yet visit in printed source order. The walk is
-        // correct regardless because it counts each category SEPARATELY
-        // (`trigger_slot` among triggers, `ability_slot` among abilities), which
-        // reproduces exactly the position the parse-time `from_category_vector_len`
-        // computed. Each `RetainPrinted{Trigger,Ability}FromSource` is a
+        // The load-bearing invariant is PER-CATEGORY COUNTING, not source order.
+        // `values_mut()` visits in source order now that every producer emits at a
+        // real line, but the walk never depended on that: it counts each category
+        // SEPARATELY (`trigger_slot` among triggers, `ability_slot` among
+        // abilities), which is exactly the position `lower_oracle_ir` will give the
+        // definition when it re-buckets items into the per-category vectors of
+        // `ParsedAbilities`. That is why retiring the category-ordered Class façade
+        // — the last producer that visited out of source order — left every stamped
+        // slot unchanged. Each `RetainPrinted{Trigger,Ability}FromSource` is a
         // self-reference to its enclosing item (CR 603.1 / CR 602.1), stamped with
         // that item's per-category slot, replacing the `placeholder()` (= 0) the
-        // dispatch loop baked in. This per-category counting stays correct when a
-        // later commit makes item ordering truly source-based.
+        // dispatch loop baked in.
         //
         // Match is EXHAUSTIVE over `OracleNodeIr` (no `_`), mirroring `emit`'s
         // printed-slot match above: a future node variant — or the currently
@@ -1363,7 +1327,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::ProcessRadCounters => {}
         Effect::ChooseFromZone { .. } => {}
         Effect::RememberCard { .. } => {}
-        Effect::ForEachCategoryExile { .. } => {}
+        Effect::ForEachCategory { .. } => {}
         Effect::ChooseObjectsIntoTrackedSet { .. } => {}
         Effect::ChooseAndSacrificeRest { .. } => {}
         Effect::Exploit { .. } => {}
@@ -1585,19 +1549,13 @@ mod tests {
             "an out-of-range child must be REJECTED pre-emit, got {bad:?}"
         );
 
-        // Fragment/precision coupling is enforced on children too. This span IS
-        // contained (0..10 of a 10-byte document), so only the precision mismatch
-        // can reject it — the assertion cannot pass for the wrong reason.
-        let mism = alloc.allocate_with_span(
-            OracleSourceSpan::whole_document("abcdefghij", 3),
-            Some("abc"),
-        );
-        assert!(
-            matches!(mism, Err(DocBuilderError::FragmentPrecisionMismatch { .. })),
-            "a WholeDocument child carrying a fragment must be rejected, got {mism:?}"
-        );
-
-        // ...and the converse: an Exact span with no fragment is equally rejected.
+        // Fragment/precision coupling is enforced on children too. Only ONE
+        // direction of that coupling is still REPRESENTABLE: every live tier
+        // (`Exact`, `ChainRelative`) returns `carries_fragment() == true`, so
+        // "a span that must not carry a fragment, carrying one" — the retired
+        // `WholeDocument` case — can no longer be constructed. The guard is not
+        // weaker for it; the case moved from a runtime rejection to a type-level
+        // impossibility. The surviving direction still discriminates:
         let missing = alloc.allocate_with_span(span(0, 2, 6, 4), None);
         assert!(
             matches!(
@@ -1893,32 +1851,36 @@ mod tests {
         assert_eq!(b3.ability_index().get(), 0);
     }
 
-    /// A whole-document span must be self-describing: `first_line == 0` is "we
-    /// don't know the line", not "line 0". `SpanPrecision` carries that.
+    /// A span that is NOT card-absolute must say so. `ChainRelative` carries a
+    /// truthful byte range — but one measured inside a single effect chain, not
+    /// into the card — so a position renderer must be able to refuse to print it
+    /// as a card position. This is the discriminating case that keeps `is_exact`
+    /// from being tautologically true now that `WholeDocument` is retired.
     #[test]
-    fn span_precision_distinguishes_coarse_from_exact() {
-        let coarse = OracleSourceSpan::whole_document("Flying\n{T}: Add {G}.", 0);
-        assert_eq!(coarse.precision, SpanPrecision::WholeDocument);
+    fn span_precision_distinguishes_chain_relative_from_exact() {
+        let chain_local = OracleSourceSpan::chain_relative(0, 0, 0, 6, 0);
+        assert_eq!(chain_local.precision, SpanPrecision::ChainRelative);
         assert!(
-            !coarse.is_exact(),
-            "a renderer must be able to refuse to print line 0 for this span"
+            !chain_local.is_exact(),
+            "a renderer must be able to refuse to print a chain-local offset as a card position"
         );
 
         let exact = OracleSourceSpan::exact(1, 1, 7, 20, 0);
         assert_eq!(exact.precision, SpanPrecision::Exact);
         assert!(exact.is_exact());
 
-        // Both are true containing spans; precision is orthogonal to containment.
-        assert!(exact.is_contained_by(&coarse));
+        // Both tiers locate a real byte range, so both carry their fragment.
+        assert!(chain_local.carries_fragment() && exact.carries_fragment());
     }
 
-    /// The 3a document span is coarse but true: it contains the item, and
-    /// distinct ordinals keep co-located siblings from tripping the overlap rule.
+    /// Two items may legitimately share one printed line — `Kicker {2}{G}` emits a
+    /// `Keyword` and an `AdditionalCost` from the same bytes. Distinct ordinals are
+    /// what keep those co-located siblings from tripping the overlap rule; the rule
+    /// itself must still fire when the ordinal is NOT distinct.
     #[test]
-    fn whole_document_span_contains_items_and_never_conflicts() {
-        let text = "Flying\n{T}: Add {G}.";
-        let first = OracleSourceSpan::whole_document(text, 0);
-        let second = OracleSourceSpan::whole_document(text, 1);
+    fn colocated_siblings_conflict_only_on_a_shared_ordinal() {
+        let first = OracleSourceSpan::exact(0, 0, 0, 6, 0);
+        let second = OracleSourceSpan::exact(0, 0, 0, 6, 1);
         assert!(first.is_contained_by(&second) && second.is_contained_by(&first));
         assert!(
             !first.conflicts_with(&second),
@@ -1928,7 +1890,5 @@ mod tests {
             first.conflicts_with(&first.clone()),
             "same ordinal + overlapping bytes must still conflict (rule is live)"
         );
-        assert_eq!(first.last_line, 1);
-        assert_eq!(first.end_byte, text.len());
     }
 }

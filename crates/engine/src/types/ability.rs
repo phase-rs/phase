@@ -35,13 +35,15 @@ use crate::types::events::{ClashResult, PlayerActionKind};
 // Supporting types
 // ---------------------------------------------------------------------------
 
-/// CR 700.2: Who makes a choice during an effect's resolution.
+/// CR 608.2c-e: Who makes a choice during an effect's resolution (controller by
+/// default per CR 608.2c; opponent/APNAP ordering per CR 608.2e). Not CR 700.2 —
+/// that defines *modal* choices (picking a bulleted mode), a distinct concept.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Chooser {
     /// The controller of the spell/ability makes the choice.
     #[default]
     Controller,
-    /// An opponent of the controller makes the choice (CR 700.2).
+    /// An opponent of the controller makes the choice (CR 608.2e).
     /// In 2-player, the single opponent. In multiplayer, controller chooses which opponent.
     Opponent,
 }
@@ -173,6 +175,37 @@ impl IterationCategory {
             .collect(),
         }
     }
+}
+
+/// CR 608.2c: Per-member terminal action during [`Effect::ForEachCategory`]
+/// iteration. The category axis (`IterationCategory`) is shared; only the
+/// per-member body differs (exile from tracked pool vs put counter on permanent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ForEachCategoryAction {
+    /// CR 608.2c + CR 105.1 / CR 205.2a: Exile one card of the bound member from
+    /// the chain tracked pool — "for each color, you may exile a card of that
+    /// color from among the revealed cards" (Sanar).
+    ExileFromPool {
+        /// The zone the pool cards live in (where each chosen card is exiled from).
+        zone: Zone,
+        /// CR 608.2d: When true (the "you may exile" idiom), each member's pick
+        /// is a resolution-time optional choice (0..=1 per member).
+        #[serde(default = "default_true")]
+        up_to: bool,
+    },
+    /// CR 608.2c + CR 105.1 / CR 122.1: Put counters on one battlefield permanent
+    /// matching a base filter augmented with the bound member — "for each color,
+    /// put a +1/+1 counter on a Dragon you control of that color" (Call the Spirit
+    /// Dragons).
+    PutCounter {
+        /// Base permanent filter before the per-member color/type restriction.
+        target: TargetFilter,
+        /// CR 122.1: Counter type placed on each chosen permanent.
+        counter_type: crate::types::counter::CounterType,
+        /// CR 122.1: Number of counters placed per member iteration.
+        count: QuantityExpr,
+    },
 }
 
 /// CR 101.4: Who selects permanents in a multi-player category choice effect
@@ -5775,7 +5808,7 @@ pub enum AttackScope {
 #[serde(tag = "type")]
 pub enum PlayerFilter {
     /// The controller of the effect or quantity.
-    /// CR 700.2a: the default chooser for any modal/effect player reference.
+    /// CR 608.2c: the controller is the default player for any effect/quantity reference.
     #[default]
     Controller,
     /// All opponents of the controller.
@@ -7734,6 +7767,15 @@ pub enum AbilityCost {
     /// CR 701.3d: Unattach this Equipment from the object it is equipping.
     /// Used by activated costs such as Sunforger's "Unattach this Equipment".
     Unattach,
+    /// CR 701.3d + CR 608.2k: Unattach `count` attachments matching `filter`
+    /// from the source host as a cost; the detached object stays on the
+    /// battlefield and becomes this ability's cost-referent (Captain America's
+    /// "Unattach an Equipment from ~" → "that Equipment's mana value"). Distinct
+    /// from the unit `Unattach` (which detaches the source Equipment itself).
+    UnattachFrom {
+        filter: TargetFilter,
+        count: u32,
+    },
     Mill {
         count: u32,
     },
@@ -7914,6 +7956,7 @@ impl AbilityCost {
             | AbilityCost::PaySpeed { .. }
             | AbilityCost::ReturnToHand { .. }
             | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
             | AbilityCost::Blight { .. }
@@ -7998,6 +8041,7 @@ impl AbilityCost {
             AbilityCost::PaySpeed { .. } => vec![CostCategory::PaysSpeed],
             AbilityCost::ReturnToHand { .. } => vec![CostCategory::ReturnsToHand],
             AbilityCost::Unattach => vec![CostCategory::Unattaches],
+            AbilityCost::UnattachFrom { .. } => vec![CostCategory::Unattaches],
             AbilityCost::Mill { .. } => vec![CostCategory::Mills],
             AbilityCost::Exert => vec![CostCategory::Exerts],
             AbilityCost::Blight { .. } => vec![CostCategory::PutsCounters],
@@ -8102,6 +8146,7 @@ impl AbilityCost {
             | AbilityCost::PaySpeed { .. }
             | AbilityCost::ReturnToHand { .. }
             | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
             | AbilityCost::Blight { .. }
@@ -11374,7 +11419,7 @@ pub enum Effect {
     /// Building block for impulse draw, cascade, hideaway, and similar exile-then-select patterns.
     /// The selection is from the tracked set of the parent effect's result, falling back to
     /// direct zone contents for wordings like "choose a card in your hand."
-    /// CR 700.2: The `chooser` field determines who makes the selection.
+    /// CR 608.2d: The `chooser` field determines who makes the selection.
     ChooseFromZone {
         /// How many cards to choose.
         #[serde(default = "default_one")]
@@ -11427,40 +11472,21 @@ pub enum Effect {
     RememberCard {
         target: TargetFilter,
     },
-    /// CR 608.2c + CR 105.1 / CR 205.2a: For each member of a fixed category
-    /// (the five colors, or the CR 205.2a card types that can appear in a
-    /// library — nine: artifact, battle, creature, enchantment, instant,
-    /// kindred, land, planeswalker, sorcery), optionally choose one
-    /// card of *that* member from a card pool and exile it — "for each color,
-    /// you may exile a card of that color from among the revealed cards"
-    /// (Sanar), "for each card type, you may exile a card of that type from
-    /// among them" (Portent of Calamity).
-    ///
-    /// This is the category-iteration sibling of
-    /// `ChooseFromZone { zone_owner: EachPlayer }`: it parks one
-    /// `ChooseFromZoneChoice` prompt per category member, augmenting the pool
-    /// candidate filter with the bound member's color/type, and accumulates
-    /// every pick into the resolution chain's tracked object set so a
-    /// downstream "you may cast a spell from among them" / "put the rest into
-    /// your graveyard" reads exactly the cards chosen across all members. The
-    /// pool source is the same as `ChooseFromZone`'s tracked-set resolution
-    /// (the most recent revealed/exiled set). Optionality lives in `up_to`
-    /// (each member's pick is "you may", i.e. 0..=1).
-    ForEachCategoryExile {
+    /// CR 608.2c + CR 105.1: For each member of a fixed category (the five colors,
+    /// or CR 205.2a card types), perform a per-member action referencing the
+    /// bound member ("that color/type"). Iterates members in printed order,
+    /// parking one `ChooseFromZoneChoice` per member when multiple candidates
+    /// exist, and accumulates every pick into the chain tracked set for
+    /// downstream "this way" / "among them" references.
+    ForEachCategory {
         /// CR 105.1 / CR 205.2a: Which fixed category's members are iterated.
         category: IterationCategory,
-        /// The zone the pool cards live in (where each chosen card is exiled
-        /// from — typically `Library` for revealed-from-top pools).
-        zone: Zone,
-        /// CR 700.2: Who makes each per-member choice. Controller by default.
+        /// CR 608.2d: Who makes each per-member choice when multiple candidates
+        /// exist. Controller by default.
         #[serde(default)]
         chooser: Chooser,
-        /// CR 608.2d: When true (the "you may exile" idiom), each member's pick
-        /// is a resolution-time optional choice — the player announces the choice
-        /// while applying the effect, selecting 0 or 1 card of that member (a
-        /// 0..=1 optional pick per member).
-        #[serde(default = "default_true")]
-        up_to: bool,
+        /// Per-member terminal action (exile from pool or put counter).
+        action: ForEachCategoryAction,
     },
     /// CR 603.7e: An affected-player-chosen battlefield permanent set, written
     /// into the chain's tracked object set so downstream effects ("pay {N} for
@@ -12294,8 +12320,8 @@ fn is_one(n: &u32) -> bool {
     *n == 1
 }
 
-/// `serde` default for the `up_to` flag of `Effect::ForEachCategoryExile` — the
-/// "you may exile" idiom makes each per-member pick optional (0..=1).
+/// `serde` default for the `up_to` flag of `ForEachCategoryAction::ExileFromPool` —
+/// the "you may exile" idiom makes each per-member pick optional (0..=1).
 fn default_true() -> bool {
     true
 }
@@ -12759,6 +12785,10 @@ pub enum PileSource {
     /// Objects are revealed from the top of the controller's library
     /// (Fact or Fiction shape). `count` is the number of cards to reveal.
     RevealedFromLibraryTop { count: u32 },
+    /// Objects were exiled earlier in the same resolution chain
+    /// (Boneyard Parley shape). The eligible set is derived from
+    /// `linked_exile_cards_for_source` keyed on the ability's source.
+    ExiledThisWay,
 }
 
 /// Default pile source is Battlefield (backward-compatible with Make an Example).
@@ -13562,7 +13592,7 @@ impl Effect {
             // `WaitingFor::ReturnAsAuraTarget`. No stack-push target slot.
             | Effect::ReturnAsAura { .. }
             | Effect::ChooseFromZone { .. }
-            | Effect::ForEachCategoryExile { .. }
+            | Effect::ForEachCategory { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::EachPlayerCopyChosen { .. }
             | Effect::GainEnergy { .. }
@@ -13916,7 +13946,7 @@ impl Effect {
             | Effect::ChooseDamageSource { .. }
             | Effect::ChooseFromZone { .. }
             | Effect::RememberCard { .. }
-            | Effect::ForEachCategoryExile { .. }
+            | Effect::ForEachCategory { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
             // CR 122.1: parent count is forwarded verbatim into the per-kind
@@ -14168,7 +14198,7 @@ impl Effect {
             | Effect::ChooseDamageSource { .. }
             | Effect::ChooseFromZone { .. }
             | Effect::RememberCard { .. }
-            | Effect::ForEachCategoryExile { .. }
+            | Effect::ForEachCategory { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::ChooseOneOf { .. }
             // CR 122.1: parent count is forwarded verbatim into the per-kind
@@ -14413,7 +14443,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GrantCastingPermission { .. } => "GrantCastingPermission",
         Effect::ChooseFromZone { .. } => "ChooseFromZone",
         Effect::RememberCard { .. } => "RememberCard",
-        Effect::ForEachCategoryExile { .. } => "ForEachCategoryExile",
+        Effect::ForEachCategory { .. } => "ForEachCategory",
         Effect::ChooseObjectsIntoTrackedSet { .. } => "ChooseObjectsIntoTrackedSet",
         Effect::ChooseAndSacrificeRest { .. } => "ChooseAndSacrificeRest",
         Effect::EachPlayerCopyChosen { .. } => "EachPlayerCopyChosen",
@@ -14924,7 +14954,11 @@ impl From<&Effect> for EffectKind {
             Effect::RememberCard { .. } => EffectKind::RememberCard,
             // The per-member iteration parks `ChooseFromZoneChoice` prompts and
             // emits `ChooseFromZone` resolution events; it shares the kind.
-            Effect::ForEachCategoryExile { .. } => EffectKind::ChooseFromZone,
+            Effect::ForEachCategory {
+                action: ForEachCategoryAction::PutCounter { .. },
+                ..
+            } => EffectKind::PutCounter,
+            Effect::ForEachCategory { .. } => EffectKind::ChooseFromZone,
             Effect::ChooseObjectsIntoTrackedSet { .. } => EffectKind::ChooseObjectsIntoTrackedSet,
             Effect::ChooseCounterKind { .. } => EffectKind::ChooseCounterKind,
             Effect::PutChosenCounter { .. } => EffectKind::PutChosenCounter,
@@ -16323,7 +16357,7 @@ pub enum AbilityCondition {
         )]
         subject: ObjectScope,
     },
-    /// CR 608.2e + CR 702.49 + CR 702.190a: "Instead" override gated on the source
+    /// CR 608.2c + CR 702.49 + CR 702.190a: "Instead" override gated on the source
     /// permanent having entered via a specified cast/activation variant this turn.
     /// Unlike AdditionalCostPaidInstead (which reads SpellContext.additional_cost_paid),
     /// this reads GameObject.cast_variant_paid from the game state.
@@ -16367,7 +16401,7 @@ pub enum AbilityCondition {
     /// CR 701.54a: True when the ability's source permanent is its controller's
     /// Ring-bearer. For "unless ~ is your Ring-bearer", wrap with `Not`.
     IsRingBearer,
-    /// CR 608.2e: "If [target] has [keyword], [override effect] instead"
+    /// CR 608.2c: "If [target] has [keyword], [override effect] instead"
     /// Checked at resolution time against the first resolved object target's keywords.
     /// Uses "Instead" override semantics: swaps the parent effect when condition is met.
     TargetHasKeywordInstead { keyword: Keyword },

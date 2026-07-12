@@ -1031,6 +1031,7 @@ pub(super) fn handle_unless_payment(
             AbilityCost::Tap
             | AbilityCost::Untap
             | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::PaySpeed { .. }
             | AbilityCost::Exile { .. }

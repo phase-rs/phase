@@ -7708,6 +7708,30 @@ fn player_count_comparison_filters(type_text: &str) -> Option<(TargetFilter, Tar
     Some((type_filter, you_filter))
 }
 
+/// CR 614.1a: "an opponent who controls at least as many <filter> as you do" —
+/// the applicability condition of an "instead" replacement effect (Land
+/// Equilibrium). The relative clause ("who controls …") binds to the SPECIFIC
+/// entering/acting opponent — the player who would put the permanent onto the
+/// battlefield — not to an existential aggregate over all opponents. Returns the
+/// bare `(type_filter, you_filter)` pair (via the comparator-agnostic
+/// `player_count_comparison_filters` helper) so the replacement-condition builder
+/// can compose it directly into `ReplacementCondition::OnlyIfQuantity` with the
+/// scoped-player controller stamped on `type_filter`. This deliberately does NOT
+/// build `StaticCondition::QuantityComparison` / `PlayerFilter::ControlsCount`
+/// (the shape used by `parse_opponent_controls_more_than_you`): that shape is an
+/// existential "an opponent controls more <filter> than you" aggregate check and
+/// would be WRONG here — it does not bind the count to the specific entering
+/// player the replacement is evaluated against.
+pub(crate) fn parse_opponent_who_controls_at_least_as_many(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, TargetFilter)> {
+    let (rest, _) = tag("an opponent who controls at least as many ").parse(input)?;
+    let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" as you do").parse(rest)?;
+    let (rest, _) = tag(" as you do").parse(rest)?;
+    let pair = player_count_comparison_filters(type_text).ok_or_else(|| oracle_err(type_text))?;
+    Ok((rest, pair))
+}
+
 /// CR 118.12a: Parse "[player] pays {cost}" → UnlessPay { cost }.
 ///
 /// Handles "you pay {N}", "their controller pays {N}", "its controller pays {N}".
@@ -8072,6 +8096,57 @@ pub fn parse_you_put_into_hand_this_way_condition(
     Ok((rest, AbilityCondition::ZoneChangedThisWay { filter }))
 }
 
+/// CR 608.2c + CR 122.1: Parse "you put [counter type] counters on [N] [type]
+/// this way" — active-voice reflexive gate for counter-placement producers
+/// (Call the Spirit Dragons: "If you put +1/+1 counters on five Dragons this
+/// way, you win the game"). Counts filtered tracked-set members matching the
+/// type phrase against the parsed threshold.
+pub fn parse_you_put_counters_on_type_this_way_condition(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = tag("you put ").parse(input)?;
+    let (rest, _) = opt(terminated(
+        super::primitives::parse_counter_type_typed,
+        alt((tag(" counters "), tag(" counter "))),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag("on ").parse(rest)?;
+    let (count_expr, rest) =
+        crate::parser::oracle_util::parse_count_expr(rest).ok_or_else(|| {
+            nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
+        })?;
+    let threshold = match count_expr {
+        QuantityExpr::Fixed { value } => value,
+        _ => {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            )))
+        }
+    };
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, _) = tag("this way").parse(after_filter.trim())?;
+    Ok((
+        rest,
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(filter),
+                    caused_by: None,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: threshold },
+        },
+    ))
+}
+
 /// CR 400.7 + CR 608.2c: Parse "returned [quantifier] [type] to your hand this
 /// way" — the passive/elided-subject bounce gate (Cache Grab's disjunct:
 /// "returned a Squirrel card to your hand this way"). Returns the matched type
@@ -8134,7 +8209,7 @@ pub fn parse_you_control_or_returned_this_way_condition(
     ))
 }
 
-/// CR 121 + CR 608.2c + CR 609.3: Parse "you draw [one or more] card[s] this
+/// CR 121 + CR 608.2c: Parse "you draw [one or more] card[s] this
 /// way" — the active-voice draw-count gate (Transcendent Archaic: "you may draw
 /// X cards … If you draw one or more cards this way, discard two cards"). Reads
 /// the amount moved by the immediately preceding draw effect in the sub-ability

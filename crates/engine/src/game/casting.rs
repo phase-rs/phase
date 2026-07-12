@@ -12894,6 +12894,133 @@ pub(super) fn pay_mana_cost_with_choices(
     Ok(())
 }
 
+/// CR 601.2h: Pay the locked spell mana cost from the current pool without
+/// opening another mana-ability window.
+pub(super) fn pay_mana_cost_from_pool_with_choices(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, EngineError> {
+    super::layers::flush_layers(state);
+
+    let spell_meta = build_spell_meta(state, player, source_id);
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    let permissions = {
+        let any_color = player_can_spend_as_any_color_for_payment(
+            state,
+            player,
+            Some(source_id),
+            spell_ctx.as_ref(),
+        );
+        super::static_abilities::build_cost_permission_context(state, player, any_color)
+    };
+    {
+        let player_data = state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .expect("player exists");
+        if !mana_payment::can_pay_for_spell(
+            &player_data.mana_pool,
+            cost,
+            spell_ctx.as_ref(),
+            permissions,
+        ) {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot pay mana cost".to_string(),
+            ));
+        }
+    }
+
+    let hand_demand = mana_payment::compute_hand_color_demand(state, player, source_id);
+    let pins: Vec<crate::types::mana::ManaPipId> = state.active_payment_pins.clone();
+    let player_data = state
+        .players
+        .iter_mut()
+        .find(|p| p.id == player)
+        .expect("player exists");
+    let (spent_units, life_payments) = mana_payment::pay_cost_with_demand_and_choices(
+        &mut player_data.mana_pool,
+        cost,
+        Some(&hand_demand),
+        spell_ctx.as_ref(),
+        permissions.any_color,
+        phyrexian_choices,
+        permissions.life_colors,
+        &pins,
+    )
+    .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
+    if !spent_units.is_empty() && mana_payment::has_unspent_mana_continuous_effects(state) {
+        state.layers_dirty.mark_full();
+    }
+
+    for payment in &life_payments {
+        let amount = u32::try_from(payment.amount).unwrap_or(0);
+        match super::life_costs::pay_life_as_cast_or_activation_cost(state, player, amount, events)
+        {
+            super::life_costs::PayLifeCostResult::Paid { .. } => {}
+            super::life_costs::PayLifeCostResult::InsufficientLife
+            | super::life_costs::PayLifeCostResult::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay Phyrexian life cost".to_string(),
+                ));
+            }
+        }
+    }
+
+    let spent_convoke_sources = spent_units
+        .iter()
+        .filter(|unit| unit.is_convoke_payment())
+        .map(|unit| unit.source_id)
+        .collect::<HashSet<_>>();
+    cleanup_unused_convoke_payments(state, player, source_id, &spent_convoke_sources);
+
+    let mana_spent_units = spent_units
+        .iter()
+        .filter(|unit| !unit.is_convoke_payment())
+        .cloned()
+        .collect::<Vec<_>>();
+
+    apply_mana_spell_grants(state, source_id, &mana_spent_units);
+
+    if let Some(obj) = state.objects.get_mut(&source_id) {
+        obj.mana_spent_to_cast = false;
+        obj.mana_spent_to_cast_amount = 0;
+        obj.colors_spent_to_cast = crate::types::mana::ColoredManaCount::default();
+        obj.mana_spent_source_snapshots.clear();
+    }
+
+    if !mana_spent_units.is_empty() {
+        let source_snapshots: Vec<_> = mana_spent_units
+            .iter()
+            .filter_map(|unit| {
+                state
+                    .objects
+                    .get(&unit.source_id)
+                    .map(|source| source.snapshot_for_mana_spent())
+                    .or_else(|| state.lki_cache.get(&unit.source_id).cloned())
+                    .map(|lki| crate::types::game_state::ManaSpentSourceSnapshot {
+                        source_id: unit.source_id,
+                        lki,
+                    })
+            })
+            .collect();
+        if let Some(obj) = state.objects.get_mut(&source_id) {
+            obj.mana_spent_to_cast = true;
+            obj.mana_spent_to_cast_amount = mana_spent_units.len() as u32;
+            for unit in &mana_spent_units {
+                obj.colors_spent_to_cast.add_unit(unit);
+            }
+            obj.mana_spent_source_snapshots = source_snapshots;
+        }
+    }
+
+    Ok(mana_spent_units.len() as u32)
+}
+
 fn cleanup_unused_convoke_payments(
     state: &mut GameState,
     player: PlayerId,
@@ -13695,6 +13822,20 @@ pub(super) fn find_non_self_exile(
     }
 }
 
+/// CR 701.3d + CR 608.2k: Detect a non-self `UnattachFrom` activation cost
+/// (Captain America's Throw) requiring an interactive "unattach a matching
+/// attachment from the source" selection. Returns `(count, filter)`. The
+/// source-self `Unattach` unit variant returns `None` — it detaches the source
+/// Equipment itself and is auto-paid, never surfaced interactively. Recurses
+/// into `Composite`, mirroring `find_non_self_exile`.
+pub(super) fn find_unattach_from_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+    match cost {
+        AbilityCost::UnattachFrom { filter, count } => Some((*count, filter)),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_unattach_from_cost),
+        _ => None,
+    }
+}
+
 /// CR 117.1 + CR 601.2b: Detect an `ExileWithAggregate` activation cost (Baron
 /// Helmut Zemo's Boast) requiring an interactive "exile any number reaching the
 /// aggregate threshold" selection. Returns a borrowed view of its parameters.
@@ -13868,6 +14009,38 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
                 .unwrap_or_default()
         }
     }
+}
+
+/// CR 701.3d + CR 601.2b + CR 202.3: Battlefield attachments controlled by
+/// `player`, currently attached to `source`, matching `filter`, whose mana value
+/// is at least `n`. Mirrors `find_eligible_exile_for_cost_targets`. The `n`
+/// mana-value floor implements the divided-damage legality gate (CR 601.2c/M1):
+/// the chosen Equipment's mana value is the total damage divided among the
+/// announced targets, so it must be >= the target count. Pass `n = 0` for the
+/// generic eligibility count (no floor).
+pub(crate) fn find_eligible_unattach_for_cost_targets(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    filter: &TargetFilter,
+    n: u32,
+) -> Vec<ObjectId> {
+    let ctx = super::filter::FilterContext::from_source(state, source);
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            let Some(obj) = state.objects.get(&id) else {
+                return false;
+            };
+            // CR 701.3d: only attachments currently attached to the source host.
+            obj.controller == player
+                && obj.attached_to.and_then(|t| t.as_object()) == Some(source)
+                && obj.effective_mana_value() >= n
+                && super::filter::matches_target_filter(state, id, filter, &ctx)
+        })
+        .collect()
 }
 
 fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
@@ -14356,6 +14529,11 @@ pub fn can_activate_ability_now_with_restriction_gates(
     ) {
         return false;
     }
+    // CR 702.49: Ninjutsu-family marker abilities are not normal activated
+    // abilities — they must route through `GameAction::ActivateNinjutsu`.
+    if super::keywords::is_ninjutsu_family_marker_ability(&ability_def) {
+        return false;
+    }
 
     // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
     // players can't activate abilities that aren't mana abilities.
@@ -14675,6 +14853,14 @@ pub fn handle_activate_ability(
         ability_def.activator_filter.as_ref(),
     ) {
         return Err(EngineError::NotYourPriority);
+    }
+    // CR 702.49: Ninjutsu-family marker abilities must not use the generic
+    // activated-ability stack path — mana is only paid in `activate_ninjutsu`.
+    if super::keywords::is_ninjutsu_family_marker_ability(&ability_def) {
+        return Err(EngineError::InvalidAction(
+            "Ninjutsu-family abilities must be activated via ActivateNinjutsu (CR 702.49)"
+                .to_string(),
+        ));
     }
     // CR 602.1: Check activation zone — default to battlefield.
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
@@ -15464,6 +15650,11 @@ pub fn handle_activate_ability(
         pending_target.activation_cost = ability_def.cost.clone();
         pending_target.activation_ability_index = Some(ability_index);
         pending_target.target_constraints = target_constraints;
+        // CR 601.2d: propagate the divided-effect flag so a targeted activated
+        // ability that divides damage/counters among its targets (Captain
+        // America's Throw) reaches the `DistributeAmong` step after its costs are
+        // paid. Mirrors the spell target-selection path (`pending_targets.distribute`).
+        pending_target.distribute = ability_def.distribute.clone();
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending_target),

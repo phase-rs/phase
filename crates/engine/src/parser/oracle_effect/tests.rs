@@ -2,7 +2,7 @@ use super::*;
 use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
-use crate::types::ability::{AttachmentKind, PerpetualModification};
+use crate::types::ability::{AttachmentKind, ForEachCategoryAction, PerpetualModification};
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
@@ -708,9 +708,9 @@ fn for_each_card_type_exile_from_among_them() {
     assert!(
         matches!(
             effect,
-            Effect::ForEachCategoryExile {
+            Effect::ForEachCategory {
                 category: IterationCategory::CardType,
-                up_to: true,
+                action: ForEachCategoryAction::ExileFromPool { up_to: true, .. },
                 ..
             }
         ),
@@ -733,9 +733,9 @@ fn for_each_color_exile_from_revealed_cards() {
             assert!(
                 matches!(
                     effect,
-                    Effect::ForEachCategoryExile {
+                    Effect::ForEachCategory {
                         category: IterationCategory::Color,
-                        up_to: true,
+                        action: ForEachCategoryAction::ExileFromPool { up_to: true, .. },
                         ..
                     }
                 ),
@@ -744,7 +744,88 @@ fn for_each_color_exile_from_revealed_cards() {
         }
 }
 
-/// CR 608.2c: the for-each-category EXILE parser must NOT swallow the
+/// CR 105.1 + CR 122.1: "for each color, put a +1/+1 counter on a Dragon you
+/// control of that color" parses to `ForEachCategoryPutCounter` (Call the Spirit
+/// Dragons).
+#[test]
+fn for_each_color_put_counter_on_typed_permanent_of_that_color() {
+    use crate::types::ability::IterationCategory;
+    use crate::types::counter::CounterType;
+
+    let effect =
+        parse_effect("for each color, put a +1/+1 counter on a Dragon you control of that color");
+    assert!(
+        matches!(
+            effect,
+            Effect::ForEachCategory {
+                category: IterationCategory::Color,
+                action: ForEachCategoryAction::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    ..
+                },
+                ..
+            }
+        ),
+        "expected ForEachCategoryPutCounter(Color), got {effect:?}"
+    );
+}
+
+/// CR 608.2c + CR 104.2b: Call the Spirit Dragons upkeep chains per-color
+/// counter placement with a gated win rider.
+#[test]
+fn call_the_spirit_dragons_upkeep_parses_put_counter_and_win_rider() {
+    use crate::types::ability::{
+        AbilityCondition, Comparator, IterationCategory, QuantityExpr, QuantityRef,
+    };
+    use crate::types::counter::CounterType;
+    let def = parse_effect_chain(
+        "for each color, put a +1/+1 counter on a Dragon you control of that color. \
+         If you put +1/+1 counters on five Dragons this way, you win the game.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::ForEachCategory {
+                category: IterationCategory::Color,
+                action: ForEachCategoryAction::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    ..
+                },
+                ..
+            }
+        ),
+        "expected ForEachCategoryPutCounter, got {:?}",
+        def.effect
+    );
+    let win = def
+        .sub_ability
+        .as_ref()
+        .expect("win rider must chain after counter placement");
+    assert!(
+        matches!(win.effect.as_ref(), Effect::WinTheGame { .. }),
+        "expected WinTheGame sub_ability, got {:?}",
+        win.effect
+    );
+    let Some(AbilityCondition::QuantityCheck {
+        lhs,
+        comparator,
+        rhs,
+    }) = win.condition.as_ref()
+    else {
+        panic!("WinTheGame must be gated, got {:?}", win.condition);
+    };
+    assert_eq!(*comparator, Comparator::GE);
+    assert!(matches!(
+        lhs,
+        QuantityExpr::Ref {
+            qty: QuantityRef::FilteredTrackedSetSize { .. },
+        }
+    ));
+    assert!(matches!(rhs, QuantityExpr::Fixed { value: 5 }));
+}
+
+/// CR 608.2c: the for-each-category PUT-counter parser must NOT swallow the
 /// distinct-types PUT-to-hand form — "for each card type, you may put a card
 /// of that type from among the revealed cards into your hand" is a different
 /// instruction (put, not exile) and must still route to the distinct-types
@@ -6965,6 +7046,51 @@ fn blazing_salvo_unless_have_deal_damage() {
     }
 }
 
+/// CR 601.2d (#5613): a divided/distributed cardinality-list clause's bare " or "
+/// ("… among one, two, or three target creatures") is a target-COUNT enumerator.
+/// Before this fix the binary-choice splitter split there and trial-parsed the
+/// orphan tail back through the effect→subject→static→imperative cascade. That
+/// trial parse FAILS and is discarded, so the final parse OUTPUT is identical on
+/// `main` (the pool coverage-parse-diff shows zero card changes) — but it
+/// re-enters the clause parser several frames deep. The regression is stack
+/// DEPTH, not output, so this asserts it on a bounded-stack thread.
+///
+/// Peak stack for this parse (full `parse_oracle_text` pipeline, measured):
+/// ~3.5 MiB on `main` (the wasted trial parse) vs ~1.4 MiB with the guard. A
+/// 2.5 MiB stack thus survives here (~1.1 MiB headroom) and overflows on `main`
+/// (~1 MiB margin): reintroducing the wasted trial parse overflows this thread's
+/// guard page and aborts the test binary — so the test *fails when the fix is
+/// reverted* (AI-CONTRIBUTOR.md §5(i)). The in-thread asserts additionally pin
+/// the parse OUTPUT (`PutCounter` + a captured distribution).
+#[test]
+fn distribute_cardinality_clause_parses_within_a_bounded_stack() {
+    let handle = std::thread::Builder::new()
+        .stack_size(2_621_440) // 2.5 MiB — mid-gap between the ~1.4 / ~3.5 MiB floors
+        .spawn(|| {
+            let parsed = parse_oracle_text(
+                "Distribute three +1/+1 counters among one, two, or three target creatures.",
+                "Bounded Stack Test",
+                &[],
+                &["Sorcery".to_string()],
+                &[],
+            );
+            let def = parsed.abilities.first().expect("expected a spell ability");
+            assert!(
+                matches!(*def.effect, Effect::PutCounter { .. }),
+                "counter distribution must parse whole as PutCounter, got {:?}",
+                def.effect
+            );
+            assert!(
+                def.distribute.is_some(),
+                "distribution unit must be captured"
+            );
+        })
+        .expect("spawn bounded-stack parse thread");
+    handle
+        .join()
+        .expect("parsing the cardinality clause must not overflow a 2.5 MiB stack");
+}
+
 #[test]
 fn lava_blister_its_controller_unless_have_deal_damage() {
     let def = parse_effect_chain(
@@ -8735,6 +8861,74 @@ fn return_leading_their_hand_all_exiled_with_source() {
     ));
 }
 
+/// CR 406.6 + CR 607.1/607.2a (#5577): Watcher for Tomorrow's Hideaway
+/// leaves-the-battlefield trigger — "put the exiled card into its owner's hand"
+/// — references the card THIS source exiled in a SEPARATE, earlier resolution
+/// (its ETB Hideaway). The LTB chain has no exile producer, so the singular "the
+/// exiled card" anaphor in the `ChangeZoneAll` "put" clause must bind durably to
+/// `ExiledBySource` (resolved at runtime via `exile_links`), not the chain-local
+/// `TrackedSet(0)` sentinel that is empty at LTB time. Third emission site of the
+/// #5571 cross-resolution fix (after the Copy verb and `try_parse_cast_effect`).
+#[test]
+fn hideaway_ltb_put_exiled_card_binds_exiled_by_source() {
+    let parsed = parse_oracle_text(
+        "Hideaway 4 (When this creature enters, look at the top four cards of your library, exile one face down, then put the rest on the bottom in a random order.)\n\
+         This creature enters tapped.\n\
+         When this creature leaves the battlefield, put the exiled card into its owner's hand.",
+        "Watcher for Tomorrow",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Wizard".to_string()],
+    );
+    let ltb = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("Watcher must have an LTB execute chain");
+    assert!(
+        matches!(
+            &*ltb.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::ExiledBySource,
+                ..
+            }
+        ),
+        "cross-resolution LTB 'put the exiled card' must bind ExiledBySource, got {:?}",
+        ltb.effect
+    );
+}
+
+/// Regression guard for the #5577 fix: a SAME-chain exile-then-put keeps the
+/// chain-local `TrackedSet(0)` binding (the helper returns `same_chain_binding`
+/// when `chain_has_prior_exile_producer` is set), so it must NOT flip to
+/// `ExiledBySource`.
+#[test]
+fn same_chain_put_exiled_card_keeps_tracked_set() {
+    let def = parse_effect_chain(
+        "Exile the top card of your library. Put the exiled card into your hand.",
+        AbilityKind::Spell,
+    );
+    // Walk the chain to the ChangeZoneAll "put" node.
+    fn find_put(def: &AbilityDefinition) -> Option<&TargetFilter> {
+        if let Effect::ChangeZoneAll {
+            destination: Zone::Hand,
+            target,
+            ..
+        } = &*def.effect
+        {
+            return Some(target);
+        }
+        def.sub_ability.as_deref().and_then(find_put)
+    }
+    let target = find_put(&def).expect("expected a ChangeZoneAll into hand");
+    assert!(
+        matches!(target, TargetFilter::TrackedSet { .. }),
+        "same-chain 'put the exiled card' must keep TrackedSet(0), got {target:?}"
+    );
+}
+
 #[test]
 fn effect_draw() {
     let e = parse_effect("Draw two cards");
@@ -9234,7 +9428,7 @@ fn tidus_combat_damage_trigger_draws_then_proliferates() {
 
 #[test]
 fn expand_the_sphere_difference_repeat_threads_onto_proliferate_sub() {
-    // CR 609.3: "If you put fewer than two lands onto the battlefield this
+    // CR 608.2c: "If you put fewer than two lands onto the battlefield this
     // way, proliferate a number of times equal to the difference." — the
     // leading comparison condition AND the difference-repeat count must
     // both thread onto the Proliferate sub-ability.
@@ -11324,7 +11518,7 @@ fn assassins_trophy_its_controller_may_search_chain() {
     );
 }
 
-/// CR 608.2c + CR 117.3a + CR 701.23a + CR 609.3 + CR 603.7: Winds of
+/// CR 608.2c + CR 117.3a + CR 701.23a + CR 603.7: Winds of
 /// Abandon — iterated subject-anchored search. The structure mirrors
 /// Assassin's Trophy but the search step carries `repeat_for:
 /// TrackedSetSize` so each exiled creature's controller searches their own
@@ -16869,7 +17063,7 @@ fn kicker_instead_chain_produces_correct_condition() {
 
 #[test]
 fn kicker_leading_instead_produces_correct_condition() {
-    // CR 608.2e: "if kicked, instead [effect]" — leading "instead" variant.
+    // CR 608.2c: "if kicked, instead [effect]" — leading "instead" variant.
     // Must produce AdditionalCostPaidInstead, same as trailing "instead".
     let ability = parse_effect_chain(
             "Destroy target creature or planeswalker with mana value 2 or less. If this spell was kicked, instead destroy target creature or planeswalker",
@@ -16970,7 +17164,7 @@ fn rite_of_replication_kicker_creates_five_copies() {
 
 #[test]
 fn general_condition_leading_instead_strips_prefix() {
-    // CR 608.2e: Ability-word / general condition with leading "instead"
+    // CR 608.2c: Ability-word / general condition with leading "instead"
     // (cross-line pattern like Traverse the Ulvenwald's delirium).
     let ability = parse_effect_chain(
         "If you control three or more creatures, instead draw two cards",
@@ -31625,14 +31819,17 @@ fn sanar_vivid_reveal_until_keeps_library_pile_for_per_color_exile() {
     assert!(
         matches!(
             exile.effect.as_ref(),
-            Effect::ForEachCategoryExile {
+            Effect::ForEachCategory {
                 category: IterationCategory::Color,
-                zone: Zone::Library,
-                up_to: true,
+                action: ForEachCategoryAction::ExileFromPool {
+                    zone: Zone::Library,
+                    up_to: true,
+                    ..
+                },
                 ..
             }
         ),
-        "expected ForEachCategoryExile, got {:?}",
+        "expected ForEachCategory(ExileFromPool), got {:?}",
         exile.effect
     );
 }
@@ -32944,6 +33141,69 @@ fn conjure_named_into_exile() {
     let e = parse_effect("conjure a card named Black Lotus into exile");
     match e {
         Effect::Conjure { destination, .. } => assert_eq!(destination, Zone::Exile),
+        other => panic!("expected Conjure, got: {other:?}"),
+    }
+}
+
+#[test]
+fn conjure_named_into_top_n_library_at_random() {
+    // "into the top N cards of your library at random" is a positional library slot; the
+    // engine models conjure destinations at Zone granularity, so it maps to Library (like
+    // the plain "into your library" wording).
+    let e = parse_effect(
+        "conjure a card named Sanguine Bond into the top fifteen cards of your library at random",
+    );
+    match e {
+        Effect::Conjure {
+            destination, cards, ..
+        } => {
+            assert_eq!(destination, Zone::Library);
+            assert_eq!(cards.len(), 1);
+        }
+        other => panic!("expected Conjure, got: {other:?}"),
+    }
+}
+
+#[test]
+fn conjure_named_into_top_n_each_players_library_at_random() {
+    // "each player's library" (a shared-library slot) also maps to the Library zone.
+    let e = parse_effect(
+        "conjure three cards named Sunscorched Desert into the top ten cards of each player's library at random",
+    );
+    match e {
+        Effect::Conjure { destination, .. } => assert_eq!(destination, Zone::Library),
+        other => panic!("expected Conjure, got: {other:?}"),
+    }
+}
+
+#[test]
+fn conjure_random_from_spellbook_into_top_n_library_at_random() {
+    // The top-N-library destination composes with the random draft-from-spellbook wording,
+    // which parses to DraftFromSpellbook (random) rather than Conjure.
+    let e = parse_effect(
+        "conjure a random card from the Slivers Spellbook into the top five cards of your library at random",
+    );
+    match e {
+        Effect::DraftFromSpellbook {
+            destination,
+            random,
+            ..
+        } => {
+            assert_eq!(destination, Zone::Library);
+            assert!(random);
+        }
+        other => panic!("expected DraftFromSpellbook, got: {other:?}"),
+    }
+}
+
+#[test]
+fn conjure_duplicate_into_top_n_library_at_random() {
+    // The top-N-library destination composes with the "conjure a duplicate of <ref>" wording.
+    let e = parse_effect(
+        "conjure a duplicate of that card into the top five cards of your library at random",
+    );
+    match e {
+        Effect::Conjure { destination, .. } => assert_eq!(destination, Zone::Library),
         other => panic!("expected Conjure, got: {other:?}"),
     }
 }
@@ -35347,7 +35607,7 @@ fn kindred_dominance_excludes_chosen_creature_type() {
 }
 
 // ------------------------------------------------------------------
-// CR 700.2 + CR 608.2d: ChooseOneOf inline binary-choice regression.
+// CR 608.2d: ChooseOneOf inline binary-choice regression.
 // ------------------------------------------------------------------
 
 /// Highway Robbery's spell text "You may discard a card or sacrifice a
@@ -39171,6 +39431,58 @@ fn attach_just_moved_iron_man_put_from_hand_attach_equipment_to_source() {
     }
 }
 
+/// The Invincible Iron Man (issues #4796 / #5268): full-card trigger parse must
+/// match the effect-chain shape — not the pre-fix self-attach bug.
+#[test]
+fn invincible_iron_man_trigger_parses_equipment_attach_via_parse_oracle_text() {
+    use crate::types::ability::TypeFilter;
+    use crate::types::phase::Phase;
+
+    let parsed = parse_oracle_text(
+        "Flying, haste\nAt the beginning of combat on your turn, you may put an artifact card from your hand onto the battlefield. If it's an Equipment, attach it to The Invincible Iron Man.",
+        "The Invincible Iron Man",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("expected begin-combat trigger");
+    let execute = trigger.execute.as_ref().expect("trigger has execute");
+    match execute.effect.as_ref() {
+        Effect::ChangeZone { destination, .. } => {
+            assert_eq!(*destination, Zone::Battlefield);
+        }
+        other => panic!("expected hand->battlefield ChangeZone, got {other:?}"),
+    }
+    assert!(
+        execute.forward_result,
+        "put must forward moved card to attach sub"
+    );
+    let attach = execute
+        .sub_ability
+        .as_ref()
+        .expect("expected Attach sub_ability");
+    match &*attach.effect {
+        Effect::Attach { attachment, target } => {
+            assert!(matches!(attachment, TargetFilter::SelfRef));
+            assert!(matches!(target, TargetFilter::ParentTarget));
+        }
+        other => panic!("expected Attach sub_ability, got {other:?}"),
+    }
+    match &attach.condition {
+        Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+            TargetFilter::Typed(t) => assert!(t.type_filters.iter().any(
+                |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
+            )),
+            other => panic!("expected Typed Equipment filter, got {other:?}"),
+        },
+        other => panic!("expected ZoneChangedThisWay on Attach, got {other:?}"),
+    }
+}
+
 /// Gilgamesh, Master-at-Arms (issue #3286): any-number Equipment dig-from-among
 /// plus CR 603.12 active-voice reflexive attach to Samurai.
 #[test]
@@ -41012,7 +41324,7 @@ fn that_creatures_controller_faces_villainous_choice_uses_parent_controller_choo
     }
 }
 
-/// CR 120.1 + CR 202.3 + CR 609.3 (cluster 32, Class C — Ensnared by the
+/// CR 120.1 + CR 202.3 + CR 608.2c (cluster 32, Class C — Ensnared by the
 /// Mara): the branch-1 damage amount "the total mana value of those exiled
 /// cards" is an aggregate over the most recent chain tracked set — the cards
 /// the branch-head `ExileTop` published. It parses to
@@ -41725,6 +42037,87 @@ fn where_x_rewrites_tracked_set_filtered_change_zone_keldon_flamesage() {
             .any(ability_tree_has_rewritten_change_zone_tracked_filter),
         "expected Keldon Flamesage tracked-set ChangeZone filter to bind where-X, got {:?}",
         parsed.triggers
+    );
+}
+
+/// Find the `TargetFilter` of the first `Effect::CastFromZone` reachable from
+/// `ability` via `sub_ability`/`else_ability`/`mode_abilities`.
+fn find_cast_from_zone_target(ability: &AbilityDefinition) -> Option<&TargetFilter> {
+    if let Effect::CastFromZone { target, .. } = ability.effect.as_ref() {
+        return Some(target);
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .and_then(find_cast_from_zone_target)
+        .or_else(|| {
+            ability
+                .else_ability
+                .as_deref()
+                .and_then(find_cast_from_zone_target)
+        })
+        .or_else(|| {
+            ability
+                .mode_abilities
+                .iter()
+                .find_map(find_cast_from_zone_target)
+        })
+}
+
+/// CR 406.6 + CR 607.2a anti-regression guard (issue #4792 Blocker 1): a
+/// singular "the exiled card" anaphor must keep binding to the SAME-CHAIN
+/// `TrackedSet{0}` sentinel — not durable `ExiledBySource` — when an earlier
+/// clause in the SAME resolution chain already produced the exile. Keldon
+/// Flamesage's "look at the top X ... exile ... You may cast the exiled
+/// card" is entirely one chain (one triggered ability, one resolution), so
+/// `chain_has_prior_exile_producer` must gate `resolve_singular_exiled_card_target`
+/// back to its pre-existing `TrackedSet{0}` binding.
+#[test]
+fn keldon_flamesage_cast_target_stays_tracked_set_after_exiled_by_source_fix() {
+    let parsed = parse_oracle_text(
+        "Enlist\nWhenever this creature attacks, look at the top X cards of your library, where X is this creature's power. You may exile an instant or sorcery card with mana value X or less from among them. Put the rest on the bottom of your library in a random order. You may cast the exiled card without paying its mana cost.",
+        "Keldon Flamesage",
+        &["Enlist".to_string()],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Shaman".to_string()],
+    );
+    let target = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find_map(find_cast_from_zone_target);
+    assert!(
+        matches!(
+            target,
+            Some(TargetFilter::TrackedSet { id }) if id.0 == 0
+        ),
+        "Keldon Flamesage's same-chain exile must keep CastFromZone{{TrackedSet(0)}}, got {target:?}"
+    );
+}
+
+/// CR 406.6 + CR 607.2a anti-regression guard (issue #4792 Blocker 1,
+/// continuation-timing case): Discover the Impossible's "Look at the top
+/// five ... Exile one of them face down ... You may cast the exiled card"
+/// is ALSO entirely one chain (one resolving spell), even though the
+/// Hideaway-shaped "exile one of them face down" clause is recognized via a
+/// `ContinuationAst` marker rather than its own raw exile-shaped effect
+/// surviving to the final lowered tree. `chain_has_prior_exile_producer`
+/// must still detect that same-chain exile and keep the cast anaphor at
+/// `ParentTarget` — never widen it to `ExiledBySource`.
+#[test]
+fn discover_the_impossible_cast_target_stays_parent_target_after_exiled_by_source_fix() {
+    let parsed = parse_oracle_text(
+        "Look at the top five cards of your library. Exile one of them face down and put the rest on the bottom of your library in a random order. You may cast the exiled card without paying its mana cost if it's an instant spell with mana value 2 or less. If you don't, put that card into your hand.",
+        "Discover the Impossible",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let target = parsed.abilities.iter().find_map(find_cast_from_zone_target);
+    assert!(
+        matches!(target, Some(TargetFilter::ParentTarget)),
+        "Discover the Impossible's same-chain exile (via the ExileOneOfThemFaceDown \
+         continuation) must keep CastFromZone{{ParentTarget}}, got {target:?}"
     );
 }
 

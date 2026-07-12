@@ -270,7 +270,7 @@ fn steer_clear_deals_four_with_mount_two_without() {
     assert_eq!(
         run_steer(true),
         4,
-        "controlled a Mount as you cast → 4 damage instead (CR 608.2e)"
+        "controlled a Mount as you cast → 4 damage instead (CR 608.2c)"
     );
     assert_eq!(
         run_steer(false),

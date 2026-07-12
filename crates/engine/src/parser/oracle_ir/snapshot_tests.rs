@@ -723,7 +723,7 @@ fn evils_thrall() {
     insta::assert_json_snapshot!("evils_thrall_lowered", &lowered);
 }
 
-// CR 608.2e: KeywordOverride — a "TargetHasKeywordInstead"-conditioned clause
+// CR 608.2c: KeywordOverride — a "TargetHasKeywordInstead"-conditioned clause
 // builds its def from the parsed effect + condition and attaches as the prior
 // def's `sub_ability` (Conformer Shuriken's granted attack trigger).
 #[test]

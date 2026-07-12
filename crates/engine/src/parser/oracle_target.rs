@@ -169,6 +169,29 @@ fn parse_card_or_cards_word(input: &str) -> super::oracle_nom::error::OracleResu
     parse_word_bounded(input, "cards").or_else(|_| parse_word_bounded(input, "card"))
 }
 
+/// CR 608.2c + CR 406.6 + CR 607.2a + CR 707.10 + CR 702.75a: Resolve a
+/// singular "the exiled card" / "copy the exiled card" anaphor to the
+/// correct binding. When an earlier clause in the SAME resolution chain
+/// already exiled a card (`chain_has_prior_exile_producer`), the anaphor
+/// refers to that same-chain exile and keeps its pre-existing binding
+/// (`same_chain_binding`, e.g. `TrackedSet{0}` or `ParentTarget`). Otherwise
+/// the referenced exile happened in an EARLIER, separately-resolved ability
+/// (e.g. an ETB Imprint or a synthesized Hideaway ETB) — CR 406.6 durable
+/// exile-zone tracking is required, so the anaphor must bind to
+/// `TargetFilter::ExiledBySource`, resolved at runtime via this source's
+/// `exile_links` (CR 607.1/607.2a: linked abilities reference the same
+/// object across resolutions).
+pub(crate) fn resolve_singular_exiled_card_target(
+    chain_has_prior_exile_producer: bool,
+    same_chain_binding: TargetFilter,
+) -> TargetFilter {
+    if chain_has_prior_exile_producer {
+        same_chain_binding
+    } else {
+        TargetFilter::ExiledBySource
+    }
+}
+
 /// Parse an event-context possessive reference from Oracle text.
 /// These resolve from the triggering event, not from player targeting.
 /// Must be checked BEFORE standard `parse_target` for trigger-based effects.
@@ -605,12 +628,18 @@ pub fn parse_target_with_syntax<'a>(
         }
     }
 
-    for phrase in [
-        "one, two, or three targets",
-        "one or two targets",
-        "any number of targets",
-        "targets",
-    ] {
+    // CR 115.1d: bare bounded-count target arms ("one or two targets", "one,
+    // two, or three targets") share the single `BOUNDED_TARGET_CARDINALITIES`
+    // authority (composing the plural noun off the stem); the unbounded forms
+    // ("any number of targets", bare "targets") stay inline.
+    for &(stem, _, _) in crate::parser::oracle_effect::lower::BOUNDED_TARGET_CARDINALITIES {
+        if let Ok((rest, _)) =
+            (tag::<_, _, OracleError<'_>>(stem), tag(" targets")).parse(lower.as_str())
+        {
+            return (TargetFilter::Any, &text[lower.len() - rest.len()..], syntax);
+        }
+    }
+    for phrase in ["any number of targets", "targets"] {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
             return (TargetFilter::Any, &text[lower.len() - rest.len()..], syntax);
         }

@@ -2158,6 +2158,21 @@ fn apply_action(
                         &mut events,
                     )?
                 }
+                // CR 701.3d + CR 608.2k: Unattach a matching attachment from the
+                // source as an activation cost (Captain America's Throw). The
+                // handler snapshots the detached Equipment as the cost-referent,
+                // then re-surfaces the deferred damage division.
+                PayCostKind::UnattachFrom { filter } => {
+                    casting_costs::handle_unattach_for_cost(
+                        state,
+                        *player,
+                        filter,
+                        *pending_cast.clone(),
+                        choices,
+                        &chosen,
+                        &mut events,
+                    )?
+                }
                 // CR 702.167a/b: Craft materials exile across the
                 // battlefield/graveyard union.
                 PayCostKind::ExileMaterials { materials } => {
@@ -2297,7 +2312,15 @@ fn apply_action(
                 | PayCostKind::ExilePermanent { .. }
                 | PayCostKind::ExileAggregate { .. }
                 | PayCostKind::RemoveCounter { .. }
+                // CR 701.3d: an unattach-from cost is only ever surfaced via
+                // `CostResume::Spell` (targeted activation), never as a mana
+                // ability — unreachable here.
+                | PayCostKind::UnattachFrom { .. }
                 | PayCostKind::Behold { .. } => {
+                    debug_assert!(
+                        !matches!(kind, PayCostKind::UnattachFrom { .. }),
+                        "UnattachFrom cost cannot resume a mana ability",
+                    );
                     return Err(EngineError::InvalidAction(
                         "Cost kind cannot resume a mana ability".into(),
                     ));
@@ -4833,43 +4856,66 @@ fn apply_action(
 
             // CR 601.2d: Resume casting pipeline after distribution.
             if state.pending_cast.is_some() {
-                // CR 601.2c + CR 601.2d + CR 601.2f: Targets and their division are now
-                // committed, so the total cost — including any target-dependent
-                // surcharge (Strive, CR 207.2c) — is finally determinable. Route through
-                // the single cost-determination authority every other post-target-
-                // selection path uses (`casting_targets::handle_select_targets` /
-                // `handle_choose_target`) instead of calling `finalize_cast` directly
-                // with the stale cost that was locked in at `ChooseXValue` time, before
-                // targets (and hence any per-target surcharge) were known.
                 let pending = state.pending_cast.take().unwrap();
-                // CR 601.2h ("Unpayable costs can't be paid"): mirror
-                // `finalize_mana_payment`'s `pending_for_restore` pattern
-                // (casting_costs.rs ~8623-8627/8778-8787) — `finish_pending_cast_cost_or_pay`'s
-                // downstream chain has no restore-on-error wrapper of its own, and
-                // `state.pending_cast` is already `None` here (unlike
-                // `handle_select_targets`, whose `pending_cast` lives inside the
-                // `WaitingFor::TargetSelection` variant and so is never destructively
-                // taken). Without this clone-and-restore, a recomputed cost that turns
-                // out unpayable would return `Err` with `state.pending_cast` gone while
-                // `state.waiting_for` still reports `DistributeAmong` — a resubmitted
-                // `DistributeAmong` action would then fall through to the
-                // resolution-time continuation branch below instead of being cleanly
-                // rejected.
-                let pending_for_restore = pending.clone();
-                let ability = pending.ability.clone();
-                let cost = pending.cost.clone();
-                match casting_costs::finish_pending_cast_cost_or_pay(
-                    state,
-                    p,
-                    *pending,
-                    ability,
-                    cost,
-                    &mut events,
-                ) {
-                    Ok(waiting_for) => waiting_for,
-                    Err(err) => {
-                        state.pending_cast = Some(pending_for_restore);
-                        return Err(err);
+                if let Some(ability_index) = pending.activation_ability_index {
+                    // CR 602.2b + CR 601.2d: an activated ability that divides
+                    // damage among targets goes on the stack as an ActivatedAbility
+                    // after the division is announced — not as a spell (Captain
+                    // America's Throw). `push_activated_ability_to_stack` pays the
+                    // residual mana leg and no-ops the already-paid UnattachFrom.
+                    // The spell-only cost-determination authority used in the `else`
+                    // branch (`finish_pending_cast_cost_or_pay`) must NOT be reached
+                    // here: it routes into `finalize_cast`, which would commit the
+                    // source permanent to the stack as a spell.
+                    casting_costs::push_activated_ability_to_stack(
+                        state,
+                        p,
+                        pending.object_id,
+                        ability_index,
+                        pending.ability,
+                        pending.activation_cost.as_ref(),
+                        pending.activation_residual,
+                        &mut events,
+                    )?
+                } else {
+                    // CR 601.2c + CR 601.2d + CR 601.2f: Targets and their division are now
+                    // committed, so the total cost — including any target-dependent
+                    // surcharge (Strive, CR 207.2c) — is finally determinable. Route through
+                    // the single cost-determination authority every other post-target-
+                    // selection path uses (`casting_targets::handle_select_targets` /
+                    // `handle_choose_target`) instead of calling `finalize_cast` directly
+                    // with the stale cost that was locked in at `ChooseXValue` time, before
+                    // targets (and hence any per-target surcharge) were known.
+                    //
+                    // CR 601.2h ("Unpayable costs can't be paid"): mirror
+                    // `finalize_mana_payment`'s `pending_for_restore` pattern
+                    // (casting_costs.rs ~8623-8627/8778-8787) — `finish_pending_cast_cost_or_pay`'s
+                    // downstream chain has no restore-on-error wrapper of its own, and
+                    // `state.pending_cast` is already `None` here (unlike
+                    // `handle_select_targets`, whose `pending_cast` lives inside the
+                    // `WaitingFor::TargetSelection` variant and so is never destructively
+                    // taken). Without this clone-and-restore, a recomputed cost that turns
+                    // out unpayable would return `Err` with `state.pending_cast` gone while
+                    // `state.waiting_for` still reports `DistributeAmong` — a resubmitted
+                    // `DistributeAmong` action would then fall through to the
+                    // resolution-time continuation branch below instead of being cleanly
+                    // rejected.
+                    let pending_for_restore = pending.clone();
+                    let ability = pending.ability.clone();
+                    let cost = pending.cost.clone();
+                    match casting_costs::finish_pending_cast_cost_or_pay(
+                        state,
+                        p,
+                        *pending,
+                        ability,
+                        cost,
+                        &mut events,
+                    ) {
+                        Ok(waiting_for) => waiting_for,
+                        Err(err) => {
+                            state.pending_cast = Some(pending_for_restore);
+                            return Err(err);
+                        }
                     }
                 }
             } else if let Some(mut pending_trigger) = state.pending_trigger.take() {

@@ -845,6 +845,7 @@ fn walk_cost(cost: &AbilityCost, out: &mut Vec<String>) {
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
         | AbilityCost::Blight { .. }
@@ -1160,7 +1161,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
-        | Effect::ForEachCategoryExile { .. }
+        | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::EachPlayerCopyChosen { .. }

@@ -1009,6 +1009,11 @@ fn pay_ability_cost_inner(
         | AbilityCost::Mill { .. }
         | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
+        // CR 701.3d + CR 601.2h: A non-self unattach cost is paid by the
+        // interactive `WaitingFor::PayCost { kind: UnattachFrom }` detour before
+        // this resume runs, so this arm is an idempotent no-op (mirrors the
+        // non-self Exile/Sacrifice interactive-cost arms).
+        | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Behold { .. } => {}
         AbilityCost::Discard { .. } | AbilityCost::NinjutsuFamily { .. } => {
             // At Activation these shapes are intercepted by the interactive
@@ -1187,6 +1192,9 @@ fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Unattach
+        // CR 701.3d: an unattach-from cost is paid at activation via the
+        // interactive `PayCost { UnattachFrom }` detour, never at resolution.
+        | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Exert
         | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
@@ -1318,6 +1326,9 @@ fn can_pay_resolution(
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Unattach
+        // CR 701.3d: an unattach-from cost is an activation cost, not a
+        // resolution-time cost; refuse here like the unit `Unattach`.
+        | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Sacrifice(_)
         | AbilityCost::Exile { .. }
@@ -1429,6 +1440,10 @@ mod tests {
                 from_zone: None,
             },
             AbilityCost::Unattach => AbilityCost::Unattach,
+            AbilityCost::UnattachFrom { .. } => AbilityCost::UnattachFrom {
+                filter: TargetFilter::Any,
+                count: 1,
+            },
             AbilityCost::Mill { .. } => AbilityCost::Mill { count: 1 },
             AbilityCost::Exert => AbilityCost::Exert,
             AbilityCost::Blight { .. } => AbilityCost::Blight { count: 1 },
@@ -1544,6 +1559,10 @@ mod tests {
                 from_zone: None,
             },
             AbilityCost::Unattach,
+            AbilityCost::UnattachFrom {
+                filter: TargetFilter::Any,
+                count: 1,
+            },
             AbilityCost::Mill { count: 0 },
             AbilityCost::Exert,
             AbilityCost::Blight { count: 0 },

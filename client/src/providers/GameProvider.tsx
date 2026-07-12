@@ -669,7 +669,7 @@ export function GameProvider({
             }
           }
           if (event.type === "stateChanged") {
-            processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries);
           }
           if (event.type === "guestConnected") {
             notifyOpponentJoined(tRef.current);
@@ -1017,11 +1017,12 @@ export function GameProvider({
             if (needAdapter) {
               useGameStore.setState({ adapter: wsAdapter });
             }
-            processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries);
             useMultiplayerStore.getState().setConnectionStatus("connected");
+            const wsState = event.snapshot.state;
             if (
-              event.state.match_phase === "Completed"
-              || (!event.state.match_phase && event.state.waiting_for.type === "GameOver")
+              wsState.match_phase === "Completed"
+              || (!wsState.match_phase && wsState.waiting_for.type === "GameOver")
             ) {
               clearActiveGame();
             }

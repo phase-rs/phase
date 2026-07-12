@@ -16,6 +16,8 @@ Review for gaps: things that are missing or wrong. Do not spend findings on styl
 5. If the scope is a PR touching engine/parser source, the parse-diff sticky comment (marker `<!-- coverage-parse-diff -->`) is required evidence: fetch its full body and confront the card-level diff against the PR's claimed scope. Unexplained gained/lost/changed cards are findings (unintended parser blast radius). A *Baseline pending* body means the diff is unavailable — flag it so the handler brings the branch current to regenerate it; an absent comment despite changed engine source means CI evidence is missing for the current head.
 6. Report findings only. Silence means LGTM.
 
+When `pr-contribution-handler` explicitly requests the manual quality gate, add `Quality Gate: PASS|FAIL` before findings. PASS requires all three current-PR facts: (1) claimed parse-impact count equals the measured parse-diff count and the normalized card sets are identical, using the full artifact when the sticky comment truncates examples; (2) the change is at an existing authority/right seam and reuses its vocabulary; and (3) a production-pipeline test is demonstrated to fail when the production change is reverted. On PASS, return the applicable existing praise tokens (`right-seam`, `scope-discipline`, `discriminating-runtime-test`, `parameterized-not-proliferated`) for the ordinary review/enqueue event. Never infer quality from Tier or standing and never create a `quality_recommended` event.
+
 Skip checks CI already enforces:
 
 - `scripts/check-parser-combinators.sh`

@@ -1178,7 +1178,7 @@ pub fn candidate_actions_broad_with_probe(
                 })
                 .collect()
         }
-        // CR 700.2: Choose card(s) from a tracked set (exiled/revealed cards).
+        // CR 608.2d: Choose card(s) from a tracked set (exiled/revealed cards).
         WaitingFor::ChooseFromZoneChoice {
             player,
             cards,

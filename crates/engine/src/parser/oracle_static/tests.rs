@@ -15,6 +15,73 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 
+// CR 205.1b + CR 604.1: a dynamic "gets +N/+M for each X" pump may carry a
+// trailing conjunct the for-each path used to drop (it only recovered trailing
+// keywords): "and is a <Subtype> in addition to its other types" (Reaper's
+// Scythe) or "and has \"<quoted ability>\"" (Rakdos Riteknife).
+#[test]
+fn dynamic_for_each_pump_recovers_trailing_subtype_addition() {
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +1/+1 for each soul counter on this Equipment and is an Assassin in addition to its other types.",
+    );
+    assert_eq!(defs.len(), 1);
+    let mods = &defs[0].modifications;
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })),
+        "dynamic pump lost: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Assassin".to_string()
+        }),
+        "trailing 'is an Assassin' dropped: {mods:?}"
+    );
+}
+
+#[test]
+fn dynamic_for_each_pump_recovers_trailing_quoted_ability() {
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +1/+0 for each blood counter on this Equipment and has \"{T}, Sacrifice a creature: Put a blood counter on this permanent.\"",
+    );
+    assert_eq!(defs.len(), 1);
+    let mods = &defs[0].modifications;
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })),
+        "dynamic pump lost: {mods:?}"
+    );
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })),
+        "trailing quoted ability dropped: {mods:?}"
+    );
+}
+
+// Regression: a for-each pump with only a trailing KEYWORD is unchanged and gains
+// no spurious subtype/grant.
+#[test]
+fn dynamic_for_each_pump_trailing_keyword_unchanged() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+0 for each Mountain you control and has first strike.",
+    );
+    assert_eq!(defs.len(), 1);
+    let mods = &defs[0].modifications;
+    assert!(mods
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })));
+    assert!(mods.contains(&ContinuousModification::AddKeyword {
+        keyword: Keyword::FirstStrike
+    }));
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddSubtype { .. } | ContinuousModification::GrantAbility { .. }
+        )),
+        "keyword-only pump must not gain spurious mods: {mods:?}"
+    );
+}
+
 /// CR 207.2c: an ability word is italic flavor with no rules meaning. A leading
 /// ability-word label on a subject-anchored static must be stripped so the static
 /// still parses; a leading label that is NOT a recognized ability word must be
@@ -9762,6 +9829,30 @@ fn tokens_you_control_grant_spans_all_token_permanents() {
     );
 }
 
+// Issue #5599: a granted ability's `description` is a serialized, user-visible
+// field. The compound-subject anthem path stripped its trailing turn condition
+// on the LOWERCASED predicate and emitted the lowercase buffer, so Brightcap
+// Badger's "{T}: Add {G}." rendered as "{t}: add {g}.". The description must keep
+// its printed case.
+#[test]
+fn compound_subject_granted_ability_description_keeps_original_case() {
+    let def =
+        parse_static_line("Each Fungus and Saproling you control has \"{T}: Add {G}.\"").unwrap();
+    let ContinuousModification::GrantAbility { definition } = def
+        .modifications
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("compound-subject anthem must grant the quoted ability")
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        definition.description.as_deref(),
+        Some("{T}: Add {G}."),
+        "granted-ability description must keep printed case, not the lowercased parse buffer"
+    );
+}
+
 // CR 702.95 + CR 613.1f: A soulbond pair grants a QUOTED activated/triggered
 // ability to both paired creatures — "As long as ~ is paired with another
 // creature, each of those creatures has "<ability>."". The granted ability's own
@@ -10691,7 +10782,8 @@ fn static_legend_rule_commanders_you_control() {
 
 #[test]
 fn static_cant_cause_sacrifice_or_exile_creature_tokens() {
-    // CR 603.2 + CR 609.3: The Master, Multiplied.
+    // CR 603.2 + CR 101.2: The Master, Multiplied — the "can't" effect takes
+    // precedence over the triggered ability directing the sacrifice/exile.
     let def = parse_static_line(
         "Triggered abilities you control can't cause you to sacrifice or exile creature tokens you control.",
     )
@@ -13446,6 +13538,69 @@ fn typed_filter_for_subtype_peels_leading_supertype() {
         "plain subtype must not gain a supertype, got {:?}",
         plain.properties
     );
+}
+
+// CR 110.5a + CR 506.3: a bare battlefield descriptor ("Untapped"/"Tapped")
+// used as a whole creature descriptor names a status the creature HAS (CR 110.5a:
+// "status is not a characteristic") or a combat role it's in (CR 506.3), not a
+// creature subtype. The single subtype-filter authority must resolve it to a
+// typed FilterProp instead of fabricating a zero-match Subtype("Untapped").
+#[test]
+fn typed_filter_for_subtype_resolves_bare_status_adjective() {
+    let untapped = typed_filter_for_subtype("Untapped");
+    assert!(
+        untapped.get_subtype().is_none(),
+        "must not fabricate a subtype"
+    );
+    assert!(untapped.type_filters.contains(&TypeFilter::Creature));
+    assert!(untapped.properties.contains(&FilterProp::Untapped));
+
+    let tapped = typed_filter_for_subtype("Tapped");
+    assert!(tapped.properties.contains(&FilterProp::Tapped));
+
+    // Regression: a real subtype whose name is not a status word is unchanged.
+    let goblin = typed_filter_for_subtype("Goblin");
+    assert_eq!(goblin.get_subtype(), Some("Goblin"));
+    assert!(
+        !goblin
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Tapped | FilterProp::Untapped)),
+        "plain subtype must not gain a status prop, got {:?}",
+        goblin.properties
+    );
+}
+
+#[test]
+fn untapped_creatures_you_control_anthem_uses_status_prop() {
+    // Builder's Blessing / Castle — "Untapped creatures you control get +0/+2."
+    let def = parse_static_line("Untapped creatures you control get +0/+2.").unwrap();
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected typed affected filter, got {:?}", def.affected);
+    };
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert!(
+        tf.get_subtype().is_none(),
+        "must not fabricate Subtype(\"Untapped\")"
+    );
+    assert!(tf.properties.contains(&FilterProp::Untapped));
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 2 }));
+}
+
+// Regression: "Other tapped creatures you control" must carry BOTH the status
+// prop and the Other exclusion (Saryth, the Viper's Fang; Augusta).
+#[test]
+fn other_tapped_creatures_you_control_keeps_status_and_another() {
+    let def = parse_static_line("Other tapped creatures you control have vigilance.").unwrap();
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected typed affected filter, got {:?}", def.affected);
+    };
+    assert!(tf.properties.contains(&FilterProp::Tapped));
+    assert!(tf.properties.contains(&FilterProp::Another));
+    assert!(tf.get_subtype().is_none());
 }
 
 #[test]
@@ -22529,11 +22684,11 @@ fn cant_be_activated_sorcerous_spyglass_chosen_name_with_mana_exemption() {
     }
 }
 
-// --- CR 701.23 + CR 609.3: CantSearchLibrary (Ashiok class) ---
+// --- CR 701.23 + CR 101.2: CantSearchLibrary ("can't" beats "can"; Ashiok class) ---
 
 #[test]
 fn cant_search_library_ashiok() {
-    // CR 701.23 + CR 609.3: Ashiok, Dream Render — "Spells and abilities your
+    // CR 701.23 + CR 101.2: Ashiok, Dream Render — "Spells and abilities your
     // opponents control can't cause their controller to search their library."
     let def = parse_static_line(
             "Spells and abilities your opponents control can't cause their controller to search their library.",
@@ -22564,7 +22719,8 @@ fn cant_search_library_controller_variant() {
 
 #[test]
 fn cant_search_library_mindlock_orb_players() {
-    // CR 701.23 + CR 609.3: Mindlock Orb — blanket all-players search prohibition.
+    // CR 701.23 + CR 101.2: Mindlock Orb — blanket all-players search prohibition;
+    // the "can't" effect takes precedence over any effect directing a search.
     let def = parse_static_line("Players can't search libraries.")
         .expect("Mindlock Orb Oracle text should parse");
     assert_eq!(
@@ -22590,7 +22746,8 @@ fn cant_search_library_each_player_may_not_variant() {
 
 #[test]
 fn cant_search_library_opponents_form() {
-    // CR 701.23 + CR 609.3: opponent-scoped direct search prohibition.
+    // CR 701.23 + CR 101.2: opponent-scoped direct search prohibition — the "can't"
+    // effect takes precedence over any effect directing a search.
     let def = parse_static_line("Your opponents can't search libraries.")
         .expect("opponent-scoped direct search prohibition should parse");
     assert_eq!(
@@ -27940,4 +28097,158 @@ fn combat_relation_subject_static_binds_source_anchored_filter() {
             "{line:?}: expected a source-anchored BlockingOrBlockedBy prop, got {props:?}"
         );
     }
+}
+
+/// #5257 Rayami, First of the Fallen — parser shape. "As long as an exiled
+/// creature card with a blood counter on it has flying, Rayami has flying. The
+/// same is true for first strike, ..., and vigilance." Each listed keyword is an
+/// INDEPENDENT conditional grant, so the line must yield one continuous
+/// `SelfRef` static per keyword, each gated on `IsPresent { <exiled creature +
+/// blood counter + WithKeyword(K)> }` with modification `AddKeyword(K)`.
+///
+/// Discriminator: on `main` this yields a SINGLE static whose condition falls
+/// back to `StaticCondition::Unrecognized`, so all 13 keywords apply
+/// unconditionally — the reported bug (Rayami always has every keyword).
+#[test]
+fn rayami_exiled_keyword_grant_splits_into_conditional_per_keyword_statics() {
+    // `~` is the normalized self-reference the pipeline substitutes for the card
+    // name before static-line dispatch.
+    let line = "As long as an exiled creature card with a blood counter on it has flying, ~ has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, protection, reach, trample, and vigilance.";
+    let statics = super::shared::parse_static_line_multi(line);
+
+    assert_eq!(
+        statics.len(),
+        13,
+        "expected one conditional grant per listed keyword, got {statics:?}"
+    );
+
+    for s in &statics {
+        let Some(ContinuousModification::AddKeyword { keyword }) = s.modifications.first() else {
+            panic!(
+                "each static grants exactly one keyword, got {:?}",
+                s.modifications
+            );
+        };
+        assert_eq!(
+            s.affected,
+            Some(TargetFilter::SelfRef),
+            "the grant is on the source itself"
+        );
+        let Some(StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(tf)),
+        }) = &s.condition
+        else {
+            panic!(
+                "expected an independently-evaluated IsPresent(Typed) condition, got {:?}",
+                s.condition
+            );
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "presence check requires an exiled creature card, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::InZone {
+                zone: crate::types::zones::Zone::Exile
+            }),
+            "presence check is scoped to the exile zone, got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::WithKeyword {
+                value: keyword.clone()
+            }),
+            "each keyword K is granted only while an exiled card that HAS K is present, got {:?}",
+            tf.properties
+        );
+    }
+
+    let granted: Vec<Keyword> = statics
+        .iter()
+        .filter_map(|s| match s.modifications.first() {
+            Some(ContinuousModification::AddKeyword { keyword }) => Some(keyword.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        granted.contains(&Keyword::Flying),
+        "grants flying: {granted:?}"
+    );
+    assert!(
+        granted.contains(&Keyword::Vigilance),
+        "grants vigilance: {granted:?}"
+    );
+    assert!(
+        granted.contains(&Keyword::Deathtouch),
+        "grants deathtouch: {granted:?}"
+    );
+}
+
+/// #5257 Rayami runtime discriminator: the keyword grant is CONDITIONAL and
+/// re-evaluated (CR 611.3a). With no matching exiled card, Rayami must NOT have
+/// flying; once an exiled creature card with a blood counter that itself has
+/// flying is present, Rayami gains flying — and only that keyword.
+///
+/// Discriminator: on `main` the condition is `Unrecognized`, so Rayami has
+/// flying (and every other listed keyword) unconditionally and the negative
+/// assertion flips.
+#[test]
+fn rayami_flying_grant_is_conditional_on_matching_exiled_card() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::zones::create_object;
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::Zone;
+
+    const RAYAMI: &str = "As long as an exiled creature card with a blood counter on it has flying, Rayami has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, protection, reach, trample, and vigilance.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let rayami_id = scenario
+        .add_creature_from_oracle(P0, "Rayami, First of the Fallen", 4, 4, RAYAMI)
+        .id();
+    let mut runner = scenario.build();
+    // Force layer evaluation (SBAs run, continuous effects recomputed).
+    runner.act(GameAction::PassPriority).ok();
+
+    assert!(
+        !runner.state().objects[&rayami_id].has_keyword(&Keyword::Flying),
+        "Rayami must not have flying with no matching exiled card present"
+    );
+
+    // Positive reach-guard: an exiled creature card with a blood counter that has
+    // flying. Rayami now gains flying — proving the grant path actually fires, so
+    // the negative above is a genuine conditional rather than flying being
+    // unreachable. (Seed the object directly, then re-run the continuous-effect
+    // engine — a raw state edit bypasses the normal change tracking.)
+    {
+        let state = runner.state_mut();
+        let exiled = create_object(
+            state,
+            CardId(900),
+            P0,
+            "Exiled Bat".to_string(),
+            Zone::Exile,
+        );
+        let obj = state.objects.get_mut(&exiled).expect("exiled card exists");
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.keywords.push(Keyword::Flying);
+        *obj.counters
+            .entry(CounterType::Generic("blood".to_string()))
+            .or_insert(0) += 1;
+    }
+    crate::game::layers::evaluate_layers(runner.state_mut());
+
+    assert!(
+        runner.state().objects[&rayami_id].has_keyword(&Keyword::Flying),
+        "Rayami must gain flying while an exiled flying creature card with a blood counter is present"
+    );
+    assert!(
+        !runner.state().objects[&rayami_id].has_keyword(&Keyword::Vigilance),
+        "Rayami must not gain vigilance — no exiled card has vigilance"
+    );
 }

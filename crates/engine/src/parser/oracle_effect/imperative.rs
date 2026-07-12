@@ -48,7 +48,7 @@ use crate::types::zones::Zone;
 use super::super::oracle_target::{
     parse_anaphoric_target_ref, parse_event_context_ref, parse_fight_target, parse_mass_type_union,
     parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase,
-    parse_word_bounded, resolve_pronoun_target, TargetSyntax,
+    parse_word_bounded, resolve_pronoun_target, resolve_singular_exiled_card_target, TargetSyntax,
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
@@ -1312,10 +1312,10 @@ pub(super) fn parse_one_or_more_sacrifice(
     Some((count, target, min_count))
 }
 
-/// CR 701.21a + CR 609.3: "sacrifice all <filter>" carries a mandatory
-/// count equal to the eligible object pool. This lets the sacrifice resolver's
-/// existing mandatory-all fast path perform every legal sacrifice without a
-/// one-card special case.
+/// CR 701.21a: "sacrifice all <filter>" carries a mandatory count equal to the
+/// eligible object pool (`QuantityRef::ObjectCount` over the parsed filter).
+/// This lets the sacrifice resolver's existing mandatory-all fast path perform
+/// every legal sacrifice without a one-card special case.
 pub(super) fn parse_all_sacrifice<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
@@ -3766,7 +3766,7 @@ fn try_parse_choose_owned_by_voter(
 fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
     type E<'a> = OracleError<'a>;
 
-    // CR 608.2c + CR 700.2: A standalone "Choose one." / "Choose one card."
+    // CR 608.2c + CR 608.2d: A standalone "Choose one." / "Choose one card."
     // clause (empty tail) in a resolution chain is the impulse-exile reduction
     // idiom — a preceding clause exiled one or more cards and a following clause
     // grants permission to play one of them ("Exile the top three cards of your
@@ -4708,7 +4708,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             // control gain that ability" clause can read the typed
             // `ChosenAttribute::Keyword` via
             // `ContinuousModification::AddChosenKeyword` at layer evaluation.
-            // CR 609.3 + CR 608.2d: a `DistinctFromSourceHistory` number choice
+            // CR 608.2d: a `DistinctFromSourceHistory` number choice
             // ("...that hasn't been chosen") must persist each committed value on
             // the source so successive resolutions exclude prior picks — an
             // already-chosen number is an illegal option (CR 608.2d). The same
@@ -4740,7 +4740,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             choice_optional,
             reveal: true,
         },
-        // CR 700.2: Anaphoric "choose N of them/those" → select from the tracked set
+        // CR 608.2d: Anaphoric "choose N of them/those" → select from the tracked set
         // populated by the preceding effect (RevealTop, RevealHand, ExileTop, etc.).
         ChooseImperativeAst::FromTrackedSet {
             count,
@@ -4853,6 +4853,41 @@ pub(super) fn parse_utility_imperative_ast(
                         target: TargetFilter::TriggeringSource,
                         retarget,
                     });
+                }
+                // CR 608.2k: an exile-cost anaphor ("exile a card, then copy the
+                // exiled card") disambiguates via `CostPaidObject`, not this
+                // exile-producer binding — guard so that path (handled
+                // elsewhere) is never shadowed here.
+                if ctx.current_ability_exile_cost_zone.is_none() {
+                    if let Ok((rem_lower, _)) =
+                        tag::<_, _, OracleError<'_>>("the exiled card").parse(rest_lower)
+                    {
+                        let rem = &rest[rest.len() - rem_lower.len()..];
+                        let retarget =
+                            if super::sequence::recognize_copy_retarget_clause(rem.trim()) {
+                                CopyRetargetPermission::MayChooseNewTargets
+                            } else {
+                                #[cfg(debug_assertions)]
+                                assert_no_compound_remainder(rem, text);
+                                CopyRetargetPermission::KeepOriginalTargets
+                            };
+                        // CR 406.6 + CR 607.2a + CR 707.10: "copy the exiled
+                        // card" — when no earlier clause in this SAME chain
+                        // exiled a card, the referenced exile happened in an
+                        // earlier, separately-resolved ability (ETB Imprint,
+                        // e.g. Isochron Scepter), so bind durably via
+                        // `ExiledBySource` rather than the ephemeral
+                        // chain-local `TrackedSet{0}` sentinel.
+                        return Some(UtilityImperativeAst::Copy {
+                            target: resolve_singular_exiled_card_target(
+                                ctx.chain_has_prior_exile_producer,
+                                TargetFilter::TrackedSet {
+                                    id: crate::types::identifiers::TrackedSetId(0),
+                                },
+                            ),
+                            retarget,
+                        });
+                    }
                 }
                 let (target, _rem) = if let Some((target, rem_lower)) =
                     parse_copy_stack_ability_target(rest_lower)
@@ -6005,7 +6040,7 @@ pub(super) fn parse_put_ast(
         }
     }
 
-    if let Some((effect, choice_count)) = super::try_parse_put_zone_change_parts(lower, text) {
+    if let Some((effect, choice_count)) = super::try_parse_put_zone_change_parts(lower, text, ctx) {
         return match effect {
             Effect::ChangeZoneAll {
                 origin,
@@ -9101,7 +9136,7 @@ pub(super) fn parse_imperative_family_ast(
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
             }),
 
-        // Choose (CR 700.2)
+        // Choose (CR 608.2d)
         "choose" | "secretly" => parse_choose_discard_rest_of_hand(text, lower)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)))
             .or_else(|| {

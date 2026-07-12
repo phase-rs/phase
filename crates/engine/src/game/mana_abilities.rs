@@ -1005,6 +1005,13 @@ pub fn handle_exile_for_mana_ability(
                 "Selected card not eligible for mana ability exile cost".to_string(),
             ));
         }
+        // CR 118.10: One payment cannot apply to both this mana ability cost
+        // and a pending spell sacrifice cost.
+        if deferred_spell_sacrifice_reserved(state, *id) {
+            return Err(EngineError::InvalidAction(
+                "Selected card is already committed to a spell sacrifice cost".to_string(),
+            ));
+        }
     }
 
     // CR 117.1 + CR 400.7j + CR 608.2k: Capture the cost-paid object's public
@@ -1047,6 +1054,13 @@ pub fn handle_sacrifice_for_mana_ability(
                 "Selected permanent not eligible for mana ability sacrifice cost".to_string(),
             ));
         }
+        // CR 118.10: One payment cannot apply to both this mana ability cost
+        // and a pending spell sacrifice cost.
+        if deferred_spell_sacrifice_reserved(state, *id) {
+            return Err(EngineError::InvalidAction(
+                "Selected permanent is already committed to a spell sacrifice cost".to_string(),
+            ));
+        }
     }
 
     let captured = chosen.first().and_then(|id| {
@@ -1060,6 +1074,15 @@ pub fn handle_sacrifice_for_mana_ability(
     updated.chosen_sacrificed_battlefield = chosen.to_vec();
     updated.cost_paid_object = captured;
     advance_mana_ability_activation(state, updated, events)
+}
+
+fn deferred_spell_sacrifice_reserved(state: &GameState, object_id: ObjectId) -> bool {
+    state.pending_cast.as_ref().is_some_and(|pending| {
+        pending
+            .deferred_sacrificed_permanents
+            .iter()
+            .any(|selection| selection.object_id == object_id)
+    })
 }
 
 pub fn handle_discard_for_mana_ability(
@@ -1479,6 +1502,10 @@ pub(super) fn advance_mana_ability_activation(
         if let Some((count, permanents)) =
             sacrifice_cost_choice(state, pending.player, pending.source_id, &ability_def.cost)
         {
+            let permanents: Vec<ObjectId> = permanents
+                .into_iter()
+                .filter(|id| !deferred_spell_sacrifice_reserved(state, *id))
+                .collect();
             if permanents.len() < count {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough eligible permanents to sacrifice for mana ability cost".to_string(),
@@ -1950,6 +1977,11 @@ where
         }
     } else {
         for chosen_id in &chosen {
+            if deferred_spell_sacrifice_reserved(state, *chosen_id) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Selected card is already committed to a spell sacrifice cost".to_string(),
+                ));
+            }
             if !legal.contains(chosen_id) {
                 return Err(EngineError::ActionNotAllowed(
                     "Selected card does not match the exile cost".to_string(),
@@ -1997,6 +2029,12 @@ where
     K: Iterator<Item = ObjectId>,
     L: Iterator<Item = ObjectId>,
 {
+    if cost_sacrifices_reserved_source(state, source_id, cost) {
+        return Err(EngineError::ActionNotAllowed(
+            "This permanent is already committed to a spell sacrifice cost".to_string(),
+        ));
+    }
+
     match cost {
         Some(AbilityCost::Tap) => tap_source(state, source_id, events)?,
         // CR 605.3a + CR 601.2h: Top-level mana sub-cost (e.g. hypothetical
@@ -2098,6 +2136,11 @@ where
             if matches!(cost.target, TargetFilter::SelfRef)
                 && cost.requirement == crate::types::ability::SacrificeRequirement::count(1) =>
         {
+            if deferred_spell_sacrifice_reserved(state, source_id) {
+                return Err(EngineError::ActionNotAllowed(
+                    "This permanent is already committed to a spell sacrifice cost".to_string(),
+                ));
+            }
             if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id) {
                 return Err(EngineError::ActionNotAllowed(
                     "Cannot sacrifice this permanent as a cost".to_string(),
@@ -2251,6 +2294,12 @@ where
                             && cost.requirement
                                 == crate::types::ability::SacrificeRequirement::count(1) =>
                     {
+                        if deferred_spell_sacrifice_reserved(state, source_id) {
+                            return Err(EngineError::ActionNotAllowed(
+                                "This permanent is already committed to a spell sacrifice cost"
+                                    .to_string(),
+                            ));
+                        }
                         if super::static_abilities::player_cant_sacrifice_as_cost(
                             state, player, source_id,
                         ) {
@@ -2456,6 +2505,26 @@ where
     }
 
     Ok(())
+}
+
+fn cost_sacrifices_reserved_source(
+    state: &GameState,
+    source_id: ObjectId,
+    cost: &Option<AbilityCost>,
+) -> bool {
+    deferred_spell_sacrifice_reserved(state, source_id)
+        && cost.as_ref().is_some_and(ability_cost_sacrifices_source)
+}
+
+fn ability_cost_sacrifices_source(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Sacrifice(cost) => {
+            matches!(cost.target, TargetFilter::SelfRef)
+                && cost.requirement == crate::types::ability::SacrificeRequirement::count(1)
+        }
+        AbilityCost::Composite { costs } => costs.iter().any(ability_cost_sacrifices_source),
+        _ => false,
+    }
 }
 
 /// CR 605.1a + CR 701.17a-b: Pay a `Mill` cost component of a mana ability by
@@ -3104,11 +3173,11 @@ fn exile_cost_choice(
     if zone == Zone::Library {
         return None;
     }
-    Some((
-        count as usize,
-        zone,
-        eligible_exile_cost_objects(state, player, source_id, zone, filter, count),
-    ))
+    let cards = eligible_exile_cost_objects(state, player, source_id, zone, filter, count)
+        .into_iter()
+        .filter(|id| !deferred_spell_sacrifice_reserved(state, *id))
+        .collect();
+    Some((count as usize, zone, cards))
 }
 
 fn prepare_deterministic_exile_cost_selection(

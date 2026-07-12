@@ -232,6 +232,19 @@ export class EngineWorkerClient {
     );
   }
 
+  /**
+   * Atomic state + legal-actions read. The worker services this as one
+   * synchronous block, so the pair can never straddle an engine advance.
+   * Same timeout class as `getState`. The caller (`WasmAdapter.getSnapshot`)
+   * stamps the `seq` on arrival.
+   */
+  async getSnapshot(): Promise<{ state: GameState; legalResult: LegalActionsResult }> {
+    return this.request<{ state: GameState; legalResult: LegalActionsResult }>(
+      { type: "getSnapshot" },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
   async getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult> {
     return this.request<LegalActionsResult>(
       { type: "getLegalActionsForViewer", viewerId },

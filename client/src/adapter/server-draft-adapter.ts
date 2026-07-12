@@ -1,5 +1,6 @@
 import type {
   EngineAdapter,
+  EngineSnapshot,
   GameAction,
   GameEvent,
   GameLogEntry,
@@ -9,7 +10,7 @@ import type {
   PlayerId,
   SubmitResult,
 } from "./types";
-import { AdapterError, AdapterErrorCode } from "./types";
+import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
@@ -92,9 +93,13 @@ export class ServerDraftAdapter implements EngineAdapter {
   private draftView: DraftPlayerView | null = null;
 
   // ── Game-phase state ───────────────────────────────────────────────
-  private gameState: GameState | null = null;
+  /**
+   * The single cached engine pair, rebuilt (and re-stamped) once per inbound
+   * state-bearing message — same pattern as the P2P guest / ws adapters, so
+   * `getState`/`getLegalActions` can never straddle two updates.
+   */
+  private snapshot: EngineSnapshot | null = null;
   private _playerId: PlayerId | null = null;
-  private _legalActions: LegalActionsResult = { actions: [], autoPassRecommended: false };
   private activeMatchId: string | null = null;
   private _gameCode: string | null = null;
 
@@ -188,10 +193,10 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   async getState(): Promise<GameState> {
-    if (!this.gameState) {
+    if (!this.snapshot) {
       throw new AdapterError("WS_ERROR", "No game state available", false);
     }
-    return this.gameState;
+    return this.snapshot.state;
   }
 
   getAiAction(): GameAction | null {
@@ -199,7 +204,21 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
-    return this._legalActions;
+    return this.snapshot?.legalResult ?? EMPTY_LEGAL_ACTIONS;
+  }
+
+  async getSnapshot(): Promise<EngineSnapshot> {
+    if (!this.snapshot) {
+      throw new AdapterError("WS_ERROR", "No game state available", false);
+    }
+    return this.snapshot;
+  }
+
+  /** Rebuild the cached pair from an inbound state-bearing message, stamping
+   *  it with a fresh globally-monotonic seq at arrival. */
+  private cacheSnapshot(state: GameState, legalResult: LegalActionsResult): EngineSnapshot {
+    this.snapshot = { state, legalResult, seq: nextSnapshotSeq() };
+    return this.snapshot;
   }
 
   restoreState(): void {
@@ -561,19 +580,21 @@ export class ServerDraftAdapter implements EngineAdapter {
           legal_actions_by_object?: Record<string, GameAction[]>;
           derived?: GameState["derived"];
         };
-        this.gameState = { ...data.state, derived: data.derived ?? data.state.derived };
+        const startedSnapshot = this.cacheSnapshot(
+          { ...data.state, derived: data.derived ?? data.state.derived },
+          {
+            actions: data.legal_actions ?? [],
+            autoPassRecommended: data.auto_pass_recommended ?? false,
+            spellCosts: data.spell_costs,
+            legalActionsByObject: data.legal_actions_by_object,
+          },
+        );
         this._playerId = data.your_player;
-        this._legalActions = {
-          actions: data.legal_actions ?? [],
-          autoPassRecommended: data.auto_pass_recommended ?? false,
-          spellCosts: data.spell_costs,
-          legalActionsByObject: data.legal_actions_by_object,
-        };
         this.emit({
           type: "gameStateUpdated",
-          state: this.gameState,
+          state: startedSnapshot.state,
           events: [],
-          legalResult: this._legalActions,
+          legalResult: startedSnapshot.legalResult,
         });
         break;
       }
@@ -589,13 +610,15 @@ export class ServerDraftAdapter implements EngineAdapter {
           log_entries?: GameLogEntry[];
           derived?: GameState["derived"];
         };
-        this.gameState = { ...data.state, derived: data.derived ?? data.state.derived };
-        this._legalActions = {
-          actions: data.legal_actions ?? [],
-          autoPassRecommended: data.auto_pass_recommended ?? false,
-          spellCosts: data.spell_costs,
-          legalActionsByObject: data.legal_actions_by_object,
-        };
+        const updateSnapshot = this.cacheSnapshot(
+          { ...data.state, derived: data.derived ?? data.state.derived },
+          {
+            actions: data.legal_actions ?? [],
+            autoPassRecommended: data.auto_pass_recommended ?? false,
+            spellCosts: data.spell_costs,
+            legalActionsByObject: data.legal_actions_by_object,
+          },
+        );
         if (this.pendingResolve) {
           this.emit({ type: "actionPendingChanged", pending: false });
           this.pendingResolve({ events: data.events, log_entries: data.log_entries });
@@ -604,9 +627,9 @@ export class ServerDraftAdapter implements EngineAdapter {
         } else {
           this.emit({
             type: "gameStateUpdated",
-            state: this.gameState,
+            state: updateSnapshot.state,
             events: data.events,
-            legalResult: this._legalActions,
+            legalResult: updateSnapshot.legalResult,
             logEntries: data.log_entries,
           });
         }
@@ -633,7 +656,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.phase = "between_rounds";
         this.activeMatchId = null;
         this._gameCode = null;
-        this.gameState = null;
+        this.snapshot = null;
         this.emit({ type: "actionPendingChanged", pending: false });
         this.emit({
           type: "gameOver",
@@ -757,7 +780,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       this.ws.close();
       this.ws = null;
     }
-    this.gameState = null;
+    this.snapshot = null;
     this._playerId = null;
     this._gameCode = null;
     this.draftCode = null;

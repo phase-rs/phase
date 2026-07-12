@@ -957,7 +957,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
-        | Effect::ForEachCategoryExile { .. }
+        | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::EachPlayerCopyChosen { .. }
@@ -1539,6 +1539,7 @@ fn fold_cost(acc: &mut NodeAcc, cost: &AbilityCost) {
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
         | AbilityCost::Reveal { .. }

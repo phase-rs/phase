@@ -11,10 +11,10 @@ use super::ability::{
     CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
     ChosenAttribute, Comparator, ContinuousModification, ControlWindow, CopyScale,
     CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr,
-    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
-    TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause, TriggerCondition,
-    TriggerDefinition,
+    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, PileSource,
+    QuantityExpr, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
+    StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause,
+    TriggerCondition, TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, TokenImageRef};
@@ -2051,6 +2051,12 @@ impl ActivationResidual {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredSacrificeSelection {
+    pub object_id: ObjectId,
+    pub filter: TargetFilter,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingCast {
     pub object_id: ObjectId,
     pub card_id: CardId,
@@ -2158,6 +2164,11 @@ pub struct PendingCast {
     /// quantities can resolve later.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub convoked_creatures: Vec<ObjectId>,
+    /// CR 601.2g + CR 601.2h: Non-mana spell additional-cost permanents selected
+    /// for sacrifice, but whose actual zone move is deferred until the final
+    /// payment commit so mana abilities can be activated first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_sacrificed_permanents: Vec<DeferredSacrificeSelection>,
     /// CR 118.3a: Player-directed pin hints recorded during
     /// `WaitingFor::ManaPayment`. Each id names a pool `ManaUnit` the caster
     /// prefers to spend first; pins are priority hints, not removals — the unit
@@ -2238,6 +2249,7 @@ impl PendingCast {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -3033,6 +3045,16 @@ pub enum PayCostKind {
     ExileFromManaZone {
         zone: Zone,
     },
+    /// CR 701.3d + CR 601.2h: Unattach a matching attachment from the source
+    /// host as an activation cost (Captain America's Throw). `filter` is the
+    /// attachment-implying `TargetFilter` the choices were drawn from; the
+    /// handler re-validates that each chosen object is still on the battlefield,
+    /// controlled by the player, and attached to the source before detaching it.
+    /// The Equipment stays on the battlefield (CR 701.3d) and its snapshot
+    /// becomes the resolving ability's cost-referent (CR 608.2k).
+    UnattachFrom {
+        filter: TargetFilter,
+    },
     RemoveCounter {
         counter_type: CounterMatch,
         /// CR 118.3 + CR 122.1: number of counters to remove from the one
@@ -3696,7 +3718,7 @@ pub enum WaitingFor {
         up_to: bool,
         destination: Zone,
     },
-    /// CR 700.2: Player selects card(s) from a tracked set (e.g., exiled cards).
+    /// CR 608.2d: Player selects card(s) from a tracked set (e.g., exiled cards).
     /// Chosen/unchosen cards flow into sub-abilities via pending_continuation,
     /// unlike DigChoice which moves to fixed zones.
     ChooseFromZoneChoice {
@@ -4631,6 +4653,9 @@ pub enum WaitingFor {
         unchosen_pile_effect: Option<Box<super::ability::AbilityDefinition>>,
         /// Source ability's object ID.
         source_id: ObjectId,
+        /// CR 700.3: Where the objects originate (battlefield, library top, exile).
+        #[serde(default = "default_pile_source_battlefield")]
+        pile_source: PileSource,
     },
     /// CR 700.3 + CR 700.3a + CR 101.4: A subject is partitioning their own
     /// objects into two piles for an `Effect::SeparateIntoPiles`. `pile_a`
@@ -4665,6 +4690,9 @@ pub enum WaitingFor {
         unchosen_pile_effect: Option<Box<super::ability::AbilityDefinition>>,
         /// Source ability's object ID — for logging and state filter echoes.
         source_id: ObjectId,
+        /// CR 700.3: Where the objects originate (battlefield, library top, exile).
+        #[serde(default = "default_pile_source_battlefield")]
+        pile_source: PileSource,
     },
     /// CR 700.3 + CR 101.4c: The chooser picks one pile (A or B) per
     /// completed `PileResult`. CR 101.4c allows the chooser to make
@@ -4687,6 +4715,9 @@ pub enum WaitingFor {
         unchosen_pile_effect: Option<Box<super::ability::AbilityDefinition>>,
         /// Source ability's object ID — for logging and state filter echoes.
         source_id: ObjectId,
+        /// CR 700.3: Where the objects originate (battlefield, library top, exile).
+        #[serde(default = "default_pile_source_battlefield")]
+        pile_source: PileSource,
     },
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
@@ -9787,6 +9818,12 @@ impl PartialEq for GameState {
 
 impl Eq for GameState {}
 
+/// Default pile source is Battlefield (backward-compatible with pre-existing
+/// serialized `WaitingFor::SeparatePiles*` states).
+fn default_pile_source_battlefield() -> PileSource {
+    PileSource::Battlefield
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10602,6 +10639,7 @@ mod tests {
                 declared_kickers_to_pay: Vec::new(),
                 declined_kickers: Vec::new(),
                 convoked_creatures: Vec::new(),
+                deferred_sacrificed_permanents: Vec::new(),
                 pinned_pool_units: Vec::new(),
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
@@ -10968,6 +11006,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,

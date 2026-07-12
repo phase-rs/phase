@@ -60,6 +60,7 @@ type EngineRequest =
   | { type: "getState"; id: number }
   | { type: "getFilteredState"; id: number; viewerId: number }
   | { type: "getLegalActions"; id: number }
+  | { type: "getSnapshot"; id: number }
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
   | { type: "getViewerSnapshot"; id: number; viewerId: number }
   | { type: "getAiAction"; id: number; difficulty: string; playerId: number }
@@ -286,6 +287,25 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           break;
         }
         result(msg.id, r);
+        break;
+      }
+
+      case "getSnapshot": {
+        // Atomicity guarantee: these two reads form ONE synchronous block with
+        // no yield point between them, and the only engine mutation
+        // (`submit_action`) is itself a single synchronous call. This handler
+        // is `async` and handlers CAN interleave at await points (e.g.
+        // submitAction's Debug/CreateCard card-DB fetch), so the absence of an
+        // `await` between the two calls below is exactly what makes the pair
+        // atomic: a snapshot can never observe a half-applied action, nor
+        // straddle two engine versions.
+        const state = get_game_state();
+        const legalResult = get_legal_actions_js();
+        if (state === null || legalResult === null) {
+          error(msg.id, "NOT_INITIALIZED: get_game_state/get_legal_actions_js returned null");
+          break;
+        }
+        result(msg.id, { state, legalResult });
         break;
       }
 

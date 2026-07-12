@@ -870,6 +870,7 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
         if let Ok((after_clause, condition)) =
             nom_cond::parse_you_control_or_returned_this_way_condition(rest)
                 .or_else(|_| nom_cond::parse_you_put_into_hand_this_way_condition(rest))
+                .or_else(|_| nom_cond::parse_you_put_counters_on_type_this_way_condition(rest))
                 .or_else(|_| nom_cond::parse_you_draw_this_way_condition(rest))
         {
             let body_lower = strip_reflexive_conditional_body_separator(after_clause);
@@ -2323,7 +2324,7 @@ pub(super) fn strip_player_property_superlative_conditional(
     )
 }
 
-/// CR 608.2e + CR 122.1b: Parse "if that creature has <keyword>[ and ~ doesn't], <effect>".
+/// CR 608.2c + CR 122.1b: Parse "if that creature has <keyword>[ and ~ doesn't], <effect>".
 ///
 /// The optional " and ~ doesn't" conjunct (Super-Adaptoid: "If that creature
 /// has haste and Super-Adaptoid doesn't, put a haste counter on
@@ -3764,7 +3765,7 @@ fn build_instead_def(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
-    // CR 608.2e: An additional-cost-paid "instead" fold ("if it/this spell was
+    // CR 608.2c: An additional-cost-paid "instead" fold ("if it/this spell was
     // kicked, ... instead") is owned by `strip_additional_cost_conditional`,
     // which folds it to the dedicated `AdditionalCostPaidInstead`. Defer here so
     // the generic `parse_condition_text` recognizer (which now classifies "was
@@ -4049,9 +4050,11 @@ fn counter_threshold_to_condition(
     }
 }
 
-/// CR 609.3: Compose a `QuantityExpr::Difference` from a two-operand quantity
+/// CR 608.2c: Compose a `QuantityExpr::Difference` from a two-operand quantity
 /// comparison condition — the unsigned magnitude gap between the operands, as
 /// referenced by "a number of times equal to the difference" repeat suffixes.
+/// "The difference" is an anaphoric back-reference to the operands the earlier
+/// condition text established (read the whole text, apply the rules of English).
 ///
 /// Class-general: any `AbilityCondition::QuantityCheck` yields the difference
 /// of its operands. Both `lhs` and `rhs` are already `QuantityExpr`, so they
@@ -6630,6 +6633,26 @@ mod tests {
     }
 
     #[test]
+    fn s07_if_put_counters_on_type_this_way() {
+        // Call the Spirit Dragons: "if you put +1/+1 counters on five Dragons this way".
+        let (cond, body) = strip_if_you_do_conditional(
+            "if you put +1/+1 counters on five Dragons this way, you win the game",
+        );
+        assert_eq!(body, "you win the game");
+        assert!(
+            matches!(
+                cond,
+                Some(AbilityCondition::QuantityCheck {
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 5 },
+                    ..
+                })
+            ),
+            "got {cond:?}"
+        );
+    }
+
+    #[test]
     fn s07_if_put_no_cards_into_hand_this_way_is_count_zero() {
         // Nashi: "if you put no cards into your hand this way" → TrackedSetSize == 0.
         let (cond, body) = strip_if_you_do_conditional(
@@ -7417,8 +7440,8 @@ mod tests {
 
     #[test]
     fn difference_expr_composes_unsigned_gap_from_quantity_check() {
-        // CR 609.3: a two-operand comparison yields the difference of its
-        // operands — class-general over any QuantityCheck.
+        // CR 608.2c: "the difference" back-references the two operands the earlier
+        // condition established — class-general over any QuantityCheck.
         let cond = AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::TrackedSetSize,
@@ -9085,7 +9108,7 @@ mod tests {
         ));
     }
 
-    /// CR 608.2e: Full instead-clause assembly for Fblthp's ETB draw rider.
+    /// CR 608.2c: Full instead-clause assembly for Fblthp's ETB draw rider.
     #[test]
     fn fblthp_library_origin_instead_clause() {
         let instead = try_parse_generic_instead_clause(
@@ -9108,7 +9131,7 @@ mod tests {
         ));
     }
 
-    /// CR 608.2e: ETB base draw + library-origin instead override chain.
+    /// CR 608.2c: ETB base draw + library-origin instead override chain.
     #[test]
     fn fblthp_etb_draw_chain_with_library_instead() {
         let def = parse_effect_chain(

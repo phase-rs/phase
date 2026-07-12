@@ -569,6 +569,46 @@ fn pay_activation_costs_after_target_selection(
             }));
         }
 
+        // CR 701.3d + CR 601.2c/601.2h: a targeted "unattach a matching
+        // attachment from ~" ability chooses its targets first, then surfaces the
+        // Unattach cost interactively (Captain America's Throw). The chosen
+        // Equipment's mana value drives the divided damage (CR 202.3 + CR 608.2k),
+        // so eligibility narrows to attachments whose mana value is at least the
+        // announced target count (CR 601.2c). Modeled on the non-self exile detour.
+        if let Some((count, filter)) = super::casting::find_unattach_from_cost(activation_cost) {
+            let n = distribution_targets(&assigned_ability).len() as u32;
+            let eligible = super::casting::find_eligible_unattach_for_cost_targets(
+                state,
+                player,
+                pending.object_id,
+                filter,
+                n,
+            );
+            if eligible.is_empty() {
+                // CR 733 / CR 601.2h: unpayable cost — nothing has been detached
+                // (pre-commit revert), so the activation is simply illegal.
+                return Err(EngineError::ActionNotAllowed(
+                    "No eligible Equipment to unattach with mana value >= target count".into(),
+                ));
+            }
+            let mut pending = pending.clone();
+            pending.ability = assigned_ability;
+            // CR 601.2h: unattach-from is a required cost — no decline, exactly
+            // `count` selections.
+            return Ok(Some(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::UnattachFrom {
+                    filter: filter.clone(),
+                },
+                choices: eligible,
+                count: count as usize,
+                min_count: count as usize,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
+            }));
+        }
+
         let should_record_loyalty = crate::types::ability::is_loyalty_ability_cost(activation_cost)
             && super::planeswalker::can_activate_loyalty_ability(
                 state,

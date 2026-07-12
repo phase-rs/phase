@@ -290,6 +290,10 @@ fn payment_cost(
             _ => card_value(state, obj_id) * 0.5,
         },
         PayCostKind::Behold { .. } => card_value(state, obj_id) * 0.1,
+        // CR 701.3d: Unattaching an Equipment as a cost keeps it on the
+        // battlefield (only the attachment link is removed), so the real resource
+        // cost is ~0 — the AI should treat the chosen Equipment as free to detach.
+        PayCostKind::UnattachFrom { .. } => 0.0,
         PayCostKind::Sacrifice => sacrifice_cost(state, obj_id, penalties),
     }
 }

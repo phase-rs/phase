@@ -1283,6 +1283,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,

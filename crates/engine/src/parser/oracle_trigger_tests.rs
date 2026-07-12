@@ -4591,7 +4591,8 @@ fn parse_ezio_damage_trigger_full_structure() {
     // Outer execute is the "you may pay {WUBRG}" cost.
     let execute = def.execute.as_ref().expect("execute must be Some");
 
-    // (c) Optional flag — the "you may" prefix on the cost (CR 609.3).
+    // (c) Optional flag — the "you may" prefix on the cost (CR 603.5: a triggered
+    // ability's "may" effect is optional; the choice is made when it resolves).
     assert!(
         execute.optional,
         "execute.optional must be true (the 'you may pay' wording)",
@@ -4712,7 +4713,8 @@ fn parse_ezio_damage_trigger_verbatim_oracle_text() {
 
     let execute = def.execute.as_ref().expect("execute must be Some");
 
-    // (b) Optional flag — the "you may pay" wording (CR 609.3).
+    // (b) Optional flag — the "you may pay" wording (CR 603.5: a triggered
+    // ability's "may" effect is optional; the choice is made when it resolves).
     assert!(
         execute.optional,
         "execute.optional must be true (the 'you may pay' wording)",
@@ -23454,4 +23456,103 @@ fn dance_of_the_dead_etb_lowers_to_reanimator_chain_tapped_4767() {
         "Dance of the Dead",
         /* expect_tapped */ true,
     );
+}
+
+/// #5253 (Railway Brawler): "Whenever another creature you control enters, put
+/// X +1/+1 counters on it, where X is its power." The "its" in the count clause
+/// is the ENTERING creature (the counter recipient), not the ability carrier.
+/// The `parse_self_power_ref` combinator lowers "its power" to
+/// `Power { scope: Source }` (carrier), so an enters-trigger lift remaps the
+/// count to `EventSource` when the counter target is itself the event object.
+/// Reverting the lift leaves `scope: Source` — the count would read Railway
+/// Brawler's power instead of the entering creature's (the #5253 bug).
+#[test]
+fn railway_brawler_counter_count_reads_entering_creature_power() {
+    let parsed = parse_oracle_text(
+        "Reach, trample\n\
+         Whenever another creature you control enters, put X +1/+1 counters on it, \
+         where X is its power.",
+        "Railway Brawler",
+        &[],
+        &["Creature".to_string()],
+        &["Dinosaur".to_string()],
+    );
+
+    // Positive reach-guard: nothing lowered to Unimplemented.
+    assert!(
+        !parsed.triggers.iter().any(|t| {
+            t.execute
+                .as_ref()
+                .is_some_and(|e| matches!(&*e.effect, Effect::Unimplemented { .. }))
+        }),
+        "Railway Brawler trigger must not produce Unimplemented: {parsed:#?}"
+    );
+
+    let put = parsed
+        .triggers
+        .iter()
+        .find_map(|t| match t.execute.as_deref()?.effect.as_ref() {
+            Effect::PutCounter {
+                count,
+                target,
+                counter_type,
+            } => Some((count.clone(), target.clone(), counter_type.clone())),
+            _ => None,
+        })
+        .expect("Railway Brawler enters trigger must lower to PutCounter");
+
+    assert_eq!(put.2, CounterType::Plus1Plus1);
+    // "on it" — the entering creature.
+    assert_eq!(put.1, TargetFilter::TriggeringSource);
+    // "where X is its power" — the entering creature's power, i.e. the event
+    // object (EventSource), NOT the ability carrier (Source).
+    assert_eq!(
+        put.0,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::EventSource,
+            },
+        },
+        "count must read the ENTERING creature's power (EventSource), not the carrier"
+    );
+}
+
+/// Negative reach-guard for the #5253 lift: a genuine self-power counter read —
+/// "Whenever ~ attacks, put a number of +1/+1 counters on ~ equal to its power"
+/// — must KEEP `scope: Source`. The lift only fires on a single-object
+/// zone-change trigger whose counter target is the event object; an attacks
+/// trigger putting counters on the source (`SelfRef`) is untouched, so the
+/// carrier's own power is preserved.
+#[test]
+fn self_power_counter_on_source_keeps_source_scope() {
+    let parsed = parse_oracle_text(
+        "Whenever this creature attacks, put a number of +1/+1 counters on it \
+         equal to its power.",
+        "Test Attacker",
+        &[],
+        &["Creature".to_string()],
+        &["Beast".to_string()],
+    );
+
+    let count = parsed
+        .triggers
+        .iter()
+        .find_map(|t| match t.execute.as_deref()?.effect.as_ref() {
+            Effect::PutCounter { count, .. } => Some(count.clone()),
+            _ => None,
+        });
+
+    // Whether or not this exact phrasing fully parses, if it DOES produce a
+    // PutCounter with a per-object power ref, that ref must stay Source-scoped
+    // (an attacks trigger is not a zone-change trigger, so the lift is inert).
+    if let Some(QuantityExpr::Ref {
+        qty: QuantityRef::Power { scope },
+    }) = count
+    {
+        assert_eq!(
+            scope,
+            ObjectScope::Source,
+            "an attacks-trigger self-power counter must not be remapped to EventSource"
+        );
+    }
 }

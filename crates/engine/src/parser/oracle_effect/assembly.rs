@@ -28,8 +28,7 @@ use super::lower::{
     apply_where_x_to_latest_def, attach_any_color_mana_rider_to_previous_play_from_exile,
     attach_cast_cost_raise_to_previous_play_from_exile,
     attach_graveyard_redirect_rider_to_prior_cast_from_zone,
-    attach_land_enters_tapped_to_previous_play_from_exile,
-    attach_until_next_same_source_exile_to_previous_play_from_exile, cast_cost_raise_rider,
+    attach_land_enters_tapped_to_previous_play_from_exile, cast_cost_raise_rider,
     consolidate_die_and_coin_defs, definition_targets_self_source,
     effect_publishes_revealed_subject, extract_bounded_target_multi_target,
     extract_exact_target_multi_target, extract_optional_target_multi_target,
@@ -38,15 +37,14 @@ use super::lower::{
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
     gate_reflexive_rider_on_declined_optional_target, is_land_enters_tapped_rider,
     is_linked_exile_cast_bottom_cleanup, is_spend_mana_as_any_color_rider, is_stable_branch_amount,
-    is_until_next_same_source_exile_rider, nest_whenever_this_turn_token_cleanup_delayed_trigger,
+    nest_whenever_this_turn_token_cleanup_delayed_trigger,
     normalize_linked_exile_cast_bottom_cleanup,
     parse_controlled_by_different_players_target_constraint,
     parse_same_zone_owner_target_constraint, parse_total_mana_value_target_constraint,
     patch_choose_from_zone_counter_continuation_target, patch_population_head_tap_anaphor,
     patch_self_ref_head_tap_anaphor, resolve_populated_token_anaphors,
     resolve_populated_unsuspect_anaphors, resolve_those_tokens_anaphors,
-    rewire_cross_sentence_token_counter_attach, rewire_result_anchored_subchain,
-    rewire_token_attach_sibling, rewrite_counter_instead_target_from_antecedent,
+    rewire_result_anchored_subchain, rewrite_counter_instead_target_from_antecedent,
     rewrite_else_event_context_to_stable, rewrite_else_parent_target_to_self_ref,
     rewrite_player_anaphor_targets_in_definition, rewrite_those_tokens_from_antecedent,
     rewrite_two_target_counter_chain, target_choice_timing_for_clause,
@@ -59,11 +57,13 @@ use super::{
     attach_repeat_process_keywords, attach_same_is_true_keywords,
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
-    fold_cast_copy_of_card_defs, has_explicit_player_target, inject_chosen_color_choice_grant,
-    mark_uses_tracked_set, parse_spell_graveyard_replacement_rider,
-    publishes_tracked_set_from_resolution, retarget_counter_additional_cost_to_target,
-    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
-    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
+    def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
+    def_is_keyword_counter_placement, fold_cast_copy_of_card_defs, has_explicit_player_target,
+    inject_chosen_color_choice_grant, mark_uses_tracked_set,
+    parse_spell_graveyard_replacement_rider, publishes_tracked_set_from_resolution,
+    retarget_counter_additional_cost_to_target, rewrite_parent_targets_to_tracked_set,
+    rewrite_rounding_mode, rewrite_that_type_mana_instead, stamp_delayed_returns,
+    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
 
 // ===========================================================================
@@ -143,7 +143,7 @@ struct NodeRef {
 //    `mem::take()` — the ops that invalidate any index-keyed reference (the
 //    reason U6-B1's registries had to be recomputed after every mutation).
 //  * A node that leaves top-level `defs` is not deleted. It is `Absorbed { into }`
-//    — nested under a known parent — or honestly `Dropped`. Design §2.2: a node
+//    — nested under a known parent. Design §2.2: a node
 //    can migrate OUT of the node-set (nested by a handler, or wrapped into an
 //    `Effect` payload), and a registry that later binds to such a node would
 //    mutate a def that is no longer in the output. That must be a typed state,
@@ -162,9 +162,6 @@ enum NodeStatus {
     /// No longer top-level: nested under `into` (as its `sub_ability`/`else_ability`)
     /// by a handler that popped it and pushed its replacement.
     Absorbed { into: NodeId },
-    /// Removed from top-level by an in-place restructure whose parent we cannot
-    /// name (a continuation rebuilding `defs`). Recorded honestly, never guessed.
-    Dropped,
 }
 
 #[allow(dead_code)]
@@ -172,6 +169,39 @@ enum NodeStatus {
 struct ArenaNode {
     prov: NodeProvenance,
     status: NodeStatus,
+    /// Identity witness, stamped ONCE at birth — see [`def_witness`].
+    witness: DefWitness,
+}
+
+/// A def's identity, as something `assert_mirrors` can actually compare against
+/// `defs` — the heap address of its boxed `Effect`.
+///
+/// This is the only witness available that is invariant under exactly the
+/// operations assembly performs on a def that SURVIVES, and variant under the one
+/// that creates a new def:
+///
+///  * `Vec::remove` / `pop` / `push` / `mem::take` move the `AbilityDefinition`
+///    struct, but never the pointee of its `Box<Effect>`.
+///  * The in-place effect rewrites (`*previous.effect = Effect::ExileTop { .. }`,
+///    `sequence.rs`) overwrite the pointee's CONTENTS, not its address — so a
+///    witness survives them, exactly as `NodeId` claims identity does.
+///  * A genuinely new def (`AbilityDefinition::new`) allocates a new `Box`, so it
+///    gets a new witness — which is the correct outcome: it also gets a new id.
+///
+/// It is stamped when the node is created and NEVER re-stamped. Re-deriving it
+/// from `defs` on every `observe` would make the mirror assert compare `defs`
+/// against itself — a tautology, which is the defect this exists to remove.
+///
+/// The one way an address could lie is ABA: a def is dropped, its `Box` freed, and
+/// a later def allocated at the same address. It cannot produce a false green here,
+/// because the asserts only ever compare witnesses of defs that are still ALIVE —
+/// a node in `order` (its def is in `defs`) or an `Absorbed` node (its def was
+/// MOVED into a parent's `sub_ability`/`else_ability`, so its `Box` is not freed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DefWitness(usize);
+
+fn def_witness(def: &AbilityDefinition) -> DefWitness {
+    DefWitness(std::ptr::from_ref(&*def.effect) as usize)
 }
 
 /// Stable-id mirror of `defs`. `order` is the live top-level sequence; it is the
@@ -184,9 +214,6 @@ struct Arena {
     order: Vec<NodeId>,
     /// Nodes popped out of `order` this clause, awaiting classification by `settle`.
     detached: Vec<NodeId>,
-    /// Did anything get pushed after the last detach? Distinguishes "popped and
-    /// replaced" (→ `Absorbed`) from "removed outright" (→ `Dropped`).
-    pushed_since_detach: bool,
 }
 
 impl Arena {
@@ -194,14 +221,19 @@ impl Arena {
         &self.nodes[id.0 as usize]
     }
 
-    fn push_new(&mut self, origin: Option<ClauseId>, role: NodeRole) -> NodeId {
+    fn push_new(
+        &mut self,
+        origin: Option<ClauseId>,
+        role: NodeRole,
+        witness: DefWitness,
+    ) -> NodeId {
         let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(ArenaNode {
             prov: NodeProvenance { origin, role },
             status: NodeStatus::Live,
+            witness,
         });
         self.order.push(id);
-        self.pushed_since_detach = true;
         id
     }
 
@@ -222,7 +254,6 @@ impl Arena {
         self.detached.retain(|d| *d != id);
         self.nodes[id.0 as usize].status = NodeStatus::Live;
         self.order.push(id);
-        self.pushed_since_detach = true;
     }
 
     /// The id currently at top-level position `index`, if any.
@@ -230,58 +261,138 @@ impl Arena {
         self.order.get(index).copied()
     }
 
+    /// Every top-level id EXCEPT the first. `Instead` nests defs `1..N` into the root
+    /// (`defs[0]`) and must name it as their parent, so it needs exactly this set.
+    fn tail_ids(&self) -> Vec<NodeId> {
+        self.order.iter().skip(1).copied().collect()
+    }
+
+    /// Provenance of the node currently at top-level `index` — the SINGLE store.
+    ///
+    /// There used to be a SECOND, positional one (`AssemblyEnv::prov`), kept in step
+    /// by `observe` with `truncate` + re-push. `reinstate` preserved identity in the
+    /// arena's store — but `refresh`, which builds ALL role membership, read the
+    /// POSITIONAL one. So the identity machinery was faithfully maintaining a store
+    /// that role membership never consulted, and the two silently disagreed after
+    /// any move: `Instead` re-stamped `prov[0]` with the OVERRIDE clause's id while
+    /// the arena still (correctly) held clause 0's. Keying provenance to identity in
+    /// one place removes the disagreement CLASS, not just its instances.
+    fn prov_at(&self, index: usize) -> Option<NodeProvenance> {
+        self.order.get(index).map(|id| self.node(*id).prov)
+    }
+
+    /// Mirror a MID-VECTOR removal (`defs.remove(index)`).
+    ///
+    /// `sync_len` can only shrink from the TAIL — it `pop()`s `order`, and `observe`
+    /// documents that precondition in its own doc comment. Mirroring a mid-vector
+    /// `defs.remove(i)` with a tail pop keeps `order.len()` exactly right while
+    /// detaching the WRONG node and silently renaming every node from `i` onward.
+    /// A removal is a different operation from a truncation, so it gets its own
+    /// primitive rather than being approximated by one.
+    fn remove_at(&mut self, index: usize) -> NodeId {
+        let id = self.order.remove(index);
+        self.detached.push(id);
+        id
+    }
+
+    /// Record that `id` was nested INTO `parent` by the handler that moved it.
+    ///
+    /// `settle` otherwise INFERS the parent as `order.last()`. That inference holds
+    /// only when the handler pushes its replacement and nothing else. A handler that
+    /// ALSO runs an intrinsic continuation pushes a node after the real parent, and
+    /// the inference then names the continuation's node. A site that knows its parent
+    /// states it; emission order is not a parenthood oracle.
+    fn absorb(&mut self, id: NodeId, parent: NodeId) {
+        self.detached.retain(|d| *d != id);
+        self.nodes[id.0 as usize].status = NodeStatus::Absorbed { into: parent };
+    }
+
     /// Mirror a `defs` length change we cannot hook from inside (helper-driven
     /// pushes in `apply_clause_continuation` / `attach_repeat_process_keywords`,
     /// and every handler pop). Ids are issued, never recycled.
-    fn sync_len(&mut self, defs_len: usize, origin: Option<ClauseId>, role: NodeRole) {
-        while self.order.len() > defs_len {
+    fn sync_len(&mut self, defs: &[AbilityDefinition], origin: Option<ClauseId>, role: NodeRole) {
+        while self.order.len() > defs.len() {
             let id = self
                 .order
                 .pop()
                 .expect("order non-empty while longer than defs");
             self.detached.push(id);
-            self.pushed_since_detach = false;
         }
-        while self.order.len() < defs_len {
-            self.push_new(origin, role);
+        while self.order.len() < defs.len() {
+            // The node being created IS `defs[order.len()]` — stamp its witness at
+            // birth, from the def it actually mirrors. Never re-stamp an existing
+            // node: a witness re-derived from `defs` would make `assert_mirrors`
+            // compare `defs` against itself.
+            let witness = def_witness(&defs[self.order.len()]);
+            self.push_new(origin, role, witness);
         }
     }
 
-    /// Classify anything detached this clause, then assert the mirror invariant.
+    /// End of a clause: every def this clause detached must have been RESOLVED.
     ///
-    /// A handler that pops its antecedent and pushes a replacement (`DigAlt`,
-    /// `Instead`, `FoldSearchIntoElse`, `ModifyPrior::EntersTappedAttacking`)
-    /// nests the popped def under that replacement — so the detached nodes are
-    /// `Absorbed` into the new tail. If nothing was pushed, the node was removed
-    /// outright and we do NOT invent a parent for it.
-    fn settle(&mut self, defs_len: usize) {
-        if !self.detached.is_empty() {
-            let parent = if self.pushed_since_detach {
-                self.order.last().copied()
-            } else {
-                None
-            };
-            let detached = std::mem::take(&mut self.detached);
-            for id in detached {
-                self.nodes[id.0 as usize].status = match parent {
-                    Some(into) => NodeStatus::Absorbed { into },
-                    None => NodeStatus::Dropped,
-                };
+    /// A handler that removes a def from `defs` has to say where it went — `absorb`
+    /// when it nests the def under another, `reinstate` when it returns the def to
+    /// top-level. All four Phase-1 shrink sites do: `EntersTappedAttacking` and
+    /// `Instead` reinstate; `DigAlt`, `Instead` and `FoldSearchIntoElse` absorb.
+    ///
+    /// U6-0c marked whatever was still detached here as `Dropped`. That was a
+    /// REINTRODUCED SILENT LIE, and it is the reason this asserts instead. The
+    /// parenthood assert SKIPS `Dropped` nodes — nothing to check, the def left the
+    /// output — so a future handler that detaches a def, nests it, and forgets to
+    /// `absorb` would be recorded as "removed from the output" and quietly accepted.
+    /// The arena would hold the wrong model and no assert would object: exactly the
+    /// class of defect U6-0 exists to delete, reintroduced by the fix for it.
+    ///
+    /// So `Dropped` is gone. A node is `Live` or `Absorbed`, and "the handler never
+    /// said" is a failure, not a third state.
+    fn settle(&mut self) {
+        debug_assert!(
+            self.detached.is_empty(),
+            "arena/defs divergence: a detached node was never absorbed or reinstated — \
+             the handler that removed it from `defs` did not say where it went"
+        );
+        self.detached.clear();
+    }
+
+    /// Follow an `Absorbed` chain up to the LIVE top-level node that still holds this
+    /// node in its tree, and return that node's index in `defs`.
+    fn live_root_index(&self, id: NodeId) -> Option<usize> {
+        let mut cursor = id;
+        // Bounded by the node count: a parent is always an EXISTING node, so a chain
+        // that has not terminated within `nodes.len()` hops must contain a cycle.
+        for _ in 0..=self.nodes.len() {
+            match self.node(cursor).status {
+                NodeStatus::Live => return self.order.iter().position(|o| *o == cursor),
+                NodeStatus::Absorbed { into } => cursor = into,
             }
         }
-        self.pushed_since_detach = false;
-        self.assert_mirrors(defs_len);
+        // A cycle looks unconstructible (`absorb` is only ever called with a parent
+        // that is Live at the time), but it must not FAIL QUIET: returning `None` here
+        // would make the absorbed-parenthood assert pass VACUOUSLY for this node —
+        // a self-inflicted false green of exactly the kind U6-0 exists to remove.
+        unreachable!("arena: `Absorbed` chain contains a cycle — parenthood is corrupt")
     }
 
-    /// C1's whole point: the arena's LIVE nodes correspond 1:1 to `defs`.
+    /// The arena's LIVE nodes correspond 1:1 to `defs` — *by identity*, not merely
+    /// by count.
     ///
-    /// `debug_assert` so it is free in release but active in the entire test
-    /// suite and the corpus sweep. A divergence here is a finding, not a nit —
+    /// `debug_assert` so it is free in release but active in the entire test suite
+    /// and the full-pool corpus sweep. A divergence here is a finding, not a nit:
     /// it means the arena does not model what assembly actually does.
-    fn assert_mirrors(&self, defs_len: usize) {
+    ///
+    /// **Why this takes `&[AbilityDefinition]` and not `defs_len`.** The four count
+    /// and status asserts below are all maintained by the same two writes that
+    /// establish them (`sync_len` reconciles `order.len()` TO `defs_len`, then the
+    /// assert compares them; `settle` drains `detached`, then asserts it is empty).
+    /// They cannot fail by construction — they prove the assert is *wired*, never
+    /// that it can *discriminate a wrong model*. Two real modelling defects shipped
+    /// underneath them. The two asserts that follow compare the arena against
+    /// `defs` and against the output tree, so a wrong model has something to be
+    /// wrong ABOUT.
+    fn assert_mirrors(&self, defs: &[AbilityDefinition]) {
         debug_assert_eq!(
             self.order.len(),
-            defs_len,
+            defs.len(),
             "arena/defs divergence: live node count != defs len"
         );
         debug_assert!(
@@ -294,15 +405,73 @@ impl Arena {
                 .all(|id| matches!(self.node(*id).status, NodeStatus::Live)),
             "arena/defs divergence: a non-Live node is in `order`"
         );
-        debug_assert!(
-            self.nodes.iter().enumerate().all(|(i, n)| {
-                let live_by_status = matches!(n.status, NodeStatus::Live);
-                let live_by_order = self.order.contains(&NodeId(i as u32));
-                live_by_status == live_by_order
-            }),
+        // Live-by-status and live-by-`order` are the same SET. Counting is O(n) rather
+        // than the O(nodes x order) `contains`-in-a-loop it replaces — and this assert
+        // is LIVE in the full-pool export (`[profile.tool] inherits = "dev"`).
+        //
+        // Precisely: standalone, the count is INCOMPARABLE to the membership scan, not
+        // stronger. It catches a duplicate id in `order` (which inflates the length)
+        // that a `contains` scan waves through; it is blind to a duplicate that is
+        // exactly compensated by an orphaned Live node. That blind spot is covered —
+        // the identity assert below pins `order[i]` to `defs[i]` by witness, and an
+        // orphan cannot survive it. The SET of asserts is what holds, not this line.
+        debug_assert_eq!(
+            self.nodes
+                .iter()
+                .filter(|n| matches!(n.status, NodeStatus::Live))
+                .count(),
+            self.order.len(),
             "arena/defs divergence: Live status and `order` membership disagree"
         );
+
+        // IDENTITY, not count: `order[i]` must still name the def that is ACTUALLY
+        // at `defs[i]`. A `defs` mutation mirrored by the WRONG arena op — a
+        // mid-vector `Vec::remove` mirrored by `sync_len`'s tail `pop` — keeps every
+        // count above perfectly balanced while silently renaming every node from the
+        // removal point on. This is the assert that notices.
+        debug_assert!(
+            self.order
+                .iter()
+                .zip(defs)
+                .all(|(id, def)| self.node(*id).witness == def_witness(def)),
+            "arena/defs divergence: `order` names a different def than `defs` holds \
+             at that index — a `defs` mutation was mirrored by the wrong arena op"
+        );
+
+        // `Absorbed { into }` is a CLAIM about the output tree, and the claim is
+        // checkable: the absorbed def must actually BE somewhere inside the tree of
+        // the node it names. `settle` INFERS that parent from emission order
+        // (`order.last()`), which is a guess — a handler that pushes anything AFTER
+        // its real parent (an intrinsic continuation, say) makes the guess wrong.
+        // This is the assert that catches an inferred parent being the wrong one.
+        debug_assert!(
+            self.nodes.iter().all(|n| match n.status {
+                NodeStatus::Absorbed { into } => self
+                    .live_root_index(into)
+                    .is_none_or(|i| def_tree_contains(&defs[i], n.witness)),
+                NodeStatus::Live => true,
+            }),
+            "arena/defs divergence: an `Absorbed {{ into }}` node is not anywhere \
+             inside the tree of the parent it names — the parent was inferred, wrongly"
+        );
     }
+}
+
+/// Is a def with this witness anywhere in `def`'s tree? Walks the two slots a
+/// handler can nest an absorbed node into.
+///
+/// `AbilityDefinition` has a THIRD nested-def slot — `mode_abilities` — and it is
+/// excluded deliberately, not by oversight: assembly never writes it (verified; the
+/// parser only ever reads/iterates it), so no absorbed node can land there. If a
+/// future handler does nest into it, this walk will fail to find the node and the
+/// absorbed-parenthood assert goes RED — the safe direction, and the signal to add
+/// the slot here rather than a silent pass.
+fn def_tree_contains(def: &AbilityDefinition, witness: DefWitness) -> bool {
+    def_witness(def) == witness
+        || [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|child| def_tree_contains(child, witness))
 }
 
 /// Emit-time facts about the chain assembled so far.
@@ -312,10 +481,9 @@ impl Arena {
 #[allow(dead_code)]
 #[derive(Debug, Default)]
 pub(super) struct AssemblyEnv {
-    /// U6-C1 dual-run arena. Maintained in lockstep with `defs`, read by nothing.
+    /// U6-C1 arena. Maintained in lockstep with `defs`, and the SINGLE authority for
+    /// node identity and provenance — see `Arena::prov_at`.
     arena: Arena,
-    /// Provenance parallel to `defs`, kept the same length by `observe`.
-    prov: Vec<NodeProvenance>,
     /// "Look at the top N"-class antecedent (`Dig`/`Mill`/`RevealUntil`) — the
     /// node `RestDestination` / `DigFromAmong` continuations scan backward for.
     last_dig: Option<NodeRef>,
@@ -346,8 +514,12 @@ pub(super) struct AssemblyEnv {
     optional_head_nodes: Vec<usize>,
     /// Every continuation-pushed search-destination `ChangeZone`, in emission order.
     search_destination_nodes: Vec<usize>,
-    /// Every `Dig`/`Mill` node, in emission order (the `DigFromAmong` anchor set).
-    dig_or_mill_nodes: Vec<usize>,
+    /// Every `Dig`/`RevealUntil` node (the `RestDestination` patchable set).
+    dig_or_reveal_until_nodes: Vec<usize>,
+    /// Every `Destroy`/`DestroyAll` node (the can't-be-regenerated antecedent set).
+    destroy_like_nodes: Vec<usize>,
+    /// Every node already carrying a face-down profile (CR 708.2a spec antecedent).
+    face_down_profile_nodes: Vec<usize>,
 }
 
 /// Which antecedent a handler is binding to. Point selectors only (U6-C2);
@@ -393,6 +565,18 @@ pub(super) enum AntecedentRole {
     Conditional,
     /// An "any player may" head (`optional_for`).
     OptionalHead,
+    /// A `Dig` or `RevealUntil` — the set `patch_rest_destination_recursively`
+    /// can patch, which a `RestDestination` ("put the rest ...") clause binds back
+    /// to. Deliberately a DIFFERENT set from `DigOrMill`.
+    DigOrRevealUntil,
+    /// A `Destroy` or `DestroyAll` — the antecedent of a "can't be regenerated"
+    /// rider, which may be non-adjacent (Kirtar's Wrath puts a Token between them).
+    DestroyLike,
+    /// A move/manifest/turn-face-down node that ALREADY carries a face-down
+    /// profile — the antecedent a "They're N/M ... creatures." spec refines
+    /// (CR 708.2a). "Already carries one" is the binding condition itself, not a
+    /// guard: a node with no profile is not this antecedent at all.
+    FaceDownProfileHolder,
     /// A `Dig` or `Mill` — the "look at / mill N cards" anchor a `DigFromAmong`
     /// continuation binds back to.
     ///
@@ -401,6 +585,96 @@ pub(super) enum AntecedentRole {
     /// (`RestDestination` wants `Dig|RevealUntil`), so a shared union registry
     /// would mis-bind. Roles name a set, not a vibe.
     DigOrMill,
+
+    // ---- U6-C5 LIVE roles ---------------------------------------------------
+    // Membership is recomputed from `defs` on every `resolve` (see
+    // `live_role_predicate`), never cached in a registry.
+    /// A `GenericEffect` head — the template a "The same is true for <keywords>"
+    /// continuation replicates its first `StaticDefinition` from (CR 702).
+    ///
+    /// Membership is the EFFECT VARIANT ALONE. It deliberately does NOT require a
+    /// non-empty `static_abilities`: the pre-arena scan stopped (`return`) at the
+    /// first `GenericEffect` from the back and gave up when it carried no statics —
+    /// it did NOT keep walking to an earlier one. Narrowing the role to "has a
+    /// static" would resume that walk and bind a DIFFERENT def. The empty case is
+    /// the mutator's bail, not the role's filter.
+    GenericEffectHead,
+    /// A keyword-counter placement (`PutCounter { counter_type: Keyword(_) }`) —
+    /// the sibling template a "Repeat this process for <keywords>" continuation
+    /// clones (Kathril, Aspect Warper).
+    KeywordCounterPlacement,
+    /// A `DealDamage` — the antecedent an "excess damage" rider redirects from
+    /// (CR 120.4a). The rider need not be adjacent to the damage clause, which is
+    /// why this is a role and not `LastEmitted`.
+    ///
+    /// Membership is the EFFECT VARIANT ALONE. It deliberately does NOT require
+    /// `excess.is_none()`: the scan this replaces stopped at the nearest
+    /// `DealDamage` unconditionally and then overwrote `excess`. Narrowing the role
+    /// to "has no excess yet" would make an already-written def a NON-candidate and
+    /// resume the walk to an earlier `DealDamage` the old code never reached. The
+    /// overwrite is the mutator's business; the role names where the walk STOPS.
+    DamageDealer,
+    /// A `Dig` — the "look at the top N" anchor that BOTH private-look riders bind
+    /// back to: `ExileLookedAtCard` (the Gonti impulse idiom, CR 608.2c) rewrites it
+    /// into an `ExileTop`, and `ExileOneOfThemFaceDown` (Hideaway, CR 702.75a)
+    /// patches it into the choose-one-and-exile shape. One role, because the two
+    /// scans it replaces had BYTE-IDENTICAL predicates — they are the same
+    /// antecedent, named twice.
+    ///
+    /// Membership is the EFFECT VARIANT ALONE — NOT `reveal: false`. The private-look
+    /// requirement (CR 701.20e) is a filter the RECOGNIZERS already applied upstream
+    /// when they decided to emit these continuations at all; importing it here would
+    /// make a revealed `Dig` a non-candidate and walk PAST it to an earlier one the
+    /// old scans never reached. Same trap, mirrored, as narrowing `GenericEffectHead`
+    /// to "has a static".
+    DigLook,
+}
+
+/// Membership predicates for the roles whose candidacy is **live** — recomputed
+/// from `defs` on every `resolve` instead of read from a `refresh`-maintained
+/// registry. Returns `None` for the registry-backed roles (U6-C2/C3).
+///
+/// Why the split is a CORRECTNESS requirement, not a style choice: `refresh` only
+/// runs from `observe`, and `observe` is only called where **`defs.len()` changes**.
+/// These roles are sensitive to mutations that change no length at all — a
+/// `KeywordOverride` nesting a `sub_ability` in place (and, from U6-C5c, an
+/// `alt_ability_cost`/`expiry` slot being filled). A cached registry for them would
+/// be stale by construction; a live predicate cannot be.
+///
+/// Each predicate is a STRUCTURAL MIRROR of its mutator's success condition and
+/// lives beside it, so the two cannot drift apart unnoticed.
+fn live_role_predicate(role: AntecedentRole) -> Option<fn(&AbilityDefinition) -> bool> {
+    match role {
+        AntecedentRole::GenericEffectHead => Some(def_is_generic_effect_head),
+        AntecedentRole::KeywordCounterPlacement => Some(def_is_keyword_counter_placement),
+        // LIVE, not cached. The scan this role replaces (`sequence.rs`, the
+        // `DigFromAmong` fallthrough) re-derived its antecedent from `defs` on every
+        // call, so it saw the CURRENT effect of every def. A cached registry is
+        // refreshed only by `observe` — i.e. only when `defs.len()` changes — and the
+        // assembler performs LENGTH-PRESERVING in-place effect rewrites
+        // (`*previous.effect = Effect::ExileTop { .. }`) that turn a `Dig` into
+        // something else without any length change. Cached, this role would go on
+        // naming a def that is no longer a `Dig`/`Mill`. Live, it is EXACTLY the scan.
+        AntecedentRole::DigOrMill => Some(def_is_dig_or_mill),
+        // LIVE, for the same reason as `DigOrMill` — and it is the SAME rewrite that
+        // forces it: `ExileLookedAtCard` does `*previous.effect = Effect::ExileTop`,
+        // turning a `Dig` into a non-`Dig` with NO length change, so `observe` never
+        // fires and a cached registry would go on naming it. `ExileOneOfThemFaceDown`
+        // nests a `sub_ability` in place — also length-preserving. Live, the role is
+        // EXACTLY the scan it replaces.
+        AntecedentRole::DigLook => Some(def_is_dig_look),
+        // LIVE. `ExcessDamageToController` writes a FIELD (`*excess = Some(..)`) — the
+        // most length-preserving mutation there is. A cached registry is refreshed only
+        // where `defs.len()` changes, so it could not see this at all; that it happens
+        // to stay correct for THIS role today is luck, not design. Cached membership is
+        // stale by construction here, so it is not offered.
+        AntecedentRole::DamageDealer => Some(def_is_damage_dealer),
+        AntecedentRole::Conditional
+        | AntecedentRole::OptionalHead
+        | AntecedentRole::DigOrRevealUntil
+        | AntecedentRole::DestroyLike
+        | AntecedentRole::FaceDownProfileHolder => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,25 +729,20 @@ impl AssemblyEnv {
         self.arena.id_at(index)
     }
 
-    /// Record provenance for any nodes `defs` gained since the last call, then
-    /// recompute the registries against the current `defs`.
+    /// Mirror any length change `defs` has undergone since the last call into the
+    /// arena, then recompute the registries against the current `defs`.
     ///
-    /// `defs` only ever grows by push/extend or shrinks from the TAIL (`pop`) or
-    /// wholesale (`mem::take`), so truncating/extending `prov` to `defs.len()`
-    /// keeps the two aligned without tracking each op individually.
+    /// Handles growth (push/extend) and TAIL shrink (`pop`, `mem::take`). A
+    /// MID-VECTOR `defs.remove(i)` is NOT a length change this can mirror — the
+    /// caller must announce it with `Arena::remove_at` first, which is why that is a
+    /// separate primitive rather than something inferred from a length delta.
     pub(super) fn observe(
         &mut self,
         defs: &[AbilityDefinition],
         origin: Option<ClauseId>,
         role: NodeRole,
     ) {
-        // U6-C1: mirror the same length change into the arena. Same call sites,
-        // same discipline (after EVERY statement that changes `defs.len()`).
-        self.arena.sync_len(defs.len(), origin, role);
-        self.prov.truncate(defs.len());
-        while self.prov.len() < defs.len() {
-            self.prov.push(NodeProvenance { origin, role });
-        }
+        self.arena.sync_len(defs, origin, role);
         self.refresh(defs);
     }
 
@@ -491,13 +760,18 @@ impl AssemblyEnv {
         self.conditional_nodes.clear();
         self.optional_head_nodes.clear();
         self.search_destination_nodes.clear();
-        self.dig_or_mill_nodes.clear();
+        self.dig_or_reveal_until_nodes.clear();
+        self.destroy_like_nodes.clear();
+        self.face_down_profile_nodes.clear();
 
         for (index, def) in defs.iter().enumerate() {
-            let provenance = self.prov.get(index).copied().unwrap_or(NodeProvenance {
-                origin: None,
-                role: NodeRole::Unknown,
-            });
+            // Provenance comes from the arena, keyed by IDENTITY — so a def that was
+            // moved (`Instead`'s root, `EntersTappedAttacking`'s patched def) keeps
+            // the provenance it was born with, and role membership below is computed
+            // from the truth `reinstate` has been preserving all along.
+            let provenance = self.arena.prov_at(index).expect(
+                "`observe` syncs `order` to `defs` before `refresh`, so every index is live",
+            );
             let node = NodeRef { index, provenance };
 
             // CRITICAL (audit §5.1): register a conditional off the BUILT def's
@@ -531,8 +805,37 @@ impl AssemblyEnv {
             {
                 self.search_destination_nodes.push(index);
             }
-            if matches!(&*def.effect, Effect::Dig { .. } | Effect::Mill { .. }) {
-                self.dig_or_mill_nodes.push(index);
+            if matches!(
+                &*def.effect,
+                Effect::Dig { .. } | Effect::RevealUntil { .. }
+            ) {
+                self.dig_or_reveal_until_nodes.push(index);
+            }
+            if matches!(
+                &*def.effect,
+                Effect::Destroy { .. } | Effect::DestroyAll { .. }
+            ) {
+                self.destroy_like_nodes.push(index);
+            }
+            if matches!(
+                &*def.effect,
+                Effect::ChangeZoneAll {
+                    face_down_profile: Some(_),
+                    library_position: None,
+                    random_order: false,
+                    ..
+                } | Effect::ChangeZone {
+                    face_down_profile: Some(_),
+                    ..
+                } | Effect::Manifest {
+                    profile: Some(_),
+                    ..
+                } | Effect::TurnFaceDown {
+                    profile: Some(_),
+                    ..
+                }
+            ) {
+                self.face_down_profile_nodes.push(index);
             }
             match &*def.effect {
                 Effect::Dig { .. } | Effect::Mill { .. } | Effect::RevealUntil { .. } => {
@@ -596,49 +899,57 @@ impl AssemblyEnv {
                 }
             }
         };
-        let candidates: &[usize] = match selector {
-            AntecedentSelector::LastEmitted => {
-                let hit = defs.len().checked_sub(1).filter(|i| passes(*i));
-                return match hit {
-                    Some(i) => Some(i),
-                    None => match on_miss {
-                        OnMiss::Ignore => None,
-                    },
-                };
-            }
+        // The most recent index (in `defs` order) whose membership AND guard hold.
+        let last_live = |is_member: fn(&AbilityDefinition) -> bool| -> Option<usize> {
+            (0..defs.len())
+                .rev()
+                .find(|i| is_member(&defs[*i]) && passes(*i))
+        };
+        // The most recent candidate from a `refresh`-maintained emission-ordered list.
+        let last_cached =
+            |list: &[usize]| -> Option<usize> { list.iter().rev().copied().find(|i| passes(*i)) };
+
+        let hit: Option<usize> = match selector {
+            AntecedentSelector::LastEmitted => defs.len().checked_sub(1).filter(|i| passes(*i)),
             AntecedentSelector::FirstEmitted => {
-                let hit = (!defs.is_empty()).then_some(0).filter(|i| passes(*i));
-                return match hit {
-                    Some(i) => Some(i),
-                    None => match on_miss {
-                        OnMiss::Ignore => None,
-                    },
-                };
-            }
-            AntecedentSelector::LastWithRole(AntecedentRole::Conditional) => {
-                &self.conditional_nodes
-            }
-            AntecedentSelector::LastWithRole(AntecedentRole::OptionalHead) => {
-                &self.optional_head_nodes
+                (!defs.is_empty()).then_some(0).filter(|i| passes(*i))
             }
             AntecedentSelector::ContinuationProduct(ContinuationRole::SearchDestination) => {
-                &self.search_destination_nodes
+                last_cached(&self.search_destination_nodes)
             }
-            AntecedentSelector::LastWithRole(AntecedentRole::DigOrMill) => &self.dig_or_mill_nodes,
             AntecedentSelector::Between { anchor } => {
                 // Walk FORWARD over emission order from the anchor and take the
                 // FIRST qualifying node. Reads `order` only — never the output tree.
                 let anchor_pos = self.arena.order.iter().position(|id| *id == anchor);
-                let hit = anchor_pos.and_then(|a| ((a + 1)..defs.len()).find(|i| passes(*i)));
-                return match hit {
-                    Some(i) => Some(i),
-                    None => match on_miss {
-                        OnMiss::Ignore => None,
-                    },
-                };
+                anchor_pos.and_then(|a| ((a + 1)..defs.len()).find(|i| passes(*i)))
             }
+            // Roles split by HOW membership is determined — live predicate over
+            // `defs` (U6-C5) vs. emission-ordered registry (U6-C2/C3). The split and
+            // its rationale live in `live_role_predicate`.
+            AntecedentSelector::LastWithRole(role) => match live_role_predicate(role) {
+                Some(is_member) => last_live(is_member),
+                None => match role {
+                    AntecedentRole::Conditional => last_cached(&self.conditional_nodes),
+                    AntecedentRole::OptionalHead => last_cached(&self.optional_head_nodes),
+                    AntecedentRole::DigOrRevealUntil => {
+                        last_cached(&self.dig_or_reveal_until_nodes)
+                    }
+                    AntecedentRole::DestroyLike => last_cached(&self.destroy_like_nodes),
+                    AntecedentRole::FaceDownProfileHolder => {
+                        last_cached(&self.face_down_profile_nodes)
+                    }
+                    // `live_role_predicate` returned `Some` for these, so this arm is
+                    // unreachable — but it is spelled out rather than wildcarded so a
+                    // NEW role cannot be added without choosing a side.
+                    AntecedentRole::GenericEffectHead
+                    | AntecedentRole::KeywordCounterPlacement
+                    | AntecedentRole::DigOrMill
+                    | AntecedentRole::DigLook
+                    | AntecedentRole::DamageDealer => None,
+                },
+            },
         };
-        match candidates.iter().rev().copied().find(|i| passes(*i)) {
+        match hit {
             Some(i) => Some(i),
             None => match on_miss {
                 OnMiss::Ignore => None,
@@ -663,6 +974,19 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // `Comma`/`Then`/no boundary makes it a within-clause `ContinuationStep`.
     let mut prev_boundary: Option<ClauseBoundary> = None;
     for clause_ir in &ir.clauses {
+        // "The arena mirrors `defs`" is load-bearing for every binding below, and it
+        // is asserted HERE, at the one point every clause path must pass through.
+        //
+        // `settle` runs at the end of the normal and special paths, but the five
+        // rider `continue`s below skip it. Those are safe today only because their
+        // helpers fold into a PRIOR def without changing `defs.len()` — a fact
+        // nothing enforced. Asserting at the top of the loop enforces it for every
+        // path, including any rider added later: a clause that mutates `defs` without
+        // telling the arena is caught on the NEXT clause rather than silently
+        // self-healed by `sync_len` (which would push a fresh node carrying the wrong
+        // provenance and hand it to role membership).
+        env.arena.assert_mirrors(&defs);
+
         // CR 608.2c: Handle absorbed clauses and special (rider) clauses that
         // modify previous defs rather than emitting new sibling defs. Each path
         // evaluates to `true`; the boundary advance below then runs uniformly so
@@ -794,10 +1118,35 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // CR 702 / CR 608.2c: replicate the antecedent template clause once
                 // per listed keyword. `kind` selects which template shape (and thus
                 // helper); the keyword-swap logic lives unchanged in the helpers.
+                //
+                // U6-C5: both templates are bound by ROLE. These two sites were the
+                // last `defs.iter().rev()` scans that no earlier increment had even
+                // noticed — they never recursed into a sub-tree, so they are plain
+                // "most recent node of role X" bindings and needed no new machinery.
                 match kind {
-                    ReplicateKind::StaticGrant => attach_same_is_true_keywords(&mut defs, keywords),
+                    ReplicateKind::StaticGrant => {
+                        let bound = env.resolve(
+                            &defs,
+                            AntecedentSelector::LastWithRole(AntecedentRole::GenericEffectHead),
+                            None,
+                            OnMiss::Ignore,
+                        );
+                        if let Some(bound_index) = bound {
+                            attach_same_is_true_keywords(&mut defs[bound_index], keywords);
+                        }
+                    }
                     ReplicateKind::CounterPlacement => {
-                        attach_repeat_process_keywords(&mut defs, keywords)
+                        let bound = env.resolve(
+                            &defs,
+                            AntecedentSelector::LastWithRole(
+                                AntecedentRole::KeywordCounterPlacement,
+                            ),
+                            None,
+                            OnMiss::Ignore,
+                        );
+                        if let Some(bound_index) = bound {
+                            attach_repeat_process_keywords(&mut defs, bound_index, keywords);
+                        }
                     }
                 }
                 env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
@@ -909,6 +1258,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // special-clause arms).
                 match replace_kind {
                     ReplaceMeaningKind::DigAlt(alt_def) => {
+                        // Identity: `new_def` genuinely IS new (it comes from the IR),
+                        // so it correctly gets a fresh id — this is the one absorbing
+                        // handler that does NOT `reinstate`. The popped def is nested
+                        // under it as `else_ability`, so it names that parent.
+                        let absorbed = defs
+                            .len()
+                            .checked_sub(1)
+                            .and_then(|last| env.arena.id_at(last));
                         if let Some(last_def) = defs.pop() {
                             env.observe(&defs, None, NodeRole::Unknown);
                             let mut new_def = *alt_def.clone();
@@ -919,6 +1276,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             new_def.else_ability = Some(Box::new(last_def));
                             defs.push(new_def);
                             env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
+                            let parent = env
+                                .arena
+                                .id_at(defs.len() - 1)
+                                .expect("the replacement def was just pushed");
+                            if let Some(absorbed) = absorbed {
+                                env.arena.absorb(absorbed, parent);
+                            }
                         }
                         true
                     }
@@ -951,7 +1315,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         if bound.is_some() {
                             // Identity: the root is MOVED out of `defs` and back in —
                             // it keeps its NodeId (U6-C2 ruling). Capture before the take.
+                            // The TAIL defs (1..N) are nested into the root below, so
+                            // capture their ids too and name the root as their parent —
+                            // `settle` no longer infers one.
                             let root_id = env.arena.id_at(0);
+                            let tail_ids = env.arena.tail_ids();
                             let mut chain_defs = std::mem::take(&mut defs);
                             env.observe(&defs, None, NodeRole::Unknown);
                             let mut root = chain_defs.remove(0);
@@ -977,6 +1345,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             defs.push(root);
                             if let Some(id) = root_id {
                                 env.arena.reinstate(id);
+                                // Each tail def was appended into the root's sub-spine
+                                // by `append_to_deepest_sub_ability`.
+                                for tail in tail_ids {
+                                    env.arena.absorb(tail, id);
+                                }
                             }
                             env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
                         }
@@ -1027,12 +1400,40 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     None,
                     OnMiss::Ignore,
                 );
-                if let Some(bound_index) = bound {
+                let absorbed = if let Some(bound_index) = bound {
+                    // `bound_index` is wherever the destination node sits — the selector
+                    // is `last_cached(&search_destination_nodes)`, which is under no
+                    // obligation to return the tail. So this is a MID-VECTOR removal and
+                    // is announced as one: `observe`/`sync_len` can only mirror a TAIL
+                    // shrink, and would otherwise detach the LAST node while `defs`
+                    // dropped THIS one, renaming every node from here on.
+                    //
+                    // Measured: on the full ~35k-face pool this fold fires twice, and
+                    // both are currently tail removals — so the tail-pop mirror happened
+                    // to agree, and the divergence is latent rather than live. It is
+                    // fixed structurally anyway: correctness here must not rest on a
+                    // coincidence about today's card pool.
+                    let id = env.arena.remove_at(bound_index);
                     def.else_ability = Some(Box::new(defs.remove(bound_index)));
                     env.observe(&defs, None, NodeRole::Unknown);
-                }
+                    Some(id)
+                } else {
+                    None
+                };
                 defs.push(def);
                 env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
+                if let Some(absorbed) = absorbed {
+                    // Name the parent EXPLICITLY. `settle` would infer it as
+                    // `order.last()`, but the intrinsic continuation below pushes the
+                    // NEW search-destination node AFTER this def — so the inference
+                    // names the continuation's node as parent of a def that is in fact
+                    // nested in THIS def's `else_ability`.
+                    let parent = env
+                        .arena
+                        .id_at(defs.len() - 1)
+                        .expect("the def carrying the folded `else_ability` was just pushed");
+                    env.arena.absorb(absorbed, parent);
+                }
                 // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
                 if let Some(continuation) = intrinsic {
                     apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
@@ -1075,9 +1476,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // clause, not the stale boundary that preceded it.
         if handled_as_special {
             prev_boundary = clause_ir.boundary;
-            // U6-C1: classify anything this handler detached, then assert the
-            // arena's live nodes still mirror `defs` 1:1.
-            env.arena.settle(defs.len());
+            // Classify anything this handler detached; the mirror is asserted at the
+            // next loop-top, or at the Phase-1/Phase-2 boundary for the last clause.
+            env.arena.settle();
             continue;
         }
 
@@ -1129,12 +1530,6 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
         if is_land_enters_tapped_rider(clause_ir)
             && attach_land_enters_tapped_to_previous_play_from_exile(&mut defs)
-        {
-            prev_boundary = clause_ir.boundary;
-            continue;
-        }
-        if is_until_next_same_source_exile_rider(clause_ir)
-            && attach_until_next_same_source_exile_to_previous_play_from_exile(&mut defs)
         {
             prev_boundary = clause_ir.boundary;
             continue;
@@ -1559,9 +1954,20 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // so a following normal clause must stamp `sub_link` from the boundary
         // AFTER the special clause, not the stale one that preceded it.
         prev_boundary = clause_ir.boundary;
-        // U6-C1: same settle + mirror assertion on the normal (`Emit`) path.
-        env.arena.settle(defs.len());
+        // Classify anything this clause detached. The mirror is asserted at the top of
+        // the next iteration, and — for the LAST clause, which has no next iteration —
+        // at the Phase-1/Phase-2 boundary below.
+        env.arena.settle();
     }
+
+    // The terminal-clause blind spot: the loop-top assert validates each clause's
+    // mutations on the NEXT iteration, so drift introduced by a card's FINAL clause
+    // would never be asserted at all — a rider on the last clause (Brainstealer
+    // Dragon's trailing mana rider is the witness) could desync the arena and no
+    // assert would ever run again. Phase 2 does not touch `env`, so this is the last
+    // moment the mirror still means anything. Assert it here, and Phase 1 is covered
+    // end to end.
+    env.arena.assert_mirrors(&defs);
 
     // ── Phase 2: Post-loop assembly (unchanged) ────────────────────────
     let kind = ir.kind;
@@ -1619,7 +2025,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
     }
 
-    // CR 702.33d + CR 608.2e: Resolve "create [N] of those tokens [instead]"
+    // CR 702.33d + CR 608.2c: Resolve "create [N] of those tokens [instead]"
     // anaphoric subs — the sub-ability parses as `Unimplemented` because the
     // noun "those tokens" refers back to the previous clause's token-creation
     // effect. Rewrite those subs by cloning the previous effect with an
@@ -1657,27 +2063,8 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         let last = defs.pop().unwrap();
         let mut chain = last;
         while let Some(mut prev) = defs.pop() {
-            if prev.condition == Some(AbilityCondition::AdditionalCostPaidInstead) {
-                if let Some(base_chain) = prev.else_ability.as_mut() {
-                    if matches!(
-                        (&*base_chain.effect, &*chain.effect),
-                        (
-                            Effect::ChangeZone {
-                                origin: Some(Zone::Library),
-                                destination: Zone::Hand,
-                                ..
-                            },
-                            Effect::ChangeZone {
-                                origin: Some(Zone::Library),
-                                destination: Zone::Hand,
-                                ..
-                            }
-                        )
-                    ) {
-                        append_to_deepest_sub_ability(base_chain, chain.sub_ability.clone());
-                    }
-                }
-            }
+            // R1 — a SHAPE REPAIR, not materialization.
+            merge_search_tail_into_additional_cost_else(&mut prev, &chain);
             // A node attached as a `sub_ability` is a resolution continuation
             // of its parent, not an independently activatable ability.
             // Normalize its kind to `Spell` (the "resolves alongside parent"
@@ -1685,36 +2072,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // dedicated clause builders that construct sub-abilities directly
             // (e.g., `try_parse_pump_with_damage_sub` at line 3220).
             chain.kind = AbilityKind::Spell;
-            if prev.optional && is_linked_exile_cast_bottom_cleanup(&prev.effect, &chain.effect) {
-                normalize_linked_exile_cast_bottom_cleanup(&mut chain.effect);
-                prev.else_ability = Some(Box::new(chain.clone()));
-            }
+            // R2 — a SHAPE REPAIR, not materialization.
+            normalize_linked_exile_cast_pair(&mut prev, &mut chain);
             if prev.sub_ability.is_some() {
                 // Walk to the deepest sub_ability and append there
                 let mut cursor = &mut prev;
                 while cursor.sub_ability.is_some() {
                     cursor = cursor.sub_ability.as_mut().unwrap();
                 }
-                // FIX C — CR 120.1 + CR 208.1 + CR 608.2c: a "Then it deals damage equal to
-                // its power to <fresh opponent>" tail appended after a `ConditionInstead`
-                // override is the same one-sided-fight anaphor as the non-nested Ambuscade
-                // form ("It" = the boosted creature = Target1, the source; "its power" read
-                // live). The generic fold loop appends it without the chunk-loop's anaphor
-                // rebind, so it would otherwise keep the subject-stamping default
-                // (`Power{Source}` + `damage_source: None` → 0 damage from the spell). Reuse
-                // the one-sided-fight rebind to restore `Power{Anaphoric}` + `DamageSource::
-                // Target`. No-op (returns false, mutates nothing) for non-damage /
-                // non-fresh-opponent tails (Evil's Thrall's Untap, the Draw tails). Gated to
-                // the override cursor + an independent `SequentialSibling` tail so non-nested
-                // Ambuscade/Bite Down/Rabid Bite (rebound at the chunk-loop site) are
-                // untouched.
-                if matches!(
-                    cursor.condition,
-                    Some(AbilityCondition::ConditionInstead { .. })
-                ) && chain.sub_link == SubAbilityLink::SequentialSibling
-                {
-                    bind_anaphoric_damage_subject_keep_recipient(chain.effect.as_mut());
-                }
+                // R3 — a SHAPE REPAIR, not materialization.
+                rebind_condition_instead_damage_anaphor(cursor, &mut chain);
                 cursor.sub_ability = Some(Box::new(chain));
             } else {
                 prev.sub_ability = Some(Box::new(chain));
@@ -1759,6 +2126,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     inject_chosen_color_choice_grant(&mut result, false);
     rewrite_that_type_mana_instead(&mut result);
 
+    fold_token_it_has_grants_into_token_statics(&mut result);
+    fold_copy_spell_gains_haste_and_quoted_grant(&mut result);
+    nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
     // parent zone-change to Battlefield when the chained sub-ability is an
     // `Attach` gated by `ZoneChangedThisWay`. Without this, the runtime
@@ -1782,11 +2152,6 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // card's id as the sub-ability's `source_id` (see `effects/mod.rs`
     // forward_result branch), so `Attach::resolve` operates on the correct
     // attaching object.
-    rewire_cross_sentence_token_counter_attach(&mut result);
-    rewire_token_attach_sibling(&mut result);
-    fold_token_it_has_grants_into_token_statics(&mut result);
-    fold_copy_spell_gains_haste_and_quoted_grant(&mut result);
-    nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     rewire_result_anchored_subchain(&mut result);
     fold_enters_this_way_counter_rider(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
@@ -1845,4 +2210,241 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     super::propagate_guess_branch_condition_to_continuations(&mut result);
 
     result
+}
+
+// ===========================================================================
+// The three SHAPE REPAIRS hidden in the final fold (U6-C4)
+// ===========================================================================
+//
+// The fold does two jobs: pure materialization (link each def into the next via
+// `sub_ability`), and these three adjacency-sniffing semantic repairs. They were
+// anonymous, interleaved with the linking, and each fires on a handful of cards
+// out of 35,396 — so a materialization rewrite could drop all three and the suite
+// would stay green. Naming them means C5's diff has to VISIBLY keep calling them.
+//
+// C4 is pure code motion: bodies are byte-identical, call order is unchanged.
+
+/// R1 — CR 608.2c + CR 601.2b: the ELSE-SIDE half of `FoldSearchIntoElse`.
+///
+/// One rules concept implemented in two places. `ClauseDisposition::FoldSearchIntoElse`
+/// binds the *search* side at clause time (by provenance, since U6-C2); this fold-time
+/// repair binds the *else* side by SHAPE-SNIFFING the pair. When an additional cost was
+/// paid (CR 601.2b) and both the stashed base chain and the incoming tail are
+/// search-destination moves, the tail's continuation is appended to the base's deepest
+/// sub — later text modifying the meaning of earlier text (CR 608.2c).
+///
+/// Note it reads `chain.sub_ability` only; `chain` itself is linked normally afterward.
+/// Returns whether the repair fired.
+fn merge_search_tail_into_additional_cost_else(
+    prev: &mut AbilityDefinition,
+    chain: &AbilityDefinition,
+) -> bool {
+    if prev.condition == Some(AbilityCondition::AdditionalCostPaidInstead) {
+        if let Some(base_chain) = prev.else_ability.as_mut() {
+            if matches!(
+                (&*base_chain.effect, &*chain.effect),
+                (
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Library),
+                        destination: Zone::Hand,
+                        ..
+                    },
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Library),
+                        destination: Zone::Hand,
+                        ..
+                    }
+                )
+            ) {
+                append_to_deepest_sub_ability(base_chain, chain.sub_ability.clone());
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// R2 — CR 608.2c + CR 401.4: linked-exile-cast bottom cleanup.
+///
+/// After an optional `CastFromZone` from a linked exile, the trailing "put it on the
+/// bottom" cleanup is normalized in place AND stashed as `prev.else_ability`.
+///
+/// DELIBERATE, DO NOT "FIX": `chain` is cloned into `else_ability` here and is ALSO
+/// linked as `prev`'s sub by the caller below, so the node is reachable via two paths.
+/// That duplication is the existing behavior; preserving it is the point of C4.
+/// Returns whether the repair fired.
+fn normalize_linked_exile_cast_pair(
+    prev: &mut AbilityDefinition,
+    chain: &mut AbilityDefinition,
+) -> bool {
+    if prev.optional && is_linked_exile_cast_bottom_cleanup(&prev.effect, &chain.effect) {
+        normalize_linked_exile_cast_bottom_cleanup(&mut chain.effect);
+        prev.else_ability = Some(Box::new(chain.clone()));
+        return true;
+    }
+    false
+}
+
+/// R3 — CR 120.1 + CR 208.1 + CR 608.2c: a "Then it deals damage equal to
+/// its power to <fresh opponent>" tail appended after a `ConditionInstead`
+/// override is the same one-sided-fight anaphor as the non-nested Ambuscade
+/// form ("It" = the boosted creature = Target1, the source; "its power" read
+/// live). The generic fold loop appends it without the chunk-loop's anaphor
+/// rebind, so it would otherwise keep the subject-stamping default
+/// (`Power{Source}` + `damage_source: None` → 0 damage from the spell). Reuse
+/// the one-sided-fight rebind to restore `Power{Anaphoric}` + `DamageSource::
+/// Target`. No-op (returns false, mutates nothing) for non-damage /
+/// non-fresh-opponent tails (Evil's Thrall's Untap, the Draw tails). Gated to
+/// the override cursor + an independent `SequentialSibling` tail so non-nested
+/// Ambuscade/Bite Down/Rabid Bite (rebound at the chunk-loop site) are
+/// untouched.
+///
+/// Returns whether the rebind actually mutated the tail (the gate can pass while the
+/// rebind is a no-op — see above), so a fire count measures real repairs, not gate hits.
+fn rebind_condition_instead_damage_anaphor(
+    cursor: &AbilityDefinition,
+    chain: &mut AbilityDefinition,
+) -> bool {
+    if matches!(
+        cursor.condition,
+        Some(AbilityCondition::ConditionInstead { .. })
+    ) && chain.sub_link == SubAbilityLink::SequentialSibling
+    {
+        return bind_anaphoric_damage_subject_keep_recipient(chain.effect.as_mut());
+    }
+    false
+}
+
+#[cfg(test)]
+mod arena_tests {
+    use super::*;
+
+    fn shuffle_def() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+        )
+    }
+
+    /// The mirror assert's IDENTITY check (`order[i]` names the def actually at
+    /// `defs[i]`) guards the mid-vector-removal defect — and that defect is LATENT on
+    /// today's card pool: both `FoldSearchIntoElse` removals happen to land on the
+    /// tail, where a tail pop coincidentally mirrors them correctly. So nothing in the
+    /// suite or the full-pool sweep has ever watched this assert go red, and a guard
+    /// nobody has seen fail is a guard nobody should trust.
+    ///
+    /// This drives the defect synthetically: remove `defs[1]`, then mirror it the way
+    /// the pre-fix code did — with `sync_len`'s TAIL pop. Note what stays perfectly
+    /// consistent: 3 defs and 3 nodes become 2 and 2. Every count lines up. The old
+    /// count-only assert accepted exactly this. Only IDENTITY diverges — `order[1]`
+    /// still names the def that was removed, not the one that shifted into its place.
+    #[test]
+    #[should_panic(expected = "order` names a different def than `defs` holds")]
+    fn tail_pop_mirroring_a_mid_vector_removal_is_caught() {
+        let mut defs = vec![shuffle_def(), shuffle_def(), shuffle_def()];
+        let mut arena = Arena::default();
+        arena.sync_len(&defs, None, NodeRole::Primary);
+        arena.assert_mirrors(&defs);
+
+        defs.remove(1); // MID-vector removal ...
+        arena.sync_len(&defs, None, NodeRole::Unknown); // ... mirrored by a TAIL pop.
+
+        // The handler still RESOLVES its detach, exactly as every real one does — the
+        // pre-fix bug was never a dangling node, it was WHICH node got detached. So
+        // absorb the (wrong) one, which is what the old `settle` did by inferring a
+        // parent. `settle` then has nothing to object to, and the identity assert is
+        // left to catch the divergence on its own.
+        //
+        // The parent is `id_at(1)`, NOT `id_at(0)`, so this test does not depend on the
+        // ORDER of the asserts. The stray node is the tail one, whose def is the one
+        // that shifted into `defs[1]`; naming `id_at(1)` as its parent therefore makes
+        // the absorbed-parenthood assert (b) genuinely TRUE (`live_root_index` lands on
+        // `defs[1]`, which IS that def), leaving assert (a) — identity — as the only
+        // false one. Absorbing into `id_at(0)` would ALSO trip (b), and (a) would only
+        // be the observed failure because it happens to run first.
+        let stray = arena.detached[0];
+        let parent = arena.id_at(1).expect("defs[1] is live");
+        arena.absorb(stray, parent);
+        arena.settle();
+
+        arena.assert_mirrors(&defs);
+    }
+
+    /// `settle`'s invariant, and the reason `NodeStatus::Dropped` is gone.
+    ///
+    /// A handler that removes a def from `defs` must say where it went — `absorb` when
+    /// it nests the def, `reinstate` when it returns it to top-level. U6-0c recorded a
+    /// handler that said NOTHING as `Dropped` ("the def left the output"). But the
+    /// parenthood assert SKIPS `Dropped` nodes, precisely because a def that left the
+    /// output has nothing left to check against — so "I forgot to name the parent" was
+    /// accepted as "there is no parent", silently, with the arena holding the wrong
+    /// model and no assert objecting.
+    ///
+    /// That is the same silent-lie class U6-0 exists to remove, reintroduced by the fix
+    /// for it. This is the shape it was swallowing, and it now fails.
+    #[test]
+    #[should_panic(expected = "never absorbed or reinstated")]
+    fn a_detached_node_the_handler_never_resolved_is_caught() {
+        let mut defs = vec![shuffle_def(), shuffle_def()];
+        let mut arena = Arena::default();
+        arena.sync_len(&defs, None, NodeRole::Primary);
+
+        // A handler pops a def and nests it under the survivor — but forgets to absorb.
+        let popped = defs.pop().expect("two defs");
+        defs[0].sub_ability = Some(Box::new(popped));
+        arena.sync_len(&defs, None, NodeRole::Unknown); // detaches the node ...
+        arena.settle(); // ... and never said where it went.
+    }
+
+    /// The TERMINAL-CLAUSE blind spot, and why the Phase-1/Phase-2 boundary assert
+    /// exists. The loop-top assert validates a clause's mutations on the NEXT
+    /// iteration — so a card's FINAL clause has no iteration after it, and drift it
+    /// introduces was asserted by nothing at all. Brainstealer Dragon's trailing mana
+    /// rider is the real witness: it corrupted the arena and only an output diff
+    /// caught it.
+    ///
+    /// This is the shape the boundary assert catches — a rider that mutated `defs` and
+    /// never told the arena. Note it is also the shape `sync_len` SELF-HEALS if it is
+    /// allowed to run first: it would push a fresh node carrying the wrong provenance
+    /// and hand it to role membership, which is why the drift must be caught, not
+    /// reconciled.
+    #[test]
+    #[should_panic(expected = "live node count != defs len")]
+    fn a_terminal_clause_that_mutates_defs_without_telling_the_arena_is_caught() {
+        let mut defs = vec![shuffle_def(), shuffle_def(), shuffle_def()];
+        let mut arena = Arena::default();
+        arena.sync_len(&defs, None, NodeRole::Primary);
+
+        defs.pop(); // a terminal rider mutates `defs` ...
+        arena.assert_mirrors(&defs); // ... and never told the arena.
+    }
+
+    /// The green half of the pair. Without it, the `should_panic` above proves only
+    /// that the assert CAN fail — not that it DISCRIMINATES. `remove_at` models the
+    /// same removal correctly, and the same assert accepts it.
+    #[test]
+    fn remove_at_mirroring_a_mid_vector_removal_is_accepted() {
+        let mut defs = vec![shuffle_def(), shuffle_def(), shuffle_def()];
+        let mut arena = Arena::default();
+        arena.sync_len(&defs, None, NodeRole::Primary);
+
+        let absorbed = arena.remove_at(1); // the removal, MODELLED ...
+        let removed = defs.remove(1); // ... rather than approximated.
+        arena.sync_len(&defs, None, NodeRole::Unknown);
+
+        // Nest the removed def under the survivor, exactly as a folding handler does,
+        // and name that parent — then the parenthood assert has something true to find.
+        defs[0].else_ability = Some(Box::new(removed));
+        let parent = arena.id_at(0).expect("defs[0] is live");
+        arena.absorb(absorbed, parent);
+
+        arena.settle();
+        arena.assert_mirrors(&defs);
+        assert!(matches!(
+            arena.node(absorbed).status,
+            NodeStatus::Absorbed { into } if into == parent
+        ));
+    }
 }

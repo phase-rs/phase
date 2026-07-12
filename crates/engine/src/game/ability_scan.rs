@@ -93,9 +93,10 @@
 
 use crate::types::ability::{
     AbilityCondition, ControllerRef, CountScope, Duration, EachDamageRecipient, Effect,
-    GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition, ResolvedAbility,
-    StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource, TriggerCondition,
+    ForEachCategoryAction, GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition,
+    ResolvedAbility, StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource,
+    TriggerCondition,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 
@@ -1192,12 +1193,11 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(target));
             acc
         }
-        Effect::ForEachCategoryExile {
-            category: _,
-            zone: _,
-            chooser: _,
-            up_to: _,
-        } => Axes::NONE,
+        Effect::ForEachCategory {
+            action: ForEachCategoryAction::PutCounter { target, .. },
+            ..
+        } => scan_target_filter(target),
+        Effect::ForEachCategory { .. } => Axes::NONE,
         Effect::ChooseObjectsIntoTrackedSet {
             chooser,
             filter,
@@ -3627,7 +3627,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
-        | Effect::ForEachCategoryExile { .. }
+        | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::Exploit { .. }

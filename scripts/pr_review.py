@@ -40,6 +40,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -71,6 +72,7 @@ PR_ATTRIBUTED_EVENTS = {
     "changes_requested",
     "defer",
     "deferred",
+    "decline",
     "fixup_push",
     "freshness_check",
     "hard_stop",
@@ -106,6 +108,8 @@ ALLOWED_OUTCOMES = {
     "merged",
     "closed",
     "deferred",
+    "decline",
+    "declined",
     "defer-fe",
     "ci_failed",
     "hold_ci",
@@ -141,6 +145,8 @@ DEFECT_SIGNAL_WEIGHTS = {
     "careful-watch": 4,
     "ai-template-gap": 4,
     "unchecked-engine-implementer": 4,
+    "wrong-or-stale-cr-annotation": 8,
+    "duplicated-domain-vocabulary": 8,
 }
 # Praise signals add to the contributor score (credit, capped below). They never
 # affect recurrence, scrutiny, or the derived-trusted gate — praise softens the
@@ -204,6 +210,19 @@ DEFAULT_GITTENSOR_API_URL = "https://api.gittensor.io/prs"
 GITTENSOR_CLOSED_ATTENTION_MIN = 20
 GITTENSOR_CLOSED_ATTENTION_RATIO = 0.6
 AI_CONTRIBUTOR_TEMPLATE_HEADINGS = ("summary", "files changed", "track", "llm", "verification")
+REQUIRED_ARTIFACT_H2_HEADINGS = (
+    "implementation method (required)",
+    "verification",
+    "gate a",
+    "anchored on",
+    "final review-impl",
+)
+REQUIRED_VERIFICATION_CHECKBOX_LABELS = (
+    "Required checks ran clean, or the exact CI-owned alternative is stated below.",
+    "Gate A output below is for the current committed head.",
+    "Final review-impl below is clean for the current committed head.",
+    "Both anchors cite existing analogous code at the same seam.",
+)
 PROOF_REQUIRED_RISK_FLAGS = {
     "verification-skipped-or-delegated",
     "agent-coauthored-all-commits",
@@ -227,8 +246,10 @@ CANDIDATE_ACTION_ORDER = {
     "approve_ready_for_handler": 2,
     "warn_stale_changes_for_handler": 3,
     "review": 3,
+    "hold": 4,
     "hold_ci": 4,
     "request_changes": 5,
+    "decline": 5,
     "blocked": 6,
     "defer": 7,
     "queued": 8,
@@ -293,6 +314,47 @@ class Policy:
         return str(value) if value else None
 
     @property
+    def admission_mode(self) -> str:
+        return str(self.raw.get("admission", {}).get("mode", "audit"))
+
+    @property
+    def admission_enforced_after(self) -> str | None:
+        value = self.raw.get("admission", {}).get("enforced_after")
+        return str(value) if value else None
+
+    @property
+    def architecture_scope_patterns(self) -> list[str]:
+        return [
+            str(pattern)
+            for pattern in self.raw.get("architecture_scope", {}).get("patterns", [])
+        ]
+
+    @property
+    def architecture_scope_mode(self) -> str:
+        return str(self.raw.get("architecture_scope", {}).get("mode", "audit"))
+
+    @property
+    def architecture_scope_spans(self) -> dict[str, list[str]]:
+        spans = self.raw.get("architecture_scope", {}).get("spans", {})
+        if spans:
+            return {
+                str(name): [str(pattern) for pattern in patterns]
+                for name, patterns in spans.items()
+            }
+        return self.path_classes
+
+    @property
+    def architecture_scope_span_threshold(self) -> int:
+        return self._positive_int(
+            self.raw.get("architecture_scope", {}).get("span_threshold"), 3
+        )
+
+    @property
+    def architecture_accepted_issue_label(self) -> str | None:
+        value = self.raw.get("admission", {}).get("accepted_issue_label")
+        return str(value) if value else None
+
+    @property
     def requested_changes_warning_after_days(self) -> int:
         return self._positive_int(
             self.raw.get("requested_changes", {}).get("warning_after_days"),
@@ -333,7 +395,28 @@ def load_policy(path: Path) -> Policy:
     if not path.exists():
         return Policy({})
     with path.open("rb") as file:
-        return Policy(tomllib.load(file))
+        policy = Policy(tomllib.load(file))
+    validate_policy(policy)
+    return policy
+
+
+def validate_policy(policy: Policy) -> None:
+    if policy.admission_mode not in {"audit", "enforce"}:
+        raise ValueError(f"invalid admission.mode: {policy.admission_mode!r}")
+    if policy.admission_mode == "enforce":
+        cutoff = policy.admission_enforced_after
+        if (
+            cutoff is None
+            or not cutoff.endswith("Z")
+            or parse_event_datetime(cutoff) is None
+        ):
+            raise ValueError(
+                "admission.mode='enforce' requires a valid UTC admission.enforced_after timestamp ending in Z"
+            )
+    if policy.architecture_scope_mode not in {"audit", "enforce"}:
+        raise ValueError(
+            f"invalid architecture_scope.mode: {policy.architecture_scope_mode!r}"
+        )
 
 
 def load_private_overrides(state_dir: Path) -> dict[str, Any]:
@@ -524,9 +607,52 @@ def all_events(state_dir: Path) -> list[dict[str, Any]]:
     return sorted(events, key=event_sort_key)
 
 
+def effective_signals_by_event(events: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Return signals after append-only review-correction tombstones."""
+    by_id = {
+        str(event.get("event_id")): event
+        for event in events
+        if event.get("event_id")
+    }
+    retracted: dict[str, set[str]] = {}
+    for correction in sorted(events, key=event_sort_key):
+        if correction.get("event_type") != "review_correction":
+            continue
+        target_id = str(correction.get("corrects_event_id") or "")
+        target = by_id.get(target_id)
+        if target is None or target.get("event_type") == "review_correction":
+            continue
+        target_signals = {
+            canonical
+            for signal in target.get("signals") or []
+            if (canonical := canonical_signal(str(signal))) is not None
+        }
+        corrected = {
+            canonical
+            for signal in correction.get("signals") or []
+            if (canonical := canonical_signal(str(signal))) in target_signals
+        }
+        retracted.setdefault(target_id, set()).update(corrected)
+    effective: dict[str, list[str]] = {}
+    for event_id, event in by_id.items():
+        if event.get("event_type") == "review_correction":
+            effective[event_id] = []
+            continue
+        removed = retracted.get(event_id, set())
+        effective[event_id] = [
+            str(signal)
+            for signal in event.get("signals") or []
+            if (canonical := canonical_signal(str(signal))) is None
+            or canonical not in removed
+        ]
+    return effective
+
+
 def latest_events_by_pr_head(events: list[dict[str, Any]]) -> dict[tuple[int, str], dict[str, Any]]:
     latest: dict[tuple[int, str], dict[str, Any]] = {}
     for event in events:
+        if event.get("event_type") == "review_correction":
+            continue
         pr = event.get("pr")
         head_sha = event.get("head_sha")
         if pr is None or not head_sha:
@@ -622,6 +748,8 @@ def canonical_from_text(value: str | None) -> tuple[str, str] | None:
         return ("blocked", "blocked")
     if "hard-stop" in text:
         return ("blocked", "hard_stop")
+    if text == "decline" or text == "declined":
+        return ("blocked", "declined")
     if "merged" in text or "pruned-as-merged" in text or text == "pruned-merged":
         return ("merged", "merged")
     if "defer-fe" in text or text == "defer" or text == "deferred":
@@ -1010,6 +1138,8 @@ def contributor_rows_from_prs(
 def build_pr_contributor_map(events: list[dict[str, Any]]) -> dict[int, str]:
     contributors: dict[int, str] = {}
     for event in sorted(events, key=event_sort_key):
+        if event.get("event_type") == "review_correction":
+            continue
         pr = event.get("pr")
         if pr is None:
             continue
@@ -1033,6 +1163,7 @@ def build_analytics_model(
     refreshed: bool = False,
 ) -> dict[str, Any]:
     all_sorted_events = sorted(events, key=event_sort_key)
+    effective_signals = effective_signals_by_event(all_sorted_events)
     pr_contributors = build_pr_contributor_map(all_sorted_events)
     filtered_events = filtered_events_by_days(all_sorted_events, days)
     pr_accumulators: dict[int, PrAccumulator] = {}
@@ -1054,6 +1185,8 @@ def build_analytics_model(
 
     for event in filtered_events:
         event_type = event.get("event_type")
+        if event_type == "review_correction":
+            continue
         login = contributor_login_for_event(event)
         if event_type == "quality_entry":
             if login:
@@ -1075,7 +1208,10 @@ def build_analytics_model(
         # Signals recorded on PR-attributed outcome events join the same lifetime
         # aggregate the legacy quality_entry import feeds (per-occurrence recurrence
         # is collected separately by collect_signal_occurrences).
-        add_signals(contributor, event.get("signals") or [])
+        add_signals(
+            contributor,
+            effective_signals.get(str(event.get("event_id") or ""), []),
+        )
         accumulator = pr_accumulators.setdefault(
             pr_number,
             PrAccumulator(pr_number, contributor, [], {}),
@@ -1155,10 +1291,14 @@ def collect_signal_occurrences(
     trust, and repeated praise must do neither.
     """
     occurrences: dict[str, list[dict[str, Any]]] = {}
+    effective_signals = effective_signals_by_event(events)
     for event in events:
-        if event.get("event_type") not in PR_ATTRIBUTED_EVENTS:
+        if (
+            event.get("event_type") not in PR_ATTRIBUTED_EVENTS
+            or event.get("event_type") == "review_correction"
+        ):
             continue
-        signals = event.get("signals") or []
+        signals = effective_signals.get(str(event.get("event_id") or ""), [])
         pr = event.get("pr")
         login = contributor_login_for_event(event)
         if not signals or pr is None or not login:
@@ -1506,7 +1646,7 @@ def classify_files(files: list[str], policy: Policy) -> dict[str, Any]:
     elif "frontend" in classes and len(classes) > 1:
         surface = "mixed"
         gate = "policy"
-    elif "engine" in classes:
+    elif set(classes) & {"engine", "server", "draft"}:
         surface = "backend"
         gate = "review"
     else:
@@ -1572,6 +1712,7 @@ def compact_pr_view(pr: dict[str, Any], acting_login: str) -> dict[str, Any]:
         "state": pr.get("state"),
         "isDraft": pr.get("isDraft"),
         "url": pr.get("url"),
+        "createdAt": pr.get("createdAt"),
         "author_login": author_login,
         "self_authored": author_login == acting_login,
         "headRefName": pr.get("headRefName"),
@@ -1625,6 +1766,287 @@ def markdown_headings(body: str | None) -> set[str]:
         if heading:
             headings.add(heading)
     return headings
+
+
+def markdown_sections(body: str | None) -> dict[str, list[str]]:
+    """Split a PR body at exact H2 headings without interpreting other heading levels."""
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in (body or "").splitlines():
+        stripped = line.strip()
+        match = re.match(r"^##\s+(.+?)\s*$", stripped)
+        if match:
+            current = match.group(1).casefold()
+            sections.setdefault(current, [])
+        elif current is not None:
+            sections[current].append(line)
+    return sections
+
+
+def relevant_h2_heading_counts(body: str | None) -> dict[str, int]:
+    counts = {heading: 0 for heading in REQUIRED_ARTIFACT_H2_HEADINGS}
+    for line in (body or "").splitlines():
+        match = re.match(r"^##\s+(.+?)\s*$", line.strip())
+        if match:
+            heading = match.group(1).casefold()
+            if heading in counts:
+                counts[heading] += 1
+    return counts
+
+
+def section_text(sections: dict[str, list[str]], heading: str) -> str:
+    return "\n".join(sections.get(heading, [])).strip()
+
+
+def admission_time_profile(pr: dict[str, Any], policy: Policy) -> dict[str, Any]:
+    """Classify creation time for artifact admission enforcement."""
+    cutoff = parse_event_datetime(policy.admission_enforced_after)
+    created_raw = pr.get("createdAt")
+    created = parse_event_datetime(created_raw)
+    insufficient = created is None
+    post_cutoff = cutoff is not None and created is not None and created >= cutoff
+    if insufficient:
+        status = "unknown"
+    elif cutoff is None:
+        status = "audit_unconfigured"
+    elif post_cutoff:
+        status = "post_cutoff"
+    else:
+        status = "proven_legacy"
+    return {
+        "created_at": created_raw,
+        "created_at_status": status,
+        "insufficient_admission_data": insufficient,
+        "post_cutoff": post_cutoff,
+        "enforced": policy.admission_mode == "enforce" and post_cutoff,
+        "hold": policy.admission_mode == "enforce" and insufficient,
+    }
+
+
+def artifact_profile(
+    pr: dict[str, Any],
+    policy: Policy,
+    files: list[str] | None = None,
+    classification: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Evaluate immutable, current-head contributor artifacts separately from proof."""
+    timing = admission_time_profile(pr, policy)
+    body = str(pr.get("body") or "")
+    head = str(pr.get("headRefOid") or "").lower()
+    sections = markdown_sections(body)
+    heading_counts = relevant_h2_heading_counts(body)
+    missing_headings = sorted(
+        heading for heading, count in heading_counts.items() if count == 0
+    )
+    duplicate_headings = sorted(
+        heading for heading, count in heading_counts.items() if count > 1
+    )
+    gate_matches = re.findall(
+        r"(?m)^Gate A PASS head=([0-9a-f]{40}) base=([0-9a-f]{40})$",
+        section_text(sections, "gate a"),
+    )
+    review_matches = re.findall(
+        r"(?m)^Final review-impl PASS head=([0-9a-f]{40})$",
+        section_text(sections, "final review-impl"),
+    )
+    anchor_pattern = re.compile(r"^-\s+([^\s:][^:]*):([1-9][0-9]*)\s+(?:—|-)\s+.+$")
+    anchors = []
+    for line in sections.get("anchored on", []):
+        match = anchor_pattern.match(line.strip())
+        if match:
+            anchors.append({"path": match.group(1), "line": int(match.group(2))})
+    distinct_anchors = {
+        (anchor["path"], anchor["line"]) for anchor in anchors
+    }
+    verification_lines = sections.get("verification", [])
+    verification_text = "\n".join(verification_lines).strip()
+    checked_required: dict[str, int] = {}
+    unchecked_required: list[str] = []
+    for label in REQUIRED_VERIFICATION_CHECKBOX_LABELS:
+        checked_line = f"- [x] {label}"
+        unchecked_line = f"- [ ] {label}"
+        checked_required[label] = sum(
+            line.strip() == checked_line for line in verification_lines
+        )
+        if any(line.strip() == unchecked_line for line in verification_lines):
+            unchecked_required.append(unchecked_line)
+    required_verification_valid = all(
+        count == 1 for count in checked_required.values()
+    ) and not unchecked_required
+    method = section_text(sections, "implementation method (required)")
+    method_records = re.findall(r"(?m)^Method:\s*.+$", method)
+    backend_surface = bool(
+        set((classification or {}).get("path_classes") or {})
+        & {"engine", "server", "draft"}
+    )
+    method_valid = False
+    if len(method_records) == 1:
+        method_record = method_records[0]
+        engine_method = method_record == "Method: /engine-implementer"
+        not_applicable_method = bool(
+            re.fullmatch(r"Method: not-applicable\s+[—-]\s+\S.+", method_record)
+        )
+        method_valid = engine_method or (not_applicable_method and not backend_surface)
+    claimed_text = section_text(sections, "claimed parse impact")
+    claimed_cards = []
+    if claimed_text.casefold().rstrip(".") != "none":
+        claimed_cards = sorted(
+            {
+                line.strip()[2:].strip()
+                for line in sections.get("claimed parse impact", [])
+                if line.strip().startswith("- ") and line.strip()[2:].strip()
+            },
+            key=str.casefold,
+        )
+    failures = []
+    if missing_headings:
+        failures.append("missing_required_h2_headings")
+    if duplicate_headings:
+        failures.append("duplicate_required_h2_headings")
+    if not gate_matches:
+        failures.append("missing_gate_a_pass")
+    elif len(gate_matches) > 1:
+        failures.append("duplicate_gate_a_pass")
+    elif gate_matches[0][0] != head:
+        failures.append("stale_gate_a_head")
+    if not review_matches:
+        failures.append("missing_final_review_impl_pass")
+    elif len(review_matches) > 1:
+        failures.append("duplicate_final_review_impl_pass")
+    elif review_matches[0] != head:
+        failures.append("stale_final_review_impl_head")
+    if len(distinct_anchors) < 2:
+        failures.append("fewer_than_two_anchors")
+    if unchecked_required:
+        failures.append("unchecked_required_verification")
+    if not verification_text:
+        failures.append("missing_or_empty_verification")
+    elif not required_verification_valid:
+        failures.append("invalid_required_verification_checkboxes")
+    if not method_valid:
+        failures.append("invalid_implementation_method")
+
+    return {
+        "mode": policy.admission_mode,
+        "enforcement_cutoff": policy.admission_enforced_after,
+        **timing,
+        "passes": not failures,
+        "would_decline": bool(failures),
+        "decline": timing["enforced"] and bool(failures),
+        "failures": failures,
+        "gate_a_head": gate_matches[0][0] if len(gate_matches) == 1 else None,
+        "final_review_head": review_matches[0] if len(review_matches) == 1 else None,
+        "anchors": anchors,
+        "unchecked_required": unchecked_required,
+        "required_verification_counts": checked_required,
+        "missing_relevant_h2_headings": missing_headings,
+        "duplicate_relevant_h2_headings": duplicate_headings,
+        "method_valid": method_valid,
+        "method_records": method_records,
+        "claimed_cards": claimed_cards,
+    }
+
+
+def accepted_closing_issues(pr: dict[str, Any], accepted_label: str | None) -> list[int]:
+    if not accepted_label:
+        return []
+    accepted = accepted_label.casefold()
+    return sorted(
+        int(issue["number"])
+        for issue in pr.get("closingIssuesReferences", [])
+        if issue.get("number") is not None
+        and accepted
+        in {
+            str(label.get("name") or "").casefold()
+            for label in issue.get("labels", [])
+        }
+    )
+
+
+def architecture_scope_profile(
+    pr: dict[str, Any], files: list[str], policy: Policy, private_overrides: dict[str, Any]
+) -> dict[str, Any]:
+    matched_paths = sorted(
+        path for path in files if matches_any(path, policy.architecture_scope_patterns)
+    )
+    span_names: set[str] = set()
+    ambiguous_span_files: dict[str, list[str]] = {}
+    for path in files:
+        path_spans = sorted(
+            name
+            for name, patterns in policy.architecture_scope_spans.items()
+            if matches_any(path, patterns)
+        )
+        if path_spans:
+            # A file is one architectural unit. Overlapping policy patterns must
+            # never manufacture three spans from a single changed path.
+            span_names.add(path_spans[0])
+        if len(path_spans) > 1:
+            ambiguous_span_files[path] = path_spans
+    spans = sorted(span_names)
+    span_triggered = len(spans) >= policy.architecture_scope_span_threshold
+    triggered = bool(matched_paths) or span_triggered
+    author = (pr.get("author") or {}).get("login")
+    private_authors = {
+        fold_login(str(login))
+        for login in private_overrides.get("architecture_scope_authors", [])
+    }
+    author_authorized = bool(author) and fold_login(str(author)) in private_authors
+    issue_evidence_complete = bool(pr.get("closingIssuesReferencesComplete"))
+    issues = (
+        accepted_closing_issues(pr, policy.architecture_accepted_issue_label)
+        if issue_evidence_complete
+        else []
+    )
+    issue_authorized = bool(issues)
+    authorized = author_authorized or issue_authorized
+    mode = policy.architecture_scope_mode
+    incomplete_issue_evidence = (
+        triggered and not author_authorized and not issue_evidence_complete
+    )
+    evidence = {
+        "matched_paths": matched_paths,
+        "spans": spans,
+        "span_threshold": policy.architecture_scope_span_threshold,
+        "ambiguous_span_files": ambiguous_span_files,
+        "accepted_closing_issues": issues,
+        "closing_issue_records": pr.get("closingIssuesReferences", []),
+        "closing_issue_count": pr.get("closingIssuesReferencesCount"),
+        "author_private_override": author_authorized,
+        "closing_issue_evidence_complete": issue_evidence_complete,
+        "files_complete": bool(pr.get("filesComplete")),
+    }
+    path_text = ", ".join(matched_paths) if matched_paths else "none"
+    span_text = ", ".join(spans) if spans else "none"
+    decline_comment = (
+        "**Closed without implementation-diff review.** This PR enters protected "
+        "architecture scope because it touches "
+        f"`{path_text}` and/or spans `{span_text}`. AI-contributor PRs may enter "
+        "this scope only after an explicit prior maintainer appointment or when "
+        "the PR closes an issue labeled `accepted`. Tier, contributor standing, "
+        "the `quality` label, prior praise, and frontend permission do not waive "
+        "this gate. Open a fresh PR from current `main` only after one of those "
+        "authorizations exists, and rerun `/engine-implementer`, the final "
+        "`review-impl`, and Gate A against its committed head."
+    )
+    return {
+        "mode": mode,
+        "enforcement_cutoff": None,
+        "post_cutoff": None,
+        "enforced": mode == "enforce",
+        "hold": mode == "enforce" and incomplete_issue_evidence,
+        "triggered": triggered,
+        "authorized": authorized,
+        "would_decline": triggered and not authorized,
+        "decline": (
+            mode == "enforce"
+            and triggered
+            and not authorized
+            and not incomplete_issue_evidence
+        ),
+        "evidence": evidence,
+        "decline_comment": decline_comment,
+    }
 
 
 def unchecked_markdown_items(body: str | None) -> list[str]:
@@ -2042,6 +2464,8 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     pr = packet["pr"]
     head = pr.get("headRefOid")
     classification = packet.get("classification", {})
+    artifacts = packet.get("artifacts") or {}
+    architecture_scope = packet.get("architecture_scope") or {}
     latest_commit = packet.get("latest_maintainer_review_commit")
     review_decision = pr.get("reviewDecision")
     queue = bool(
@@ -2078,6 +2502,15 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif classification.get("hard_stop_paths"):
         action = "request_changes"
         reason = "hard_stop"
+    elif artifacts.get("hold") or architecture_scope.get("hold"):
+        action = "hold"
+        reason = "insufficient_admission_data"
+    elif artifacts.get("decline"):
+        action = "decline"
+        reason = "required_artifacts_current_head"
+    elif architecture_scope.get("decline"):
+        action = "decline"
+        reason = "architecture_scope_not_authorized"
     elif (packet.get("contributor") or {}).get("standing") == "skip":
         # Explicit maintainer standing override (private-overrides.json). Ordered
         # after hard_stop deliberately: a skip-listed contributor touching guarded
@@ -2187,7 +2620,7 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         and latest_commit is not None
         and latest_commit != head
     )
-    if baseline_pending_after_maintainer_merge and (
+    if action not in {"decline", "hold"} and baseline_pending_after_maintainer_merge and (
         review_decision == "APPROVED" or stale_changes_requested
     ) and not (packet.get("proof") or {}).get("proof_gap"):
         action = "approve_ready_for_handler"
@@ -2216,7 +2649,53 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         "contributor": packet.get("contributor"),
         "gittensor": packet.get("gittensor"),
         "proof": packet.get("proof"),
+        "artifacts": artifacts,
+        "architecture_scope": architecture_scope,
     }
+    audit_would_decline = []
+    if artifacts.get("would_decline") and not artifacts.get("decline"):
+        audit_would_decline.append(
+            {"gate": "artifacts", "evidence": artifacts.get("failures", [])}
+        )
+    if architecture_scope.get("would_decline") and not architecture_scope.get("decline"):
+        audit_would_decline.append(
+            {
+                "gate": "architecture_scope",
+                "evidence": architecture_scope.get("evidence", {}),
+            }
+        )
+    if audit_would_decline:
+        recommendation["audit_would_decline"] = audit_would_decline
+    if artifacts.get("mode") == "audit" and artifacts.get(
+        "insufficient_admission_data"
+    ):
+        recommendation["audit_insufficient_admission_data"] = {
+            "created_at": artifacts.get("created_at"),
+            "created_at_status": artifacts.get("created_at_status"),
+        }
+    if action == "hold" and reason == "insufficient_admission_data":
+        recommendation["hold_evidence"] = {
+            "maintainer_blocker": True,
+            "non_mutating": True,
+            "implementation_diff_review_allowed": False,
+            "created_at": artifacts.get("created_at"),
+            "created_at_status": artifacts.get("created_at_status"),
+        }
+    if action == "decline":
+        if reason == "architecture_scope_not_authorized":
+            recommendation["decline_comment"] = architecture_scope.get("decline_comment")
+            recommendation["decline_evidence"] = architecture_scope.get("evidence")
+        else:
+            failures = ", ".join(artifacts.get("failures") or [])
+            recommendation["decline_comment"] = (
+                "**Closed without implementation-diff review.** Required current-head "
+                f"admission artifacts failed for `{head}`: {failures}. Open a fresh "
+                "PR from current `main`, rerun `/engine-implementer`, complete and "
+                "address a final `review-impl`, then rerun Gate A against that exact "
+                "committed head. Merely including the required headings or PASS text "
+                "is not validation; their content and SHA must match the current head."
+            )
+            recommendation["decline_evidence"] = artifacts
     if action in {"warn_stale_changes_for_handler", "close_stale_changes_for_handler"}:
         recommendation["requested_changes_expiry"] = requested_changes_expiry
     if action == "defer" and reason == "frontend_policy":
@@ -2279,6 +2758,10 @@ def make_packet(
     parse_diff = parse_diff_comment_state(
         pr.get("comments", []), {"github-actions", acting_login}
     )
+    artifacts = artifact_profile(pr, policy, files, classification)
+    architecture_scope = architecture_scope_profile(
+        pr, files, policy, private_overrides
+    )
     compact_pr = compact_pr_view(pr, acting_login)
     author_policy = {
         "frontend_review_allowed": frontend_review_allowed(
@@ -2316,12 +2799,24 @@ def make_packet(
         "classification": classification,
         "ci": checks,
         "parse_diff": parse_diff,
+        "artifacts": artifacts,
+        "architecture_scope": architecture_scope,
         "latest_maintainer_review_commit": latest_review_commit(pr, acting_login),
         "domain": {"rules_domain": policy.rules_domain},
         "policy": {
             "labels": {
                 "frontend_deferred": policy.frontend_deferred_label,
                 "quality": policy.quality_label,
+            },
+            "admission": {
+                "mode": policy.admission_mode,
+                "enforced_after": policy.admission_enforced_after,
+                "accepted_issue_label": policy.architecture_accepted_issue_label,
+                "architecture_span_threshold": policy.architecture_scope_span_threshold,
+            },
+            "architecture_scope": {
+                "mode": policy.architecture_scope_mode,
+                "span_threshold": policy.architecture_scope_span_threshold,
             },
             "requested_changes": {
                 "warning_after_days": policy.requested_changes_warning_after_days,
@@ -2335,7 +2830,19 @@ def make_packet(
         "proof": proof,
         "policy_trace": policy_trace(
             classification, (contributor_summary or {}).get("standing")
-        ),
+        )
+        + [
+            "architecture_issue_evidence:"
+            + json_dumps(
+                {
+                    "records": architecture_scope["evidence"]["closing_issue_records"],
+                    "count": architecture_scope["evidence"]["closing_issue_count"],
+                    "complete": architecture_scope["evidence"][
+                        "closing_issue_evidence_complete"
+                    ],
+                }
+            )
+        ],
         "local_current_event": local_event,
         "local_first_block_event": first_block_event,
     }
@@ -2347,7 +2854,17 @@ def policy_trace(classification: dict[str, Any], standing: str | None = None) ->
     # Trace records MATCHED patterns, not fired actions: a merged PR with hard-stop
     # paths still traces matched:hard_stop, and a skip-standing contributor traces
     # matched:standing_skip even when hard_stop wins the action ladder.
-    trace = ["hard_stop", "safety_queue_freshness", "private_override", "standing", "path_policy", "default"]
+    trace = [
+        "terminal_self",
+        "hard_stop",
+        "admission",
+        "architecture_scope",
+        "private_override",
+        "standing",
+        "safety_queue_freshness",
+        "path_policy",
+        "default",
+    ]
     if classification.get("hard_stop_paths"):
         trace.append("matched:hard_stop")
     if standing == "skip":
@@ -2407,10 +2924,11 @@ def pr_node_fields(
         f"number title {pr_body}state isDraft url createdAt updatedAt headRefName headRefOid "
         "baseRefName mergeStateStatus reviewDecision changedFiles "
         "author{login} "
-        "labels(first:20){nodes{name}} "
+        "closingIssuesReferences(first:20){totalCount pageInfo{hasNextPage endCursor} nodes{number state labels(first:20){totalCount pageInfo{hasNextPage endCursor} nodes{name}}}} "
+        "labels(first:100){totalCount pageInfo{hasNextPage endCursor} nodes{name}} "
         "assignees(first:10){nodes{login}} "
         "isInMergeQueue mergeQueueEntry{position state} autoMergeRequest{enabledAt} "
-        "files(first:100){nodes{path}} "
+        "files(first:100){totalCount pageInfo{hasNextPage endCursor} nodes{path}} "
         f"latestReviews(first:20){{nodes{{author{{login}} state submittedAt commit{{oid}}{review_body}}}}} "
         f"{full_reviews}"
         f"{comments}"
@@ -2458,6 +2976,17 @@ def graphql_nodes(container: Any) -> list[dict[str, Any]]:
     if not isinstance(container, dict):
         return []
     return [node for node in container.get("nodes", []) if isinstance(node, dict)]
+
+
+def graphql_connection_complete(container: Any) -> bool:
+    if not isinstance(container, dict) or not isinstance(container.get("totalCount"), int):
+        return False
+    page_info = container.get("pageInfo")
+    return (
+        isinstance(page_info, dict)
+        and page_info.get("hasNextPage") is False
+        and container["totalCount"] == len(graphql_nodes(container))
+    )
 
 
 def graphql_rollup_contexts(node: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2550,6 +3079,32 @@ def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
     """Adapt a GraphQL PR node into the gh `--json`-style shape downstream code reads."""
     latest_reviews = graphql_reviews(graphql_nodes(node.get("latestReviews")))
     full_reviews = graphql_nodes(node.get("reviews"))
+    closing_issue_connection = node.get("closingIssuesReferences")
+    closing_issue_nodes = graphql_nodes(closing_issue_connection)
+    closing_issue_records = sorted(
+        {
+            (
+                int(issue["number"]),
+                str(issue.get("state") or ""),
+                tuple(
+                    sorted(
+                        {
+                            str(label.get("name"))
+                            for label in graphql_nodes(issue.get("labels"))
+                            if label.get("name")
+                        },
+                        key=str.casefold,
+                    )
+                ),
+                graphql_connection_complete(issue.get("labels")),
+            )
+            for issue in closing_issue_nodes
+            if issue.get("number") is not None
+        },
+        key=lambda record: (record[0], record[1], tuple(name.casefold() for name in record[2])),
+    )
+    labels_connection = node.get("labels")
+    files_connection = node.get("files")
     return {
         "number": node.get("number"),
         "title": node.get("title"),
@@ -2566,12 +3121,32 @@ def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
         "reviewDecision": node.get("reviewDecision"),
         "changedFiles": node.get("changedFiles"),
         "author": {"login": (node.get("author") or {}).get("login")},
-        "labels": [{"name": label.get("name")} for label in graphql_nodes(node.get("labels"))],
+        "closingIssuesReferences": [
+            {
+                "number": number,
+                "state": state,
+                "labels": [{"name": name} for name in labels],
+                "labelsComplete": labels_complete,
+            }
+            for number, state, labels, labels_complete in closing_issue_records
+        ],
+        "closingIssuesReferencesCount": (
+            closing_issue_connection.get("totalCount")
+            if isinstance(closing_issue_connection, dict)
+            else None
+        ),
+        "closingIssuesReferencesComplete": graphql_connection_complete(
+            closing_issue_connection
+        )
+        and all(graphql_connection_complete(issue.get("labels")) for issue in closing_issue_nodes),
+        "labels": [{"name": label.get("name")} for label in graphql_nodes(labels_connection)],
+        "labelsComplete": graphql_connection_complete(labels_connection),
         "assignees": [{"login": a.get("login")} for a in graphql_nodes(node.get("assignees"))],
         "isInMergeQueue": node.get("isInMergeQueue"),
         "mergeQueueEntry": node.get("mergeQueueEntry"),
         "autoMergeRequest": node.get("autoMergeRequest"),
-        "files": [{"path": f.get("path")} for f in graphql_nodes(node.get("files"))],
+        "files": [{"path": f.get("path")} for f in graphql_nodes(files_connection)],
+        "filesComplete": graphql_connection_complete(files_connection),
         "comments": [
             {
                 "author": {"login": (c.get("author") or {}).get("login")},
@@ -2748,6 +3323,8 @@ def scan_candidate(pr: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]
         "hard_stop_paths": packet["classification"]["hard_stop_paths"],
         "ci": packet["ci"]["state"],
         "parse_diff": packet["parse_diff"],
+        "artifacts": packet.get("artifacts"),
+        "architecture_scope": packet.get("architecture_scope"),
         "review_decision": pr.get("reviewDecision"),
         "is_in_merge_queue": packet["pr"].get("isInMergeQueue"),
         "merge_queue_entry": packet["pr"].get("mergeQueueEntry"),
@@ -2780,11 +3357,38 @@ def command_scan(args: argparse.Namespace) -> int:
     for candidate in candidates:
         candidates_by_action.setdefault(candidate["advisory_action"], []).append(candidate)
     action_counts = {action: len(items) for action, items in candidates_by_action.items()}
+    artifact_passes = sum(
+        1 for candidate in candidates if (candidate.get("artifacts") or {}).get("passes")
+    )
+    artifact_failures: dict[str, int] = {}
+    for candidate in candidates:
+        for failure in (candidate.get("artifacts") or {}).get("failures") or []:
+            artifact_failures[failure] = artifact_failures.get(failure, 0) + 1
+    architecture_triggered = sum(
+        1
+        for candidate in candidates
+        if (candidate.get("architecture_scope") or {}).get("triggered")
+    )
+    architecture_would_decline = sum(
+        1
+        for candidate in candidates
+        if (candidate.get("architecture_scope") or {}).get("would_decline")
+    )
     output = {
         "acting_login": context.acting_login,
         "completeness": "triage",
         "action_counts": action_counts,
         "candidates_by_action": candidates_by_action,
+        "audit_summary": {
+            "prs": len(candidates),
+            "artifact_passes": artifact_passes,
+            "artifact_pass_rate": (
+                artifact_passes / len(candidates) if candidates else None
+            ),
+            "artifact_failures": artifact_failures,
+            "architecture_triggered": architecture_triggered,
+            "architecture_would_decline": architecture_would_decline,
+        },
     }
     if len(candidates) == args.limit:
         output["warnings"] = [
@@ -2798,7 +3402,7 @@ def event_skeleton(pr_number: int, compact_pr: dict[str, Any]) -> dict[str, Any]
     # Timestamp is prefilled because event_id hashes it: an agent that fills the
     # skeleton and pipes it to `record --event-json -` gets idempotent retries.
     return {
-        "event_type": "<FILL: review|changes_requested|blocked|approved_enqueued|deferred|held|requested_changes_warning|stale_changes_closed>",
+        "event_type": "<FILL: review|changes_requested|blocked|decline|approved_enqueued|deferred|held|requested_changes_warning|stale_changes_closed|review_correction>",
         "pr": pr_number,
         "head_sha": compact_pr.get("headRefOid"),
         "author": compact_pr.get("author_login"),
@@ -2853,7 +3457,9 @@ def read_event_arg(value: str) -> dict[str, Any]:
     return json.loads(Path(value).read_text(encoding="utf-8"))
 
 
-def event_validation_error(event: dict[str, Any]) -> str | None:
+def event_validation_error(
+    event: dict[str, Any], existing_events: list[dict[str, Any]] | None = None
+) -> str | None:
     event_type = event.get("event_type")
     if event_type not in ALLOWED_EVENT_TYPES:
         return f"event_type {event_type!r} is not in the allowed vocabulary"
@@ -2871,6 +3477,63 @@ def event_validation_error(event: dict[str, Any]) -> str | None:
         unknown = sorted(set(signals) - QUALITY_SIGNAL_VOCAB)
         if unknown:
             return f"signals {unknown} are not in the allowed vocabulary"
+    if event_type == "review_correction":
+        target_id = event.get("corrects_event_id")
+        if not isinstance(target_id, str) or not target_id:
+            return "review_correction requires corrects_event_id"
+        if not signals:
+            return "review_correction requires a non-empty signals subset"
+        if len(signals) != len(set(signals)):
+            return "review_correction signals must not contain duplicates"
+        if event.get("outcome") is not None:
+            return "review_correction must not carry an outcome"
+        target = next(
+            (
+                candidate
+                for candidate in existing_events or []
+                if candidate.get("event_id") == target_id
+            ),
+            None,
+        )
+        if target is None:
+            return f"review_correction target {target_id!r} was not found"
+        if target.get("event_type") == "review_correction":
+            return "review_correction cannot target another correction"
+        for field in ("pr", "head_sha"):
+            if event.get(field) != target.get(field):
+                return f"review_correction {field} must match the target event"
+        event_author = event.get("author")
+        target_author = target.get("author")
+        if (
+            event_author is None
+            or target_author is None
+            or fold_login(str(event_author)) != fold_login(str(target_author))
+        ):
+            return "review_correction author must match the target event"
+        target_signals = {
+            canonical
+            for signal in target.get("signals") or []
+            if (canonical := canonical_signal(str(signal))) is not None
+        }
+        if not set(signals).issubset(target_signals):
+            return "review_correction signals must be an exact subset of target signals"
+        idempotent_retry = any(
+            candidate.get("event_id") == event.get("event_id")
+            and candidate.get("event_type") == "review_correction"
+            and candidate.get("corrects_event_id") == target_id
+            and candidate.get("signals") == signals
+            for candidate in existing_events or []
+        )
+        already_retracted = {
+            canonical
+            for candidate in existing_events or []
+            if candidate.get("event_type") == "review_correction"
+            and candidate.get("corrects_event_id") == target_id
+            for signal in candidate.get("signals") or []
+            if (canonical := canonical_signal(str(signal))) is not None
+        }
+        if not idempotent_retry and set(signals) & already_retracted:
+            return "review_correction signals include an already-retracted occurrence"
     return None
 
 
@@ -2881,7 +3544,8 @@ def command_record(args: argparse.Namespace) -> int:
     if isinstance(event.get("outcome"), str):
         event["outcome"] = event["outcome"].lower()
     normalized = normalize_event(event)
-    error = event_validation_error(normalized)
+    existing_events = all_events(args.state_dir)
+    error = event_validation_error(normalized, existing_events)
     if error is not None and not args.force:
         print(
             json_dumps(
@@ -2998,10 +3662,14 @@ def command_check_skill_sync(args: argparse.Namespace) -> int:
 
 
 def command_compact(args: argparse.Namespace) -> int:
-    events = filtered_events_by_days(all_events(args.state_dir), args.days)
+    all_state_events = all_events(args.state_dir)
+    effective_signals = effective_signals_by_event(all_state_events)
+    events = filtered_events_by_days(all_state_events, args.days)
     prs: dict[str, dict[str, Any]] = {}
     contributors: dict[str, dict[str, Any]] = {}
     for event in events:
+        if event.get("event_type") == "review_correction":
+            continue
         pr = event.get("pr")
         author = event.get("author")
         if pr is not None:
@@ -3020,8 +3688,11 @@ def command_compact(args: argparse.Namespace) -> int:
             )
             entry["events"] += 1
             entry["latest_timestamp"] = event.get("timestamp")
+            event_signals = effective_signals.get(
+                str(event.get("event_id") or ""), []
+            )
             for signal in list((event.get("quality") or {}).get("signals") or []) + list(
-                event.get("signals") or []
+                event_signals
             ):
                 canonical = canonical_signal(str(signal))
                 if canonical is None:

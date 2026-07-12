@@ -3545,6 +3545,98 @@ mod tests {
         assert_eq!(run(1), 0, "smaller-power creature must not add counters");
     }
 
+    /// #5253 (Railway Brawler): "Whenever another creature you control enters,
+    /// put X +1/+1 counters on it, where X is its power." End-to-end through the
+    /// real parser: an entering creature receives +1/+1 counters equal to ITS
+    /// OWN power, not Railway Brawler's. The source and entering creature have
+    /// DIFFERENT power so the referent is observable. Reverting the enters lift
+    /// leaves the count `scope: Source`, reading Railway Brawler's power (the
+    /// #5253 bug) — this assertion goes red.
+    #[test]
+    fn railway_brawler_counters_entering_creature_by_its_own_power() {
+        use crate::game::stack::resolve_top;
+        use crate::game::triggers::process_triggers;
+        use crate::types::card_type::CoreType;
+        use crate::types::triggers::TriggerMode;
+
+        let parsed = crate::parser::parse_oracle_text(
+            "Reach, trample\n\
+             Whenever another creature you control enters, put X +1/+1 counters on it, \
+             where X is its power.",
+            "Railway Brawler",
+            &[],
+            &["Creature".to_string()],
+            &["Dinosaur".to_string()],
+        );
+        let enters_trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::ChangesZone)
+                    && t.execute
+                        .as_ref()
+                        .is_some_and(|e| matches!(&*e.effect, Effect::PutCounter { .. }))
+            })
+            .unwrap_or_else(|| {
+                panic!("Railway Brawler enters PutCounter trigger not parsed: {parsed:#?}")
+            })
+            .clone();
+
+        let mut state = GameState::new_two_player(42);
+
+        // Railway Brawler on the battlefield, controller P0, power 5.
+        let brawler_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Railway Brawler".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let b = state.objects.get_mut(&brawler_id).unwrap();
+            b.power = Some(5);
+            b.toughness = Some(5);
+            b.card_types.core_types.push(CoreType::Creature);
+            b.trigger_definitions.push(enters_trigger);
+        }
+
+        // Another creature P0 controls, power 3, currently off the battlefield.
+        let entering_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        {
+            let e = state.objects.get_mut(&entering_id).unwrap();
+            e.power = Some(3);
+            e.toughness = Some(3);
+            e.card_types.core_types.push(CoreType::Creature);
+        }
+
+        // The creature enters the battlefield → fires Railway Brawler's trigger.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, entering_id, Zone::Battlefield, &mut events);
+        process_triggers(&mut state, &events);
+        while !state.stack.is_empty() {
+            let mut resolve_events = Vec::new();
+            resolve_top(&mut state, &mut resolve_events);
+        }
+
+        // The entering creature gets counters equal to ITS OWN power (3), NOT
+        // Railway Brawler's power (5).
+        assert_eq!(
+            state.objects[&entering_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "entering creature must get +1/+1 counters = its own power (3), not the source's (5)"
+        );
+    }
+
     /// Regression test: MoveCounters must use LKI when the source has changed zones.
     /// Simulates Essence Channeler's "When this creature dies, put its counters on
     /// target creature you control" — the source is in the graveyard with no counters,

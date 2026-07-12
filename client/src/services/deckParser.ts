@@ -20,7 +20,7 @@ export interface ParsedDeck {
   companion?: string;
 }
 
-const DECK_NAME_LINE_PATTERN = /^(?:deck\s+name|name|title)\s*:?\s+(.+)$/i;
+const DECK_NAME_LINE_PATTERN = /^(?:deck\s+name|name|title)\s*(?::|=)?\s*(.+)$/i;
 
 /**
  * Flat deck shape consumed by the engine (`PlayerDeckList` in Rust) and by
@@ -85,6 +85,11 @@ const COMPANION_ANNOTATION_RE = /\s*(?:\[Companion(?:\s*\{[^}]*\})?\]|\*Companio
 const FOIL_INDICATOR_RE =
   /\s+(?:\*F\*|\*E\*|\*Foil\*|\*Etched\*|\[Foil\]|\[Etched\]|\(Foil\)|\(Etched\)|F)\s*$/i;
 
+// Forge serializes a selected printing as `count Card Name+|SET|[collector]`.
+// The optional `+` marks a foil; finishes are not represented in ParsedDeck,
+// so it is intentionally discarded while retaining the printing information.
+const FORGE_LINE_PATTERN = /^(\d+)x?\s+(.+?)\|([A-Za-z0-9]+)\|\[([^\]]+)\](?:\|#.*)?$/;
+
 // "Commanders" is the section label Archidekt uses when exporting with categories.
 function getNamedSection(line: string): DeckSection | null {
   const normalized = line.trim().toLowerCase().replace(COLON_SECTION_RE, "");
@@ -135,6 +140,22 @@ function parseDeckEntryLine(line: string): LineParseResult | null {
   }
 
   remainder = remainder.replace(FOIL_INDICATOR_RE, "");
+
+  const forgeMatch = remainder.match(FORGE_LINE_PATTERN);
+  if (forgeMatch) {
+    const name = forgeMatch[2].replace(/\+$/, "").trim();
+    return {
+      entry: {
+        count: parseInt(forgeMatch[1], 10),
+        name,
+        sourcePrinting: {
+          setCode: forgeMatch[3].toLowerCase(),
+          collectorNumber: forgeMatch[4],
+        },
+      },
+      annotation,
+    };
+  }
 
   // Collector number is the first token after the set parens. Tolerate (and
   // discard) any trailing annotation the foil/finish strip above didn't catch

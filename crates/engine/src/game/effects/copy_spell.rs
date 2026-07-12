@@ -555,6 +555,9 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
             .cloned();
     }
     if let Effect::CopySpell { target, .. } = &ability.effect {
+        if target.references_exiled_by_source() {
+            return copy_source_from_exiled_by_source(state, ability, target);
+        }
         if references_tracked_set(target) {
             return copy_source_from_tracked_set(state, ability, target);
         }
@@ -614,6 +617,39 @@ fn tracked_set_id_from_filter(filter: &TargetFilter) -> Option<TrackedSetId> {
         TargetFilter::Not { filter } => tracked_set_id_from_filter(filter),
         _ => None,
     }
+}
+
+/// CR 707.10 + CR 406.6 + CR 607.2a (Isochron Scepter class / Hideaway
+/// family): `CopySpell { ExiledBySource }` copies a card that was exiled by
+/// an EARLIER, separately-resolved ability on this same source (an ETB
+/// Imprint or a synthesized Hideaway ETB) — not by an earlier clause in this
+/// same resolution chain (that case stays on the `TrackedSet` path via
+/// `copy_source_from_tracked_set`). Resolved via the source's durable
+/// `exile_links`, the same linked-ability lookup `cast_from_zone.rs` uses for
+/// `CastFromZone { ExiledBySource }`. At most one card is ever linked to a
+/// given source under this binding (a single Imprint / Hideaway exile per
+/// source), so `.find` on the first match is sufficient — no ordering
+/// ambiguity to resolve.
+fn copy_source_from_exiled_by_source(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Option<StackEntry> {
+    let ctx = FilterContext::from_ability(ability);
+    // CR 607.2a: the lookup is scoped by `ability.source_id` but kind-agnostic
+    // (it matches ANY `ExileLinkKind` linked to this source), mirroring the
+    // pre-existing `cast_from_zone.rs` linked-exile pattern. Accepted
+    // limitation: no card links two different exile kinds to one source, so a
+    // first-match `.find` cannot pick the wrong pile.
+    let source_id = crate::game::players::linked_exile_cards_for_source(state, ability.source_id)
+        .iter()
+        .map(|link| link.exiled_id)
+        .find(|id| {
+            state.objects.get(id).is_some_and(|obj| {
+                obj.zone == Zone::Exile && matches_target_filter(state, *id, target, &ctx)
+            })
+        })?;
+    stack_entry_from_exiled_spell_object(state, source_id, ability.controller)
 }
 
 /// CR 707.10 + CR 702.153a (Isochron Scepter): `CopySpell { TrackedSet }` copies

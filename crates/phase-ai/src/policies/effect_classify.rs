@@ -288,7 +288,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::FlipCoinUntilLose { .. }
         | Effect::Forage
         | Effect::ForceAttack { .. }
-        | Effect::ForEachCategoryExile { .. }
+        | Effect::ForEachCategory { .. }
         | Effect::FreeCastFromZones { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::GainControlAll { .. }

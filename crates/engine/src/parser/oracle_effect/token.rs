@@ -712,7 +712,8 @@ fn parse_token_description_with_context(
         }
     }
 
-    // CR 609.3: "for each [thing] this way" -- count from preceding zone moves.
+    // CR 608.2c: "for each [thing] this way" -- the "this way" anaphor counts from
+    // the preceding zone moves in the same effect.
     // Matches "for each card put into a graveyard this way", "for each creature
     // exiled this way", etc.
     {
@@ -737,7 +738,7 @@ fn parse_token_description_with_context(
                     .ok()
                     .filter(|(rest, _)| rest.is_empty())
                     .map(|(_, qty)| QuantityExpr::Ref { qty })
-                    // CR 609.3 + CR 205.2a: a TYPE-restricted "for each <type> card
+                    // CR 608.2c + CR 205.2a: a TYPE-restricted "for each <type> card
                     // <verb> this way" (Dread Summons: "for each creature card put
                     // into a graveyard this way") counts only the matching cards
                     // moved this way — `FilteredTrackedSetSize` — not every card

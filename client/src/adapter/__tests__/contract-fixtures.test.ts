@@ -120,10 +120,15 @@ describe("shared adapter contract fixtures", () => {
 
     ws.dispatchSynthetic("message", JSON.stringify(stateUpdateFixture));
 
+    // The engine pair now travels as one seq-stamped `EngineSnapshot`, so the
+    // state is asserted through `snapshot.state` rather than a sibling field.
     expect(listener).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "stateChanged",
-        state: stateUpdateFixture.data.state,
+        snapshot: expect.objectContaining({
+          state: expect.objectContaining(stateUpdateFixture.data.state),
+          seq: expect.any(Number),
+        }),
         events: stateUpdateFixture.data.events,
       }),
     );

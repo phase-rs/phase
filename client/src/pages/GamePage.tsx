@@ -802,7 +802,10 @@ function GamePageContent({
   const objects = useGameStore((s) => s.gameState?.objects);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const turnNumber = useGameStore((s) => s.gameState?.turn_number);
-  const engineWaitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  // Store `waitingFor`, not `gameState.waiting_for`: this is paired below with
+  // the store-slice `legalActionsByObject`, and only the store's own field is
+  // committed atomically with the legal actions.
+  const engineWaitingFor = useGameStore((s) => s.waitingFor);
   const deckPools = useGameStore((s) => s.gameState?.deck_pools);
   const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
   const isSandboxGame = useGameStore(
@@ -2876,11 +2879,19 @@ function AbilityChoiceModal() {
   );
 }
 
+// ── Prompt modals ───────────────────────────────────────────────────────
+//
+// Every modal below reads the store's `waitingFor` — the SAME authority its
+// outer mount gate uses, and the one `commitEngineSnapshot` writes atomically
+// with the legal actions. Do NOT reach for `gameState.waiting_for` here: that
+// re-opens the split-authority gap where the outer gate opens a modal while the
+// inner component sees a different prompt and renders nothing.
+
 function SpellbookDraftModal() {
   const { t } = useTranslation("game");
   const canActForWaitingState = useCanActForWaitingState();
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const source = useGameStore((s) =>
     waitingFor?.type === "SpellbookDraft"
       ? s.gameState?.objects[waitingFor.data.source_id]
@@ -2912,7 +2923,7 @@ function SpellbookDraftModal() {
 
 function OptionalCostModal() {
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
 
   if (waitingFor?.type !== "OptionalCostChoice") return null;
 
@@ -2924,7 +2935,7 @@ function OptionalCostModal() {
 function DefilerPaymentModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
 
   if (waitingFor?.type !== "DefilerPayment") return null;
 
@@ -2950,7 +2961,7 @@ function DefilerPaymentModal() {
 
 function OptionalEffectModal() {
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "OptionalEffectChoice" && waitingFor?.type !== "OpponentMayChoice") return null;
@@ -2962,7 +2973,7 @@ function OptionalEffectModal() {
 
 function TopOrBottomModal() {
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "TopOrBottomChoice" && waitingFor?.type !== "ClashCardPlacement") return null;
@@ -2974,7 +2985,7 @@ function TopOrBottomModal() {
 
 function MutateMergeModal() {
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "MutateMergeChoice") return null;
@@ -2984,7 +2995,7 @@ function MutateMergeModal() {
 
 function CipherEncodeModal() {
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "CipherEncodeChoice") return null;
@@ -2997,7 +3008,7 @@ function CipherEncodeModal() {
 function UntapChoiceModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "UntapChoice") return null;
@@ -3041,7 +3052,7 @@ function UntapChoiceModal() {
 function ExertChoiceModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "ExertChoice") return null;
@@ -3084,7 +3095,7 @@ function ExertChoiceModal() {
 function EnlistChoiceModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "EnlistChoice") return null;
@@ -3181,7 +3192,7 @@ function formatUnlessCost(
 function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
 
   if (waitingFor?.type !== "UnlessPayment") return null;
 
@@ -3240,7 +3251,7 @@ function UnlessPaymentPanel() {
 function UnlessPaymentChooseCostModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
 
   if (waitingFor?.type !== "UnlessPaymentChooseCost") return null;
 
@@ -3285,7 +3296,7 @@ function UnlessPaymentChooseCostModal() {
 function ActivationCostOneOfChoiceModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
 
   if (waitingFor?.type !== "ActivationCostOneOfChoice") return null;
 

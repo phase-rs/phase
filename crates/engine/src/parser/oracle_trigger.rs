@@ -1598,6 +1598,12 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         {
             lift_parent_target_to_triggering_source_in_ability(execute);
             lift_shared_quality_parent_target_to_triggering_source_in_ability(execute);
+            // CR 608.2k: "put X +1/+1 counters on it, where X is its power" —
+            // "its" is the entering object (the counter recipient), not the
+            // ability carrier (#5253, Railway Brawler). Run after the
+            // parent-target lift so the counter recipient is already
+            // `TriggeringSource` when this checks the target.
+            lift_counter_count_self_scope_to_event_source_in_ability(execute);
         }
     }
 
@@ -1689,6 +1695,101 @@ fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefin
         }
         lift_parent_target_to_triggering_source(link.effect.as_mut());
         node = link.sub_ability.as_deref_mut();
+    }
+}
+
+/// CR 608.2k + CR 122.1: On a single-object enters/zone-change trigger,
+/// "put X +1/+1 counters on it, where X is its power" refers to the ENTERING
+/// object for both "it" (the counter recipient) and "its" (the per-object
+/// characteristic X reads). The recipient is lifted to `TriggeringSource` by
+/// `lift_parent_target_to_triggering_source`; this companion lifts the count's
+/// self-scoped per-object refs the same way.
+///
+/// The `where X is its power` clause parses "its power" via
+/// `parse_self_power_ref`, which emits `ObjectScope::Source` (the ability
+/// carrier — Railway Brawler) because that combinator also serves the genuine
+/// self-read forms (`~'s power`, `this card's power`, Scavenge). On an enters
+/// trigger the anaphor is the event object, not the carrier, so the count reads
+/// the wrong creature's power (#5253). When the counter effect's `target` is
+/// itself the event object (`TriggeringSource`/`ParentTarget`), the "its" in
+/// the count clause is the SAME object as the "it" recipient, so its
+/// `Source`-scoped per-object refs are remapped to `EventSource` (the entering
+/// object, resolved live-then-LKI at runtime). Genuine self-reads are untouched:
+/// they only reach this remap on an enters trigger whose counter target is the
+/// event object, where "its" cannot mean the carrier.
+fn lift_counter_count_self_scope_to_event_source(effect: &mut Effect) {
+    let (count, target) = match effect {
+        Effect::PutCounter { count, target, .. } | Effect::PutCounterAll { count, target, .. } => {
+            (count, &*target)
+        }
+        _ => return,
+    };
+    if matches!(
+        target,
+        TargetFilter::TriggeringSource | TargetFilter::ParentTarget
+    ) {
+        remap_self_scope_to_event_source_in_quantity(count);
+    }
+}
+
+/// Remap `Source`-scoped per-object quantity refs (power, toughness, mana value,
+/// …) to `EventSource`, recursing through arithmetic wrappers. Exhaustive over
+/// `QuantityExpr` so a new wrapper forces a compile error here rather than
+/// silently skipping a nested per-object ref.
+fn remap_self_scope_to_event_source_in_quantity(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref { qty } => remap_self_scope_to_event_source_in_ref(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => remap_self_scope_to_event_source_in_quantity(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs
+                .iter_mut()
+                .for_each(remap_self_scope_to_event_source_in_quantity);
+        }
+        QuantityExpr::Difference { left, right } => {
+            remap_self_scope_to_event_source_in_quantity(left);
+            remap_self_scope_to_event_source_in_quantity(right);
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
+/// Retarget a single per-object `QuantityRef` whose scope is `Source` to
+/// `EventSource`. Mirrors `rebind_anaphoric_ref`'s per-object arm set. Leaves
+/// every non-`Source` scope and every non-per-object ref untouched.
+fn remap_self_scope_to_event_source_in_ref(qty: &mut QuantityRef) {
+    let scope = match qty {
+        QuantityRef::Power { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. }
+        | QuantityRef::CountersOn { scope, .. } => scope,
+        _ => return,
+    };
+    if *scope == ObjectScope::Source {
+        *scope = ObjectScope::EventSource;
+    }
+}
+
+/// Recurse `lift_counter_count_self_scope_to_event_source` through an ability's
+/// effect and every chained `sub_ability`/`else_ability`, mirroring the descent
+/// of the sibling parent-target lifts.
+fn lift_counter_count_self_scope_to_event_source_in_ability(ability: &mut AbilityDefinition) {
+    lift_counter_count_self_scope_to_event_source(ability.effect.as_mut());
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        lift_counter_count_self_scope_to_event_source_in_ability(sub);
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
+        lift_counter_count_self_scope_to_event_source_in_ability(else_ability);
     }
 }
 
