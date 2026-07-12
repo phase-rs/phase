@@ -5309,6 +5309,24 @@ fn parse_damage_modification_static(
     Some(def)
 }
 
+/// CR 615.1a + CR 602.2a: Bridge the recipient scope recognized from a "would
+/// deal damage to X" clause into `Effect::PreventDamage`'s `target` field. Only
+/// `Player { Controller }` ("to you") is proven needed by any in-corpus one-shot
+/// prevention card today (Mercenaries and its Circle/Rune-of-Protection sibling
+/// class); every other `DamageTargetFilter` shape is left as `Any` — matching
+/// prior behavior — rather than silently "fixed" without a card to verify
+/// against. For an activated ability "you" is the activator (CR 602.2a), which
+/// `TargetFilter::Controller` resolves to at runtime via
+/// `resolve_player_for_context_ref`.
+fn damage_target_filter_to_prevent_target(filter: Option<&DamageTargetFilter>) -> TargetFilter {
+    match filter {
+        Some(DamageTargetFilter::Player {
+            player: DamageTargetPlayerScope::Controller,
+        }) => TargetFilter::Controller,
+        _ => TargetFilter::Any,
+    }
+}
+
 /// CR 614.9 + CR 614.1a + CR 615: Parse a one-shot "the next time [source]
 /// would deal [combat] damage [to X] this turn, [modify/redirect] instead"
 /// damage-replacement effect into `Effect::CreateDamageReplacement`.
@@ -5430,7 +5448,14 @@ pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effec
         return Some(Effect::PreventDamage {
             amount: PreventionAmount::All,
             amount_dynamic: None,
-            target: TargetFilter::Any,
+            // CR 615.1a + CR 602.2a: prevention shield recipient scope; for an
+            // activated ability "you" is the activator per CR 602.2a. The
+            // recipient scope was already recognized from the "would deal
+            // damage to X" clause — carry it through instead of discarding it.
+            // The `recipient_object_filter` object-slot path ("to target
+            // creature") is intentionally left as `Any` here (unchanged), since
+            // it takes `target_filter == None`.
+            target: damage_target_filter_to_prevent_target(target_filter.as_ref()),
             scope: combat_scope
                 .map(|_| crate::types::ability::PreventionScope::CombatDamage)
                 .unwrap_or(crate::types::ability::PreventionScope::AllDamage),
@@ -6182,6 +6207,12 @@ fn parse_damage_target_phrase(
             alt((tag("to a creature"), tag("to that creature"))),
         ),
         value(damage_target_opponent(), tag("to an opponent")),
+        // CR 602.2a: "to you" — the recipient is the ability's controller. For an
+        // activated ability that is the activator (Mercenaries: "Any player may
+        // activate this ability"), so the scope must be carried through rather
+        // than collapsed to `Any`. Mirrors the durable path's use of
+        // `damage_target_controller()` for "would be dealt to you".
+        value(damage_target_controller(), tag("to you")),
         value(
             damage_target_any_player(),
             alt((tag("to a player"), tag("to that player"))),
