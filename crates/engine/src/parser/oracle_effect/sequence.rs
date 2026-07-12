@@ -789,7 +789,7 @@ fn parse_exile_rest_after_dig(lower: &str) -> bool {
         .is_ok()
 }
 
-/// CR 406.3 + CR 701.16a: Recognize the "[then] exile it/them/that card/those
+/// CR 406.3 + CR 701.20e: Recognize the "[then] exile it/them/that card/those
 /// cards/the card [face down]" clause that follows a private `Dig` look step —
 /// the Gonti, Canny Acquisitor impulse idiom. Returns `Some(face_down)` when the
 /// whole clause matches (`face_down = true` only for the explicit hidden-
@@ -6133,12 +6133,12 @@ pub(super) fn parse_followup_continuation_ast(
                 reorder_all: false,
             })
         }
-        // CR 406.3 + CR 701.16a: "[then] exile it/them [face down]" after a
+        // CR 406.3 + CR 701.20e: "[then] exile it/them [face down]" after a
         // private `Dig` (the "look at the top N cards of <player>'s library"
         // look step). This is the Gonti, Canny Acquisitor impulse idiom —
         // "look at the top card of that player's library, then exile it face
         // down. You may play that card ...". Plain `Dig` only inspects the top
-        // cards (CR 701.16a); without a destination they stay in the library,
+        // cards (CR 701.20e); without a destination they stay in the library,
         // so the exile clause must rewrite the `Dig` into an `Effect::ExileTop`
         // (the face-down impulse-exile primitive shared with Cunning Rhetoric /
         // Bomat Courier) for the looked-at card to actually leave the library.
@@ -6475,7 +6475,7 @@ pub(super) fn parse_followup_continuation_ast(
         // explicit "put it onto the battlefield" chunk in the same sentence is
         // a paraphrase and must be absorbed to avoid a duplicate ChangeZone.
         //
-        // CR 701.23i + CR 609.3: Iterated-search variants (Winds of Abandon class)
+        // CR 701.23i + CR 608.2c: Iterated-search variants (Winds of Abandon class)
         // surface a plural subject ("those players put those cards onto the
         // battlefield tapped") because the search step has `repeat_for:
         // TrackedSetSize`. The compound has already been folded by the

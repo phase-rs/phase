@@ -341,7 +341,7 @@ fn is_copy_token_substitution(def: &AbilityDefinition) -> bool {
     matches!(&*def.effect, Effect::CopyTokenOf { .. })
 }
 
-/// CR 614.12a: Single authority for ABANDONING a live post-replacement
+/// CR 614.6: Single authority for ABANDONING a live post-replacement
 /// continuation (as opposed to draining it normally via
 /// `apply_pending_post_replacement_effect`, which only clears
 /// `post_replacement_source` itself once the continuation is dispatched).
@@ -6449,7 +6449,7 @@ fn apply_single_replacement(
                 // with the prevented amount so `EventContextAmount` resolves
                 // correctly when the follow-up effect fires.
                 //
-                // CR 615.5 + CR 609.7 + CR 614.12a: Stash the *prevented event's*
+                // CR 615.5 + CR 609.7: Stash the *prevented event's*
                 // damage source so `TargetFilter::PostReplacementSourceController`
                 // can resolve "the source's controller draws cards" follow-ups
                 // (Swans of Bryn Argoll). Distinct from `post_replacement_source`,

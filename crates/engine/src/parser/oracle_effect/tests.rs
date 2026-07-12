@@ -16617,6 +16617,222 @@ fn winding_way_reveal_partition_full_parse_tree() {
     }
 }
 
+/// CR 608.2c + CR 401.4 + CR 701.17a: The Fourteenth Doctor's cast-trigger body
+/// — "reveal top N, put all <filter> revealed this way into your graveyard and
+/// the rest on the bottom of your library in a random order". The primary pile
+/// mills to the GRAVEYARD; the "rest" complement returns to the library BOTTOM
+/// in a RANDOM order. Regression guard: before the fix the "on the bottom of …
+/// library" phrase hijacked the whole sentence to a single-card
+/// `PutAtLibraryPosition{Bottom}` filtered to the subtype (dropping the mill and
+/// inverting the partition). Tests the class shape, not the specific card.
+#[test]
+fn reveal_partition_graveyard_primary_random_rest_to_library_bottom() {
+    let def = parse_effect_chain(
+        "Reveal the top fourteen cards of your library. Put all Doctor cards revealed this way into your graveyard and the rest on the bottom of your library in a random order.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::RevealTop { count, .. } = &*def.effect else {
+        panic!("top-level must be RevealTop, got {:?}", def.effect);
+    };
+    assert_eq!(*count, 14, "reveal the top fourteen cards");
+
+    // Primary: TrackedSetFiltered(Subtype Doctor) → Graveyard. Randomness is
+    // routed to the LIBRARY pile, so the graveyard primary is not random.
+    let primary = def
+        .sub_ability
+        .as_ref()
+        .expect("RevealTop must chain to the graveyard mill");
+    let Effect::ChangeZoneAll {
+        destination: primary_dest,
+        target: primary_target,
+        random_order: primary_random,
+        ..
+    } = &*primary.effect
+    else {
+        panic!(
+            "expected ChangeZoneAll for the mill, got {:?}",
+            primary.effect
+        );
+    };
+    assert_eq!(*primary_dest, crate::types::zones::Zone::Graveyard);
+    assert!(
+        !*primary_random,
+        "randomness belongs to the library rest pile, not the graveyard mill"
+    );
+    match primary_target {
+        TargetFilter::TrackedSetFiltered { filter, .. } => match filter.as_ref() {
+            TargetFilter::Typed(tf) => assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Doctor".to_string())),
+                "primary filter must scope to Doctor subtype, got {:?}",
+                tf.type_filters
+            ),
+            other => panic!("expected Typed filter inside TrackedSetFiltered, got {other:?}"),
+        },
+        other => panic!("expected TrackedSetFiltered target, got {other:?}"),
+    }
+
+    // Complement: TrackedSetFiltered(Not Doctor) → Library, bottom, RANDOM.
+    let rest = primary
+        .sub_ability
+        .as_ref()
+        .expect("mill must chain the rest complement");
+    let Effect::ChangeZoneAll {
+        destination: rest_dest,
+        target: rest_target,
+        library_position: rest_pos,
+        random_order: rest_random,
+        ..
+    } = &*rest.effect
+    else {
+        panic!("expected ChangeZoneAll for the rest, got {:?}", rest.effect);
+    };
+    assert_eq!(*rest_dest, crate::types::zones::Zone::Library);
+    assert_eq!(
+        *rest_pos,
+        Some(crate::types::ability::LibraryPosition::Bottom),
+        "the rest goes on the bottom of the library"
+    );
+    assert!(
+        *rest_random,
+        "\"in a random order\" applies to the library rest pile"
+    );
+    match rest_target {
+        TargetFilter::TrackedSetFiltered { filter, .. } => assert!(
+            matches!(filter.as_ref(), TargetFilter::Not { .. }),
+            "rest complement must negate the chosen filter, got {filter:?}"
+        ),
+        other => panic!("expected TrackedSetFiltered(Not(..)) for the rest, got {other:?}"),
+    }
+}
+
+/// CR 608.2c + CR 401.4: the Garruk, Caller of Beasts / Goblin Ringleader shape
+/// — "put all <filter> revealed this way into your HAND and the rest on the
+/// bottom of your library IN ANY ORDER". Same partition class, but the primary
+/// pile is the hand and the rest is arranged by the owner (`random_order:
+/// false`) rather than randomized. Proves the "in a random order" vs "in any
+/// order" split routes randomness correctly.
+#[test]
+fn reveal_partition_hand_primary_any_order_rest_to_library_bottom() {
+    let def = parse_effect_chain(
+        "Reveal the top five cards of your library. Put all creature cards revealed this way into your hand and the rest on the bottom of your library in any order.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::RevealTop { count, .. } = &*def.effect else {
+        panic!("top-level must be RevealTop, got {:?}", def.effect);
+    };
+    assert_eq!(*count, 5);
+
+    let primary = def.sub_ability.as_ref().expect("RevealTop must chain");
+    let Effect::ChangeZoneAll {
+        destination: primary_dest,
+        ..
+    } = &*primary.effect
+    else {
+        panic!("expected ChangeZoneAll, got {:?}", primary.effect);
+    };
+    assert_eq!(*primary_dest, crate::types::zones::Zone::Hand);
+
+    let rest = primary
+        .sub_ability
+        .as_ref()
+        .expect("primary must chain the rest complement");
+    let Effect::ChangeZoneAll {
+        destination: rest_dest,
+        library_position: rest_pos,
+        random_order: rest_random,
+        ..
+    } = &*rest.effect
+    else {
+        panic!("expected ChangeZoneAll for the rest, got {:?}", rest.effect);
+    };
+    assert_eq!(*rest_dest, crate::types::zones::Zone::Library);
+    assert_eq!(
+        *rest_pos,
+        Some(crate::types::ability::LibraryPosition::Bottom),
+        "the rest goes on the bottom of the library"
+    );
+    assert!(
+        !*rest_random,
+        "\"in any order\" means the owner arranges (not random)"
+    );
+}
+
+/// CR 608.2c: the reveal-partition guard (`is_this_way_partition` in
+/// `parse_put_imperative`) must be scoped to the REVEAL-origin anaphor
+/// ("revealed this way"), NOT the bare "this way". Muse Vortex is an
+/// EXILE-origin partition whose primary subject is a negation over the *cast*
+/// set — "put the exiled instant and sorcery cards that weren't cast this way
+/// into your hand and the rest on the bottom of your library in a random
+/// order" — so it matches "the rest" + "this way" but is NOT the reveal shape
+/// the guard means. With the too-broad `"this way"` guard it was hijacked onto
+/// the tracked-set path and bound a `ChangeZone { target: TargetFilter::Any }`
+/// ("any target") into the hand — a phantom TARGETING filter on a card whose
+/// text contains no targeting at all. This pins the narrowed guard: no
+/// hand-bound zone change may carry the phantom `Any` target.
+#[test]
+fn muse_vortex_exile_partition_does_not_bind_phantom_any_target() {
+    fn collect(ability: &AbilityDefinition, out: &mut Vec<Effect>) {
+        out.push((*ability.effect).clone());
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            collect(sub, out);
+        }
+        if let Some(els) = ability.else_ability.as_deref() {
+            collect(els, out);
+        }
+    }
+
+    let parsed = parse_oracle_text(
+        "Exile the top X cards of your library. You may cast an instant or sorcery \
+         spell with mana value X or less from among them without paying its mana \
+         cost. Then put the exiled instant and sorcery cards that weren't cast this \
+         way into your hand and the rest on the bottom of your library in a random \
+         order.",
+        "Muse Vortex",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+
+    let mut effects = Vec::new();
+    for ability in &parsed.abilities {
+        collect(ability, &mut effects);
+    }
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            collect(execute, &mut effects);
+        }
+    }
+
+    // The card declares zero targets, so no zone change into the hand may be
+    // bound to `TargetFilter::Any` — that would be the reveal-partition
+    // hijack's phantom "any target".
+    for effect in &effects {
+        let phantom_any_to_hand = match effect {
+            Effect::ChangeZone {
+                target,
+                destination,
+                ..
+            }
+            | Effect::ChangeZoneAll {
+                target,
+                destination,
+                ..
+            } => {
+                *destination == crate::types::zones::Zone::Hand
+                    && matches!(target, TargetFilter::Any)
+            }
+            _ => false,
+        };
+        assert!(
+            !phantom_any_to_hand,
+            "Muse Vortex must not bind a phantom `any target` hand zone change; got {effect:?}"
+        );
+    }
+}
+
 #[test]
 fn put_discarded_card_this_way_uses_tracked_set_filter() {
     let def = parse_effect_chain(

@@ -5202,7 +5202,7 @@ pub enum QuantityRef {
     /// CR 305.6: Count distinct basic land types (Plains/Island/Swamp/Mountain/Forest)
     /// among lands controlled by the referenced player. Used by Domain.
     BasicLandTypeCount { controller: ControllerRef },
-    /// CR 609.3: Count of objects moved by the preceding effect in the sub_ability chain.
+    /// CR 608.2c: Count of objects moved by the preceding effect in the sub_ability chain.
     /// Only valid during sub-ability chain resolution; returns 0 outside that context.
     /// The caller (token resolver) is responsible for consuming the tracked set after use.
     TrackedSetSize,
@@ -5225,7 +5225,7 @@ pub enum QuantityRef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
     },
-    /// CR 608.2c + CR 609.3 + CR 107.3e + CR 202.3: Reduce a numeric property
+    /// CR 608.2c + CR 107.3e + CR 202.3: Reduce a numeric property
     /// over the most recent chain tracked set (sum/max/min), reading the same set as
     /// [`QuantityRef::FilteredTrackedSetSize`] but aggregating a per-member value
     /// instead of counting members. The set is selected by highest id (the set
@@ -5249,7 +5249,7 @@ pub enum QuantityRef {
     /// is tracked in `state.exiled_from_hand_this_resolution` and reset at the
     /// top of each player action and at the start of each top-level ability chain.
     ExiledFromHandThisResolution,
-    /// CR 609.3: Numeric amount produced by the preceding effect in the sub_ability chain.
+    /// CR 608.2c: Numeric amount produced by the preceding effect in the sub_ability chain.
     /// Used for patterns where a sub_ability references the parent effect's numeric
     /// result (life lost, damage dealt, counters removed).
     PreviousEffectAmount,
@@ -9727,7 +9727,7 @@ pub enum Effect {
         /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
         #[serde(default)]
         rest_destination: Option<Zone>,
-        /// CR 701.20a vs CR 701.16a: True = cards are revealed (public), false = looked at (private).
+        /// CR 701.20a vs CR 701.20e: True = cards are revealed (public), false = looked at (private).
         #[serde(default)]
         reveal: bool,
         /// CR 614.1 / CR 110.5b: Kept cards routed to the battlefield enter
@@ -11453,7 +11453,7 @@ pub enum Effect {
         /// Who makes the choice: controller (default) or opponent.
         #[serde(default)]
         chooser: Chooser,
-        /// CR 609.3: When true, the chooser may select any number from 0..=count.
+        /// CR 107.1c: When true, the chooser may select any number from 0..=count.
         #[serde(default)]
         up_to: bool,
         /// CR 608.2d (override): When `Random`, the game selects the card(s)
@@ -15459,7 +15459,7 @@ pub struct AbilityDefinition {
     pub condition: Option<AbilityCondition>,
     /// When true, targeting is optional ("up to one"). Player may choose zero targets.
     pub optional_targeting: bool,
-    /// CR 609.3: When true, the controller chooses whether to perform this effect ("You may X").
+    /// CR 608.2d: When true, the controller chooses whether to perform this effect ("You may X").
     pub optional: bool,
     /// CR 608.2d: When set, an opponent (not the controller) chooses whether to perform this
     /// optional effect. Requires `optional: true`. Opponents are prompted in APNAP order.
@@ -15488,7 +15488,7 @@ pub struct AbilityDefinition {
     /// The individual mode abilities for modal activated/triggered abilities.
     /// Each entry is one selectable mode. Only meaningful when `modal` is Some.
     pub mode_abilities: Vec<AbilityDefinition>,
-    /// CR 609.3: Repeat this ability N times, where N = resolve_quantity(repeat_for).
+    /// CR 608.2c: Repeat this ability N times, where N = resolve_quantity(repeat_for).
     /// Produced by "for each [X], [effect]" leading patterns.
     pub repeat_for: Option<QuantityExpr>,
     /// Minimum legal announced value for X. Defaults to zero; set to one by
@@ -18578,7 +18578,7 @@ pub enum ReplacementMode {
     },
 }
 
-/// CR 614.12a + CR 615.5: Continuation effect that runs after a replacement
+/// CR 614.6 + CR 615.5: Continuation effect that runs after a replacement
 /// effect's modifications complete. Stashed by the replacement pipeline,
 /// drained by callers (`engine_replacement`, `stack`, `deal_damage`,
 /// `engine`).
@@ -19583,7 +19583,7 @@ pub struct ResolvedAbility {
     /// When true, targeting is optional ("up to one"). Player may choose zero targets.
     #[serde(default)]
     pub optional_targeting: bool,
-    /// CR 609.3: Optional effect — controller prompted before execution.
+    /// CR 608.2d: Optional effect — controller prompted before execution.
     #[serde(default)]
     pub optional: bool,
     /// CR 608.2d: When set, an opponent chooses whether to perform this optional effect.
@@ -19606,7 +19606,7 @@ pub struct ResolvedAbility {
     /// Used by `OptionalEffectChoice` to tell the player what they're choosing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// CR 609.3: Repeat this ability N times (from "for each [X], [effect]").
+    /// CR 608.2c: Repeat this ability N times (from "for each [X], [effect]").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_for: Option<QuantityExpr>,
     /// Minimum legal announced value for X. Defaults to zero; set to one by

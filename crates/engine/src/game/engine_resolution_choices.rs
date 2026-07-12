@@ -2955,7 +2955,7 @@ pub(super) fn handle_resolution_choice(
             }
             let events_after_move = events.len();
 
-            // CR 608.2e + CR 609.3: APNAP discard steps accumulate into one
+            // CR 608.2e + CR 608.2c: APNAP discard steps accumulate into one
             // tracked set. The discard handler is the single authority for
             // recording the cards it moved — `discard_as_cost_with_source`
             // runs outside `resolve_effect`, so its non-interactive sibling's

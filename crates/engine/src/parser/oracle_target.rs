@@ -4650,8 +4650,8 @@ fn parse_superlative_property_suffix(
     // "with the <superlative> <property> among " — the superlative head selects
     // the aggregate direction and the property is the second axis. Factor the
     // 2×3 cross product into two alts (PATTERNS.md §8b).
-    // CR 208.1 (toughness) + CR 202.3 (mana value): greatest/highest = Max,
-    // least/lowest/smallest = Min. Both directions feed the same generic
+    // CR 208.1 (power and toughness) + CR 202.3 (mana value): greatest/highest =
+    // Max, least/lowest/smallest = Min. Both directions feed the same generic
     // superlative_property_filter_prop, so the runtime (values.min()/max() in
     // game/quantity.rs) and the Sacrifice/Destroy/return resolvers select the
     // constrained object unchanged.
@@ -6061,7 +6061,7 @@ fn parse_cost_paid_object_reference<'a>(
     Ok((rest, TargetFilter::CostPaidObject))
 }
 
-fn parse_zone_changed_this_turn_suffix(
+pub(crate) fn parse_zone_changed_this_turn_suffix(
     input: &str,
     to: Option<Zone>,
 ) -> Option<(FilterProp, usize)> {

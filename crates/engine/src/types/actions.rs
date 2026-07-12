@@ -461,7 +461,7 @@ pub enum GameAction {
         #[serde(default)]
         payment_mode: CastPaymentMode,
     },
-    /// CR 609.3: Accept or decline an optional effect ("You may X").
+    /// CR 608.2d: Accept or decline an optional effect ("You may X").
     DecideOptionalEffect {
         accept: bool,
     },

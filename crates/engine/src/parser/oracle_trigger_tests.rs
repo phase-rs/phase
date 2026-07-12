@@ -2578,7 +2578,7 @@ fn zurgo_and_ojutai_one_or_more_player_or_battle_trigger() {
     }
 }
 
-/// CR 406.3 + CR 701.16a + CR 400.7i: Gonti, Canny Acquisitor. "look at the
+/// CR 406.3 + CR 701.20e + CR 400.7i: Gonti, Canny Acquisitor. "look at the
 /// top card of that player's library, then exile it face down" must rewrite
 /// the private `Dig` look step into a face-down `ExileTop` (issue #1316: the
 /// card was looked at but never left the library), and the follow-on "You may

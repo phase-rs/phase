@@ -1193,7 +1193,7 @@ fn strip_article(text: &str) -> &str {
         .unwrap_or(text)
 }
 
-/// CR 107.1a + CR 701.16a: Extract the typed filter embedded in an
+/// CR 107.1a + CR 701.21a: Extract the typed filter embedded in an
 /// `ObjectCount` quantity expression. Used by the sacrifice AST builder to
 /// lift "half the permanents they control" → ObjectCount's filter into the
 /// effect's target, so eligibility matches the same set the count was
@@ -2627,7 +2627,7 @@ pub(super) fn parse_search_and_creation_ast(
             source_zones: details.source_zones,
         });
     }
-    // CR 701.16a + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
+    // CR 701.20e + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
     // both produce Dig — the reveal flag distinguishes visibility semantics.
     if let Some((reveal, rest)) = nom_on_lower(text, lower, |input| {
         alt((
@@ -2731,7 +2731,7 @@ pub(super) fn parse_search_and_creation_ast(
             }
         }
     }
-    // CR 701.16a: "look at that many cards from the top of your library" — variable-count dig
+    // CR 701.20e: "look at that many cards from the top of your library" — variable-count dig
     // where "that many" references the result of a previous effect (e.g., damage dealt).
     if let Some((reveal, _)) = nom_on_lower(text, lower, |input| {
         alt((
@@ -6054,6 +6054,30 @@ pub(super) fn parse_put_ast(
         || nom_primitives::scan_contains(lower, "each"))
         && nom_primitives::scan_contains(lower, "from");
 
+    // CR 608.2c + CR 401.4: a "put all <filter> revealed this way into <z1> and
+    // the rest on the bottom/top of <library> …" partition must reach the
+    // tracked-set path (`try_parse_put_zone_change_parts`, called below) — NOT
+    // the single-card Bottom/TopOfLibrary reposition. The rest clause supplies
+    // the "on the bottom/top of … library" phrase; without this guard it
+    // hijacks the whole sentence (The Fourteenth Doctor, Garruk Caller of
+    // Beasts, Goblin Ringleader, and the rest of the reveal-partition class).
+    // Scoped to the REVEAL-origin anaphor ("revealed this way") plus the "the
+    // rest" complement subject so ordinary single-card "put it on the bottom"
+    // text is unaffected. The anaphor is deliberately the full "revealed this
+    // way" phrase, not the bare "this way": an exile-origin partition whose
+    // primary subject is itself a negation over the *cast* set — Muse Vortex's
+    // "put the exiled instant and sorcery cards that weren't cast this way into
+    // your hand and the rest on the bottom of your library in a random order" —
+    // matches "the rest" + "this way" but is NOT the reveal-partition shape this
+    // guard means (it has no revealed tracked set and no targeting), so it must
+    // fall through to its own positional handling rather than be hijacked here.
+    // This is a gating pre-filter, not the classifier — the structural
+    // classification is delegated to `try_parse_put_zone_change_parts` (which
+    // recognizes the reveal tracked anaphor via `tracked_anaphor_cause`),
+    // mirroring the `has_mass_zone_origin` idiom above.
+    let is_this_way_partition = nom_primitives::scan_contains(lower, "the rest")
+        && nom_primitives::scan_contains(lower, "revealed this way");
+
     // "put X on top of Y's library" — specific position, no auto-shuffle.
     // Must check before try_parse_put_zone_change which would emit ChangeZone (auto-shuffles).
     // Fixed-count forms with an origin zone ("from your graveyard") remain library
@@ -6061,6 +6085,7 @@ pub(super) fn parse_put_ast(
     if nom_primitives::scan_contains(lower, "on top of")
         && nom_primitives::scan_contains(lower, "library")
         && !has_mass_zone_origin
+        && !is_this_way_partition
     {
         return Some(PutImperativeAst::TopOfLibrary);
     }
@@ -6077,6 +6102,7 @@ pub(super) fn parse_put_ast(
     if nom_primitives::scan_contains(lower, "on the bottom of")
         && nom_primitives::scan_contains(lower, "library")
         && !has_mass_zone_origin
+        && !is_this_way_partition
     {
         return Some(PutImperativeAst::BottomOfLibrary);
     }
@@ -6142,6 +6168,14 @@ pub(super) fn parse_put_ast(
                 )
                 .then(|| super::parse_put_rest_destination(lower))
                 .flatten();
+                // CR 401.4: only meaningful when the rest returns to the
+                // library — capture whether it lands on the bottom or top so the
+                // complement move suppresses the default shuffle and places at
+                // that position (The Fourteenth Doctor / Garruk / Goblin
+                // Ringleader class).
+                let rest_library_position = (rest_destination == Some(Zone::Library))
+                    .then(|| super::parse_put_rest_library_position(lower))
+                    .flatten();
                 Some(PutImperativeAst::ZoneChangeAll {
                     origin,
                     destination,
@@ -6151,6 +6185,7 @@ pub(super) fn parse_put_ast(
                     library_position,
                     random_order,
                     rest_destination,
+                    rest_library_position,
                 })
             }
             Effect::ChangeZone {
@@ -6256,6 +6291,10 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             // intercepts the partition form before this bare-effect lowering.
             // Here it has already been consumed (or was absent).
             rest_destination: _,
+            // CR 401.4: The rest pile's library position belongs to the
+            // complement move, which `lower_imperative_family_ast` emits; the
+            // bare (non-partition) lowering never carries it.
+            rest_library_position: _,
         } => Effect::ChangeZoneAll {
             origin,
             destination,
@@ -10789,7 +10828,24 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             library_position,
             random_order,
             rest_destination: Some(rest_destination),
+            rest_library_position,
         }) => {
+            // CR 401.4: "in a random order" (and the bottom/top position)
+            // describes whichever pile returns to the library. Exactly one pile
+            // does in the printed partition class (the other goes to a
+            // hidden/unordered zone — hand/graveyard/exile), so route position
+            // and randomness to that pile. `random_order` was scanned by
+            // `try_parse_put_zone_change_parts` from the post-primary tail
+            // (which contains the rest clause), so it belongs to the rest
+            // whenever the rest is the library pile. Note "in a random order"
+            // (The Fourteenth Doctor) → random_order true; "in any order"
+            // (Garruk, Goblin Ringleader) → random_order false (owner arranges),
+            // because the scan only matches "in a random order".
+            let (primary_random, complement_random) = if rest_destination == Zone::Library {
+                (false, random_order)
+            } else {
+                (random_order, false)
+            };
             // "The rest" excludes the chosen subset by predicate. When the
             // primary names a filtered subset, negate its inner filter;
             // otherwise (no inner filter) the complement is the full tracked set.
@@ -10818,8 +10874,11 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                 enter_with_counters: vec![],
                 face_down_profile: None,
+                // CR 401.4: `library_position` is the PRIMARY move's own
+                // position (set only when the primary destination is a library
+                // pile); randomness for the primary is routed above.
                 library_position,
-                random_order,
+                random_order: primary_random,
             };
             let complement = Effect::ChangeZoneAll {
                 origin: None,
@@ -10829,8 +10888,9 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enter_with_counters: vec![],
                 face_down_profile: None,
-                library_position: None,
-                random_order: false,
+                // CR 401.4: the "rest" pile's bottom/top position and randomness.
+                library_position: rest_library_position,
+                random_order: complement_random,
             };
             let mut clause = parsed_clause(primary);
             clause.sub_ability = Some(Box::new(AbilityDefinition::new(

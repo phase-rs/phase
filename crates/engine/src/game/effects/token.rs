@@ -604,7 +604,7 @@ pub fn resolve(
         }
     }
 
-    // CR 609.3: Consume the tracked set after reading its size for "this way" counting.
+    // CR 608.2c: Consume the tracked set after reading its size for "this way" counting.
     if matches!(
         &ability.effect,
         Effect::Token {
