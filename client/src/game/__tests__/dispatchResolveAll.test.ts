@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { BatchResolveResult, GameState } from "../../adapter/types";
+import type { BatchResolveResult, EngineSnapshot, GameState } from "../../adapter/types";
+import { nextSnapshotSeq } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { buildGameState, buildPriorityWaitingFor, buildStackEntry } from "../../test/factories/gameStateFactory";
@@ -18,6 +19,20 @@ function stateWithStack(len: number): GameState {
 
 function chunk(itemsResolved: number, total: number): BatchResolveResult {
   return { events: [], waitingFor: priorityWf, logEntries: [], itemsResolved, total };
+}
+
+/**
+ * A `getSnapshot` stub that reads through the test's own `getState` script and
+ * pairs it with empty legal actions. The drain now reads ONE atomic pair per
+ * chunk (not getState + getLegalActions), so this keeps each test's per-chunk
+ * `getState` sequencing intact while matching the real adapter contract.
+ */
+function snapshotVia(getState: () => Promise<GameState>) {
+  return vi.fn(async (): Promise<EngineSnapshot> => ({
+    state: await getState(),
+    legalResult: { actions: [], autoPassRecommended: false },
+    seq: nextSnapshotSeq(),
+  }));
 }
 
 describe("dispatchResolveAll progress", () => {
@@ -72,6 +87,7 @@ describe("dispatchResolveAll progress", () => {
         resolveAll,
         getState,
         getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
       } as never,
     });
 
@@ -105,11 +121,13 @@ describe("dispatchResolveAll progress", () => {
       return chunk(0, 19192);
     });
 
+    const getState = vi.fn().mockResolvedValue(stateWithStack(0));
     useGameStore.setState({
       adapter: {
         resolveAll,
-        getState: vi.fn().mockResolvedValue(stateWithStack(0)),
+        getState,
         getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
       } as never,
     });
 
@@ -125,13 +143,15 @@ describe("dispatchResolveAll progress", () => {
       .fn<(action: unknown, actor: number) => Promise<{ events: never[] }>>()
       .mockResolvedValue({ events: [] });
 
+    const getState = vi.fn().mockResolvedValue(stateWithStack(2));
     useGameStore.setState({
       gameState: stateWithStack(3),
       adapter: {
         resolveAll,
         submitAction,
-        getState: vi.fn().mockResolvedValue(stateWithStack(2)),
+        getState,
         getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
       } as never,
     });
 
@@ -152,12 +172,14 @@ describe("dispatchResolveAll progress", () => {
       .fn<(action: unknown, actor: number) => Promise<{ events: never[] }>>()
       .mockResolvedValue({ events: [] });
 
+    const getState = vi.fn().mockResolvedValue(stateWithStack(2));
     useGameStore.setState({
       gameState: stateWithStack(3),
       adapter: {
         submitAction,
-        getState: vi.fn().mockResolvedValue(stateWithStack(2)),
+        getState,
         getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
       } as never,
     });
 

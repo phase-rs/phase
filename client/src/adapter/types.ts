@@ -2721,6 +2721,60 @@ export interface BatchResolveResult {
 }
 
 /**
+ * A `GameState` and the `LegalActionsResult` derived from that exact engine
+ * version, captured with no interleaving window between them.
+ *
+ * The two halves MUST be produced together (one worker round-trip, or one
+ * inbound wire message) and travel together thereafter. Fetching them as two
+ * separate adapter calls lets an engine advance land between them, producing a
+ * pair like `waiting_for = Priority` + `[DecideOptionalEffect]` legal actions —
+ * the UI then renders affordances the engine rejects, and the game softlocks.
+ */
+export interface EngineSnapshot {
+  state: GameState;
+  legalResult: LegalActionsResult;
+  /**
+   * Globally monotonic ordering stamp. Larger = derived from a newer engine
+   * version. Compared only within one store (never across clients); the store's
+   * commit authority drops pairs stamped older than the last one it committed.
+   */
+  seq: number;
+}
+
+/**
+ * Monotonic counter behind `EngineSnapshot.seq`, shared by EVERY adapter
+ * instance in the tab.
+ *
+ * Module-global (not per-adapter) on purpose: adapters are recreated per match
+ * (a Bo3 draft builds a fresh `P2PHostAdapter`/`P2PGuestAdapter`/`WasmAdapter`
+ * per game), while `dispatch.ts`'s queue and in-flight animation are module-level
+ * and outlive an adapter teardown. With per-adapter counters restarting at 1, a
+ * leftover game-1 commit could carry a *higher* stamp than game-2's fresh reads
+ * and latch the store's gate above every subsequent commit — a permanent
+ * softlock. One global counter stamps a leftover game-1 commit *below* anything
+ * fetched after the new match installs, so the gate drops it, which is exactly
+ * the desired behavior. No epoch or reset machinery is needed.
+ */
+let snapshotSeq = 0;
+
+/** Consume the next globally monotonic snapshot stamp. */
+export function nextSnapshotSeq(): number {
+  snapshotSeq += 1;
+  return snapshotSeq;
+}
+
+/**
+ * Legal actions for a transport adapter with no cached engine snapshot yet —
+ * before the first state-bearing message arrives, and after dispose. Shared by
+ * every snapshot-caching adapter (P2P guest, ws, server-draft) so the empty
+ * shape is defined once.
+ */
+export const EMPTY_LEGAL_ACTIONS: LegalActionsResult = {
+  actions: [],
+  autoPassRecommended: false,
+};
+
+/**
  * Engine-built game-scoped AI card-DB subset descriptor (the `build_ai_card_subset`
  * WASM export, serialized as a tagged union). `full` means the game's card
  * universe is not statically bounded (today: Momir) and AI workers must load the
@@ -2749,6 +2803,15 @@ export interface EngineAdapter {
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
+  /**
+   * Fetch the state and its legal actions as one atomic, seq-stamped pair.
+   *
+   * This is the ONLY correct way to read the engine pair for a store commit —
+   * `getState()` followed by `getLegalActions()` can straddle an engine advance
+   * and yield a mismatched pair. Those two methods remain for callers that
+   * genuinely need one half in isolation.
+   */
+  getSnapshot(): Promise<EngineSnapshot>;
   getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null> | GameAction | null;
   resolveAll?(
     requester: number,

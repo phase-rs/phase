@@ -146,10 +146,14 @@ describe("WebSocketAdapter", () => {
         }),
       );
 
+      // The engine pair now travels as one seq-stamped `EngineSnapshot`.
       expect(listener).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "stateChanged",
-          state: mockState,
+          snapshot: expect.objectContaining({
+            state: expect.objectContaining(mockState),
+            seq: expect.any(Number),
+          }),
           events: mockEvents,
           logEntries: mockLogEntries,
         }),

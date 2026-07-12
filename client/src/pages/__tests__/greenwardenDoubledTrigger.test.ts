@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   EngineAdapter,
+  EngineSnapshot,
   GameAction,
   GameEvent,
   GameState,
@@ -10,6 +11,7 @@ import type {
   SubmitResult,
   WaitingFor,
 } from "../../adapter/types";
+import { nextSnapshotSeq } from "../../adapter/types";
 import { dispatchAction } from "../../game/dispatch";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
@@ -93,6 +95,11 @@ function makeAdapter(
     getLegalActions: vi.fn(async (): Promise<LegalActionsResult> => ({
       actions: [],
       autoPassRecommended: false,
+    })),
+    getSnapshot: vi.fn(async (): Promise<EngineSnapshot> => ({
+      state: baseState(nextWaitingFor),
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: nextSnapshotSeq(),
     })),
     restoreState: vi.fn(),
     getAiAction: vi.fn().mockReturnValue(null),
