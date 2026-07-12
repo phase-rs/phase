@@ -43,6 +43,7 @@ import argparse
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE = REPO_ROOT / "scripts" / "zone-authority-baseline.txt"
@@ -115,7 +116,30 @@ def is_cfg_test_attr(line: str) -> bool:
     return bool(BARE_TEST.search(pred)) and "not(" not in pred
 
 
-STRING_LIT = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
+# A non-raw literal: `"..."` (with a `b`/`c` prefix, which is part of the token),
+# or a char literal. The char alternative earns its place: `'"'` must be consumed
+# whole, or the leaked `"` opens a phantom string that swallows the line.
+STRING_LIT = re.compile(r'(?:b|c)?"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
+
+# A raw-string opener: `r"`, `r#"`, `r##"`, and the byte/C-string forms `br#"` /
+# `cr#"`. Rust raw strings do NOT nest and honour NO escapes, so the `#` count is
+# the only thing that closes one -- and the only thing we have to carry.
+RAW_OPEN = re.compile(r'(?:b|c)?r(#*)"')
+
+IDENT_CHAR = re.compile(r"[A-Za-z0-9_]")
+
+
+class ScanState(NamedTuple):
+    """Lexer state carried BETWEEN lines.
+
+    Both constructs that can span a line boundary need a count, not a flag:
+    block comments nest (`/* /* */ */`) and a raw string is closed only by its
+    own `#` count. The two are mutually exclusive -- a raw string opened inside a
+    block comment is comment text, and a `/*` inside a raw string is data.
+    """
+
+    block_depth: int = 0
+    raw_hashes: int | None = None  # `#` count of the raw string we are inside
 
 
 class CensusError(Exception):
@@ -123,38 +147,99 @@ class CensusError(Exception):
     that silently mis-scopes is worse than no census."""
 
 
-def strip_noncode(line: str, in_block: bool) -> tuple[str, bool]:
-    """Return (code, still_in_block_comment).
+def _at_token_boundary(line: str, i: int) -> bool:
+    """True if `i` starts a token. `r`/`b`/`c` mean "literal prefix" only at a
+    token boundary; elsewhere they are the tail of an identifier."""
+    return i == 0 or not IDENT_CHAR.match(line[i - 1])
+
+
+def _consume_raw(line: str, i: int, hashes: int) -> tuple[int, bool]:
+    """Consume raw-string body from `i`. Returns (next_index, closed_on_this_line).
+
+    The terminator is `"` followed by exactly the opening `#` count, so a bare `"`
+    -- or a `"` with too few `#` -- is content. Nothing else terminates a raw
+    string: not a backslash, not a newline.
+    """
+    close = '"' + "#" * hashes
+    end = line.find(close, i)
+    if end == -1:
+        return len(line), False
+    return end + len(close), True
+
+
+def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
+    """Return (code, state_for_the_next_line).
 
     Strings and comments are removed before ANY brace counting or pattern
     matching. Brace counting in particular must not see a stray `{` inside a
-    string literal: inside a skipped `#[cfg(test)]` mod that would extend the
-    skip past the mod's closing brace and silently swallow the production code
-    that follows.
+    literal: inside a skipped `#[cfg(test)]` mod that would extend the skip past
+    the mod's closing brace and silently swallow the production code that
+    follows.
+
+    Raw strings are the reason this is a state machine rather than a regex. Their
+    contents are arbitrary bytes -- `//`, `/*`, `{`, `"`, and `#[cfg(test)]` all
+    appear inside them as DATA (see any `format!(r#"{{...}}"#)` JSON fixture) --
+    and they run across lines. A scanner that mishandles one does not just miss a
+    hit: it starts a comment that eats the file, or a skip region that eats the
+    production code after it.
     """
-    out = []
+    out: list[str] = []
     i = 0
+    block_depth = state.block_depth
+    raw_hashes = state.raw_hashes
+
     while i < len(line):
-        if in_block:
-            end = line.find("*/", i)
-            if end == -1:
-                return "".join(out), True
-            i = end + 2
-            in_block = False
+        if raw_hashes is not None:
+            i, closed = _consume_raw(line, i, raw_hashes)
+            if closed:
+                raw_hashes = None
             continue
+
+        if block_depth:
+            # Rust block comments nest: `/* a /* b */ still a comment */`. Closing
+            # at the first `*/` leaves the comment's tail behind as "code", and a
+            # stray brace in that tail desyncs exactly like a raw string does.
+            opened_at = line.find("/*", i)
+            closed_at = line.find("*/", i)
+            if opened_at == -1 and closed_at == -1:
+                break
+            if opened_at != -1 and (closed_at == -1 or opened_at < closed_at):
+                block_depth += 1
+                i = opened_at + 2
+            else:
+                block_depth -= 1
+                i = closed_at + 2
+            continue
+
         if line.startswith("//", i):
             break
         if line.startswith("/*", i):
-            in_block = True
+            block_depth += 1
             i += 2
             continue
-        m = STRING_LIT.match(line, i)
-        if m:
-            i = m.end()
-            continue
+
+        # A literal may open here. The `r`/`b`/`c` prefixes only mean "literal"
+        # at a token boundary -- mid-identifier they are ordinary letters. A bare
+        # quote needs no boundary: it always opens one.
+        boundary = _at_token_boundary(line, i)
+        if boundary:
+            m = RAW_OPEN.match(line, i)
+            if m:
+                hashes = len(m.group(1))
+                i, closed = _consume_raw(line, m.end(), hashes)
+                if not closed:
+                    raw_hashes = hashes
+                continue
+        if boundary or line[i] in "\"'":
+            m = STRING_LIT.match(line, i)
+            if m:
+                i = m.end()
+                continue
+
         out.append(line[i])
         i += 1
-    return "".join(out), in_block
+
+    return "".join(out), ScanState(block_depth, raw_hashes)
 
 
 def annotation_reason(line: str) -> str | None:
@@ -190,27 +275,35 @@ def iter_production_lines(rel: str, lines: list[str]):
     silent in both directions (test code scanned as production, production
     skipped as test).
 
-    NOTE for callers: `code` has string literals REMOVED, because brace counting
-    must not see a `{` inside a string. A pattern that needs a literal (e.g.
-    matching `"Draw" => ReplacementEvent::Draw`) will never fire against `code`.
-    Rewrite the pattern to key on the code around the literal, or match `raw`
-    and accept that comments are then in scope.
+    NOTE for callers: `code` has string literals REMOVED (raw strings included),
+    because brace counting must not see a `{` inside a literal. A pattern that
+    needs a literal (e.g. matching `"Draw" => ReplacementEvent::Draw`) will never
+    fire against `code`. Rewrite the pattern to key on the code around the
+    literal, or match `raw` and accept that comments are then in scope.
     """
     current_fn = "<module>"
     skip_until_depth: int | None = None
     depth = 0
     pending_cfg_test = False
-    in_block = False
+    state = ScanState()
 
     for i, raw in enumerate(lines):
-        code, in_block = strip_noncode(raw, in_block)
+        code, state = strip_noncode(raw, state)
 
         # Track an inline `#[cfg(test)] mod foo { .. }` body and skip it whole.
         # A naive "first #[cfg(test)] wins" is wrong: engine.rs has 10 and
         # synthesis.rs has 75, nearly all `#[cfg(test)] mod foo;` *declarations*
         # of outlined files, which are excluded by name instead.
+        #
+        # Keyed on `code`, never `raw`, so a `#[cfg(test)]` QUOTED inside a raw
+        # string is text and cannot arm the skip. Belt-and-braces: the `code.strip()`
+        # clear below already saves this today, because a raw-string terminator
+        # always leaves at least a `;` behind. That is a coincidence of the
+        # terminator's punctuation, not a property anyone declared -- and a
+        # structural decision taken on unstripped text is exactly the bug this
+        # function exists to prevent.
         if skip_until_depth is None:
-            if is_cfg_test_attr(raw):
+            if is_cfg_test_attr(code):
                 pending_cfg_test = True
             elif pending_cfg_test:
                 if INLINE_TEST_MOD.match(code):
