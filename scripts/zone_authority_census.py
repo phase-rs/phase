@@ -126,7 +126,43 @@ STRING_LIT = re.compile(r'(?:b|c)?"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
 # the only thing that closes one -- and the only thing we have to carry.
 RAW_OPEN = re.compile(r'(?:b|c)?r(#*)"')
 
-IDENT_CHAR = re.compile(r"[A-Za-z0-9_]")
+# Where a comment or a literal could START. Everything between two candidates is
+# ordinary code and is appended in ONE slice.
+#
+# This exists for throughput, and it is load-bearing: the scanner sweeps ~7MB of
+# Rust per census run, and a character-at-a-time loop that fires a regex per
+# character does that at ~0.2 MB/s -- minutes per gate. Only these positions can
+# open something:
+#
+#     /   a line or block comment            "  '   a string or char literal
+#     b c r   a literal prefix, but ONLY when a `"` follows (through any `#`s),
+#             which is what the lookahead checks -- otherwise every identifier
+#             starting with b/c/r would be a false stop
+#
+# Over-inclusion here is free (the branch logic below rejects a false candidate
+# and moves on). Under-inclusion is a BUG: a missed candidate is a literal
+# scanned as code. Every construct the branches can consume starts at one of
+# these characters.
+#
+# EVERY alternative starts with a character from one small set, deliberately:
+# that lets the regex engine prefilter on the first character and skip runs of
+# ordinary code at C speed. Do NOT add a lookbehind here to enforce the token
+# boundary -- it defeats the prefilter and drags the scan back to per-character
+# lookaround. `_at_token_boundary` already enforces it, in Python, at the few
+# positions that survive this far.
+# The `r?` in the lookahead is load-bearing: it lets the candidate fire on the
+# FIRST letter of a two-letter prefix (`br#"`, `cr"`). Without it the scan stops
+# on the `r` instead, where the boundary check correctly rejects it -- and the
+# literal is then mis-lexed as an ordinary string. The test suite catches this.
+CANDIDATE = re.compile(r"""[/"']|[bcr](?=r?#*")""")
+
+IDENT_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+
+# Bound up front: these are called once per candidate across every line of the
+# tree, and re-resolving the attribute each time is measurable at that volume.
+_find_candidate = CANDIDATE.search
+_match_raw_open = RAW_OPEN.match
+_match_string_lit = STRING_LIT.match
 
 
 class ScanState(NamedTuple):
@@ -150,7 +186,7 @@ class CensusError(Exception):
 def _at_token_boundary(line: str, i: int) -> bool:
     """True if `i` starts a token. `r`/`b`/`c` mean "literal prefix" only at a
     token boundary; elsewhere they are the tail of an identifier."""
-    return i == 0 or not IDENT_CHAR.match(line[i - 1])
+    return i == 0 or line[i - 1] not in IDENT_CHARS
 
 
 def _consume_raw(line: str, i: int, hashes: int) -> tuple[int, bool]:
@@ -183,12 +219,21 @@ def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
     hit: it starts a comment that eats the file, or a skip region that eats the
     production code after it.
     """
+    # Fast path. 4 lines in 5 hold no comment and no literal, and for those the
+    # scanner has nothing to do -- so it should ALLOCATE nothing: no char list,
+    # no join, no fresh ScanState. Doing the work anyway is most of what made the
+    # per-character version too slow to run on the tree it was written to sweep.
+    if state.block_depth == 0 and state.raw_hashes is None and _find_candidate(line) is None:
+        return line, state
+
     out: list[str] = []
     i = 0
+    n = len(line)
     block_depth = state.block_depth
     raw_hashes = state.raw_hashes
+    append = out.append
 
-    while i < len(line):
+    while i < n:
         if raw_hashes is not None:
             i, closed = _consume_raw(line, i, raw_hashes)
             if closed:
@@ -211,32 +256,50 @@ def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
                 i = closed_at + 2
             continue
 
-        if line.startswith("//", i):
+        # Skip straight to the next position that could open a comment or a
+        # literal, taking everything before it as code in one slice.
+        m = _find_candidate(line, i)
+        if m is None:
+            append(line[i:])
             break
-        if line.startswith("/*", i):
-            block_depth += 1
-            i += 2
+        start = m.start()
+        if start > i:
+            append(line[i:start])
+            i = start
+
+        ch = line[i]
+        if ch == "/":
+            nxt = line[i + 1 : i + 2]
+            if nxt == "/":
+                break
+            if nxt == "*":
+                block_depth += 1
+                i += 2
+                continue
+            append("/")  # division, not a comment
+            i += 1
             continue
 
         # A literal may open here. The `r`/`b`/`c` prefixes only mean "literal"
         # at a token boundary -- mid-identifier they are ordinary letters. A bare
         # quote needs no boundary: it always opens one.
-        boundary = _at_token_boundary(line, i)
+        boundary = i == 0 or line[i - 1] not in IDENT_CHARS
         if boundary:
-            m = RAW_OPEN.match(line, i)
+            m = _match_raw_open(line, i)
             if m:
                 hashes = len(m.group(1))
                 i, closed = _consume_raw(line, m.end(), hashes)
                 if not closed:
                     raw_hashes = hashes
                 continue
-        if boundary or line[i] in "\"'":
-            m = STRING_LIT.match(line, i)
+        if boundary or ch == '"' or ch == "'":
+            m = _match_string_lit(line, i)
             if m:
                 i = m.end()
                 continue
 
-        out.append(line[i])
+        # A false candidate: an `r`/`b`/`c` that opens nothing.
+        append(ch)
         i += 1
 
     return "".join(out), ScanState(block_depth, raw_hashes)
