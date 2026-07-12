@@ -977,7 +977,13 @@ fn parse_multi_sentence_statics(text: &str) -> Option<Vec<StaticDefinition>> {
 /// Aura/Equipment continuation referring to the enchanted/equipped creature,
 /// distinct from a self-name (`~`) or a typed subject.
 fn segment_subject_is_pronoun_it(segment: &str) -> bool {
-    segment.trim_start().to_lowercase().starts_with("it ")
+    // `trim_start` normalizes leading whitespace on the pre-split sentence chunk
+    // and `to_lowercase` builds the TextPair lower half — both structural, not
+    // dispatch. The "it " subject test itself runs through nom's `tag()` via the
+    // `nom_tag_tp` bridge so the pronoun match stays on the combinator path.
+    let trimmed = segment.trim_start();
+    let lower = trimmed.to_lowercase();
+    nom_tag_tp(&TextPair::new(trimmed, &lower), "it ").is_some()
 }
 
 /// True iff a filter is scoped to an attached object — the enchanted (Aura,
