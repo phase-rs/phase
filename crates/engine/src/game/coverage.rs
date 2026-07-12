@@ -18,15 +18,15 @@ use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
-    Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
-    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect,
-    EffectOutcomeSignal, EffectScope, FilterProp, ForEachCategoryAction, GameRestriction,
-    LibraryPosition, ManaProduction, ObjectProperty, ObjectScope, PerpetualModification,
-    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
-    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    CoinFlipResult, Comparator, ContinuousModification, ControllerRef, CountScope,
+    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
+    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
+    ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
+    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -3662,6 +3662,10 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         AbilityCondition::AlternativeManaCostPaid => "alternative mana cost was paid".into(),
         AbilityCondition::EffectOutcome { .. } => "previous effect outcome".into(),
         AbilityCondition::EventOutcomeWon => "you won the event".into(),
+        AbilityCondition::CoinFlipOutcome { result } => match result {
+            CoinFlipResult::Won => "you won the flip".into(),
+            CoinFlipResult::Lost => "you lost the flip".into(),
+        },
         AbilityCondition::WhenYouDo => "when you do".into(),
         AbilityCondition::CastFromZone { zone } => format!("cast from {}", fmt_zone(zone)),
         AbilityCondition::CastDuringPhase { phases } => {
@@ -4043,6 +4047,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceIsPaired => "source is paired".into(),
         SC::SourceInZone { zone } => format!("source is in {}", fmt_zone(zone)),
         SC::EnchantedIsFaceDown => "enchanted creature is face-down".into(),
+        SC::SourceIsFaceUp => "source plane is face up".into(),
         SC::AdditionalCostPaid => "additional cost was paid".into(),
         SC::CastingAsVariant { variant } => format!("casting as {variant:?}"),
         SC::None => "none".into(),
@@ -7047,6 +7052,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
             EffectOutcomeSignal::Guessed { .. } => ("EffectOutcomeGuessed", Handled),
         },
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
+        AbilityCondition::CoinFlipOutcome { .. } => ("CoinFlipOutcome", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
         AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
@@ -7453,6 +7459,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         // object's zone against the specified zone. Runtime-handled.
         StaticCondition::SourceInZone { .. } => ("SourceInZone", Handled),
         StaticCondition::EnchantedIsFaceDown => ("EnchantedIsFaceDown", Handled),
+        // CR 311.2 / CR 901.7: evaluated by `layers::evaluate_condition` against
+        // the command-zone active plane. Runtime-handled.
+        StaticCondition::SourceIsFaceUp => ("SourceIsFaceUp", Handled),
         StaticCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
         StaticCondition::CastingAsVariant { .. } => ("CastingAsVariant", Handled),
     }

@@ -9,7 +9,7 @@ use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
     CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ChosenAttribute, Comparator, ContinuousModification, ControlWindow, CopyScale,
+    ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification, ControlWindow, CopyScale,
     CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
     GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, PileSource,
     QuantityExpr, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
@@ -1138,6 +1138,26 @@ pub struct PendingCoinFlip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lose_effect: Option<Box<AbilityDefinition>>,
     pub kind: PendingCoinFlipKind,
+}
+
+/// CR 705.2: The controller-relevant result of the most recent coin flip
+/// performed during the current resolution. Written by the flip authority
+/// (`flip_through_replacement` / `resume_after_keep`), read by
+/// `AbilityCondition::CoinFlipOutcome` when a `RepeatContinuation::WhileCondition`
+/// loop re-evaluates its predicate ("if you lose the flip, repeat this process").
+/// Carries the `flipper` (CR 705.2: only the player who flips wins/loses) so the
+/// gate stays controller-relative even in a hypothetical multi-flipper process.
+/// The stored `result` reuses the same `CoinFlipResult` vocabulary that
+/// `AbilityCondition::CoinFlipOutcome` matches against, so the written value and
+/// the read predicate can never drift into a `bool`-vs-enum mismatch.
+/// Resolution-scoped like `last_revealed_ids`: overwrite-on-produce, cleared at
+/// the authoritative resolution-lifetime boundary (top-level `resolve_ability_chain`
+/// entry) and again at each `WhileCondition` iteration start so the gate reads
+/// only the current iteration's flip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolutionCoinFlip {
+    pub flipper: PlayerId,
+    pub result: CoinFlipResult,
 }
 
 /// CR 614.12b + CR 614.1c + CR 614.13: Resume state for a multi-target
@@ -7711,6 +7731,17 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_coin_flip: Option<PendingCoinFlip>,
 
+    /// CR 705.2: Result of the most recent coin flip in the current resolution,
+    /// carrying the flipper so `AbilityCondition::CoinFlipOutcome` is
+    /// controller-relative. Written by the flip authority and read when a
+    /// `RepeatContinuation::WhileCondition` loop re-evaluates ("if you lose the
+    /// flip, repeat this process"). Resolution-scoped like `last_revealed_ids`:
+    /// cleared at top-level `resolve_ability_chain` entry (CR 608.2c — the
+    /// authoritative resolution-lifetime boundary) so a stale flip from a prior
+    /// resolution can never satisfy a later gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_coin_flip: Option<ResolutionCoinFlip>,
+
     /// CR 608.2c + CR 107.1c: Pending "repeat this process" loop paused because
     /// an iteration's process entered an interactive `WaitingFor` state.
     /// Drained by `drain_pending_continuation` after `pending_continuation`,
@@ -9479,6 +9510,7 @@ impl GameState {
             pending_copy_token_resolution: None,
             pending_each_player_copy_chosen: None,
             pending_coin_flip: None,
+            resolution_coin_flip: None,
             pending_repeat_until: None,
             pending_choose_one_of: None,
             pending_vote_ballot_iteration: None,
@@ -10351,6 +10383,10 @@ impl PartialEq for GameState {
             && self.pending_copy_token_resolution == other.pending_copy_token_resolution
             && self.pending_each_player_copy_chosen == other.pending_each_player_copy_chosen
             && self.pending_coin_flip == other.pending_coin_flip
+            // CR 104.4b: volatile resolution-scoped flip result. A flip already
+            // advances `state.rng`, so iterations differ regardless; comparing
+            // this field never masks a real repeat (safe to include).
+            && self.resolution_coin_flip == other.resolution_coin_flip
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
             && self.pending_vote_ballot_iteration == other.pending_vote_ballot_iteration

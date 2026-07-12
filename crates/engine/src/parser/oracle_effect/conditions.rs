@@ -25,10 +25,10 @@ use crate::parser::oracle_ir::ast::ContinuationAst;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, Comparator, ControllerRef, CountScope, DamageChannel,
-    DigSource, Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, ObjectScope,
-    ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, StaticCondition,
-    TargetFilter, TypeFilter, TypedFilter,
+    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope,
+    DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome,
+    ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1403,6 +1403,30 @@ pub(super) fn try_parse_moved_card_subtype_attach_followup(
         target: TargetFilter::ParentTarget,
     };
     Some((condition, attach, is_optional))
+}
+
+/// CR 705.2 + CR 608.2c: Strip a resolution-scoped "if you {win|lose} the flip,"
+/// gate that precedes a "repeat this process" directive, mapping it to
+/// `AbilityCondition::CoinFlipOutcome`. Scoped to the repeat-directive context
+/// (called first inside `try_parse_repeat_process_directive`) so inline
+/// Krark-style "if you win the flip, <effect>" branches — whose body is NOT
+/// "repeat this process" — still fall through to the coin-flip fold. Returns the
+/// original text unchanged when no flip gate is present.
+pub(super) fn strip_coin_flip_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+    let lower = text.to_lowercase();
+    match nom_on_lower(text, &lower, |i| {
+        let (i, _) = tag::<_, _, OracleError<'_>>("if you ").parse(i)?;
+        let (i, result) = alt((
+            value(CoinFlipResult::Won, tag("win the flip")),
+            value(CoinFlipResult::Lost, tag("lose the flip")),
+        ))
+        .parse(i)?;
+        let (i, _) = tag(", ").parse(i)?;
+        Ok((i, AbilityCondition::CoinFlipOutcome { result }))
+    }) {
+        Some((condition, remainder)) => (Some(condition), remainder.to_string()),
+        None => (None, text.to_string()),
+    }
 }
 
 pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityCondition>, String) {
@@ -4379,6 +4403,10 @@ pub(crate) fn static_condition_to_ability_condition(
         | StaticCondition::CompletedADungeon
         | StaticCondition::ControlsCommander { .. }
         | StaticCondition::EnchantedIsFaceDown
+        // CR 311.2 / CR 901.7: plane face-up status is a duration-only continuous-
+        // effect condition (evaluated in the layer system), never an
+        // effect-resolution-time `AbilityCondition` — lowering returns `None`.
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::SourceControllerEquals { .. }
         // CR 702.166a: Bargain payment is a cost-determination predicate with no
         // effect-resolution (`AbilityCondition`) equivalent.
@@ -4476,6 +4504,7 @@ pub(crate) fn ability_condition_to_static_condition(
         // a continuous-effect gate.
         AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
         | AbilityCondition::WhenYouDo
         | AbilityCondition::RevealedHasCardType { .. }
         | AbilityCondition::ObjectsShareQuality { .. }

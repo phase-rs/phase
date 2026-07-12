@@ -1881,6 +1881,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::ZoneChangedThisWay { .. }
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
         | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::NthResolutionThisTurn { .. }
         | AbilityCondition::RevealedHasCardType { .. }
@@ -1975,6 +1976,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::ControlsCommander { .. }
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
@@ -5825,6 +5827,9 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         | AbilityCondition::ZoneChangedThisWay { filter: _ }
         | AbilityCondition::CostPaidObjectMatchesFilter { filter: _ } => reads_event_live(),
         AbilityCondition::EventOutcomeWon => reads_event_live(),
+        // CR 705.2: reads resolution-local `state.resolution_coin_flip` — a live
+        // in-resolution signal, same read-bucket as `EventOutcomeWon`.
+        AbilityCondition::CoinFlipOutcome { result: _ } => reads_event_live(),
         AbilityCondition::SpellCastWithVariantThisTurn { variant: _ }
         | AbilityCondition::NthResolutionThisTurn { n: _ } => {
             reads_player_of(StateKind::JournalCast)
@@ -6047,6 +6052,10 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceInZone { .. }
+        // CR 311.2: the source plane's face-up status is a source-object status
+        // read (command-zone membership), grouped with the other frozen source
+        // status flags (saddled/monstrous/…).
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::WasStartingPlayer { .. } => frozen_source_read(),
         StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::RecipientMatchesFilter { .. }

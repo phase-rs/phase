@@ -1048,7 +1048,7 @@ use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, ProhibitionScope, StaticMode};
-use crate::types::triggers::TriggerMode;
+use crate::types::triggers::{PlaneswalkRole, TriggerMode};
 use crate::types::zones::Zone;
 
 fn parse(
@@ -1062,6 +1062,95 @@ fn parse(
     let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
     let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
     parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
+}
+
+/// Cluster 97 (CR 603.7a + CR 311.2 + CR 701.31): The Doctor's Childhood Barn —
+/// a Planechase plane — parses its "Whenever chaos ensues …" trigger chain with
+/// ZERO `Effect::Unimplemented` and ZERO `StaticCondition::Unrecognized`, and
+/// specifically produces (a) the inline delayed `PhaseIn { ParentTarget }`
+/// trigger keyed to `Planeswalked { role: Any }` (`uses_tracked_set: false`,
+/// `Persistent`) and (b) the plane-face-up `CantPhaseIn` duration
+/// `ForAsLongAs { SourceIsFaceUp }`. Regression against the two prior gaps.
+#[test]
+fn the_doctors_childhood_barn_planechase_full_parse() {
+    let parsed = parse(
+        "Creatures enter tapped.\nWhenever chaos ensues, for each opponent, choose up to \
+         one target nonland permanent that opponent controls. Untap those permanents. They \
+         phase out. They can't phase in for as long as The Doctor's Childhood Barn remains \
+         face up. When a player planeswalks, those permanents phase in.",
+        "The Doctor's Childhood Barn",
+        &[],
+        &["Plane"],
+        &["Gallifrey"],
+    );
+
+    // Collect every effect + duration across the trigger's execute chain,
+    // descending into the CreateDelayedTrigger inner effect.
+    fn walk<'a>(
+        def: &'a AbilityDefinition,
+        effects: &mut Vec<&'a Effect>,
+        durations: &mut Vec<&'a Duration>,
+    ) {
+        effects.push(&def.effect);
+        if let Some(d) = &def.duration {
+            durations.push(d);
+        }
+        if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+            walk(effect, effects, durations);
+        }
+        if let Some(sub) = &def.sub_ability {
+            walk(sub, effects, durations);
+        }
+    }
+
+    let mut effects = Vec::new();
+    let mut durations = Vec::new();
+    for trig in &parsed.triggers {
+        if let Some(exec) = &trig.execute {
+            walk(exec, &mut effects, &mut durations);
+        }
+    }
+
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "no Effect::Unimplemented in the Barn's trigger chain, got {effects:?}"
+    );
+    assert!(
+        !durations.iter().any(|d| matches!(
+            d,
+            Duration::ForAsLongAs {
+                condition: StaticCondition::Unrecognized { .. }
+            }
+        )),
+        "no StaticCondition::Unrecognized duration in the Barn's chain, got {durations:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(e,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent {
+                    trigger,
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::Persistent,
+                    ..
+                },
+                effect,
+                uses_tracked_set: false,
+            }
+            if matches!(trigger.mode, TriggerMode::Planeswalked { role: PlaneswalkRole::Any })
+                && matches!(&*effect.effect, Effect::PhaseIn { target: TargetFilter::ParentTarget })
+        )),
+        "delayed PhaseIn{{ParentTarget}} keyed to Planeswalked {{ role: Any }} (uses_tracked_set false), got {effects:?}"
+    );
+    assert!(
+        durations.iter().any(|d| matches!(
+            d,
+            Duration::ForAsLongAs {
+                condition: StaticCondition::SourceIsFaceUp
+            }
+        )),
+        "CantPhaseIn duration ForAsLongAs{{SourceIsFaceUp}}, got {durations:?}"
+    );
 }
 
 /// Issue #4727 (CR 611.2 + CR 201.2a): "Target creature and all other creatures
@@ -10791,14 +10880,16 @@ fn ghirapur_grand_prix_put_counter_uses_speed_quantity() {
     ));
 
     // CR 312.5 / CR 701.31d: the "When you planeswalk here" arrival clause
-    // must also map to PlaneswalkedTo — the end-step assertion above does not
-    // cover the arrival trigger, so assert it explicitly.
+    // must also map to Planeswalked { role: To } — the end-step assertion above
+    // does not cover the arrival trigger, so assert it explicitly.
     assert!(
-        result
-            .triggers
-            .iter()
-            .any(|t| t.mode == TriggerMode::PlaneswalkedTo),
-        "Ghirapur Grand Prix's 'When you planeswalk here' must produce a PlaneswalkedTo trigger",
+        result.triggers.iter().any(|t| matches!(
+            t.mode,
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::To
+            }
+        )),
+        "Ghirapur Grand Prix's 'When you planeswalk here' must produce a Planeswalked {{ role: To }} trigger",
     );
 }
 

@@ -10,7 +10,7 @@ use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::triggers::TriggerMode;
+use crate::types::triggers::{PlaneswalkRole, TriggerMode};
 use crate::types::zones::Zone;
 
 use super::triggers::TriggerMatcher;
@@ -122,9 +122,10 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::DungeonCompleted => match_dungeon_completed,
         // CR 311.7 / CR 901.9b: "Whenever chaos ensues" fires for the active plane.
         TriggerMode::ChaosEnsues => match_chaos_ensues,
-        // CR 701.31d: planeswalked-away-from / planeswalked-to (encounter) endpoints.
-        TriggerMode::PlaneswalkedFrom => match_planeswalked_from,
-        TriggerMode::PlaneswalkedTo => match_planeswalked_to,
+        // CR 701.31 / CR 701.31d / CR 901.11: all planeswalk triggers route to one
+        // matcher that reads the `PlaneswalkRole` off the trigger's mode — `From`
+        // and `To` bind the source to that endpoint, `Any` is source-independent.
+        TriggerMode::Planeswalked { .. } => match_planeswalked,
         // CR 904.9 / CR 701.32b: "When you set this scheme in motion" fires for
         // the scheme set in motion.
         TriggerMode::SetInMotion => match_set_in_motion,
@@ -392,8 +393,16 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::DungeonCompleted, match_dungeon_completed);
     // CR 311.7 / CR 701.31 / CR 901.9b: Planechase triggers
     r.insert(TriggerMode::ChaosEnsues, match_chaos_ensues);
-    r.insert(TriggerMode::PlaneswalkedFrom, match_planeswalked_from);
-    r.insert(TriggerMode::PlaneswalkedTo, match_planeswalked_to);
+    // CR 701.31 / CR 701.31d / CR 901.11: one matcher for every planeswalk role;
+    // it reads the role off the trigger's mode. Each role is a distinct registry
+    // key (role participates in `TriggerMode`'s Hash/Eq).
+    for role in [
+        PlaneswalkRole::From,
+        PlaneswalkRole::To,
+        PlaneswalkRole::Any,
+    ] {
+        r.insert(TriggerMode::Planeswalked { role }, match_planeswalked);
+    }
     // CR 904.9 / CR 701.32b / CR 701.33b: Archenemy scheme triggers
     r.insert(TriggerMode::SetInMotion, match_set_in_motion);
     r.insert(TriggerMode::Abandoned, match_abandoned);
@@ -476,8 +485,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         // TriggerMode::DungeonCompleted — moved to real matcher above
         // TriggerMode::RoomEntered — moved to real matcher above
         TriggerMode::PlanarDice,
-        // TriggerMode::PlaneswalkedFrom — moved to real matcher above
-        // TriggerMode::PlaneswalkedTo — moved to real matcher above
+        // TriggerMode::Planeswalked { .. } — moved to real matcher above
         // TriggerMode::ChaosEnsues — moved to real matcher above
         TriggerMode::Copied,
         TriggerMode::ConjureAll,
@@ -4061,44 +4069,45 @@ pub(super) fn match_chaos_ensues(
     matches!(event, GameEvent::ChaosEnsued { plane_id } if *plane_id == source_id)
 }
 
-/// CR 701.31d: "Whenever you planeswalk away from [this plane]" — fires when the
-/// source plane/phenomenon is the card planeswalked away from.
-pub(super) fn match_planeswalked_from(
+/// CR 701.31 / CR 701.31d / CR 312.5 / CR 901.11: unified planeswalk trigger
+/// matcher for every `PlaneswalkRole`. All planeswalk triggers fire on the same
+/// `GameEvent::Planeswalked` and share the same player-validity check
+/// (`valid_player_matches`); the role read off the trigger's own mode decides
+/// which endpoint the source must bind to:
+///   * `From` — "whenever you planeswalk away from [this plane]": source is the
+///     plane/phenomenon walked away from (`from` endpoint).
+///   * `To`   — "when you encounter / planeswalk to [this card]": source is the
+///     plane/phenomenon turned face up (`to` endpoint).
+///   * `Any`  — "whenever a player planeswalks" (source-independent, e.g. The
+///     Doctor's Childhood Barn's delayed phase-in): no endpoint constraint.
+///
+/// The default (`valid_target: None`) `TriggerDefinition` matches every player;
+/// `valid_player_matches` narrows it if a player filter is ever attached.
+pub(super) fn match_planeswalked(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::Planeswalked {
-        from: Some(f),
+    // The registry only routes `Planeswalked { role }` triggers here, but read
+    // the role defensively rather than assume it.
+    let TriggerMode::Planeswalked { role } = &trigger.mode else {
+        return false;
+    };
+    let GameEvent::Planeswalked {
         player_id,
-        ..
+        from,
+        to,
     } = event
-    {
-        *f == source_id && valid_player_matches(trigger, state, *player_id, source_id)
-    } else {
-        false
-    }
-}
-
-/// CR 312.5 / CR 701.31d: "When you encounter / planeswalk to [this card]" —
-/// fires when the source plane/phenomenon is the card turned face up.
-pub(super) fn match_planeswalked_to(
-    event: &GameEvent,
-    trigger: &TriggerDefinition,
-    source_id: ObjectId,
-    state: &GameState,
-) -> bool {
-    if let GameEvent::Planeswalked {
-        to: Some(t),
-        player_id,
-        ..
-    } = event
-    {
-        *t == source_id && valid_player_matches(trigger, state, *player_id, source_id)
-    } else {
-        false
-    }
+    else {
+        return false;
+    };
+    let endpoint_matches = match role {
+        PlaneswalkRole::From => *from == Some(source_id),
+        PlaneswalkRole::To => *to == Some(source_id),
+        PlaneswalkRole::Any => true,
+    };
+    endpoint_matches && valid_player_matches(trigger, state, *player_id, source_id)
 }
 
 /// CR 904.9 / CR 701.32b: "When you set this scheme in motion" — fires for the
@@ -4755,6 +4764,74 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    /// CR 701.31 / CR 701.31d / CR 901.11: the unified `match_planeswalked` matcher
+    /// reads the `PlaneswalkRole` off the trigger's mode. `Any` fires for every
+    /// `Planeswalked` event regardless of endpoint (The Doctor's Childhood Barn's
+    /// delayed phase-in); `From`/`To` bind the source to that endpoint. Non-
+    /// planeswalk events never fire.
+    #[test]
+    fn match_planeswalked_binds_source_per_role() {
+        let state = setup();
+        let source_id = ObjectId(99);
+        let any = make_trigger(TriggerMode::Planeswalked {
+            role: PlaneswalkRole::Any,
+        });
+        let from = make_trigger(TriggerMode::Planeswalked {
+            role: PlaneswalkRole::From,
+        });
+        let to = make_trigger(TriggerMode::Planeswalked {
+            role: PlaneswalkRole::To,
+        });
+
+        // `Any` fires for a plain planeswalk with unrelated endpoints; the source
+        // need not be either endpoint.
+        let ev = GameEvent::Planeswalked {
+            player_id: PlayerId(0),
+            from: Some(ObjectId(10)),
+            to: Some(ObjectId(11)),
+        };
+        assert!(match_planeswalked(&ev, &any, source_id, &state));
+        // `From`/`To` require the source to be the respective endpoint.
+        assert!(!match_planeswalked(&ev, &from, source_id, &state));
+        assert!(!match_planeswalked(&ev, &to, source_id, &state));
+
+        // Source is the `from` endpoint: only `From` (and `Any`) fire.
+        let ev_from = GameEvent::Planeswalked {
+            player_id: PlayerId(0),
+            from: Some(source_id),
+            to: Some(ObjectId(11)),
+        };
+        assert!(match_planeswalked(&ev_from, &from, source_id, &state));
+        assert!(match_planeswalked(&ev_from, &any, source_id, &state));
+        assert!(!match_planeswalked(&ev_from, &to, source_id, &state));
+
+        // Source is the `to` endpoint: only `To` (and `Any`) fire.
+        let ev_to = GameEvent::Planeswalked {
+            player_id: PlayerId(0),
+            from: Some(ObjectId(10)),
+            to: Some(source_id),
+        };
+        assert!(match_planeswalked(&ev_to, &to, source_id, &state));
+        assert!(match_planeswalked(&ev_to, &any, source_id, &state));
+        assert!(!match_planeswalked(&ev_to, &from, source_id, &state));
+
+        // `Any` fires even when both endpoints are absent (empty-deck edge cases).
+        let ev_empty = GameEvent::Planeswalked {
+            player_id: PlayerId(1),
+            from: None,
+            to: None,
+        };
+        assert!(match_planeswalked(&ev_empty, &any, source_id, &state));
+        assert!(!match_planeswalked(&ev_empty, &from, source_id, &state));
+        assert!(!match_planeswalked(&ev_empty, &to, source_id, &state));
+
+        // Does NOT fire for a non-planeswalk event, for any role.
+        let other = GameEvent::ChaosEnsued {
+            plane_id: source_id,
+        };
+        assert!(!match_planeswalked(&other, &any, source_id, &state));
     }
 
     #[test]

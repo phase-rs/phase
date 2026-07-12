@@ -6797,6 +6797,15 @@ pub enum StaticCondition {
     IsTapped {
         scope: ObjectScope,
     },
+    /// CR 311.2 + CR 901.7 + CR 611.2b: True while the source plane/phenomenon is
+    /// the active FACE-UP card in the command zone (`planechase::active_plane`).
+    /// A player planeswalking away (CR 701.31b) turns it face down and moves it to
+    /// the planar deck, so any `ForAsLongAs { SourceIsFaceUp }` continuous effect
+    /// (The Doctor's Childhood Barn's "can't phase in for as long as ~ remains
+    /// face up") ends. This is the planar face-up status (a command-zone state,
+    /// CR 311.2/901.7), NOT morph face-up (a per-object `face_down` flag, CR 708 —
+    /// see `EnchantedIsFaceDown`). Negation is `Not { Box::new(SourceIsFaceUp) }`.
+    SourceIsFaceUp,
     /// CR 702.171b: True when the source permanent is saddled. Negation via Not { SourceIsSaddled }.
     SourceIsSaddled,
     /// CR 702.62a + CR 611.2b: True when the source object's current controller
@@ -16262,6 +16271,15 @@ pub enum AbilityCondition {
     /// back to `optional_effect_performed` for in-chain clash continuations
     /// whose parent effect records the result directly.
     EventOutcomeWon,
+    /// CR 705.2 + CR 608.2c: "if you {win|lose} the flip" as a resolution-time
+    /// gate — true when the controller's most recent in-resolution coin flip
+    /// (`state.resolution_coin_flip`, controller-relative via the recorded
+    /// `flipper`) matches `result`. Distinct from `EventOutcomeWon`, which reads
+    /// the trigger event (`state.current_trigger_event`): a phenomenon /
+    /// mid-resolution flip is not the trigger event, so the two read different
+    /// state sources. Feeds `RepeatContinuation::WhileCondition` ("repeat this
+    /// process") and any cross-sentence flip-result gate.
+    CoinFlipOutcome { result: CoinFlipResult },
     /// CR 603.12: "When you do" — reflexive trigger that fires based on whether the
     /// parent's trigger event actually occurred. For a non-cost parent (e.g. a
     /// `BecomeCopy` reflexive or a copy/exile replacement sub-ability) the "do"
@@ -17805,6 +17823,22 @@ pub struct CounterTriggerFilter {
 pub enum CoinFlipResult {
     Won,
     Lost,
+}
+
+impl CoinFlipResult {
+    /// CR 705.2: The single authority mapping the engine's `won: bool` flip
+    /// outcome onto the typed `CoinFlipResult` stored in `ResolutionCoinFlip`
+    /// and matched by `AbilityCondition::CoinFlipOutcome`. Keeping the mapping
+    /// here (rather than open-coding `if won { Won } else { Lost }` at each flip
+    /// site) means the written result and the read predicate share one
+    /// vocabulary and can never drift.
+    pub fn from_won(won: bool) -> Self {
+        if won {
+            CoinFlipResult::Won
+        } else {
+            CoinFlipResult::Lost
+        }
+    }
 }
 
 /// CR 706.2: Typed result-face filter for "Whenever you roll a [result]" die-roll
