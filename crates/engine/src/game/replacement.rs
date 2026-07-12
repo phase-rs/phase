@@ -10095,7 +10095,7 @@ mod tests {
         assert_eq!(
             state.last_effect_count,
             Some(1),
-            "CR 609.3: the TRUE total actually drawn across the whole 2-unit \
+            "CR 608.2c: the TRUE total actually drawn across the whole 2-unit \
              instruction is 1 (unit 1 dredged for 0, unit 2 drew 1 normally) — \
              not 2 (the naive per-unit count) and not 0 (the last unit's count \
              if last_effect_count were wrongly overwritten per-unit)"
@@ -10158,10 +10158,10 @@ mod tests {
         assert_eq!(
             state.last_effect_count,
             Some(2),
-            "CR 609.3: both units drew normally (unit 1's declined draw, folded \
-             into the resumed multi-draw's total, PLUS unit 2's declined draw) \
+            "CR 608.2c: both units drew normally (unit 1's declined draw, folded \
+             into the resumed instruction's frame, PLUS unit 2's declined draw) \
              — the total must be 2, not 1 (which would mean unit 1's own draw \
-             was silently dropped from the accumulator)"
+             was silently dropped from the frame's accumulator)"
         );
     }
 
