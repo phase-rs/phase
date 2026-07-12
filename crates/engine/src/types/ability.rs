@@ -18463,6 +18463,35 @@ pub enum CombatDamageScope {
     NoncombatOnly,
 }
 
+/// CR 121.2 + CR 616.1g: Which stage of a draw a `ReplacementEvent::Draw`
+/// definition applies at.
+///
+/// CR 121.2 makes "draw N cards" two distinct things: the *instruction*, and the N
+/// *individual card draws* it performs. CR 121.2a says an instruction "can be
+/// modified by replacement effects that refer to the number of cards drawn. This
+/// modification occurs before considering any of the individual card draws. See
+/// rule 616.1g." A definition watches exactly one of those, and conflating them is
+/// the CR 121.2a divergence this axis exists to close.
+///
+/// This is a restriction on the *definition* — a sibling of `combat_scope`,
+/// `destination_zone` and `damage_target_filter`, evaluated in the same matcher —
+/// not a property of the event. Which stage an event is currently at is the
+/// event's business, and is a separate type.
+///
+/// Required exactly when `ReplacementDefinition::event` is `Draw`, and forbidden
+/// otherwise; see `ReplacementDefinition::validate_draw_scope`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DrawReplacementScope {
+    /// Modifies the draw *instruction*'s count before any individual draw happens
+    /// (CR 121.2a). Quantum Riddler — "if you would draw one or more cards, you
+    /// draw that many cards plus one instead" — is the only card in the pool that
+    /// does this.
+    InstructionCount,
+    /// Replaces or prevents a single individual card draw (CR 121.6b). Dredge,
+    /// Notion Thief, Hullbreacher, and the runtime "you can't draw" shields.
+    IndividualDraw,
+}
+
 /// CR 614.1a: Which player(s) a replacement effect applies to, scoped relative
 /// to the replacement source player. For permanents/spells this is the source's
 /// controller; for cards outside the battlefield/stack, CR 109.4 + CR 108.4a
@@ -18566,6 +18595,15 @@ pub struct ReplacementDefinition {
     /// None = all damage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combat_scope: Option<CombatDamageScope>,
+    /// CR 121.2 + CR 616.1g: which stage of a draw this definition watches — the
+    /// instruction's count, or one individual card draw. See
+    /// [`DrawReplacementScope`].
+    ///
+    /// `Some` exactly when `event` is `Draw`, `None` otherwise; declared at
+    /// construction and never inferred later. Checked by
+    /// [`ReplacementDefinition::validate_draw_scope`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_scope: Option<DrawReplacementScope>,
     /// Shield type for one-shot replacement effects that expire at cleanup.
     #[serde(default, skip_serializing_if = "ShieldKind::is_none")]
     pub shield_kind: ShieldKind,
@@ -18695,11 +18733,48 @@ impl ReplacementDefinition {
         }
     }
 
+    /// CR 121.2 + CR 616.1g: declare which draw stage this definition watches.
+    ///
+    /// Chainable, so a `Draw` producer reads `ReplacementDefinition::new(Draw)
+    /// .draw_scope(IndividualDraw)`. The scope is declared at construction and
+    /// never inferred later — inferring it from the `execute` shape is exactly the
+    /// CR 121.2a conflation this axis exists to prevent.
+    pub fn draw_scope(mut self, scope: DrawReplacementScope) -> Self {
+        self.draw_scope = Some(scope);
+        self
+    }
+
+    /// CR 121.2: `draw_scope` is `Some` exactly when `event` is `Draw`.
+    ///
+    /// A `Draw` definition with no scope would have to have one guessed for it at
+    /// match time; a non-`Draw` definition with a scope is a category error. Both
+    /// are construction bugs, so this returns the offending definition's problem
+    /// rather than silently defaulting.
+    pub fn validate_draw_scope(&self) -> Result<(), String> {
+        match (&self.event, &self.draw_scope) {
+            (ReplacementEvent::Draw, None) => Err(format!(
+                "ReplacementEvent::Draw definition has no draw_scope (CR 121.2: a \
+                 definition must declare whether it modifies the instruction's count \
+                 or replaces one individual draw). description={:?}",
+                self.description
+            )),
+            (event, Some(scope)) if !matches!(event, ReplacementEvent::Draw) => Err(format!(
+                "non-Draw replacement ({event:?}) carries draw_scope {scope:?} — \
+                 draw_scope is meaningless outside CR 121.2"
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// Create a new replacement definition with only the required event field.
     /// All optional fields default to `None`/`Mandatory`.
+    ///
+    /// A `Draw` event REQUIRES a follow-up `.draw_scope(...)` (CR 121.2); see
+    /// [`Self::validate_draw_scope`].
     pub fn new(event: ReplacementEvent) -> Self {
         Self {
             event,
+            draw_scope: None,
             execute: None,
             runtime_execute: None,
             mode: ReplacementMode::Mandatory,

@@ -7,8 +7,8 @@
 
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef,
-    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectScope,
-    FilterProp, ManaReplacementScope, QuantityExpr, QuantityModification, QuantityRef,
+    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope, Effect,
+    EffectScope, FilterProp, ManaReplacementScope, QuantityExpr, QuantityModification, QuantityRef,
     ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
     TapStateChange, TargetFilter, TypedFilter,
 };
@@ -73,6 +73,7 @@ pub fn convert_as_enters(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::ChangeZone,
+            draw_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode,
@@ -155,6 +156,7 @@ pub fn convert_replace_would_enter(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::ChangeZone,
+            draw_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode,
@@ -220,6 +222,7 @@ pub fn convert_replace_would_deal_damage(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::DamageDone,
+            draw_scope: None,
             execute: None,
             runtime_execute: None,
             mode: Default::default(),
@@ -596,6 +599,19 @@ pub fn convert_replace_would_draw(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::Draw,
+            // CR 121.2 + CR 121.2a: the scope follows the Forge event variant and is
+            // NOT one constant. A count-form antecedent ("would draw one or more /
+            // two or more cards") is the instruction-level hook CR 121.2a modifies
+            // "before considering any of the individual card draws"; a singular
+            // antecedent ("would draw a card", the draw step, a cycling draw) is one
+            // individual draw. Same rule the Oracle parser applies.
+            draw_scope: Some(match event {
+                ReplacableEventWouldDraw::APlayerWouldDrawOneOrMoreCards(_)
+                | ReplacableEventWouldDraw::APlayerWouldDrawTwoOrMoreCards(_) => {
+                    DrawReplacementScope::InstructionCount
+                }
+                _ => DrawReplacementScope::IndividualDraw,
+            }),
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode: Default::default(),
@@ -721,6 +737,7 @@ pub fn convert_replace_would_put_into_graveyard(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::Moved,
+            draw_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode: Default::default(),
@@ -971,6 +988,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::Moved,
+            draw_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode: Default::default(),
@@ -1061,6 +1079,7 @@ pub fn convert_replace_would_put_counters(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::AddCounter,
+            draw_scope: None,
             execute: None,
             runtime_execute: None,
             mode: Default::default(),
@@ -1245,6 +1264,7 @@ pub fn convert_replace_would_gain_life(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::GainLife,
+            draw_scope: None,
             execute: None,
             runtime_execute: None,
             mode: Default::default(),
@@ -1363,6 +1383,7 @@ fn try_build_may_cost_pair(
     Ok(Some(ReplacementDefinition {
         expiry: None,
         event: ReplacementEvent::ChangeZone,
+        draw_scope: None,
         execute: execute.map(Box::new),
         runtime_execute: None,
         mode: ReplacementMode::MayCost {
