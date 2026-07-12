@@ -8441,6 +8441,23 @@ pub struct PostReplacementDrain {
 
     /// CR 614.5 + CR 616.1f: replacement identities already applied to the event
     /// that produced this continuation, so a def cannot fire twice on it.
+    ///
+    /// This lives INSIDE the drain rather than beside it, and that is a deliberate
+    /// call backed by a census of the field's every use before the bundling
+    /// (`git grep post_replacement_applied d1f7d05ea8`, 7 sites):
+    ///
+    ///   * exactly ONE read — `apply_pending_post_replacement_effect`'s
+    ///     `std::mem::take`, which IS the drain;
+    ///   * both writes sit with a continuation install (`stash_*`, and the optional
+    ///     accept/decline branch);
+    ///   * both clears pair with one too — `combat_damage.rs`'s clear is the line
+    ///     immediately before the continuation it is zeroing the set *for*, and the
+    ///     optional branch's clear pairs with that branch installing no continuation.
+    ///
+    /// So the set never lives without a drain and is never read except at drain
+    /// time. It is co-owned, not merely co-located. (The reading that it has an
+    /// independent lifecycle comes from looking at the *instant* of the
+    /// `combat_damage` clear rather than its *purpose*; that reading is wrong.)
     pub applied: HashSet<AppliedReplacementKey>,
 
     /// CR 615.5 + CR 609.7: source of the *prevented event itself* (the damage
@@ -8465,14 +8482,42 @@ pub struct PostReplacementDrain {
 ///   * [`Self::Replace`] — the optional accept/decline path and the combat
 ///     prevention riders: the *resident* continuation is overwritten.
 ///
-/// Both are lossy, in opposite directions. Neither can be right in general —
-/// CR 616.1g explicitly contemplates one replacement applying to an event
-/// contained within another, so a resident continuation and an incoming one are
-/// both real work and a single slot can hold only one.
-///
 /// Naming them is the point: today the policy is an accident of where the
-/// assignment happens to sit. Once the stack can hold both (nesting), this enum
-/// goes away.
+/// assignment happens to sit.
+///
+/// # `KeepResident` is currently correct BY ACCIDENT. Read this before "fixing" it.
+///
+/// Discarding the incoming continuation looks like a plain bug, and dropping it in
+/// favour of a real stack looks like the obvious fix. **It is not.** Instrumenting
+/// every collision across the full suite finds exactly two live occupants, and in
+/// both the discarded continuation is *byte-identical to the resident one*:
+///
+///   * Wolverine, Fierce Fighter — `RemoveAllDamage { target: SelfRef }`, stashed
+///     once per damage instance in a combat batch;
+///   * Krark's Thumb — `FlipCoins { count: Multiply { 2, EventContextAmount } }`.
+///
+/// So the discard is *accidentally de-duplicating*: the same replacement's
+/// continuation is stashed twice and the second is dropped, so the effect runs
+/// once — which is right. **Letting the stack nest naively runs both: Wolverine
+/// heals twice, Krark's Thumb doubles twice.** No pin covers that.
+///
+/// The slot is conflating two different rules:
+///
+///   * CR 614.5 — a replacement "gets only one opportunity to affect an event or
+///     any modified events that may replace that event": the SAME definition
+///     arriving twice must be suppressed.
+///   * CR 616.1g — "one replacement or prevention effect may apply to an event, and
+///     another may apply to an event contained within the first event": a DIFFERENT
+///     definition on a contained event must nest.
+///
+/// A blind "is the slot occupied?" test satisfies the first by accident (for
+/// today's occupants) while destroying the second (which has no occupant today).
+///
+/// The fix therefore gates on the **identity of the replacement**, not the
+/// **occupancy of the slot**: suppress when the incoming `ReplacementId` is already
+/// in the event's `applied` set (CR 614.5), nest otherwise (CR 616.1g). Those two
+/// cards are the regression tests — Wolverine must heal once, Krark must double
+/// once. Tracked in GitHub issue #5676.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidentDrainPolicy {
     KeepResident,
