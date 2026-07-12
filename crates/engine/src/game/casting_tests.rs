@@ -38352,6 +38352,127 @@ fn persistent_exile_play_permission_plays_linked_land_through_action() {
     assert_eq!(obj.played_from_zone, Some(Zone::Exile));
 }
 
+/// CR 400.7 + CR 406.6 + CR 607.2a: Provenance-stamp lifetime regression. A
+/// NONpermanent spell cast from an exile pool via a `PlayFromExile` grant that
+/// records its authorizing source (a card exiled with The Matrix of Time that
+/// "you may cast") is stamped with that source at cast finalization
+/// (`casting_costs.rs` ~7093), so the one "cast a spell from among cards exiled
+/// with ~" SpellCast trigger recognizes it while it is on the stack. Once the
+/// spell resolves to the graveyard, CR 400.7 makes the resulting card a NEW
+/// object with no memory of its pool origin — the stamp MUST clear on the
+/// Stack→graveyard move so a LATER, unrelated graveyard cast (flashback, etc.)
+/// is not misread as pool-originated. Guards the `move_to_zone`
+/// Stack→non-battlefield clear against regression: without it the stale stamp
+/// rides into the graveyard and every later recast falsely satisfies
+/// `TargetFilter::PlayedFromSourceExile`.
+#[test]
+fn exile_pool_provenance_stamp_clears_when_nonpermanent_resolves_to_graveyard() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    // The exiling permanent (e.g., The Matrix of Time); its ObjectId is the
+    // provenance the SpellCast trigger's filter is bound to.
+    let source_card_id = crate::types::identifiers::CardId(state.next_object_id);
+    let source_id = create_object(
+        &mut state,
+        source_card_id,
+        player,
+        "The Matrix of Time".to_string(),
+        Zone::Battlefield,
+    );
+    // A nonpermanent (instant) in exile carrying a `PlayFromExile` grant whose
+    // `source_id` is the exiling permanent, castable for free so the cast does
+    // not depend on a mana pool. This is the object-tagged provenance class that
+    // sets `played_from_exile_source` at finalization.
+    let spell = add_exiled_card(&mut state, player, "Exiled Bolt");
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types = vec![CoreType::Instant];
+        obj.mana_cost = ManaCost::zero();
+        obj.casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                duration: crate::types::ability::Duration::Permanent,
+                granted_to: player,
+                frequency: CastFrequency::Unlimited,
+                source_id: Some(source_id),
+                invalidation: None,
+                exiled_by_ability_controller: Some(player),
+                mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            });
+    }
+    let card_id = state.objects.get(&spell).unwrap().card_id;
+
+    // Cast it from exile through the public action — it lands on the stack.
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("the exile-pool instant should cast through the PlayFromExile grant");
+
+    // While on the stack, the provenance stamp records the authorizing source
+    // and the SpellCast trigger's `PlayedFromSourceExile` filter matches — the
+    // trigger fires correctly for this pool-originated cast.
+    let ctx = crate::game::filter::FilterContext::from_source(&state, source_id);
+    assert_eq!(
+        state.objects.get(&spell).unwrap().zone,
+        Zone::Stack,
+        "the cast spell must be on the stack"
+    );
+    assert_eq!(
+        state.objects.get(&spell).unwrap().played_from_exile_source,
+        Some(source_id),
+        "cast-time stamp must record the authorizing exile-pool source"
+    );
+    assert!(
+        crate::game::filter::matches_target_filter(
+            &state,
+            spell,
+            &TargetFilter::PlayedFromSourceExile,
+            &ctx,
+        ),
+        "the SpellCast trigger must recognize this cast as pool-originated"
+    );
+
+    // The instant resolves to the graveyard (Stack→Graveyard zone change — the
+    // exact seam the fix touches). CR 400.7: the graveyard card is a new object.
+    zones::move_to_zone(&mut state, spell, Zone::Graveyard, &mut Vec::new());
+    assert_eq!(state.objects.get(&spell).unwrap().zone, Zone::Graveyard);
+    assert_eq!(
+        state.objects.get(&spell).unwrap().played_from_exile_source,
+        None,
+        "resolving to a non-battlefield zone must clear the exile-pool stamp"
+    );
+
+    // A LATER graveyard cast (flashback, etc.) returns the same card to the
+    // stack WITHOUT any exile-pool authorization. The stale stamp must not ride
+    // along, so the pool-provenance trigger must NOT fire off this recast.
+    zones::move_to_zone(&mut state, spell, Zone::Stack, &mut Vec::new());
+    assert_eq!(
+        state.objects.get(&spell).unwrap().played_from_exile_source,
+        None,
+        "a graveyard recast is never pool-originated"
+    );
+    assert!(
+        !crate::game::filter::matches_target_filter(
+            &state,
+            spell,
+            &TargetFilter::PlayedFromSourceExile,
+            &ctx,
+        ),
+        "a later graveyard cast must NOT be treated as cast from the exile pool"
+    );
+}
+
 /// Build a persistent, your-turn-only, Cast-mode `ExileCastPermission`
 /// source carrying the Azula, Cunning Usurper concessions: any-type-mana
 /// spend (CR 609.4b) and flash-grant (CR 702.8a).

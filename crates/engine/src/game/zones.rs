@@ -317,6 +317,23 @@ pub(crate) fn apply_zone_exit_cleanup(
                         | crate::types::ability::CastingPermission::PlayFromExile { .. }
                 )
             });
+
+            // CR 400.7 + CR 406.6 + CR 607.2a: The exile-pool provenance stamp
+            // (`played_from_exile_source`, set at cast finalization) authorizes the
+            // one SpellCast trigger that fired while this spell was on the stack
+            // (The Matrix of Time's "cast a spell from among cards exiled with ~").
+            // That trigger evaluates at cast time; once the spell leaves the stack
+            // for a NON-battlefield zone (resolves to graveyard, is countered,
+            // bounced, or exiled), CR 400.7 makes the resulting card a new object
+            // with no memory of its pool origin. A permanent spell keeps the stamp
+            // through Stack→Battlefield and has it cleared on the later
+            // battlefield exit by `reset_for_battlefield_exit`; a NONpermanent
+            // spell never reaches that path, so without this clear its stale stamp
+            // would ride into the graveyard and wrongly authorize a LATER,
+            // unrelated graveyard cast (flashback, etc.) as pool-originated.
+            if to != Zone::Battlefield {
+                obj_mut.played_from_exile_source = None;
+            }
         }
 
         if from == Zone::Battlefield {

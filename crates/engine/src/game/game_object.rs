@@ -982,7 +982,10 @@ pub struct GameObject {
     /// stripped on zone exit before the LandPlayed/SpellCast trigger evaluates.
     /// Read by `TargetFilter::PlayedFromSourceExile` to gate "whenever you play a
     /// land or cast a spell from among cards exiled with ~" triggers (The Matrix
-    /// of Time). Cleared on battlefield exit alongside `played_from_zone`.
+    /// of Time). Cleared on battlefield exit alongside `played_from_zone` (permanent
+    /// spells), and on Stack→non-battlefield leave in `move_to_zone` (nonpermanent
+    /// spells resolving to the graveyard / countered / bounced) so a later
+    /// unrelated graveyard cast is not misread as pool-originated (CR 400.7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub played_from_exile_source: Option<ObjectId>,
 

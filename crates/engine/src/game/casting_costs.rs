@@ -17119,6 +17119,87 @@ its replicate cost was paid.)\nDraw a card.";
         (runner, spell_id, card_id)
     }
 
+    /// Build a targetless "draw a card" spell in P0's hand carrying Exterminate!'s
+    /// NON-mana Replicate cost — "Replicate—Tap an untapped Dalek you control" —
+    /// plus two untapped Daleks P0 controls to pay it with. The real Exterminate!
+    /// replicate line drives the parser to the printed
+    /// `Keyword::Replicate(AbilityCost::TapCreatures { Dalek, count 1 })`, the
+    /// repeatable additional cost, and the copy-on-cast trigger (verified end-to-
+    /// end by `oracle-gen`); the effect line is swapped for a targetless draw so
+    /// the copy count is observable via `SpellCopied` alone, with no per-copy
+    /// `CopyRetarget` prompt (CR 707.10c). Returns the runner, spell id, card id,
+    /// and the two Dalek ids.
+    fn replicate_tap_dalek_scenario() -> (
+        crate::game::scenario::GameRunner,
+        ObjectId,
+        CardId,
+        ObjectId,
+        ObjectId,
+    ) {
+        use crate::game::scenario::GameScenario;
+
+        const REPLICATE_TAP_DALEK_ORACLE: &str = "Replicate\u{2014}Tap an untapped Dalek you \
+control. (When you cast this spell, copy it for each time you paid its replicate cost. You may \
+choose new targets for the copies.)\nDraw a card.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        let dalek_a = scenario
+            .add_creature(PlayerId(0), "Dalek Drone", 2, 2)
+            .with_subtypes(vec!["Dalek"])
+            .id();
+        let dalek_b = scenario
+            .add_creature(PlayerId(0), "Dalek Sentinel", 2, 2)
+            .with_subtypes(vec!["Dalek"])
+            .id();
+
+        // Exterminate! is a sorcery; cast at sorcery speed in the main phase.
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Test Replicate Tap Dalek",
+            false,
+            REPLICATE_TAP_DALEK_ORACLE,
+        );
+        // {0} base cost — only the non-mana tap replicate payments gate the cast.
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        });
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+        let runner = scenario.build();
+        (runner, spell_id, card_id, dalek_a, dalek_b)
+    }
+
+    /// Pay one iteration of a repeatable `TapCreatures` replicate cost: assert the
+    /// engine is prompting for the tap selection with `dalek` eligible, select it,
+    /// and confirm the tap was accepted (returning to the next replicate prompt).
+    fn pay_tap_one_dalek(runner: &mut crate::game::scenario::GameRunner, dalek: ObjectId) {
+        use crate::types::actions::GameAction;
+        match runner.state().waiting_for.clone() {
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { .. },
+                choices,
+                count,
+                ..
+            } => {
+                assert_eq!(
+                    count, 1,
+                    "each Exterminate! replicate payment taps one Dalek"
+                );
+                assert!(
+                    choices.contains(&dalek),
+                    "the Dalek to tap must be an eligible untapped candidate: {choices:?}"
+                );
+            }
+            other => panic!("expected a TapCreatures PayCost prompt, got {other:?}"),
+        }
+        runner
+            .act(GameAction::SelectCards { cards: vec![dalek] })
+            .expect("tapping the selected Dalek must be accepted");
+    }
+
     /// Count `SpellCopied` events emitted while resolving the stack to empty.
     /// Each `Effect::CopySpell` iteration emits exactly one (CR 707.10), so the
     /// total equals the number of replicate copies created.
@@ -17208,6 +17289,89 @@ its replicate cost was paid.)\nDraw a card.";
         assert_eq!(
             copies, 2,
             "replicate paid twice must create exactly two copies (original + 2 copies)"
+        );
+    }
+
+    /// CR 702.56a + CR 707.10: Runtime coverage for a NON-mana Replicate cost.
+    /// Exterminate!'s "Replicate—Tap an untapped Dalek you control" is paid TWICE
+    /// at cast — tapping two Daleks — and the copy-on-cast trigger must create
+    /// exactly two copies. The parser proof lives in `oracle_keyword.rs`
+    /// (`parse_keyword_from_oracle_replicate_tap_dalek_cost`); the sibling mana
+    /// tests above only exercise the mana replicate path at runtime, so this
+    /// drives the full non-mana tap-cost payment machinery end-to-end and asserts
+    /// BOTH tap selections happened AND the correct copy count.
+    #[test]
+    fn replicate_tap_dalek_paid_twice_taps_two_daleks_and_creates_two_copies() {
+        use crate::types::GameAction;
+        let (mut runner, spell_id, card_id, dalek_a, dalek_b) = replicate_tap_dalek_scenario();
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("casting the tap-replicate spell must be accepted");
+
+        // First replicate payment: opt in, then tap the first Dalek.
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice { .. }
+            ),
+            "the first replicate prompt must surface, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("first replicate opt-in must be accepted");
+        pay_tap_one_dalek(&mut runner, dalek_a);
+
+        // Second replicate payment: opt in, then tap the second Dalek. The first
+        // Dalek is now tapped, so it is no longer an eligible candidate.
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice { .. }
+            ),
+            "the second replicate prompt must surface, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("second replicate opt-in must be accepted");
+        pay_tap_one_dalek(&mut runner, dalek_b);
+
+        // Decline further payments — this finishes the cast.
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("declining further replicate payments must finish the cast");
+
+        // Both selections took effect: both Daleks are tapped by the cost.
+        assert!(
+            runner.state().objects[&dalek_a].tapped,
+            "the first Dalek must be tapped to pay the replicate cost"
+        );
+        assert!(
+            runner.state().objects[&dalek_b].tapped,
+            "the second Dalek must be tapped to pay the replicate cost"
+        );
+
+        // CR 601.2i + CR 603.3: the original spell plus its replicate cast-trigger
+        // are on the stack after the cast commits.
+        assert!(
+            runner.state().stack.iter().any(|e| e.id == spell_id),
+            "the original replicate spell must be on the stack after the cast commits"
+        );
+
+        // CR 702.56a + CR 707.10: resolving the cast trigger copies the spell once
+        // per Dalek tapped — exactly two copies.
+        let copies = drain_counting_spell_copies(&mut runner);
+        assert_eq!(
+            copies, 2,
+            "two Dalek taps must create exactly two replicate copies"
         );
     }
 
