@@ -340,13 +340,15 @@ pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
     // abandoned alongside the applied seed it rides with.
     state.post_replacement_token_substitution_count = None;
     state.pending_connive_reentry = None;
-    // CR 121.6b + CR 800.4a: `PendingMultiDraw` is single-player-scoped (it
-    // tracks only the departing player's own in-flight multi-card draw), so
-    // it is safe to null outright here — unlike the deliberately-preserved
-    // multi-player queue fields nearby in `elimination.rs`
-    // (`pending_team_draw_step` etc.), which need the interrupted APNAP queue
-    // resumed for the remaining players rather than field-nulling.
-    state.pending_multi_draw = None;
+    // CR 121.2 + CR 800.4a: draw frames are single-player-scoped (each tracks one
+    // player's own in-flight instruction), so the whole stack is abandoned outright
+    // here — unlike the deliberately-preserved multi-player queue fields nearby in
+    // `elimination.rs` (`pending_team_draw_step` etc.), which need the interrupted
+    // APNAP queue resumed for the remaining players rather than field-nulling.
+    //
+    // The frame-ID allocator deliberately does NOT rewind: a `DrawSequenceFrameId`
+    // captured before the abandonment must never alias a frame allocated after it.
+    state.draw_sequences.abandon_all();
 }
 
 pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
@@ -10040,30 +10042,30 @@ mod tests {
     /// the single dredge outcome, matching "drew no cards" from the report).
     #[test]
     fn multi_draw_dredges_one_of_two_units_other_draws_normally() {
-        use crate::game::effects::draw::resume_multi_draw;
+        use crate::game::effects::draw::start_draw_sequence;
         use crate::types::actions::GameAction;
 
         let mut state = dredge_state(10);
         let mut events = Vec::new();
 
-        let result = resume_multi_draw(&mut state, PlayerId(0), 2, 0, &mut events);
+        let result = start_draw_sequence(&mut state, PlayerId(0), 2, &mut events);
         let ReplacementResult::NeedsChoice(chooser) = result else {
             panic!("expected the first unit's dredge offer to pause, got {result:?}");
         };
         assert_eq!(chooser, PlayerId(0));
+        let parked = state
+            .draw_sequences
+            .active()
+            .expect("the paused instruction must stay on the draw-sequence stack");
         assert_eq!(
-            state.pending_multi_draw,
-            Some(crate::types::game_state::PendingMultiDraw {
-                player: PlayerId(0),
-                remaining: 1,
-                accumulated: 0,
-            }),
-            "one unit must remain queued after the first unit parks"
+            (parked.player, parked.remaining, parked.accumulated),
+            (PlayerId(0), 1, 0),
+            "one unit must remain owed after the first unit parks, with nothing yet delivered"
         );
 
         // Accept the dredge offer for unit 1 through the real production path —
-        // `handle_replacement_choice` applies the accepted event AND drains
-        // `pending_multi_draw` for the remaining unit.
+        // `handle_replacement_choice` settles the accepted event AND resumes the
+        // parked frame for the remaining unit.
         state.priority_player = chooser;
         crate::game::engine::apply_as_current(
             &mut state,
@@ -10072,9 +10074,9 @@ mod tests {
         .expect("resume the dredge choice");
 
         assert!(
-            state.pending_multi_draw.is_none(),
-            "the multi-draw must fully complete once both units resolve, got {:?}",
-            state.pending_multi_draw
+            state.draw_sequences.is_empty(),
+            "the instruction must fully complete once both units resolve, got {:?}",
+            state.draw_sequences
         );
         assert!(
             state.players[0].hand.contains(&ObjectId(10)),
@@ -10104,13 +10106,13 @@ mod tests {
     /// — the hostile sibling of the accept case above.
     #[test]
     fn multi_draw_decline_dredge_unit_one_still_draws_unit_two_normally() {
-        use crate::game::effects::draw::resume_multi_draw;
+        use crate::game::effects::draw::start_draw_sequence;
         use crate::types::actions::GameAction;
 
         let mut state = dredge_state(10);
         let mut events = Vec::new();
 
-        let result = resume_multi_draw(&mut state, PlayerId(0), 2, 0, &mut events);
+        let result = start_draw_sequence(&mut state, PlayerId(0), 2, &mut events);
         let ReplacementResult::NeedsChoice(chooser) = result else {
             panic!("expected the first unit's dredge offer to pause, got {result:?}");
         };

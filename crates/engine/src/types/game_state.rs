@@ -6694,24 +6694,26 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_connive_reentry: Option<PendingConniveReentry>,
 
-    /// CR 121.6b: "If an effect replaces a draw within a sequence of card
-    /// draws, the replacement effect is completed before resuming the
-    /// sequence." Tracks an in-progress multi-card draw (`Effect::Draw{count:
-    /// N}`, N > 1) paused mid-way by a per-unit replacement choice (Dredge,
-    /// Notion Thief, Hullbreacher, etc.) so the remaining units resolve
-    /// independently instead of the whole count being replaced or drawn as
-    /// one atomic batch. `accumulated` (CR 609.3) is the running total of
-    /// cards ACTUALLY delivered across every already-completed unit of this
-    /// instruction — committed to `state.last_effect_count` exactly once,
-    /// when the full original count is exhausted, so chained "discard that
-    /// many" sub-abilities see the true total, not just the last unit's
-    /// count. Drained only by `engine_replacement::handle_replacement_choice`
-    /// (the `Draw` arm) and `replacement::abandon_post_replacement_continuation`
-    /// (player departure, CR 800.4a) — single-player-scoped, safe to null
-    /// outright on departure unlike the deliberately-preserved multi-player
-    /// queue fields (`pending_team_draw_step` etc.) nearby in `elimination.rs`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_multi_draw: Option<PendingMultiDraw>,
+    /// CR 121.2 + CR 121.6b + CR 616.1g: draw instructions in flight, innermost
+    /// last. See [`DrawSequenceStack`]. Every pause and resume of a multi-card
+    /// draw addresses a frame here by [`DrawSequenceFrameId`]; the single resume
+    /// authority is `effects::draw::resume_draw_sequence`.
+    ///
+    /// Replaced the single `pending_multi_draw` slot, which could not represent a
+    /// nested instruction (CR 616.1g) — a substituted inner draw overwrote the
+    /// outer frame and its remaining units were silently lost.
+    #[serde(default, skip_serializing_if = "DrawSequenceStack::is_empty")]
+    pub draw_sequences: DrawSequenceStack,
+
+    /// Legacy save shape for the single in-flight multi-card draw, superseded by
+    /// [`Self::draw_sequences`]. JSON only; migrated into the stack by
+    /// [`Self::migrate_pending_multi_draw`]. Never written.
+    #[serde(
+        default,
+        rename = "pending_multi_draw",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub legacy_pending_multi_draw: Option<PendingMultiDraw>,
 
     /// CR 701.12c + CR 616.1: Tail of a life-total assignment that paused on a
     /// gain/loss replacement choice. Drained by `handle_replacement_choice` after
@@ -8406,15 +8408,169 @@ pub struct PendingConniveReentry {
     pub applied: HashSet<AppliedReplacementKey>,
 }
 
-/// CR 121.6b + CR 609.3: See the doc comment on `GameState::pending_multi_draw`.
+/// Legacy pre-`DrawSequenceStack` save shape: the single in-flight multi-card
+/// draw. Deserialize-only — [`GameState::migrate_pending_multi_draw`] converts it
+/// into a one-frame [`DrawSequenceStack`]. No production writer remains.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingMultiDraw {
     pub player: PlayerId,
-    /// Units of the original multi-card draw not yet attempted.
     pub remaining: u32,
-    /// Running total of cards actually delivered across every already-completed
-    /// unit — committed to `state.last_effect_count` once `remaining` reaches 0.
     pub accumulated: u32,
+}
+
+/// Identifies one draw-instruction frame within [`DrawSequenceStack`].
+///
+/// Frames are addressed by ID, never by position: a resume that arrives after a
+/// pause must prove it is resuming the frame it parked, not merely "whatever is
+/// on top now". Between the park and the resume a nested instruction (CR 616.1g)
+/// may have been pushed and popped above it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DrawSequenceFrameId(pub u64);
+
+/// CR 121.2: "Cards may only be drawn one at a time. If a player is instructed to
+/// draw multiple cards, that player performs that many individual card draws."
+///
+/// One frame is one *draw instruction* in flight — the unit of a `Draw N`, not of
+/// a single card. It survives a pause (a per-unit replacement choice: Dredge,
+/// Notion Thief, Hullbreacher, a Miracle reveal) so the remaining individual
+/// draws resume against exactly this instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrawSequenceFrame {
+    pub frame_id: DrawSequenceFrameId,
+    pub player: PlayerId,
+    /// CR 121.6b: individual draws of this instruction not yet attempted. "If an
+    /// effect replaces a draw within a sequence of card draws, the replacement
+    /// effect is completed before resuming the sequence."
+    pub remaining: u32,
+    /// CR 608.2c: running total of cards ACTUALLY delivered across every
+    /// completed unit of this instruction. This is the value a later "that many"
+    /// clause on the same card reads ("Draw two cards, then discard that many") —
+    /// "later text on the card may modify the meaning of earlier text". Committed
+    /// to `state.last_effect_count` exactly once, when the instruction completes,
+    /// so the chained clause sees the true total across the WHOLE instruction and
+    /// not just the last unit. A unit whose draw was replaced by something else
+    /// (Dredge) contributes 0; a unit doubled by a count modifier contributes its
+    /// post-replacement count.
+    pub accumulated: u32,
+}
+
+/// CR 121.2 + CR 616.1g: the stack of draw instructions in flight.
+///
+/// A stack rather than a single slot because a replacement applied to one
+/// instruction's individual draw may itself perform a draw (CR 616.1g: "one
+/// replacement or prevention effect may apply to an event, and another may apply
+/// to an event contained within the first event"). The inner instruction must run
+/// to completion and then resume the outer one.
+///
+/// The predecessor of this type was a single `Option<PendingMultiDraw>` slot,
+/// which could not represent that nesting: a substituted inner draw overwrote the
+/// outer instruction's frame and its remaining units were silently lost.
+///
+/// Invariants, enforced by [`DrawSequenceStack::validate`]:
+///   * every `frame_id` is distinct and `< next_frame_id`;
+///   * `next_frame_id` never rewinds, so a stale [`DrawSequenceFrameId`] from an
+///     abandoned frame can never alias a live one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrawSequenceStack {
+    frames: Vec<DrawSequenceFrame>,
+    next_frame_id: u64,
+}
+
+impl DrawSequenceStack {
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    /// The instruction currently being executed — the innermost one.
+    pub fn active(&self) -> Option<&DrawSequenceFrame> {
+        self.frames.last()
+    }
+
+    pub fn active_mut(&mut self) -> Option<&mut DrawSequenceFrame> {
+        self.frames.last_mut()
+    }
+
+    /// The active frame, but only if it is the one the caller parked.
+    ///
+    /// CR 616.1g: a resume must address its own instruction. If a nested
+    /// instruction is still above this one, the outer frame is not resumable yet
+    /// and this returns `None` rather than letting the outer resume run against
+    /// the inner frame's cursor.
+    pub fn active_if(&mut self, frame_id: DrawSequenceFrameId) -> Option<&mut DrawSequenceFrame> {
+        self.frames
+            .last_mut()
+            .filter(|frame| frame.frame_id == frame_id)
+    }
+
+    /// Push a new instruction and return its ID. Monotonic: the allocator never
+    /// rewinds, so an ID from a popped frame is never reissued.
+    pub fn push(&mut self, player: PlayerId, count: u32) -> DrawSequenceFrameId {
+        let frame_id = DrawSequenceFrameId(self.next_frame_id);
+        self.next_frame_id += 1;
+        self.frames.push(DrawSequenceFrame {
+            frame_id,
+            player,
+            remaining: count,
+            accumulated: 0,
+        });
+        frame_id
+    }
+
+    /// Pop the active instruction, which must be `frame_id`.
+    pub fn pop(&mut self, frame_id: DrawSequenceFrameId) -> Option<DrawSequenceFrame> {
+        if self.frames.last()?.frame_id != frame_id {
+            return None;
+        }
+        self.frames.pop()
+    }
+
+    /// CR 800.4a: abandon every in-flight instruction (player departure).
+    ///
+    /// The allocator deliberately does NOT rewind: a [`DrawSequenceFrameId`]
+    /// captured before the abandonment must never alias a frame allocated after
+    /// it, or a stale resume would drive the wrong instruction.
+    pub fn abandon_all(&mut self) {
+        self.frames.clear();
+    }
+
+    /// CR 104.4b: loop-equality projection — compares game *position*, not history.
+    ///
+    /// Two states that differ only in how many draw frames the game has allocated
+    /// over its lifetime are the same position, so the monotonic `next_frame_id`
+    /// allocator and the per-frame `frame_id` (both pure identity) are excluded.
+    /// What remains is exactly what the predecessor `Option<PendingMultiDraw>`
+    /// compared: who is drawing, how many units are owed, how many have landed.
+    ///
+    /// This must NOT be the derived `PartialEq`. Comparing the allocator would
+    /// mean two identical positions never compare equal, and CR 104.4b loop
+    /// detection would silently stop firing — a failure invisible to every draw
+    /// test, surfacing only as "the engine no longer draws a mandatory loop".
+    /// `GameState`'s hand-curated `PartialEq` already excludes the other
+    /// identity-bearing state (`transient_continuous_effects`,
+    /// `resolution_source_relatch`) for the same reason.
+    pub(crate) fn loop_equal(&self, other: &Self) -> bool {
+        self.frames.len() == other.frames.len()
+            && self.frames.iter().zip(&other.frames).all(|(a, b)| {
+                a.player == b.player && a.remaining == b.remaining && a.accumulated == b.accumulated
+            })
+    }
+
+    /// Returns `Err` describing the first broken invariant, if any.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        for frame in &self.frames {
+            if frame.frame_id.0 >= self.next_frame_id {
+                return Err(format!(
+                    "draw frame {:?} is at or above the allocator {} — a stale ID can alias a live frame",
+                    frame.frame_id, self.next_frame_id
+                ));
+            }
+            if !seen.insert(frame.frame_id) {
+                return Err(format!("duplicate draw frame id {:?}", frame.frame_id));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8893,7 +9049,8 @@ impl GameState {
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
             pending_connive_reentry: None,
-            pending_multi_draw: None,
+            draw_sequences: DrawSequenceStack::default(),
+            legacy_pending_multi_draw: None,
             pending_life_total_assignment: None,
             pending_spell_resolution: None,
             pending_mutate_merge: None,
@@ -9387,6 +9544,31 @@ impl GameState {
         }
     }
 
+    /// CR 121.2: Migrate the legacy single-slot `pending_multi_draw` save shape
+    /// into [`Self::draw_sequences`] as a one-frame stack. Idempotent — a no-op
+    /// once the legacy slot is empty (the steady state after one post-load hop).
+    /// Called from `finalize_public_state` alongside
+    /// [`Self::migrate_post_replacement_continuation`], so every deserialize
+    /// boundary (engine-wasm restore, multiplayer host resume, gamePersistence
+    /// rehydration) migrates without per-callsite plumbing.
+    ///
+    /// A legacy save can only ever have recorded ONE in-flight instruction, so it
+    /// converts to exactly one frame. Nesting (CR 616.1g) that the old shape could
+    /// not record is not invented here.
+    pub fn migrate_pending_multi_draw(&mut self) {
+        let Some(legacy) = self.legacy_pending_multi_draw.take() else {
+            return;
+        };
+        // A canonical stack already present wins: the legacy slot is stale.
+        if !self.draw_sequences.is_empty() {
+            return;
+        }
+        let frame_id = self.draw_sequences.push(legacy.player, legacy.remaining);
+        if let Some(frame) = self.draw_sequences.active_if(frame_id) {
+            frame.accumulated = legacy.accumulated;
+        }
+    }
+
     /// CR 104.4b: a cheap pre-filter fingerprint of loop-mutable state. It need
     /// NOT be complete — a confirmation pass (`loop_states_equal`) deep-compares
     /// before any draw, so a fingerprint collision can never cause a wrongful
@@ -9614,7 +9796,10 @@ impl PartialEq for GameState {
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
             && self.pending_connive_reentry == other.pending_connive_reentry
-            && self.pending_multi_draw == other.pending_multi_draw
+            // CR 104.4b: position, not history — see `DrawSequenceStack::loop_equal`.
+            // Comparing the stack structurally would fold the monotonic frame-ID
+            // allocator into loop equality and silently disable loop detection.
+            && self.draw_sequences.loop_equal(&other.draw_sequences)
             && self.pending_life_total_assignment == other.pending_life_total_assignment
             && self.pending_spell_resolution == other.pending_spell_resolution
             && self.deferred_entry_events == other.deferred_entry_events
