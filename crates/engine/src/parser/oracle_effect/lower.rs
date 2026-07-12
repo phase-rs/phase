@@ -31,10 +31,10 @@ use crate::types::ability::{
     AttackSubject, CastingPermission, Comparator, ConjureSource, ContinuousModification,
     ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
     FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission, MultiTargetSpec,
-    ObjectScope, PlayPermissionInvalidation, PlayerFilter, PreventionAmount, PreventionScope,
-    PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
+    QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -1056,20 +1056,6 @@ fn parse_until_next_same_source_exile_invalidation(input: &str) -> OracleResult<
     Ok((input, ()))
 }
 
-pub(super) fn is_until_next_same_source_exile_rider(clause: &ClauseIr) -> bool {
-    let lower = clause
-        .source
-        .fragment()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    nom_on_lower(
-        clause.source.fragment().unwrap_or_default().trim(),
-        lower.trim(),
-        |i| all_consuming(parse_until_next_same_source_exile_invalidation).parse(i),
-    )
-    .is_some()
-}
-
 /// Walk the previous def and its `sub_ability` chain for a `PlayFromExile`
 /// permission. The grant produced by the compound "exile … and may play that
 /// card" chain (Lightstall Inquisitor) lands as a sibling def during the lower
@@ -1124,22 +1110,6 @@ pub(super) fn attach_land_enters_tapped_to_previous_play_from_exile(
         return false;
     };
     *land_enter_tapped = EtbTapState::Tapped;
-    true
-}
-
-pub(super) fn attach_until_next_same_source_exile_to_previous_play_from_exile(
-    defs: &mut [AbilityDefinition],
-) -> bool {
-    let Some(CastingPermission::PlayFromExile {
-        duration,
-        invalidation,
-        ..
-    }) = find_prev_play_from_exile_permission_mut(defs)
-    else {
-        return false;
-    };
-    *duration = Duration::Permanent;
-    *invalidation = Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource);
     true
 }
 

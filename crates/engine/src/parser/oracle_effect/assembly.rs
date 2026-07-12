@@ -28,8 +28,7 @@ use super::lower::{
     apply_where_x_to_latest_def, attach_any_color_mana_rider_to_previous_play_from_exile,
     attach_cast_cost_raise_to_previous_play_from_exile,
     attach_graveyard_redirect_rider_to_prior_cast_from_zone,
-    attach_land_enters_tapped_to_previous_play_from_exile,
-    attach_until_next_same_source_exile_to_previous_play_from_exile, cast_cost_raise_rider,
+    attach_land_enters_tapped_to_previous_play_from_exile, cast_cost_raise_rider,
     consolidate_die_and_coin_defs, definition_targets_self_source,
     effect_publishes_revealed_subject, extract_bounded_target_multi_target,
     extract_exact_target_multi_target, extract_optional_target_multi_target,
@@ -38,7 +37,7 @@ use super::lower::{
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
     gate_reflexive_rider_on_declined_optional_target, is_land_enters_tapped_rider,
     is_linked_exile_cast_bottom_cleanup, is_spend_mana_as_any_color_rider, is_stable_branch_amount,
-    is_until_next_same_source_exile_rider, nest_whenever_this_turn_token_cleanup_delayed_trigger,
+    nest_whenever_this_turn_token_cleanup_delayed_trigger,
     normalize_linked_exile_cast_bottom_cleanup,
     parse_controlled_by_different_players_target_constraint,
     parse_same_zone_owner_target_constraint, parse_total_mana_value_target_constraint,
@@ -1491,12 +1490,6 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
         if is_land_enters_tapped_rider(clause_ir)
             && attach_land_enters_tapped_to_previous_play_from_exile(&mut defs)
-        {
-            prev_boundary = clause_ir.boundary;
-            continue;
-        }
-        if is_until_next_same_source_exile_rider(clause_ir)
-            && attach_until_next_same_source_exile_to_previous_play_from_exile(&mut defs)
         {
             prev_boundary = clause_ir.boundary;
             continue;
