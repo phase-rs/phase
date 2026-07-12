@@ -141,4 +141,14 @@ if ! python3 "$(dirname "$0")/zone_authority_census.py" --check; then
     FAIL=1
 fi
 
+# (C) Draw replacement-definition producers — full-tree, exact-match freeze.
+# Plan 03 gives every `ReplacementEvent::Draw` definition an explicit CR 121.2
+# scope (instruction-count vs individual-draw) assigned at construction. A
+# producer the rewrite misses would silently take a default scope, so the set of
+# producers is frozen here. The corpus half of this census needs the generated
+# card-data and therefore runs in the card-data CI job, not this one.
+if ! python3 "$(dirname "$0")/draw_replacement_census.py" --producers --check; then
+    FAIL=1
+fi
+
 exit "$FAIL"

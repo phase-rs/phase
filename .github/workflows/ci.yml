@@ -273,6 +273,21 @@ jobs:
         if: steps.gates-cache.outputs.cache-hit != 'true'
         run: cargo run --profile tool --features cli --bin card-data-validate -- data/card-data.json
 
+      - name: Draw replacement corpus freeze (Plan 03 / CR 121.2)
+        # Every `ReplacementEvent::Draw` definition must declare whether it
+        # modifies the draw *instruction* count (CR 121.2a) or replaces one
+        # *individual* draw (CR 121.2). Scope is assigned at construction and is
+        # not recoverable afterwards, so the corpus that carries one — and the
+        # scope each row must get — is frozen against a committed baseline.
+        #
+        # This lives in the card-data job, not the Rust lint job, because it
+        # reads the generated (gitignored) export. It runs UNCONDITIONALLY, with
+        # no gates-cache guard: that cache is keyed on MTGJSON + engine sources
+        # and does NOT hash scripts/**, so a PR that edited only the baseline
+        # would hit the cache, skip the check, and report a false green. The
+        # export is present either way (generated above or restored by cardgen).
+        run: python3 scripts/draw_replacement_census.py --corpus --check
+
       - name: Card support coverage report
         # Skipped on a gates-cache hit — coverage-data.json and
         # coverage-summary.json are restored from it, and both are deterministic

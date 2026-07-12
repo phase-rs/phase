@@ -175,18 +175,27 @@ def borrow_hits(code: str) -> int:
     return n
 
 
-def census_file(path: Path) -> list[tuple[str, str, str]]:
-    """Classify every non-test hit in one file.
+def iter_production_lines(rel: str, lines: list[str]):
+    """Yield `(index, raw, code, enclosing_fn)` for every PRODUCTION line.
 
-    Returns (rel_path, enclosing_fn, family) triples -- one per hit, so callers
-    can count multiple distinct branches inside the same function. An annotated
-    hit is classified into the `exempt` family rather than dropped: an exemption
-    no instrument counts is an exemption nobody revisits.
+    This is the scanner, split out from the classifier: strings and comments
+    stripped, inline `#[cfg(test)]` mod bodies skipped by brace depth, enclosing
+    fn tracked, `CensusError` on desync. WHAT counts as a hit is the caller's
+    business; WHERE production code lives is this function's.
+
+    Split out because the Draw-replacement census
+    (`draw_replacement_census.py`) needs exactly this notion of "production
+    engine code" and nothing else. A second copy of it would be a second
+    definition of production code, free to drift -- and its bugs would be
+    silent in both directions (test code scanned as production, production
+    skipped as test).
+
+    NOTE for callers: `code` has string literals REMOVED, because brace counting
+    must not see a `{` inside a string. A pattern that needs a literal (e.g.
+    matching `"Draw" => ReplacementEvent::Draw`) will never fire against `code`.
+    Rewrite the pattern to key on the code around the literal, or match `raw`
+    and accept that comments are then in scope.
     """
-    rel = str(path.relative_to(REPO_ROOT))
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-
-    hits: list[tuple[str, str, str]] = []
     current_fn = "<module>"
     skip_until_depth: int | None = None
     depth = 0
@@ -234,6 +243,23 @@ def census_file(path: Path) -> list[tuple[str, str, str]]:
 
         depth += opened - closed
 
+        yield i, raw, code, current_fn
+
+
+def census_file(path: Path) -> list[tuple[str, str, str]]:
+    """Classify every non-test hit in one file.
+
+    Returns (rel_path, enclosing_fn, family) triples -- one per hit, so callers
+    can count multiple distinct branches inside the same function. An annotated
+    hit is classified into the `exempt` family rather than dropped: an exemption
+    no instrument counts is an exemption nobody revisits.
+    """
+    rel = str(path.relative_to(REPO_ROOT))
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    hits: list[tuple[str, str, str]] = []
+
+    for i, raw, code, current_fn in iter_production_lines(rel, lines):
         n = sum(bool(pattern.search(code)) for _, pattern in FAMILIES)
         n += borrow_hits(code)
         if not n:
