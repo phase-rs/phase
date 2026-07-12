@@ -13551,13 +13551,21 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     if matches!(clause.effect, Effect::SwitchPT { .. }) && clause.multi_target.is_none() {
         clause.multi_target = extract_switch_pt_multi_target(text);
     }
-    if matches!(
+    // CR 701.10e (#5247): both counter-doubling shapes carry a
+    // "double the number of … counter(s) on <target>" phrase — `Effect::Double`
+    // (the "each kind of counter" form) and `Effect::MultiplyCounter` (a typed
+    // counter ×2, e.g. Kinetic Ooze's "+1/+1 counters"). Both recover the same
+    // `MultiTargetSpec` from the shared extractor; without the MultiplyCounter
+    // arm, "on any number of other target creatures" drops its bound and the
+    // effect binds a single required target (p0 "Unused selected target slots").
+    if (matches!(
         clause.effect,
         Effect::Double {
             target_kind: DoubleTarget::Counters { .. },
             ..
         }
-    ) && clause.multi_target.is_none()
+    ) || matches!(clause.effect, Effect::MultiplyCounter { .. }))
+        && clause.multi_target.is_none()
     {
         clause.multi_target = extract_double_counter_multi_target(text);
     }
