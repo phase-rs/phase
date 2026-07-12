@@ -163,9 +163,6 @@ enum NodeStatus {
     /// No longer top-level: nested under `into` (as its `sub_ability`/`else_ability`)
     /// by a handler that popped it and pushed its replacement.
     Absorbed { into: NodeId },
-    /// Removed from top-level by an in-place restructure whose parent we cannot
-    /// name (a continuation rebuilding `defs`). Recorded honestly, never guessed.
-    Dropped,
 }
 
 #[allow(dead_code)]
@@ -266,6 +263,12 @@ impl Arena {
         self.order.get(index).copied()
     }
 
+    /// Every top-level id EXCEPT the first. `Instead` nests defs `1..N` into the root
+    /// (`defs[0]`) and must name it as their parent, so it needs exactly this set.
+    fn tail_ids(&self) -> Vec<NodeId> {
+        self.order.iter().skip(1).copied().collect()
+    }
+
     /// Provenance of the node currently at top-level `index` — the SINGLE store.
     ///
     /// There used to be a SECOND, positional one (`AssemblyEnv::prov`), kept in step
@@ -327,35 +330,34 @@ impl Arena {
         }
     }
 
-    /// Classify anything still detached at the end of a clause, then assert the
-    /// mirror invariant.
+    /// End of a clause: every def this clause detached must have been RESOLVED.
     ///
-    /// Every handler that NESTS the def it detached now names the parent itself, via
-    /// `absorb` — `DigAlt`, `Instead`, `FoldSearchIntoElse` and
-    /// `ModifyPrior::EntersTappedAttacking` (which re-lives its def with `reinstate`
-    /// instead). So whatever is left here was removed from top-level with NO parent
-    /// to name, and is honestly `Dropped`.
+    /// A handler that removes a def from `defs` has to say where it went — `absorb`
+    /// when it nests the def under another, `reinstate` when it returns the def to
+    /// top-level. All four Phase-1 shrink sites do: `EntersTappedAttacking` and
+    /// `Instead` reinstate; `DigAlt`, `Instead` and `FoldSearchIntoElse` absorb.
     ///
-    /// This used to infer the parent as `order.last()`. That inference was wrong at
-    /// `FoldSearchIntoElse`, whose intrinsic continuation pushes a node AFTER the real
-    /// parent — the arena recorded the continuation's node as parent of a def nested
-    /// somewhere else entirely. Emission order is not a parenthood oracle, so the
-    /// guess is gone rather than special-cased.
+    /// U6-0c marked whatever was still detached here as `Dropped`. That was a
+    /// REINTRODUCED SILENT LIE, and it is the reason this asserts instead. The
+    /// parenthood assert SKIPS `Dropped` nodes — nothing to check, the def left the
+    /// output — so a future handler that detaches a def, nests it, and forgets to
+    /// `absorb` would be recorded as "removed from the output" and quietly accepted.
+    /// The arena would hold the wrong model and no assert would object: exactly the
+    /// class of defect U6-0 exists to delete, reintroduced by the fix for it.
     ///
-    /// This does NOT assert the mirror. The two assert sites — the top of the clause
-    /// loop and the Phase-1/Phase-2 boundary — between them cover every clause's
-    /// mutations, and asserting here as well only duplicated the loop-top check on
-    /// every non-rider path. Coverage is the same or better at half the calls.
+    /// So `Dropped` is gone. A node is `Live` or `Absorbed`, and "the handler never
+    /// said" is a failure, not a third state.
     fn settle(&mut self) {
-        for id in std::mem::take(&mut self.detached) {
-            self.nodes[id.0 as usize].status = NodeStatus::Dropped;
-        }
+        debug_assert!(
+            self.detached.is_empty(),
+            "arena/defs divergence: a detached node was never absorbed or reinstated — \
+             the handler that removed it from `defs` did not say where it went"
+        );
+        self.detached.clear();
     }
 
-    /// Follow an `Absorbed` chain up to the LIVE top-level node that still holds
-    /// this node in its tree, and return that node's index in `defs`. `None` when
-    /// the chain ends in a `Dropped` node — the def left the output, so there is
-    /// nothing left to check it against.
+    /// Follow an `Absorbed` chain up to the LIVE top-level node that still holds this
+    /// node in its tree, and return that node's index in `defs`.
     fn live_root_index(&self, id: NodeId) -> Option<usize> {
         let mut cursor = id;
         // Bounded by the node count: a parent is always an EXISTING node, so a chain
@@ -364,7 +366,6 @@ impl Arena {
             match self.node(cursor).status {
                 NodeStatus::Live => return self.order.iter().position(|o| *o == cursor),
                 NodeStatus::Absorbed { into } => cursor = into,
-                NodeStatus::Dropped => return None,
             }
         }
         // A cycle looks unconstructible (`absorb` is only ever called with a parent
@@ -450,7 +451,7 @@ impl Arena {
                 NodeStatus::Absorbed { into } => self
                     .live_root_index(into)
                     .is_none_or(|i| def_tree_contains(&defs[i], n.witness)),
-                NodeStatus::Live | NodeStatus::Dropped => true,
+                NodeStatus::Live => true,
             }),
             "arena/defs divergence: an `Absorbed {{ into }}` node is not anywhere \
              inside the tree of the parent it names — the parent was inferred, wrongly"
@@ -1223,7 +1224,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         // so it correctly gets a fresh id — this is the one absorbing
                         // handler that does NOT `reinstate`. The popped def is nested
                         // under it as `else_ability`, so it names that parent.
-                        let absorbed = env.arena.id_at(defs.len().wrapping_sub(1));
+                        let absorbed = defs
+                            .len()
+                            .checked_sub(1)
+                            .and_then(|last| env.arena.id_at(last));
                         if let Some(last_def) = defs.pop() {
                             env.observe(&defs, None, NodeRole::Unknown);
                             let mut new_def = *alt_def.clone();
@@ -1277,7 +1281,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             // capture their ids too and name the root as their parent —
                             // `settle` no longer infers one.
                             let root_id = env.arena.id_at(0);
-                            let tail_ids: Vec<NodeId> = env.arena.order[1..].to_vec();
+                            let tail_ids = env.arena.tail_ids();
                             let mut chain_defs = std::mem::take(&mut defs);
                             env.observe(&defs, None, NodeRole::Unknown);
                             let mut root = chain_defs.remove(0);
@@ -2316,8 +2320,44 @@ mod arena_tests {
 
         defs.remove(1); // MID-vector removal ...
         arena.sync_len(&defs, None, NodeRole::Unknown); // ... mirrored by a TAIL pop.
+
+        // The handler still RESOLVES its detach, exactly as every real one does — the
+        // pre-fix bug was never a dangling node, it was WHICH node got detached. So
+        // absorb the (wrong) one, which is what the old `settle` did by inferring a
+        // parent. `settle` then has nothing to object to, and the identity assert is
+        // left to catch the divergence on its own.
+        let stray = arena.detached[0];
+        let parent = arena.id_at(0).expect("defs[0] is live");
+        arena.absorb(stray, parent);
         arena.settle();
+
         arena.assert_mirrors(&defs);
+    }
+
+    /// `settle`'s invariant, and the reason `NodeStatus::Dropped` is gone.
+    ///
+    /// A handler that removes a def from `defs` must say where it went — `absorb` when
+    /// it nests the def, `reinstate` when it returns it to top-level. U6-0c recorded a
+    /// handler that said NOTHING as `Dropped` ("the def left the output"). But the
+    /// parenthood assert SKIPS `Dropped` nodes, precisely because a def that left the
+    /// output has nothing left to check against — so "I forgot to name the parent" was
+    /// accepted as "there is no parent", silently, with the arena holding the wrong
+    /// model and no assert objecting.
+    ///
+    /// That is the same silent-lie class U6-0 exists to remove, reintroduced by the fix
+    /// for it. This is the shape it was swallowing, and it now fails.
+    #[test]
+    #[should_panic(expected = "never absorbed or reinstated")]
+    fn a_detached_node_the_handler_never_resolved_is_caught() {
+        let mut defs = vec![shuffle_def(), shuffle_def()];
+        let mut arena = Arena::default();
+        arena.sync_len(&defs, None, NodeRole::Primary);
+
+        // A handler pops a def and nests it under the survivor — but forgets to absorb.
+        let popped = defs.pop().expect("two defs");
+        defs[0].sub_ability = Some(Box::new(popped));
+        arena.sync_len(&defs, None, NodeRole::Unknown); // detaches the node ...
+        arena.settle(); // ... and never said where it went.
     }
 
     /// The TERMINAL-CLAUSE blind spot, and why the Phase-1/Phase-2 boundary assert
