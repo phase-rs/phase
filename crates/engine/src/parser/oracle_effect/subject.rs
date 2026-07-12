@@ -3138,7 +3138,7 @@ fn try_split_pump_compound(
     let remainder = remainder_tp.original.trim();
 
     // Parse the pump clause first to check whether it carries its own duration.
-    let (power, toughness, duration) =
+    let (power, toughness, mut duration) =
         super::lower::parse_pump_clause_with_context(pump_part, ctx)?;
 
     // Guard: when the pump part has NO duration (e.g., "get +2/+2 and gain flying
@@ -3170,7 +3170,10 @@ fn try_split_pump_compound(
     // the general effect-chain parse.
     let sub_ability = if remainder.is_empty() {
         None
-    } else if let Some(choice) = build_keyword_choice_sub_ability(application, remainder) {
+    } else if let Some((choice, choice_duration)) =
+        build_keyword_choice_sub_ability(application, remainder)
+    {
+        duration = duration.or(choice_duration);
         Some(Box::new(choice))
     } else {
         Some(Box::new(super::parse_effect_chain(
@@ -3200,7 +3203,7 @@ fn try_split_pump_compound(
 fn build_keyword_choice_sub_ability(
     application: &SubjectApplication,
     remainder: &str,
-) -> Option<AbilityDefinition> {
+) -> Option<(AbilityDefinition, Option<Duration>)> {
     // The split remainder keeps its conjugated verb ("gains ..."):
     // `deconjugate_verb` in `build_continuous_clause` only normalizes the
     // compound's leading verb ("gets"), so the second clause arrives as
@@ -3209,16 +3212,20 @@ fn build_keyword_choice_sub_ability(
     let normalized = deconjugate_verb(remainder);
     let (first, second, duration) = parse_keyword_choice_grant(&normalized)?;
     let affected = static_affected_for_application(application);
+    let choice_duration = duration.clone();
     let branches = vec![
         keyword_choice_branch(first, affected.clone(), None, duration.clone()),
         keyword_choice_branch(second, affected, None, duration),
     ];
-    Some(AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::ChooseOneOf {
-            chooser: PlayerFilter::Controller,
-            branches,
-        },
+    Some((
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches,
+            },
+        ),
+        choice_duration,
     ))
 }
 

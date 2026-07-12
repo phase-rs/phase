@@ -133,6 +133,11 @@ fn alchemists_gift_grants_the_chosen_keyword_to_the_pumped_creature() {
 
     // End-to-end: the pumped creature gains ONLY the chosen keyword.
     let obj = &runner.state().objects[&target];
+    assert_eq!(
+        (obj.power, obj.toughness),
+        (Some(3), Some(3)),
+        "the pump half must remain a +1/+1 effect until end of turn"
+    );
     assert!(
         obj.has_keyword(&Keyword::Deathtouch),
         "the chosen keyword (deathtouch) must be granted to the pumped creature"
