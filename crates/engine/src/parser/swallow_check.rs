@@ -28,8 +28,9 @@ use super::oracle_ir::doc::OracleItemIr;
 use super::oracle_ir::feature::{audit_units, scope_to_unit, ItemIdTracks, OracleSemanticFeature};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, Comparator, ContinuousModification,
-    CopyRetargetPermission, Effect, FilterProp, ModalSelectionConstraint, OpponentMayScope,
-    PlayerFilter, QuantityExpr, ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition,
+    CopyRetargetPermission, Duration, Effect, FilterProp, ModalSelectionConstraint,
+    OpponentMayScope, PlayerFilter, QuantityExpr, ReplacementMode, StaticDefinition, TargetFilter,
+    TriggerDefinition,
 };
 use crate::types::game_state::RetargetScope;
 use crate::types::keywords::Keyword;
@@ -176,14 +177,14 @@ pub(crate) fn check_swallowed_clauses(
         detect_replacement_instead(&cleaned, fragment, &scoped, &mut found);
         detect_activate_only_during(&cleaned, fragment, &scoped, &mut found);
         detect_activate_limit(&cleaned, fragment, &scoped, &mut found);
-        detect_duration_until_eot(&cleaned, fragment, &scoped, &ast_json, &mut found);
+        detect_duration_until_eot(&cleaned, fragment, &scoped, &mut found);
         detect_optional_you_may(&cleaned, fragment, &scoped, &mut found);
         detect_dynamic_qty(&cleaned, fragment, &ast_json, &mut found);
         detect_condition_if(&cleaned, fragment, &ast_json, &scoped, &mut found);
         detect_condition_unless(&cleaned, fragment, &ast_json, &mut found);
         detect_condition_as_long_as(&cleaned, fragment, &ast_json, &scoped, &mut found);
         detect_duration_this_turn(&cleaned, fragment, &ast_json, &mut found);
-        detect_duration_next_turn(&cleaned, fragment, &ast_json, &mut found);
+        detect_duration_next_turn(&cleaned, fragment, &scoped, &mut found);
         detect_optional_may_have(&cleaned, fragment, &ast_json, &mut found);
         detect_apnap(&cleaned, fragment, &scoped, &mut found);
         detect_modal_dynamic_max_dropped(&cleaned, fragment, &ast_json, &mut found);
@@ -314,29 +315,43 @@ fn detect_duration_until_eot(
     cleaned: &str,
     original: &str,
     parsed: &ParsedAbilities,
-    ast_json: &str,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains("until end of turn") {
         return;
     }
-    if any_ability_has_duration(parsed) {
+    // CR 611.2a: the evidence is an END-OF-TURN duration, not "some duration". The two
+    // things this replaces were both vacuous: `any_ability_has_duration` accepted a
+    // duration of ANY kind (a `Permanent` grant discharged an "until end of turn"
+    // expectation), and its `static_has_duration` leg returned `true` for any static at
+    // all. The `json_has_any` fallback beside them existed only because the structured
+    // walk could not reach into `Effect::Token`; `effect_has_duration` now reaches every
+    // container, so the string channel is not needed here.
+    if unit_has_duration(parsed, &duration_is_end_of_turn) {
         return;
     }
-    // CR 611.2a: an "until end of turn"/"until end of combat" duration nested
-    // inside a token-granted ability (Effect::Token.static_abilities ->
-    // GrantTrigger -> trigger.execute) is invisible to the structured
-    // `def_tree_has_duration` walk, which does not descend into Effect::Token.
-    // The serialized AST is complete, so a marker check catches the nested case.
-    // Mirrors detect_duration_this_turn / detect_duration_next_turn.
-    if json_has_any(
-        ast_json,
-        &[
-            "\"duration\":\"UntilEndOfTurn\"",
-            "\"duration\":\"UntilEndOfCombat\"",
-        ],
-    ) {
+    // CR 106.4: "that mana doesn't empty until end of turn" — the duration is carried by
+    // `Effect::Mana.expiry` (`ManaExpiry`), which is not typed `Duration`.
+    if unit_has_end_of_turn_mana_expiry(parsed) {
+        return;
+    }
+    // CR 614.6 + CR 514.2: a one-shot DAMAGE replacement created by a resolving spell
+    // ("Until end of turn, all damage that would be dealt to you ... is dealt to that
+    // creature instead" — Heroic Sacrifice) has NO `duration` field to carry the scope:
+    // `ReplacementDefinition` has none. Its "until end of turn" lifetime is structural —
+    // the shield is created on resolution and expires at cleanup. So the event type IS
+    // the duration, and the clause is represented.
+    //
+    // This leg was lost when `any_ability_has_duration` was deleted, and the full-pool
+    // delta caught it as a false-positive cluster (blind fury, heroic sacrifice). Restored
+    // here as a TYPED exemption on the event, rather than as a blanket "has a replacement".
+    if parsed.replacements.iter().any(|replacement| {
+        matches!(
+            replacement.event,
+            crate::types::replacements::ReplacementEvent::DamageDone
+        )
+    }) {
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
@@ -1578,71 +1593,307 @@ fn modal_has_conditional_max(modal: &crate::types::ability::ModalChoice) -> bool
     })
 }
 
-/// Recursive walk: does any def in the tree have a non-None duration?
-fn def_tree_has_duration(def: &AbilityDefinition) -> bool {
-    if def.duration.is_some() {
-        return true;
-    }
-    if matches!(
-        &*def.effect,
-        Effect::Mana {
-            expiry: Some(_),
-            ..
-        }
-    ) {
-        return true;
-    }
-    if let Some(ref sub) = def.sub_ability {
-        if def_tree_has_duration(sub) {
-            return true;
-        }
-    }
-    if let Some(ref else_ab) = def.else_ability {
-        if def_tree_has_duration(else_ab) {
-            return true;
-        }
-    }
-    def.mode_abilities.iter().any(def_tree_has_duration)
+// `def_tree_has_duration`, `any_ability_has_duration` and `static_has_duration` used to
+// live here. All three are DELETED, and the third is why:
+//
+//     fn static_has_duration(s: &StaticDefinition) -> bool { let _ = s; true }
+//
+// It returned `true` for ANY static ability whatsoever — a keyword grant, an anthem, a
+// cost modifier — so `any_ability_has_duration` (its only caller, and the sole evidence
+// gate on `detect_duration_until_eot`) was discharged by the mere EXISTENCE of a static.
+// `StaticDefinition` has no `Duration` field at all; a static's duration lives on the
+// `Effect::GenericEffect` that wraps it. So the stub was not a conservative approximation
+// of a duration — it was unrelated to one.
+//
+// `any_ability_has_duration` compounded it by accepting a duration of ANY KIND: a
+// `Permanent` grant satisfied an "until end of turn" expectation. Evidence must be the
+// fact the expectation asked about (CR 611.2a), which is what `unit_has_duration(parsed,
+// &duration_is_end_of_turn)` now demands.
+
+// ── Typed duration evidence (CR 611.2a) ─────────────────────────────────
+//
+// `Duration` is a BOUNDED fact: its parse-time carriers are a small closed set, so it is
+// hand-typed here rather than probed. THE CARRIER LIST IS THE WHOLE CORRECTNESS ARGUMENT,
+// so it is spelled out and its derivation is reproducible:
+//
+//     rg ':\s*[^,/]*\bDuration\b' crates/engine/src/types/{ability,statics,triggers,replacements,mana}.rs
+//
+// THE GREP ABOVE IS THE SECOND ONE. The first was `:\s*(Option<)?(Box<)?Duration\b` over
+// ability/statics/triggers/replacements only, and it MISSED `ManaSpellGrant` — boxed, fully
+// qualified, and in `mana.rs`. The full-pool delta caught the omission as a false-positive
+// cluster (Generator Servant / Carnelian Orb / Arena of Glory). A carrier list is a claim
+// about a population; state the population, and measure the claim.
+//
+// POPULATION: 10 parse-time carriers (below). Excluded, and why:
+//   - `AbilityDefinition` L15728 — the serde *repr* of the same `duration` field, not a
+//     second carrier.
+//   - `ResolvedAbility` L19445 — a RUNTIME type. It never appears in `ParsedAbilities`.
+// `StaticDefinition` carries NO `Duration` field at all: a static's duration lives on the
+// `Effect::GenericEffect` that wraps it, which is why `static_has_duration`'s blanket
+// `true` was vacuous (see `unit_has_duration`).
+//
+// The nine parse-time carriers:
+//   1. `AbilityDefinition.duration`
+//   2. `Effect::BecomeCopy.duration`
+//   3. `Effect::GainActivatedAbilitiesOfTarget.duration`
+//   4. `Effect::GenericEffect.duration`
+//   5. `Effect::CastFromZone.duration`
+//   6. `Effect::ForceAttack.duration`            (non-optional)
+//   7. `Effect::PreventDamage.prevention_duration`
+//   8. `CastingPermission::ExileWithAltCost.duration`
+//   9. `CastingPermission::PlayFromExile.duration` (non-optional)
+//  10. `ManaSpellGrant::AddKeywordUntilEndOfTurn.duration` — reached via `Effect::Mana.grants`
+//      (CR 609.4b). The one the first grep missed.
+//
+// Plus one duration-EQUIVALENT that is not typed `Duration`: `Effect::Mana.expiry`
+// (`ManaExpiry`, CR 106.4 — "this mana doesn't empty until end of turn"). It is mapped
+// onto the same kinds so a mana-persistence card is not reported as a swallowed duration.
+//
+// DECLARED REACH GAP: the `_ => {}` arm below means a FUTURE `Effect` variant carrying a
+// `Duration` is invisible until it is added here. That is why the grep above is pinned in
+// the commit message: the completeness claim is only as good as the population behind it.
+
+/// The kinds of duration a detector can ask for. Each detector asks for ITS OWN kind —
+/// the defect being fixed is that `detect_duration_until_eot` used to accept ANY duration
+/// (via `any_ability_has_duration`), so a `Permanent` duration discharged an "until end of
+/// turn" expectation. Evidence must be the fact the expectation asked about.
+fn duration_is_end_of_turn(duration: &Duration) -> bool {
+    // CR 611.2a + CR 514.2: "until end of turn" / "until end of combat" both expire at a
+    // cleanup within THIS turn, and the Oracle marker " until end of turn" is the surface
+    // form of both in the printings this detector scans.
+    matches!(
+        duration,
+        Duration::UntilEndOfTurn | Duration::UntilEndOfCombat
+    )
 }
 
-fn any_ability_has_duration(parsed: &ParsedAbilities) -> bool {
-    parsed.abilities.iter().any(def_tree_has_duration)
-        || parsed
-            .triggers
+/// CR 611.2a: "until your next turn" / "until that player's next turn".
+fn duration_is_next_turn(duration: &Duration) -> bool {
+    matches!(
+        duration,
+        Duration::UntilNextTurnOf { .. } | Duration::UntilEndOfNextTurnOf { .. }
+    )
+}
+
+fn mana_expiry_is_end_of_turn(expiry: &crate::types::mana::ManaExpiry) -> bool {
+    // CR 106.4: mana normally empties at each step/phase end; an expiry overrides that.
+    matches!(
+        expiry,
+        crate::types::mana::ManaExpiry::EndOfTurn | crate::types::mana::ManaExpiry::EndOfCombat
+    )
+}
+
+/// Does any `Duration` reachable from this effect satisfy `pred`?
+///
+/// Both halves matter: the seven Effect-level CARRIERS above, and the CONTAINERS that nest
+/// further definitions. The container half is why the JSON marker existed at all — the old
+/// `def_tree_has_duration` walked only `sub`/`else`/`mode`, so an "until end of turn"
+/// nested in `Effect::Token.static_abilities -> GrantTrigger -> trigger.execute` was
+/// invisible to it and only the serialized-string scan could see it.
+fn effect_has_duration(effect: &Effect, pred: &dyn Fn(&Duration) -> bool) -> bool {
+    match effect {
+        // ---- carriers ----
+        Effect::BecomeCopy { duration, .. }
+        | Effect::GainActivatedAbilitiesOfTarget { duration, .. }
+        | Effect::CastFromZone { duration, .. } => duration.as_ref().is_some_and(|d| pred(d)),
+        Effect::ForceAttack { duration, .. } => pred(duration),
+        Effect::PreventDamage {
+            prevention_duration,
+            ..
+        } => prevention_duration.as_ref().is_some_and(|d| pred(d)),
+        Effect::GenericEffect {
+            duration,
+            static_abilities,
+            ..
+        } => {
+            duration.as_ref().is_some_and(|d| pred(d))
+                || static_abilities
+                    .iter()
+                    .any(|s| static_has_duration_matching(s, pred))
+        }
+        Effect::GrantCastingPermission { permission, .. } => {
+            casting_permission_has_duration(permission, pred)
+        }
+        // CR 609.4b + CR 611.2a: "If that mana is spent on a creature spell, it gains haste
+        // until end of turn" (Generator Servant, Carnelian Orb of Dragonkind, Arena of
+        // Glory). The duration rides on the conditional mana grant, not on the def.
+        //
+        // This carrier was MISSED by my first completeness grep (`:\s*(Option<)?Duration\b`)
+        // because its type is `Box<crate::types::ability::Duration>` — boxed AND fully
+        // qualified. The full-pool delta caught it as a false-positive cluster, which is the
+        // whole argument for measuring: a carrier list is a CLAIM ABOUT A POPULATION and is
+        // only ever as good as the grep behind it. Corrected grep, pinned:
+        //   rg ':\s*[^,/]*\bDuration\b' crates/engine/src/types/{ability,statics,triggers,replacements,mana}.rs
+        Effect::Mana { grants, .. } => grants.iter().any(|grant| match grant {
+            crate::types::mana::ManaSpellGrant::AddKeywordUntilEndOfTurn { duration, .. } => {
+                pred(duration)
+            }
+            _ => false,
+        }),
+        // ---- containers: nested definitions the duration may live inside ----
+        Effect::Token {
+            static_abilities, ..
+        } => static_abilities
             .iter()
-            .any(|t| t.execute.as_deref().is_some_and(def_tree_has_duration))
-        // CR 614.1a: AddTargetReplacement carries an implicit EOT duration
-        // for die-exile riders ("if it would die this turn, exile it instead").
-        // Its presence in the AST satisfies the Duration_ThisTurn detector.
-        || any_ability_has_target_replacement(parsed)
-        // Replacements that target a creature with EOT-bounded "die-exile"
-        // riders, prevent-damage with this-turn scope, etc. — durations
-        // are inside the execute tree or implicit in the replacement event
-        // filter for one-shots like "prevent all combat damage this turn".
-        // CR 614.6 / CR 614.13: `Mandatory` prevention/exile riders bounded
-        // to this turn are inherent to the spell's resolution (one-shot),
-        // not a separate `duration` slot.
+            .any(|s| static_has_duration_matching(s, pred)),
+        Effect::CreateEmblem { statics, triggers } => {
+            statics
+                .iter()
+                .any(|s| static_has_duration_matching(s, pred))
+                || triggers.iter().any(|t| {
+                    t.execute
+                        .as_deref()
+                        .is_some_and(|d| def_has_duration(d, pred))
+                })
+        }
+        Effect::ChooseOneOf { branches, .. } => branches.iter().any(|b| def_has_duration(b, pred)),
+        Effect::CreateDelayedTrigger { effect, .. } => def_has_duration(effect, pred),
+        Effect::Vote {
+            per_choice_effect, ..
+        } => per_choice_effect.iter().any(|d| def_has_duration(d, pred)),
+        Effect::SeparateIntoPiles {
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => {
+            def_has_duration(chosen_pile_effect, pred)
+                || unchosen_pile_effect
+                    .as_deref()
+                    .is_some_and(|d| def_has_duration(d, pred))
+        }
+        Effect::RevealFromHand { on_decline, .. } => on_decline
+            .as_deref()
+            .is_some_and(|d| def_has_duration(d, pred)),
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            win_effect
+                .as_deref()
+                .is_some_and(|d| def_has_duration(d, pred))
+                || lose_effect
+                    .as_deref()
+                    .is_some_and(|d| def_has_duration(d, pred))
+        }
+        Effect::FlipCoinUntilLose { win_effect, .. } => def_has_duration(win_effect, pred),
+        Effect::AddTargetReplacement { replacement, .. } => replacement
+            .execute
+            .as_deref()
+            .is_some_and(|d| def_has_duration(d, pred)),
+        // DECLARED REACH GAP — see the module note above. A new Duration-carrying variant
+        // must be added to the carrier list; the grep is the census that finds it.
+        _ => false,
+    }
+}
+
+fn casting_permission_has_duration(
+    permission: &crate::types::ability::CastingPermission,
+    pred: &dyn Fn(&Duration) -> bool,
+) -> bool {
+    match permission {
+        crate::types::ability::CastingPermission::ExileWithAltCost { duration, .. } => {
+            duration.as_ref().is_some_and(|d| pred(d))
+        }
+        crate::types::ability::CastingPermission::PlayFromExile { duration, .. } => pred(duration),
+        _ => false,
+    }
+}
+
+fn static_has_duration_matching(
+    static_def: &StaticDefinition,
+    pred: &dyn Fn(&Duration) -> bool,
+) -> bool {
+    // CR 613.1f: a granted ability/trigger/static can itself carry the duration.
+    static_def.modifications.iter().any(|m| match m {
+        ContinuousModification::GrantTrigger { trigger } => trigger
+            .execute
+            .as_deref()
+            .is_some_and(|d| def_has_duration(d, pred)),
+        ContinuousModification::GrantAbility { definition } => def_has_duration(definition, pred),
+        ContinuousModification::GrantStaticAbility { definition } => {
+            static_has_duration_matching(definition, pred)
+        }
+        _ => false,
+    })
+}
+
+fn def_has_duration(def: &AbilityDefinition, pred: &dyn Fn(&Duration) -> bool) -> bool {
+    if def.duration.as_ref().is_some_and(|d| pred(d)) {
+        return true;
+    }
+    if effect_has_duration(&def.effect, pred) {
+        return true;
+    }
+    if def
+        .sub_ability
+        .as_deref()
+        .is_some_and(|d| def_has_duration(d, pred))
+    {
+        return true;
+    }
+    if def
+        .else_ability
+        .as_deref()
+        .is_some_and(|d| def_has_duration(d, pred))
+    {
+        return true;
+    }
+    def.mode_abilities.iter().any(|d| def_has_duration(d, pred))
+}
+
+/// Does THIS UNIT's parse carry a duration of the kind the detector asked for?
+///
+/// Note what is deliberately absent: `parsed.statics.iter().any(static_has_duration)`, whose
+/// callee is a stub returning `true` unconditionally. Under it, ANY static ability at all —
+/// a keyword grant, a cost modifier, an anthem — discharged a duration expectation. That is
+/// the APNAP defect a third time: evidence satisfied by a fact the expectation never asked
+/// about. Statics reach durations only through their granted definitions, which
+/// `static_has_duration_matching` walks properly.
+fn unit_has_duration(parsed: &ParsedAbilities, pred: &dyn Fn(&Duration) -> bool) -> bool {
+    parsed.abilities.iter().any(|d| def_has_duration(d, pred))
+        || parsed.triggers.iter().any(|t| {
+            t.execute
+                .as_deref()
+                .is_some_and(|d| def_has_duration(d, pred))
+        })
         || parsed.replacements.iter().any(|r| {
             r.execute
                 .as_deref()
-                .is_some_and(def_tree_has_duration)
-                || matches!(
-                    r.event,
-                    crate::types::replacements::ReplacementEvent::DamageDone
-                )
+                .is_some_and(|d| def_has_duration(d, pred))
         })
-        || parsed.statics.iter().any(static_has_duration)
-        || any_ability_has_conditional_mana_spell_grant(parsed)
+        || parsed
+            .statics
+            .iter()
+            .any(|s| static_has_duration_matching(s, pred))
 }
 
-fn static_has_duration(s: &StaticDefinition) -> bool {
-    // StaticDefinition's effect contains the modification scope; durations
-    // on continuous effects show up as `Duration` slots inside Effect::Pump,
-    // Effect::Animate, etc. Conservative check: serialize-like field probing
-    // would be cleaner but for Phase 1 we accept any static abilities as
-    // "captured the line" — durations inside statics are off-scope here.
-    let _ = s;
-    true
+/// CR 106.4: `Effect::Mana.expiry` is a duration-equivalent that is not typed `Duration`.
+fn unit_has_end_of_turn_mana_expiry(parsed: &ParsedAbilities) -> bool {
+    fn def_has(def: &AbilityDefinition) -> bool {
+        if let Effect::Mana {
+            expiry: Some(expiry),
+            ..
+        } = &*def.effect
+        {
+            if mana_expiry_is_end_of_turn(expiry) {
+                return true;
+            }
+        }
+        def.sub_ability.as_deref().is_some_and(def_has)
+            || def.else_ability.as_deref().is_some_and(def_has)
+            || def.mode_abilities.iter().any(def_has)
+    }
+    parsed.abilities.iter().any(def_has)
+        || parsed
+            .triggers
+            .iter()
+            .any(|t| t.execute.as_deref().is_some_and(def_has))
 }
 
 fn any_ability_has_constraint(parsed: &ParsedAbilities) -> bool {
@@ -3529,7 +3780,7 @@ fn detect_duration_this_turn(
 fn detect_duration_next_turn(
     cleaned: &str,
     original: &str,
-    ast_json: &str,
+    parsed: &ParsedAbilities,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
     // allow-noncombinator: swallow detector marker scan on classified text
@@ -3539,8 +3790,19 @@ fn detect_duration_next_turn(
     {
         return;
     }
-    let markers: &[&str] = &["YourNextTurn", "NextTurn", "UntilYourNextTurn"];
-    if json_has_any(ast_json, markers) {
+    // CR 611.2a: the two typed next-turn durations. The markers this replaces were
+    // `["YourNextTurn", "NextTurn", "UntilYourNextTurn"]` — bare substrings, and the
+    // `NextTurn` one is a MEASURED SUBSTRING COLLISION, not a hypothetical. Counting
+    // `[A-Za-z]*NextTurn[A-Za-z]*` over the full 35,396-face export:
+    //
+    //     UntilNextTurnOf 216 | UntilEndOfNextTurnOf 182   <- real durations
+    //     SkipNextTurn     10 | ControlNextTurn        8   <- NOT durations
+    //
+    // So an "until your next turn" expectation was dischargeable by `Effect::SkipNextTurn`
+    // or `Effect::ControlNextTurn` — a fact about extra/skipped turns, not about how long
+    // a continuous effect lasts. Same defect as APNAP's `player_scope`, arriving by
+    // substring. A typed match cannot make that mistake.
+    if unit_has_duration(parsed, &duration_is_next_turn) {
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
