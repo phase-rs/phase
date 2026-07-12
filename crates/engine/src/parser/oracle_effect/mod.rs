@@ -28732,6 +28732,27 @@ fn parse_put_rest_destination(lower: &str) -> Option<Zone> {
     }
 }
 
+/// CR 401.4: When "the rest" returns to the library, capture whether it goes to
+/// the bottom or top so the complement move can suppress the default shuffle and
+/// place at that position (The Fourteenth Doctor — "on the bottom … in a random
+/// order"; Garruk / Goblin Ringleader — "on the bottom … in any order"). Scoped
+/// to the "the rest" tail (mirrors `parse_put_rest_destination`) so the primary
+/// clause's position never leaks in. This is a tail-scan pre-filter, not the
+/// classifier — the structural classification already happened in
+/// `try_parse_put_zone_change_parts`.
+fn parse_put_rest_library_position(lower: &str) -> Option<LibraryPosition> {
+    let (after_rest, _) = take_until::<_, _, OracleError<'_>>("the rest")
+        .parse(lower)
+        .ok()?;
+    if scan_contains_phrase(after_rest, "on the bottom") {
+        Some(LibraryPosition::Bottom)
+    } else if scan_contains_phrase(after_rest, "on top") {
+        Some(LibraryPosition::Top)
+    } else {
+        None
+    }
+}
+
 fn infer_origin_zone(lower: &str) -> Option<Zone> {
     // CR 400.7: An object that moves from one zone to another becomes a new
     // object — the "from" prepositional phrase identifies that origin zone.

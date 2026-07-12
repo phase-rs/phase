@@ -6050,7 +6050,7 @@ fn parse_cost_paid_object_reference<'a>(
     Ok((rest, TargetFilter::CostPaidObject))
 }
 
-fn parse_zone_changed_this_turn_suffix(
+pub(crate) fn parse_zone_changed_this_turn_suffix(
     input: &str,
     to: Option<Zone>,
 ) -> Option<(FilterProp, usize)> {

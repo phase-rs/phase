@@ -1342,6 +1342,15 @@ pub(crate) enum PutImperativeAst {
         /// the rest zone. `None` for non-partition forms.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rest_destination: Option<Zone>,
+        /// CR 401.4: Library placement for the "rest" pile when the complement
+        /// returns to the library ("… and the rest on the bottom of your
+        /// library in a random order" — The Fourteenth Doctor — or "… in any
+        /// order" — Garruk, Caller of Beasts / Goblin Ringleader et al.).
+        /// Independent of `library_position` (which governs the PRIMARY move)
+        /// because the two piles may target different positions. `None` when the
+        /// rest does not go to a specific library position.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_library_position: Option<LibraryPosition>,
     },
     TopOfLibrary,
     BottomOfLibrary,
