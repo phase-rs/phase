@@ -1201,7 +1201,7 @@ fn parse_keyword_grant_from_exiled_object_static(text: &str) -> Option<Vec<Stati
     typed
         .properties
         .push(FilterProp::InZone { zone: Zone::Exile });
-    let base = TargetFilter::Typed(typed);
+    let base = typed;
 
     // remainder (lowercased for keyword matching): "has <K0>, ~ has <K0>. The same
     // is true for <list>." The condition keyword and the granted keyword must match.
@@ -1232,9 +1232,7 @@ fn parse_keyword_grant_from_exiled_object_static(text: &str) -> Option<Vec<Stati
     let defs = keywords
         .into_iter()
         .map(|ki| {
-            let TargetFilter::Typed(mut tf) = base.clone() else {
-                unreachable!("base is Typed")
-            };
+            let mut tf = base.clone();
             tf.properties
                 .push(FilterProp::WithKeyword { value: ki.clone() });
             StaticDefinition::continuous()

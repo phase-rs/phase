@@ -28098,3 +28098,157 @@ fn combat_relation_subject_static_binds_source_anchored_filter() {
         );
     }
 }
+
+/// #5257 Rayami, First of the Fallen — parser shape. "As long as an exiled
+/// creature card with a blood counter on it has flying, Rayami has flying. The
+/// same is true for first strike, ..., and vigilance." Each listed keyword is an
+/// INDEPENDENT conditional grant, so the line must yield one continuous
+/// `SelfRef` static per keyword, each gated on `IsPresent { <exiled creature +
+/// blood counter + WithKeyword(K)> }` with modification `AddKeyword(K)`.
+///
+/// Discriminator: on `main` this yields a SINGLE static whose condition falls
+/// back to `StaticCondition::Unrecognized`, so all 13 keywords apply
+/// unconditionally — the reported bug (Rayami always has every keyword).
+#[test]
+fn rayami_exiled_keyword_grant_splits_into_conditional_per_keyword_statics() {
+    // `~` is the normalized self-reference the pipeline substitutes for the card
+    // name before static-line dispatch.
+    let line = "As long as an exiled creature card with a blood counter on it has flying, ~ has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, protection, reach, trample, and vigilance.";
+    let statics = super::shared::parse_static_line_multi(line);
+
+    assert_eq!(
+        statics.len(),
+        13,
+        "expected one conditional grant per listed keyword, got {statics:?}"
+    );
+
+    for s in &statics {
+        let Some(ContinuousModification::AddKeyword { keyword }) = s.modifications.first() else {
+            panic!(
+                "each static grants exactly one keyword, got {:?}",
+                s.modifications
+            );
+        };
+        assert_eq!(
+            s.affected,
+            Some(TargetFilter::SelfRef),
+            "the grant is on the source itself"
+        );
+        let Some(StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(tf)),
+        }) = &s.condition
+        else {
+            panic!(
+                "expected an independently-evaluated IsPresent(Typed) condition, got {:?}",
+                s.condition
+            );
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "presence check requires an exiled creature card, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::InZone {
+                zone: crate::types::zones::Zone::Exile
+            }),
+            "presence check is scoped to the exile zone, got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::WithKeyword {
+                value: keyword.clone()
+            }),
+            "each keyword K is granted only while an exiled card that HAS K is present, got {:?}",
+            tf.properties
+        );
+    }
+
+    let granted: Vec<Keyword> = statics
+        .iter()
+        .filter_map(|s| match s.modifications.first() {
+            Some(ContinuousModification::AddKeyword { keyword }) => Some(keyword.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        granted.contains(&Keyword::Flying),
+        "grants flying: {granted:?}"
+    );
+    assert!(
+        granted.contains(&Keyword::Vigilance),
+        "grants vigilance: {granted:?}"
+    );
+    assert!(
+        granted.contains(&Keyword::Deathtouch),
+        "grants deathtouch: {granted:?}"
+    );
+}
+
+/// #5257 Rayami runtime discriminator: the keyword grant is CONDITIONAL and
+/// re-evaluated (CR 611.3a). With no matching exiled card, Rayami must NOT have
+/// flying; once an exiled creature card with a blood counter that itself has
+/// flying is present, Rayami gains flying — and only that keyword.
+///
+/// Discriminator: on `main` the condition is `Unrecognized`, so Rayami has
+/// flying (and every other listed keyword) unconditionally and the negative
+/// assertion flips.
+#[test]
+fn rayami_flying_grant_is_conditional_on_matching_exiled_card() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::zones::create_object;
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::Zone;
+
+    const RAYAMI: &str = "As long as an exiled creature card with a blood counter on it has flying, Rayami has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, protection, reach, trample, and vigilance.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let rayami_id = scenario
+        .add_creature_from_oracle(P0, "Rayami, First of the Fallen", 4, 4, RAYAMI)
+        .id();
+    let mut runner = scenario.build();
+    // Force layer evaluation (SBAs run, continuous effects recomputed).
+    runner.act(GameAction::PassPriority).ok();
+
+    assert!(
+        !runner.state().objects[&rayami_id].has_keyword(&Keyword::Flying),
+        "Rayami must not have flying with no matching exiled card present"
+    );
+
+    // Positive reach-guard: an exiled creature card with a blood counter that has
+    // flying. Rayami now gains flying — proving the grant path actually fires, so
+    // the negative above is a genuine conditional rather than flying being
+    // unreachable. (Seed the object directly, then re-run the continuous-effect
+    // engine — a raw state edit bypasses the normal change tracking.)
+    {
+        let state = runner.state_mut();
+        let exiled = create_object(
+            state,
+            CardId(900),
+            P0,
+            "Exiled Bat".to_string(),
+            Zone::Exile,
+        );
+        let obj = state.objects.get_mut(&exiled).expect("exiled card exists");
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.keywords.push(Keyword::Flying);
+        *obj.counters
+            .entry(CounterType::Generic("blood".to_string()))
+            .or_insert(0) += 1;
+    }
+    crate::game::layers::evaluate_layers(runner.state_mut());
+
+    assert!(
+        runner.state().objects[&rayami_id].has_keyword(&Keyword::Flying),
+        "Rayami must gain flying while an exiled flying creature card with a blood counter is present"
+    );
+    assert!(
+        !runner.state().objects[&rayami_id].has_keyword(&Keyword::Vigilance),
+        "Rayami must not gain vigilance — no exiled card has vigilance"
+    );
+}
