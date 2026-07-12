@@ -54,7 +54,7 @@ use crate::types::events::{ClashResult, PlayerActionKind};
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
-use crate::types::triggers::{AttackTargetFilter, TriggerMode};
+use crate::types::triggers::{AttackTargetFilter, PlaneswalkRole, TriggerMode};
 use crate::types::zones::Zone;
 
 /// Returns true if `filter` references the trigger source itself — directly
@@ -3886,6 +3886,10 @@ pub(crate) fn static_condition_to_trigger_condition(
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::EnchantedIsFaceDown
+        // CR 311.2 / CR 901.7: plane face-up status is a duration-only continuous-
+        // effect condition (evaluated in the layer system), never an intervening-if
+        // (`TriggerCondition`) — lowering returns `None`.
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::SourceControllerEquals { .. }
         // CR 702.166a: Bargain payment is a cost-determination predicate with no
         // intervening-if (`TriggerCondition`) equivalent.
@@ -9988,10 +9992,17 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         .parse(lower)
         .is_ok()
     {
-        def.mode = TriggerMode::PlaneswalkedFrom;
+        def.mode = TriggerMode::Planeswalked {
+            role: PlaneswalkRole::From,
+        };
         def.valid_card = Some(TargetFilter::SelfRef);
         def.valid_target = Some(TargetFilter::Controller);
-        return Some((TriggerMode::PlaneswalkedFrom, def));
+        return Some((
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::From,
+            },
+            def,
+        ));
     }
 
     // CR 312.5 / CR 701.31d: encounter == the planeswalked-to face-up endpoint.
@@ -10019,10 +10030,17 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         .parse(lower)
         .is_ok()
     {
-        def.mode = TriggerMode::PlaneswalkedTo;
+        def.mode = TriggerMode::Planeswalked {
+            role: PlaneswalkRole::To,
+        };
         def.valid_card = Some(TargetFilter::SelfRef);
         def.valid_target = Some(TargetFilter::Controller);
-        return Some((TriggerMode::PlaneswalkedTo, def));
+        return Some((
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::To,
+            },
+            def,
+        ));
     }
 
     if matches!(

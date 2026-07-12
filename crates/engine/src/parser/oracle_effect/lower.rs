@@ -1615,25 +1615,53 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
 /// CR 122.1 + CR 614.1c: "If a Hero enters this way, it enters with an
 /// additional +1/+1 counter on it" riders on a parent battlefield zone change
 /// are entry replacement properties, not post-move `PutCounter` subs.
-/// CR 608.2c: Malamet Battle Glyph / Longstalk Brawl / Duel for Dominance —
-/// "Choose target creature you control and target creature you don't control. …
-/// put a +1/+1 counter on [the you-control creature]. Then those creatures fight
-/// each other." Chain descent propagates only the most-recent (opponent) target
-/// to later nodes, so the counter's `ParentTarget` anaphor — and any
-/// entered-this-turn condition subject — would bind the OPPONENT's creature. When
-/// the chain declares >= 2 `TargetOnly` object slots, re-key each
-/// `PutCounter{ParentTarget}` to `ParentTargetSlot { index: 0 }` (the
-/// first-declared you-control creature — `try_parse_two_targets` emits it first)
-/// and bind that node's `TargetMatchesFilter` condition to the same slot 0.
-/// Scoped to `PutCounter` (excludes Tail Swipe's `Pump`) and only rekeys a
-/// `ParentTarget` counter (measured: exactly these 3 cards; 0 cards already use
-/// `ParentTargetSlot`). Longstalk's `AdditionalCostPaid` and Duel's count gate
-/// are not `TargetMatchesFilter`, so their conditions stay node-local. Consumes
-/// increment-A's `ParentTargetSlot` counter resolver + `subject_slot` eval.
+/// CR 608.2c + CR 611.2c: the two-target fight class — "Choose target creature
+/// you control and target creature you don't control. … [buff the you-control
+/// creature]. Then those creatures fight each other." (Malamet Battle Glyph,
+/// Longstalk Brawl, Duel for Dominance, Tail Swipe, Joust, Blizzard Brawl, #4751).
+/// Chain descent propagates only the most-recent (opponent) target to later
+/// nodes, so the buff's back-reference to "the creature you control" — and any
+/// entered-this-turn condition subject — would bind the OPPONENT's creature (or,
+/// for `Pump`/`GenericEffect`, an unscoped whole-board target). When the chain
+/// declares >= 2 `TargetOnly` object slots, re-key the buff to
+/// `ParentTargetSlot { index: 0 }` (the first-declared you-control creature —
+/// `try_parse_two_targets` emits it first) and bind a `PutCounter`'s
+/// `TargetMatchesFilter` condition to the same slot 0. Covers every buff shape
+/// the class uses: `PutCounter{ParentTarget}` (counter cards),
+/// `Pump{Any|ParentTarget}` (Tail Swipe / Joust), and a SelfRef-affected
+/// `GenericEffect{target:None}` (Blizzard's "gets +N/+M and gains <keyword>").
+/// Longstalk's `AdditionalCostPaid` and Duel's count gate are not
+/// `TargetMatchesFilter`, so their conditions stay node-local. The reciprocal
+/// "those creatures fight each other" object is `ParentTarget` by design
+/// (`parse_fight_target`), so the fight itself needs no rekey.
 pub(super) fn rewrite_two_target_counter_chain(def: &mut AbilityDefinition) {
-    if count_typed_target_only_slots(def) >= 2 {
+    // CR 611.2c + CR 701.14a: gate on the class's ACTUAL signature — a chain that
+    // both declares >= 2 typed target slots AND contains an `Effect::Fight`. The
+    // slot count alone is a proxy for "two-target declaration"; it says nothing
+    // about a fight, so on its own it would let the widened `Pump`/`GenericEffect`
+    // rekey fire on any future >= 2-target chain that happens to route an unscoped
+    // buff here. Requiring the `Fight` node makes the guard encode the two-target
+    // FIGHT class the function is named for, so the rekey is safe by construction
+    // rather than by the current pool happening not to trip it (matthewevans
+    // review, #4751). All six class cards (Malamet Battle Glyph, Longstalk Brawl,
+    // Duel for Dominance, Tail Swipe, Joust, Blizzard Brawl) carry "those
+    // creatures fight each other" as a later node in the same chain.
+    if count_typed_target_only_slots(def) >= 2 && chain_contains_fight(def) {
         rekey_counter_slot_in_chain(def);
     }
+}
+
+/// True if this definition or any node reachable through its `sub_ability` /
+/// `else_ability` chain is an `Effect::Fight` (CR 701.14a). The two-target fight
+/// class always emits the fight as a later node in the same chain, so a linear
+/// descent suffices.
+fn chain_contains_fight(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::Fight { .. })
+        || def.sub_ability.as_deref().is_some_and(chain_contains_fight)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_contains_fight)
 }
 
 fn count_typed_target_only_slots(def: &AbilityDefinition) -> usize {
@@ -1654,15 +1682,46 @@ fn count_typed_target_only_slots(def: &AbilityDefinition) -> usize {
 }
 
 fn rekey_counter_slot_in_chain(def: &mut AbilityDefinition) {
-    let rekeyed = if let Effect::PutCounter { target, .. } = &mut *def.effect {
-        if matches!(target, TargetFilter::ParentTarget) {
+    let rekeyed = match &mut *def.effect {
+        // CR 608.2c: "put a +1/+1 counter on [the you-control creature]" — the
+        // `ParentTarget`/"it" anaphor must bind slot 0 (Malamet / Longstalk /
+        // Duel), not the most-recent opponent target.
+        Effect::PutCounter { target, .. } if matches!(target, TargetFilter::ParentTarget) => {
             *target = TargetFilter::ParentTargetSlot { index: 0 };
             true
-        } else {
-            false
         }
-    } else {
-        false
+        // CR 611.2c + CR 608.2c: "the creature you control gets +N/+N" — the
+        // definite back-reference (Tail Swipe / Joust / Blizzard Brawl, #4751)
+        // resolves to slot 0 (the first-declared you-control creature), not the
+        // whole battlefield. Only the two-target fight chain routes a `Pump`
+        // through here (guarded by `count_typed_target_only_slots >= 2`), where an
+        // unscoped `Any`/`ParentTarget` target is always that back-reference.
+        Effect::Pump { target, .. }
+            if matches!(target, TargetFilter::Any | TargetFilter::ParentTarget) =>
+        {
+            *target = TargetFilter::ParentTargetSlot { index: 0 };
+            true
+        }
+        // CR 611.2c + CR 613: "the creature you control gets +N/+M and gains
+        // <keyword>" lowers to a `GenericEffect` whose per-target static applies
+        // to `SelfRef` (the effect's own target). Blizzard Brawl leaves that
+        // target unwired (`None`); bind it to slot 0 so the buff lands on the
+        // first-declared you-control creature, not nowhere. Guarded on a
+        // SelfRef-affected static so a global anthem (`affected: Typed(...)`,
+        // `target: None`) is never captured.
+        Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } if target.is_none()
+            && static_abilities
+                .iter()
+                .any(|s| matches!(s.affected, Some(TargetFilter::SelfRef))) =>
+        {
+            *target = Some(TargetFilter::ParentTargetSlot { index: 0 });
+            true
+        }
+        _ => false,
     };
     if rekeyed {
         // CR 608.2c: the counter node's own condition ("if the creature you
@@ -4607,6 +4666,27 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 },
                 tag("at the beginning of the next cleanup step, "),
             ),
+            // CR 603.7a + CR 701.31 + CR 901.11: inline delayed triggered ability
+            // keyed to any planeswalk ("When a player planeswalks, …"). Mirrors The
+            // Pandorica's `WhenNextEvent { Untaps, or LeavesBattlefield, Persistent }`
+            // delayed trigger, differing only in the trigger event.
+            // `Persistent` (CR 603.7b): no stated duration → survives across turns
+            // until the next planeswalk. The stripped body ("those permanents phase
+            // in") then parses to `Effect::PhaseIn { target: ParentTarget }`, and the
+            // chosen permanents are frozen into `ability.targets` at delayed-trigger
+            // creation by the existing `parent_target_snapshot` path.
+            value(
+                DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(crate::types::ability::TriggerDefinition::new(
+                        crate::types::triggers::TriggerMode::Planeswalked {
+                            role: crate::types::triggers::PlaneswalkRole::Any,
+                        },
+                    )),
+                    or_trigger: None,
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::Persistent,
+                },
+                tag("when a player planeswalks, "),
+            ),
         ))
         .parse(i)
     }) {
@@ -4836,9 +4916,28 @@ pub(super) fn extract_switch_pt_multi_target(text: &str) -> Option<MultiTargetSp
 
 pub(super) fn extract_double_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
-    let (_, target_text) = preceded(
-        tag::<_, _, OracleError<'_>>("double the number of each kind of counter on "),
-        rest,
+    // CR 701.10e (#5247): "double the number of <descriptor> counter(s) on
+    // <target>" — the descriptor is either "each kind of" or a TYPED counter
+    // ("+1/+1 counters", "charge counters", …). Consume the descriptor up to the
+    // "counter(s) on " that introduces the target, so a typed counter surfaces
+    // the same `MultiTargetSpec` as the "each kind of" form. Without this, Kinetic
+    // Ooze ("double the number of +1/+1 counters on any number of other target
+    // creatures") drops its "any number of … target creatures" bound and binds a
+    // single required target — the ETB then panics with "Unused selected target
+    // slots" (p0). The singular "counter on" arm preserves the "each kind of
+    // counter on" form unchanged.
+    let (target_text, _) = preceded(
+        tag::<_, _, OracleError<'_>>("double the number of "),
+        alt((
+            (
+                take_until::<_, _, OracleError<'_>>(" counters on "),
+                tag(" counters on "),
+            ),
+            (
+                take_until::<_, _, OracleError<'_>>(" counter on "),
+                tag(" counter on "),
+            ),
+        )),
     )
     .parse(lower.as_str())
     .ok()?;
@@ -8492,7 +8591,7 @@ mod tests {
     };
     use crate::types::counter::CounterType;
     use crate::types::phase::Phase;
-    use crate::types::triggers::TriggerMode;
+    use crate::types::triggers::{PlaneswalkRole, TriggerMode};
     use crate::types::zones::Zone;
 
     /// CR 608.2c: a `ChooseFromZone` head with a `RemoveCounter`/`PutCounter`
@@ -9326,6 +9425,28 @@ mod tests {
             cond,
             Some(DelayedTriggerCondition::AtNextPhase {
                 phase: Phase::EndCombat,
+            })
+        );
+    }
+
+    /// CR 603.7a + CR 701.31: the inline "When a player planeswalks, …" delayed
+    /// trigger prefix strips to its body and yields a `WhenNextEvent` condition
+    /// keyed to `Planeswalked { role: Any }`, no `or_trigger`, `Persistent` lifetime
+    /// (CR 603.7b — no stated duration). The Doctor's Childhood Barn's delayed
+    /// phase-in.
+    #[test]
+    fn strip_temporal_prefix_when_a_player_planeswalks() {
+        let (body, cond) =
+            strip_temporal_prefix("when a player planeswalks, those permanents phase in");
+        assert_eq!(body, "those permanents phase in");
+        assert_eq!(
+            cond,
+            Some(DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(TriggerDefinition::new(TriggerMode::Planeswalked {
+                    role: PlaneswalkRole::Any,
+                })),
+                or_trigger: None,
+                lifetime: crate::types::ability::DelayedTriggerLifetime::Persistent,
             })
         );
     }

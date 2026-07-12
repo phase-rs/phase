@@ -6,7 +6,9 @@
 //! `cast(..).resolve()` + `CastOutcome` deltas) and would fail if the excess
 //! redirect were removed (T1) or bound to the wrong player (T2). Class members:
 //! Flame Spill, Gandalf's Sanction, Ravenous Tyrannosaurus. Ram Through's
-//! trample-conditional form is deferred to `Effect::Unimplemented` (T8).
+//! trample-conditional form redirects only while its damage source has
+//! trample (`ExcessRecipient::TargetController { source_keyword: Some(Trample) }`,
+//! T8; issue #5632).
 
 use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
@@ -18,7 +20,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -28,10 +30,10 @@ use engine::types::zones::Zone;
 const FLAME_SPILL: &str = "Flame Spill deals 4 damage to target creature. \
 Excess damage is dealt to that creature's controller instead.";
 
-// Ram Through: the excess redirect is gated on a controlled-source trample check
-// we do not model, so the whole conditional rider must be deferred (honest red),
-// NOT absorbed unconditionally (which would be rules-wrong for a non-trample
-// source).
+// Ram Through: the excess redirect is gated on the damage source (the
+// creature you control) having trample — absorbed onto `DealDamage` as a
+// source-keyword-gated rider, not an unconditional one (CR 120.4a + CR
+// 608.2c + CR 702).
 const RAM_THROUGH: &str = "Target creature you control deals damage equal to its power \
 to target creature you don't control. If the creature you control has trample, excess \
 damage is dealt to that creature's controller instead.";
@@ -447,11 +449,12 @@ fn parse_effects(oracle: &str, name: &str) -> Vec<Effect> {
     refs.into_iter().cloned().collect()
 }
 
-/// T8 — SHAPE: Flame Spill absorbs the rider onto its `DealDamage` with zero
-/// residual `Unimplemented` (fully supported); Ram Through's conditional form is
-/// NOT absorbed and stays `Unimplemented` (honest red), proving the guard.
+/// T8 — SHAPE: Flame Spill absorbs the rider onto its `DealDamage` as an
+/// unconditional redirect; Ram Through absorbs the rider onto its `DealDamage`
+/// as a trample-gated redirect. Both have zero residual `Unimplemented`
+/// (issue #5632).
 #[test]
-fn t8_shape_flame_spill_absorbs_ram_through_defers() {
+fn t8_shape_flame_spill_and_ram_through_absorb_excess_rider() {
     let fs = parse_effects(FLAME_SPILL, "Flame Spill");
     let fs_damage: Vec<&Effect> = fs
         .iter()
@@ -466,7 +469,9 @@ fn t8_shape_flame_spill_absorbs_ram_through_defers() {
         matches!(
             fs_damage[0],
             Effect::DealDamage {
-                excess: Some(ExcessRecipient::TargetController),
+                excess: Some(ExcessRecipient::TargetController {
+                    source_keyword: None
+                }),
                 ..
             }
         ),
@@ -477,33 +482,33 @@ fn t8_shape_flame_spill_absorbs_ram_through_defers() {
         "Flame Spill must have no Unimplemented residue (fully supported): {fs:?}"
     );
 
-    // Ram Through: the trample-conditional rider must NOT be absorbed onto the
-    // DealDamage (the `!has trample` / `!if ` guards defer it).
+    // Ram Through: the trample-conditional rider must be absorbed onto the
+    // DealDamage as a source-keyword-gated redirect, not an unconditional one.
     let rt = parse_effects(RAM_THROUGH, "Ram Through");
+    let rt_damage: Vec<&Effect> = rt
+        .iter()
+        .filter(|e| matches!(e, Effect::DealDamage { .. }))
+        .collect();
+    assert_eq!(
+        rt_damage.len(),
+        1,
+        "Ram Through should parse to exactly one DealDamage effect: {rt:?}"
+    );
     assert!(
-        rt.iter().all(|e| !matches!(
-            e,
+        matches!(
+            rt_damage[0],
             Effect::DealDamage {
-                excess: Some(_),
+                excess: Some(ExcessRecipient::TargetController {
+                    source_keyword: Some(KeywordKind::Trample)
+                }),
                 ..
             }
-        )),
-        "Ram Through's CONDITIONAL excess must not be absorbed unconditionally: {rt:?}"
-    );
-    // Coverage-honesty: the deferred conditional rider must leave an Unimplemented
-    // marker somewhere in the parse (not be silently dropped). Checked on the full
-    // parse Debug so it is robust to whether the residue lands as an effect, a
-    // sub-ability, or a swallowed-clause warning.
-    let rt_parsed = parse_oracle_text(
-        RAM_THROUGH,
-        "Ram Through",
-        &[],
-        &["Sorcery".to_string()],
-        &[],
+        ),
+        "Ram Through's excess must be trample-gated on the DealDamage, got: {rt:?}"
     );
     assert!(
-        format!("{rt_parsed:?}").contains("Unimplemented"),
-        "Ram Through's deferred excess rider must remain honestly Unimplemented"
+        !rt.iter().any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "Ram Through must have no Unimplemented residue (fully supported): {rt:?}"
     );
 }
 
@@ -525,18 +530,93 @@ fn t9_snapshot_carries_excess_recipient_across_resume() {
         has_wither: false,
         has_infect: false,
         combat_damage_poison: 0,
-        excess_recipient: Some(ExcessRecipient::TargetController),
+        excess_recipient: Some(ExcessRecipient::TargetController {
+            source_keyword: None,
+        }),
         lifelink_bonus: 3,
     };
     let json = serde_json::to_string(&snap).expect("snapshot serializes");
     let back: DamageContextSnapshot = serde_json::from_str(&json).expect("snapshot deserializes");
     assert_eq!(
         back.excess_recipient,
-        Some(ExcessRecipient::TargetController),
+        Some(ExcessRecipient::TargetController {
+            source_keyword: None
+        }),
         "the excess-redirect rider must survive the snapshot round-trip"
     );
     assert_eq!(
         back.lifelink_bonus, 3,
         "the deferred lifelink bonus must survive the snapshot round-trip"
+    );
+}
+
+/// Build a scenario, add a `source_power`-power source creature controlled by
+/// P0 (with trample if requested) and a `victim_toughness`-toughness victim
+/// creature controlled by P1, cast a free Ram Through targeting
+/// `[source, victim]` (matching "target creature you control ... target
+/// creature you don't control" order), and return the outcome plus both ids.
+fn cast_ram_through_at(
+    source_has_trample: bool,
+    source_power: i32,
+    victim_toughness: i32,
+) -> (CastOutcome, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let source = {
+        let mut c = scenario.add_creature(P0, "Rammer", source_power, source_power);
+        if source_has_trample {
+            c.with_keyword(Keyword::Trample);
+        }
+        c.id()
+    };
+    let victim = scenario
+        .add_creature(P1, "Victim", 2, victim_toughness)
+        .id();
+
+    let spell = {
+        let mut b = scenario.add_spell_to_hand_from_oracle(P0, "Ram Through", false, RAM_THROUGH);
+        b.with_mana_cost(ManaCost::generic(0));
+        b.id()
+    };
+
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[source, victim])
+        .resolve();
+    (outcome, source, victim)
+}
+
+/// T13 — cast-pipeline proof (trample): Ram Through's parsed `TargetOnly →
+/// DealDamage` chain, real cast target ordering, and source resolution must
+/// compose so the trample gate redirects excess. A power-5 trampling source
+/// hits a toughness-2 victim: the victim takes only the lethal 2, and the
+/// excess 3 redirects to the victim's controller (P1). Revert-fails if the
+/// `TargetOnly`-unwrap fix (or the trample gate itself) regresses: the
+/// redirect silently vanishes and `foe_life_delta` reads 0.
+#[test]
+fn t13_ram_through_trample_redirects_excess_through_real_cast() {
+    let (outcome, _source, victim) = cast_ram_through_at(true, 5, 2);
+    outcome.assert_life_delta(P1, -3);
+    assert_eq!(
+        outcome.state().objects[&victim].damage_marked,
+        2,
+        "the victim must take only the lethal 2, not the full 5 — the rest redirects"
+    );
+}
+
+/// T14 — cast-pipeline proof (no trample), the paired negative: the same
+/// power-5 source WITHOUT trample deals its full damage directly to the
+/// victim with no redirect — the gate must not fire, and the victim (not its
+/// controller) absorbs all 5.
+#[test]
+fn t14_ram_through_no_trample_deals_full_damage_no_redirect() {
+    let (outcome, _source, victim) = cast_ram_through_at(false, 5, 2);
+    outcome.assert_life_delta(P1, 0);
+    assert_eq!(
+        outcome.state().objects[&victim].damage_marked,
+        5,
+        "without trample the victim must take the full 5 with no redirect"
     );
 }

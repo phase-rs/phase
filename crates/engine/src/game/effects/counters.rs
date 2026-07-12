@@ -879,6 +879,45 @@ pub fn resolve_counter_match_for_removal(
     }
 }
 
+/// CR 122.1d + CR 101.2: Returns `true` when an active
+/// `CountersCantBeRemoved { counter_type }` static's `affected` filter matches
+/// the given object for the given counter type. "Can't" effects take precedence
+/// over any game action that would remove counters (Fear of Sleep Paralysis).
+pub(crate) fn counter_removal_blocked(
+    state: &GameState,
+    object_id: ObjectId,
+    counter_type: &CounterType,
+) -> bool {
+    use crate::types::statics::StaticMode;
+    crate::game::functioning_abilities::battlefield_active_statics(state).any(
+        |(source_obj, def)| {
+            if let StaticMode::CountersCantBeRemoved {
+                counter_type: ref ct,
+            } = def.mode
+            {
+                if ct != counter_type {
+                    return false;
+                }
+                // `def.affected` is Option<TargetFilter>; None means "all permanents".
+                match &def.affected {
+                    None => true,
+                    Some(filter) => crate::game::static_abilities::static_filter_matches(
+                        state,
+                        &crate::game::static_abilities::StaticCheckContext {
+                            target_id: Some(object_id),
+                            ..Default::default()
+                        },
+                        filter,
+                        source_obj.id,
+                    ),
+                }
+            } else {
+                false
+            }
+        },
+    )
+}
+
 /// CR 614.1: Remove counters from an object through the replacement pipeline.
 ///
 /// Single authority for counter removal, mirroring `add_counter_with_replacement`.
@@ -896,6 +935,12 @@ pub fn remove_counter_with_replacement(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 101.2: "Can't" overrides "can" — if a static prohibits removal of
+    // this counter type from this object, bail out immediately.
+    if counter_removal_blocked(state, object_id, &counter_type) {
+        return;
+    }
+
     let proposed = ProposedEvent::RemoveCounter {
         object_id,
         counter_type,
@@ -1055,6 +1100,11 @@ fn move_counter_with_replacement_entry(
         return true;
     }
     if !counter_move_commit_is_valid(state, &counter_move) {
+        return true;
+    }
+    // CR 101.2: Moving counters away is removal from the source — if a
+    // "can't be removed" prohibition covers the source, block the move.
+    if counter_removal_blocked(state, counter_move.source_id, &counter_move.counter_type) {
         return true;
     }
     let proposed = ProposedEvent::MoveCounter {
@@ -4859,6 +4909,299 @@ mod tests {
                 .copied(),
             Some(1),
             "off-battlefield source's SelfRef replacement must not fire"
+        );
+    }
+
+    // ─── CountersCantBeRemoved gate tests ───────────────────────────────────
+
+    /// Install a CountersCantBeRemoved(Stun) static on `source_id` that
+    /// protects permanents controlled by the source's opponents.
+    fn install_counters_cant_be_removed_static(state: &mut GameState, source_id: ObjectId) {
+        use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
+        use crate::types::statics::StaticMode;
+        let def = StaticDefinition::new(StaticMode::CountersCantBeRemoved {
+            counter_type: CounterType::Stun,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::Opponent),
+        ));
+        let obj = state.objects.get_mut(&source_id).unwrap();
+        obj.static_definitions.push(def);
+    }
+
+    /// CR 101.2: `remove_counter_with_replacement` is the single authority for
+    /// counter removal. When `CountersCantBeRemoved` prohibits removal, the
+    /// counter must remain and no event must fire.
+    #[test]
+    fn remove_counter_with_replacement_blocked_by_counters_cant_be_removed() {
+        let mut state = GameState::new_two_player(42);
+
+        // Player 0 controls the prohibition source (enchantment).
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fear of Sleep Paralysis".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        install_counters_cant_be_removed_static(&mut state, source);
+
+        // Player 1 controls a creature with a stun counter.
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Stunned Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 2);
+
+        let mut events = Vec::new();
+        remove_counter_with_replacement(&mut state, target, CounterType::Stun, 1, &mut events);
+
+        // Counter must remain unchanged.
+        assert_eq!(
+            state.objects[&target]
+                .counters
+                .get(&CounterType::Stun)
+                .copied(),
+            Some(2),
+            "stun counter must not be removed when blocked by CountersCantBeRemoved"
+        );
+        // No removal event.
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GameEvent::CounterRemoved { object_id, counter_type, .. }
+                    if *object_id == target && *counter_type == CounterType::Stun
+            )),
+            "no CounterRemoved event when removal is blocked"
+        );
+    }
+
+    /// Inverse: without the prohibition, `remove_counter_with_replacement`
+    /// removes the counter normally.
+    #[test]
+    fn remove_counter_with_replacement_succeeds_without_prohibition() {
+        let mut state = GameState::new_two_player(42);
+
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Stunned Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let mut events = Vec::new();
+        remove_counter_with_replacement(&mut state, target, CounterType::Stun, 1, &mut events);
+
+        // Counter must be removed.
+        assert!(
+            !state.objects[&target]
+                .counters
+                .contains_key(&CounterType::Stun),
+            "stun counter must be removed when no prohibition exists"
+        );
+        // Removal event must fire.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::CounterRemoved { object_id, counter_type, .. }
+                    if *object_id == target && *counter_type == CounterType::Stun
+            )),
+            "CounterRemoved event must fire for baseline removal"
+        );
+    }
+
+    /// CR 101.2: Moving counters away is removal from the source. When
+    /// `CountersCantBeRemoved` protects the source, the move must be blocked.
+    #[test]
+    fn move_counter_blocked_by_counters_cant_be_removed() {
+        let mut state = GameState::new_two_player(42);
+
+        // Player 0 controls the prohibition source.
+        let prohib = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fear of Sleep Paralysis".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&prohib)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        install_counters_cant_be_removed_static(&mut state, prohib);
+
+        // Player 1 controls a creature with a stun counter (protected).
+        let source_perm = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Stunned Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_perm)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&source_perm)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        // Destination for the move.
+        let dest = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Destination".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&dest)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut events = Vec::new();
+        let result = move_counter_with_replacement(
+            &mut state,
+            PlayerId(1),
+            source_perm,
+            dest,
+            CounterType::Stun,
+            1,
+            &mut events,
+        );
+
+        // Move returns true ("complete, nothing happened") but counter stays.
+        assert!(result, "move must return true when blocked");
+        assert_eq!(
+            state.objects[&source_perm]
+                .counters
+                .get(&CounterType::Stun)
+                .copied(),
+            Some(1),
+            "stun counter must remain on source when move is blocked"
+        );
+        assert!(
+            !state.objects[&dest]
+                .counters
+                .contains_key(&CounterType::Stun),
+            "destination must not receive the counter when move is blocked"
+        );
+    }
+
+    /// Inverse: without the prohibition, counter moves succeed normally.
+    #[test]
+    fn move_counter_succeeds_without_prohibition() {
+        let mut state = GameState::new_two_player(42);
+
+        let source_perm = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Stunned Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_perm)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&source_perm)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let dest = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Destination".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&dest)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut events = Vec::new();
+        let result = move_counter_with_replacement(
+            &mut state,
+            PlayerId(1),
+            source_perm,
+            dest,
+            CounterType::Stun,
+            1,
+            &mut events,
+        );
+
+        assert!(result, "move must succeed without prohibition");
+        assert!(
+            !state.objects[&source_perm]
+                .counters
+                .contains_key(&CounterType::Stun),
+            "stun counter must be removed from source after move"
+        );
+        assert_eq!(
+            state.objects[&dest]
+                .counters
+                .get(&CounterType::Stun)
+                .copied(),
+            Some(1),
+            "destination must receive the counter after move"
         );
     }
 }

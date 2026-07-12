@@ -32,7 +32,8 @@
     "label": "Détecteur de combos",
     "title": "Détecter les boucles infinies : terminer automatiquement les boucles obligatoires et afficher les ressources ∞ (désactivé par défaut)",
     "on": "Activé",
-    "off": "Désactivé"
+    "off": "Désactivé",
+    "interactive": "Interactif"
   },
   "gameMenu": {
     "sections": {

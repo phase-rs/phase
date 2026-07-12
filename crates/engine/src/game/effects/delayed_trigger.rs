@@ -747,7 +747,7 @@ mod tests {
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
-    use crate::types::triggers::TriggerMode;
+    use crate::types::triggers::{PlaneswalkRole, TriggerMode};
 
     /// T5 (s25 site 1) — CR 603.7c + CR 608.2c: `concrete_parent_target_filter`
     /// binds a `ParentTargetSlot { index }` delayed-condition filter to the
@@ -850,6 +850,64 @@ mod tests {
             state.delayed_triggers[0].condition,
             DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
         );
+    }
+
+    /// CR 603.7c + CR 608.2c: the `parent_target_snapshot` path freezes a
+    /// MULTI-target parent selection into the delayed ability at creation, exactly
+    /// as it does for The Pandorica's single target. This is the building-block
+    /// proof that The Doctor's Childhood Barn's per-opponent "choose up to one
+    /// target nonland permanent that opponent controls … those permanents phase
+    /// in" delayed trigger captures every chosen permanent (not just the first).
+    /// The intervening player ref is harmlessly carried and later filtered out by
+    /// `collect_phase_in_targets` at fire time.
+    #[test]
+    fn parent_target_snapshot_freezes_all_multi_targets_for_delayed_phase_in() {
+        let mut state = GameState::new_two_player(42);
+        let obj_a = ObjectId(10);
+        let obj_b = ObjectId(11);
+
+        let inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PhaseIn {
+                target: TargetFilter::ParentTarget,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::Planeswalked {
+                        role: PlaneswalkRole::Any,
+                    })),
+                    or_trigger: None,
+                    lifetime: crate::types::ability::DelayedTriggerLifetime::Persistent,
+                },
+                effect: Box::new(inner),
+                uses_tracked_set: false,
+            },
+            vec![
+                TargetRef::Object(obj_a),
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(obj_b),
+            ],
+            ObjectId(5),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.delayed_triggers.len(), 1);
+        let snapshot = &state.delayed_triggers[0].ability.targets;
+        assert!(
+            snapshot.contains(&TargetRef::Object(obj_a)),
+            "first chosen permanent must be snapshotted, got {snapshot:?}"
+        );
+        assert!(
+            snapshot.contains(&TargetRef::Object(obj_b)),
+            "second chosen permanent must ALSO be snapshotted (multi-target), got {snapshot:?}"
+        );
+        // Persistent lifetime survives across turns until the planeswalk fires.
+        assert!(state.delayed_triggers[0].one_shot);
     }
 
     #[test]

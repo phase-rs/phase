@@ -31,8 +31,8 @@
 //! revert-probe pin that dispatch.
 
 use crate::analysis::corpus;
-use crate::analysis::resource::ResourceAxis;
-use crate::analysis::{detect_loop, LoopCertificate, LoopProbe, WinKind};
+use crate::analysis::resource::{CounterClass, ObjectClass, ResourceAxis};
+use crate::analysis::{detect_loop, BoardDelta, LoopCertificate, LoopProbe, WinKind};
 use crate::database::CardDatabase;
 use crate::game::derived_views::derive_views;
 use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -293,6 +293,7 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
         unbounded: vec![ResourceAxis::DamageDealt(P1)],
         win_kind: WinKind::LethalDamage,
         mandatory: false,
+        residual_board_delta: BoardDelta::default(),
     };
     assert!(
         matches!(
@@ -307,6 +308,7 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
         unbounded: vec![ResourceAxis::TokensCreated],
         win_kind: WinKind::Advantage,
         mandatory: false,
+        residual_board_delta: BoardDelta::default(),
     };
     assert!(
         matches!(
@@ -331,6 +333,7 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
         unbounded: vec![ResourceAxis::Mana(ManaType::Green)],
         win_kind: WinKind::Advantage,
         mandatory: false,
+        residual_board_delta: BoardDelta::default(),
     };
     assert!(
         matches!(
@@ -470,6 +473,189 @@ fn drive_combo_d2_kilo_freed_relic() {
     let cert = corpus::drive_offline_kilo_freed_relic(card_db())
         .expect("Kilo + Freed + Relic must confirm infinite proliferate triggers");
     assert_combo(1, &cert);
+}
+
+/// PR-7 #8 (offline acceptance): a REAL Pentad Prism seeded with ≥1 charge counter,
+/// under the Kilo/Freed/Relic proliferate engine, is certified as an infinite
+/// preserved-`Generic` charge-counter growth loop — `WinKind::Advantage` (CR 104.4b:
+/// an optional loop is never a draw) naming the counter axis
+/// `Counter(Other, Other)` (Pentad is a non-creature artifact ⇒ `ObjectClass::Other`;
+/// charge is a `Generic` counter ⇒ `CounterClass::Other`, CR 122.1).
+///
+/// A2 (measured, not assumed): the cert being `Some` proves `detect_loop`'s
+/// recurrence gate matched — the constant-depth `loop_states_equal_modulo_resources`
+/// FAILS on the growing charge (Generic is preserved), so this certification depends
+/// on the new `loop_states_cover_modulo_counter_growth` disjunct. Reverting that
+/// disjunct flips this `expect` to a panic (no cert).
+#[test]
+fn drive_pentad_prism_charge_growth_certificate() {
+    let cert = corpus::drive_offline_pentad_prism(card_db()).expect(
+        "Pentad Prism (seeded ≥1 charge) under the proliferate engine must confirm an \
+         infinite charge-counter growth loop",
+    );
+    assert_eq!(
+        cert.win_kind,
+        WinKind::Advantage,
+        "a charge-counter growth loop is a CR 104.4b optional advantage engine, not a win"
+    );
+    assert!(
+        cert.covers(&[ResourceAxis::Counter(
+            CounterClass::Other,
+            ObjectClass::Other
+        )]),
+        "certificate must name the unbounded charge counter axis (got {:?})",
+        cert.unbounded
+    );
+}
+
+/// PR-7 #5 (Sunburst 0-charge dead-loop CONTROL, paired with #8): a Pentad Prism
+/// seeded with ZERO charge counters (a generic-mana Sunburst cast ⇒ 0 charge) has no
+/// counter for proliferate to grow, so the cycle degrades to the pure Kilo proliferate
+/// loop — the cert is still `Some` (certified via the constant-depth equality path on
+/// the identical board) but carries NO counter axis. The seed is thus load-bearing:
+/// #8's `Counter(Other, Other)` axis appears ONLY because a charge counter was present
+/// to grow.
+#[test]
+fn drive_pentad_prism_zero_charge_has_no_counter_axis() {
+    let cert = corpus::drive_offline_pentad_prism_seeded(card_db(), 0).expect(
+        "a 0-charge Pentad still rides the pure Kilo proliferate loop (board identical) \
+         and must confirm via the equality path",
+    );
+    assert!(
+        !cert
+            .unbounded
+            .iter()
+            .any(|a| matches!(a, ResourceAxis::Counter(..))),
+        "a 0-charge Pentad has no counter to grow ⇒ the cert must NOT name a counter axis \
+         (got {:?})",
+        cert.unbounded
+    );
+}
+
+/// PR-7 54th (offline acceptance): a REAL Walking Ballista seeded with ≥1 +1/+1
+/// counter, under the Kilo/Freed/Relic proliferate engine, is certified as an
+/// infinite-DAMAGE loop — `WinKind::LethalDamage` (CR 704.5a / CR 120.3a: each ping is
+/// 1 life loss on the opponent) naming the `DamageDealt(P1)` axis. The +1/+1 counter is
+/// MONOTONE (CR 122.1a), so `project_object_for_loop` strips it and the EXISTING
+/// constant-depth gate-1 (`loop_states_equal_modulo_resources`) covers the growth — no
+/// new predicate (contrast the 53rd Pentad's non-monotone `Generic` charge).
+///
+/// DISCRIMINATION: the paired X=0 control below (same driver, only the seed differs)
+/// loses the damage axis, so this `covers` is not vacuously "any cert". The `expect`
+/// flips to a panic if `detect_loop`'s recurrence gate is reverted; the `win_kind` /
+/// `covers` assertions flip if `classify_win_kind`'s damage branch is dropped
+/// (Advantage) — proving the ping actually reached the opponent (a mis-answered
+/// `TargetSelection` prompt would leave no `DamageDealt(P1)` axis and fail `covers`).
+#[test]
+fn drive_kilo_freed_relic_ballista_certificate() {
+    let cert = corpus::drive_offline_kilo_freed_relic_ballista(card_db(), 2).expect(
+        "Walking Ballista (seeded ≥1 +1/+1) under the proliferate engine must confirm an \
+         infinite damage loop: board identical modulo the monotone +1/+1, +1 damage/cycle",
+    );
+    assert_eq!(
+        cert.win_kind,
+        WinKind::LethalDamage,
+        "a +1 damage/cycle ping on the opponent is an unbounded CR 704.5a lethal-damage loop"
+    );
+    assert!(
+        cert.covers(&[ResourceAxis::DamageDealt(P1)]),
+        "certificate must name unbounded damage to the opponent (got {:?})",
+        cert.unbounded
+    );
+    assert!(
+        !cert.mandatory,
+        "an activated-ability loop is optional (CR 602.1), so mandatory == false"
+    );
+}
+
+/// PR-7 54th (X=0 dead-loop CONTROL, paired with the acceptance above): a Walking
+/// Ballista seeded with ZERO +1/+1 counters is a 0/0 that dies to the SBA (CR 704.5f)
+/// with no counter to remove, so the ping activation is rejected and the cycle degrades
+/// to the pure Kilo/Freed/Relic proliferate loop — the cert is still `Some` (board
+/// identical) but names NO damage axis and classifies `Advantage`. The seed is thus
+/// load-bearing: the acceptance's `LethalDamage` + `DamageDealt(P1)` appear ONLY because
+/// a +1/+1 counter was present to remove (mirrors
+/// `drive_pentad_prism_zero_charge_has_no_counter_axis`). This also pins the corrected
+/// wiring: `drive_ballista_ping` would `.expect()`-panic on the dead activation, whereas
+/// the driver's `activate_and_resolve` degrades gracefully.
+#[test]
+fn drive_kilo_freed_relic_ballista_x0_no_damage_axis() {
+    let cert = corpus::drive_offline_kilo_freed_relic_ballista(card_db(), 0).expect(
+        "a 0-counter Ballista still rides the pure Kilo proliferate loop (board identical) \
+         and must confirm via the equality path",
+    );
+    assert_eq!(
+        cert.win_kind,
+        WinKind::Advantage,
+        "with a dead Ballista the only unbounded axis is the proliferate trigger — an \
+         advantage engine, not a lethal win"
+    );
+    assert!(
+        !cert
+            .unbounded
+            .iter()
+            .any(|a| matches!(a, ResourceAxis::DamageDealt(_))),
+        "a 0-counter Ballista deals no damage ⇒ the cert must NOT name a damage axis \
+         (got {:?})",
+        cert.unbounded
+    );
+}
+
+/// PR-7 "One-Ring" (offline acceptance): a REAL The One Ring on the OPPONENT (P1),
+/// seeded ≥1 burden, under the Kilo/Freed/Relic proliferate engine, certifies an
+/// infinite preserved-`Generic` burden-growth loop — `WinKind::Advantage`
+/// (CR 104.4b) naming `Counter(Other, Other)`.
+///
+/// A2 (analytic non-vacuity, not asserted directly): the cert being `Some` proves
+/// the recurrence gate matched; the constant-depth `loop_states_equal_modulo_resources`
+/// FAILS on the growing burden (Generic is preserved), so this rides the
+/// `loop_states_cover_modulo_counter_growth` disjunct. The RUNNABLE discriminator is
+/// the seed=0 control below (Counter axis appears ONLY with seeded burden). Do NOT
+/// overclaim "no burden ⇒ no cert": the loop stays `Some` via `Trigger(Proliferate)`.
+#[test]
+fn one_ring_burden_growth_certificate() {
+    let cert = corpus::drive_offline_kilo_freed_relic_one_ring(card_db(), 1).expect(
+        "The One Ring (seeded ≥1 burden) under the proliferate engine must confirm an \
+         infinite burden-counter growth loop",
+    );
+    assert_eq!(
+        cert.win_kind,
+        WinKind::Advantage,
+        "a burden-counter growth loop is a CR 104.4b optional advantage engine, not a win"
+    );
+    assert!(
+        cert.covers(&[ResourceAxis::Counter(
+            CounterClass::Other,
+            ObjectClass::Other
+        )]),
+        "certificate must name the unbounded burden counter axis (got {:?})",
+        cert.unbounded
+    );
+    assert!(
+        !cert.mandatory,
+        "an activated-ability loop is optional (CR 602.1), so mandatory == false"
+    );
+}
+
+/// PR-7 "One-Ring" (seed=0 CONTROL, paired): a 0-burden Ring has no counter for
+/// proliferate to grow, so the cycle degrades to the pure Kilo loop — cert still
+/// `Some` (equality path, board identical) but names NO counter axis. The seed is
+/// thus load-bearing: the `Counter(Other, Other)` axis appears ONLY because burden
+/// was present to grow (mirrors `drive_pentad_prism_zero_charge_has_no_counter_axis`).
+#[test]
+fn one_ring_zero_burden_has_no_counter_axis() {
+    let cert = corpus::drive_offline_kilo_freed_relic_one_ring(card_db(), 0).expect(
+        "a 0-burden Ring still rides the pure Kilo proliferate loop (board identical) \
+         and must confirm via the equality path",
+    );
+    assert!(
+        !cert
+            .unbounded
+            .iter()
+            .any(|a| matches!(a, ResourceAxis::Counter(..))),
+        "a 0-burden Ring has no counter to grow ⇒ cert must NOT name a counter axis (got {:?})",
+        cert.unbounded
+    );
 }
 
 /// #10 PRIEST OF TITANIA + UMBRAL MANTLE — infinite green mana.
@@ -918,6 +1104,116 @@ fn drive_drain_idx18_victim_with_out_is_not_eliminated() {
     assert!(
         corpus::first_gameover_beat(&trace).is_none(),
         "P1 holds a loop-ending action — the §9 gate must refuse the shortcut (no GameOver)"
+    );
+}
+
+/// G2 (multi-trigger ring-survival MECHANISM). Two DISTINGUISHABLE "whenever you gain
+/// life" drainers — Marauding Blight-Priest (fixed: each opponent loses 1) and Vito,
+/// Thorn of the Dusk Rose (dynamic: target opponent loses that much) — plus Bloodthirsty
+/// Conqueror (the refiller: whenever an opponent loses life, you gain that much). Each
+/// life-gain fires BOTH drainers simultaneously, so CR 603.3b forces a real
+/// `OrderTriggers` window every cycle (the two abilities are order-dependent, so no
+/// auto-ordering short-circuit). This drives the loop through that window and asserts
+/// the `loop_detect_ring` SURVIVES it and accrues >= 2 samples.
+///
+/// SCOPE: the committed assertions are the ring-survival MECHANISM — the loop-detect
+/// ring survives a multi-trigger `OrderTriggers` beat (CR 603.3b) so CR 732.2a detection
+/// can accrue samples. NOTE (measured, both seam edits present): this mixed
+/// untargeted+targeted fixture ALSO reaches end-to-end `GameOver { winner: Some(P0) }` at
+/// beat 10 (Vito's targeted trigger auto-resolves forced-unique in 2p, so the untargeted
+/// Blight-Priest -> Conqueror drain carries the loop and the CR 732.2a shortcut fires;
+/// detection is via the COVER path — the cascade is super-critical, so the ring tops out at
+/// exactly `max_ring == 2`). That win is deliberately NOT asserted here: `max_ring == 2`
+/// sits at the current 2-sample detection edge, so a min-samples tightening would flip the
+/// `GameOver` for a reason unrelated to ring-survival — the wrong granularity for a
+/// ring-survival test. Ring survival is the robust invariant; the robust E2E multi-trigger
+/// detection witness = the 52nd/G1 (non-edge).
+///
+/// REVERT-FAIL (measured, both seams load-bearing): reverting EDIT A (the SEAM1
+/// `!matches!(wf, OrderTriggers)` clear guard) alone, or EDIT B (the SEAM2
+/// `GameAction::OrderTriggers` clear exemption) alone, drops `max_ring` from 2 to 1 (and
+/// the end-to-end `GameOver` from `Some(P0)` to `None`) — the ring is wiped on the
+/// OrderTriggers beat and never accrues 2 samples.
+#[test]
+fn drive_multi_trigger_ring_survives_order_triggers_beat() {
+    const FIXTURE: &[&str] = &[
+        "Marauding Blight-Priest",
+        "Vito, Thorn of the Dusk Rose",
+        "Bloodthirsty Conqueror",
+    ];
+    let Some(mut board) = corpus::build_drain_board(card_db(), FIXTURE, 200) else {
+        return; // export absent (CI / fresh checkout): skip, never fail spuriously
+    };
+    corpus::seed_lifegain_cascade(&mut board);
+    let trace = corpus::drive_with_trigger_ordering(&mut board, 60);
+    // NON-VACUITY: the two distinguishable drainers must actually force a real
+    // OrderTriggers window — otherwise the ring-survival assertion is meaningless.
+    assert!(
+        trace
+            .iter()
+            .any(|t| matches!(t.wf, WaitingFor::OrderTriggers { .. })),
+        "the two distinguishable 'whenever you gain life' drainers must force a real \
+         OrderTriggers beat (CR 603.3b)"
+    );
+    // RING SURVIVAL (the discriminating signal): the ring survives the OrderTriggers
+    // beat and accrues >= 2 Priority{active} samples across the cascade.
+    let max_ring = trace.iter().map(|t| t.ring_len).max().unwrap_or(0);
+    assert!(
+        max_ring >= 2,
+        "the loop-detect ring must survive the OrderTriggers beat and reach >= 2 samples \
+         (got {max_ring})"
+    );
+}
+
+/// G2 non-regression + driver-equivalence: idx18 (Marauding Blight-Priest + Bloodthirsty
+/// Conqueror) is the SINGLE-trigger drain path — only Blight-Priest triggers on life
+/// gain, so no simultaneous-trigger group and no `OrderTriggers` window ever forms.
+/// Driving it through the new trigger-ordering driver must therefore behave exactly like
+/// `drive_pass_priority`: ZERO OrderTriggers beats, and it still wins LIVE via the ring.
+#[test]
+fn drive_drain_idx18_single_trigger_has_no_order_beat() {
+    let Some(mut board) = corpus::build_drain_board(card_db(), corpus::row(18).cards, 200) else {
+        return; // export absent: skip
+    };
+    corpus::seed_lifegain_cascade(&mut board);
+    let trace = corpus::drive_with_trigger_ordering(&mut board, 40);
+    assert!(
+        trace
+            .iter()
+            .all(|t| !matches!(t.wf, WaitingFor::OrderTriggers { .. })),
+        "idx18 is single-trigger — no OrderTriggers window must ever form"
+    );
+    let (_, winner) = corpus::first_gameover_beat(&trace)
+        .expect("idx18 still wins LIVE under the trigger-ordering driver (single-trigger path)");
+    assert_eq!(winner, P0);
+}
+
+/// G2 false-positive control: the SAME two distinguishable drainers WITHOUT the refiller
+/// (drop Bloodthirsty Conqueror). The seed life-gain still fires both drainers → a real
+/// OrderTriggers beat occurs — but with no refill the cascade is FINITE (P1 loses a
+/// couple of life from 200 and stops). The surviving ring must NOT manufacture a false
+/// loop: no `GameOver` fires within the window.
+#[test]
+fn drive_multi_trigger_no_refiller_is_finite() {
+    const FIXTURE_NO_REFILL: &[&str] = &["Marauding Blight-Priest", "Vito, Thorn of the Dusk Rose"];
+    let Some(mut board) = corpus::build_drain_board(card_db(), FIXTURE_NO_REFILL, 200) else {
+        return; // export absent: skip
+    };
+    corpus::seed_lifegain_cascade(&mut board);
+    let trace = corpus::drive_with_trigger_ordering(&mut board, 60);
+    // Reach-guard: the OrderTriggers window still forms (both drainers fire off the seed
+    // gain) — so the finite-ness assertion below is exercised past the OrderTriggers beat,
+    // not vacuous on a board that never triggered.
+    assert!(
+        trace
+            .iter()
+            .any(|t| matches!(t.wf, WaitingFor::OrderTriggers { .. })),
+        "both drainers must fire off the seed gain, forcing an OrderTriggers beat"
+    );
+    assert!(
+        corpus::first_gameover_beat(&trace).is_none(),
+        "with no refiller the cascade is finite — the surviving ring must not manufacture \
+         a false loop/GameOver"
     );
 }
 

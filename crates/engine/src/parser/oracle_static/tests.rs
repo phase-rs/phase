@@ -82,6 +82,142 @@ fn dynamic_for_each_pump_trailing_keyword_unchanged() {
     );
 }
 
+// CR 205.1b + CR 613.4c: when a "for each X" dynamic pump carries a trailing "and
+// is a <Subtype> in addition to its other types", the type-addition tail used to
+// break the count parse and collapse the whole pump to a FIXED +N/+M (Avatar
+// Destiny, Machinist's Arsenal). The count must still scale dynamically, and the
+// trailing subtype must still be added.
+//
+// Avatar Destiny (Aura), exact Oracle text: the count is a graveyard
+// `ZoneCardCount` (creature cards in your graveyard), asserted by zone,
+// card_types, and scope — not merely "some dynamic pump".
+#[test]
+fn dynamic_for_each_pump_with_trailing_type_keeps_dynamic_scaling() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 for each creature card in your graveyard and is an Avatar in addition to its other types.",
+    );
+    assert_eq!(defs.len(), 1);
+    let mods = &defs[0].modifications;
+    // No fixed pump may survive — the whole point is the count stays dynamic.
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. }
+        )),
+        "must not emit a fixed AddPower/AddToughness: {mods:?}"
+    );
+    let expected_qty = QuantityExpr::Ref {
+        qty: QuantityRef::ZoneCardCount {
+            zone: ZoneRef::Graveyard,
+            card_types: vec![TypeFilter::Creature],
+            scope: CountScope::Controller,
+            filter: None,
+        },
+    };
+    let power = mods
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicPower { value } => Some(value),
+            _ => None,
+        })
+        .expect("dynamic power pump must be present");
+    assert_eq!(
+        *power, expected_qty,
+        "power must scale by graveyard creatures"
+    );
+    let toughness = mods
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicToughness { value } => Some(value),
+            _ => None,
+        })
+        .expect("dynamic toughness pump must be present");
+    assert_eq!(*toughness, expected_qty, "toughness must scale identically");
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Avatar".to_string()
+        }),
+        "trailing 'is an Avatar' dropped: {mods:?}"
+    );
+}
+
+// CR 205.1b + CR 613.4c: the Equipment sibling of the above — Machinist's Arsenal,
+// exact Oracle text. Here the count is an `ObjectCount` over artifacts you
+// control (asserted by filter type and controller scope), and the trailing type
+// is Artificer. Proves the fix covers BOTH quantity classes the parse-diff
+// measured, not just Avatar's graveyard count.
+#[test]
+fn dynamic_for_each_pump_with_trailing_type_machinists_arsenal() {
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +2/+2 for each artifact you control and is an Artificer in addition to its other types.",
+    );
+    assert_eq!(defs.len(), 1);
+    let mods = &defs[0].modifications;
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. }
+        )),
+        "must not emit a fixed AddPower/AddToughness: {mods:?}"
+    );
+    let power = mods
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicPower { value } => Some(value),
+            _ => None,
+        })
+        .expect("dynamic power pump must be present");
+    // Extract the ObjectCount count from either bare or "+N per" (Multiply-wrapped)
+    // dynamic pumps so the artifact filter + controller scope are asserted directly.
+    fn object_count_filter(value: &QuantityExpr) -> &TargetFilter {
+        let inner = match value {
+            // "+2/+2 for each" scales at 2 per artifact → Multiply(2, ObjectCount).
+            QuantityExpr::Multiply { factor, inner } => {
+                assert_eq!(*factor, 2, "must scale at +2 per artifact");
+                inner.as_ref()
+            }
+            other => other,
+        };
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = inner
+        else {
+            panic!("count must be an ObjectCount, got {inner:?}");
+        };
+        filter
+    }
+    let power_filter = object_count_filter(power);
+    let TargetFilter::Typed(tf) = power_filter else {
+        panic!("ObjectCount filter must be a Typed artifact filter, got {power_filter:?}");
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Artifact]);
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::You),
+        "must count artifacts YOU control, got {:?}",
+        tf.controller
+    );
+    // Toughness scales by the identical count.
+    let toughness = mods
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicToughness { value } => Some(value),
+            _ => None,
+        })
+        .expect("dynamic toughness pump must be present");
+    assert_eq!(
+        object_count_filter(toughness),
+        power_filter,
+        "toughness must scale by the same artifact count as power"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Artificer".to_string()
+        }),
+        "trailing 'is an Artificer' dropped: {mods:?}"
+    );
+}
+
 /// CR 207.2c: an ability word is italic flavor with no rules meaning. A leading
 /// ability-word label on a subject-anchored static must be stripped so the static
 /// still parses; a leading label that is NOT a recognized ability word must be
@@ -25398,6 +25534,61 @@ fn crew_contribution_power_and_toughness_modifiers_parse() {
 /// sentences are independent continuous effects (the dual-subject anthem class)
 /// must emit one `StaticDefinition` per sentence, each carrying its own affected
 /// filter and modifications. Regression for Flowering of the White Tree, whose
+// CR 608.2c: In an Aura, a continuation sentence whose subject is the pronoun
+// "It" refers to the ENCHANTED CREATURE, not the Aura object. Spider-Man No More:
+// "Enchanted creature is a Citizen ... It has defender and loses all other
+// abilities." — the second static parses with the right mods but used to bind
+// `SelfRef` (applying to the Aura, which is not on the battlefield as a creature).
+#[test]
+fn aura_it_continuation_binds_to_enchanted_creature() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1. It has defender and loses all other abilities.",
+    );
+    assert_eq!(defs.len(), 2, "both sentences must emit statics: {defs:?}");
+    // EVERY static must be scoped to the enchanted creature — none left on SelfRef.
+    for def in &defs {
+        assert!(
+            matches!(&def.affected,
+                Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::EnchantedBy)),
+            "aura continuation static must bind to the enchanted creature, got {:?}",
+            def.affected
+        );
+    }
+    // The "It" sentence carried its mods correctly (RemoveAllAbilities + Defender).
+    let it_static = defs
+        .iter()
+        .find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::RemoveAllAbilities)
+        })
+        .expect("the 'It has defender and loses all abilities' static must be present");
+    assert!(it_static
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Defender
+        }));
+}
+
+// Regression: a NON-aura multi-sentence anthem (no EnchantedBy scope, no "It"
+// pronoun subject) is untouched by the continuation rebind.
+#[test]
+fn non_aura_multi_sentence_anthem_scope_unchanged() {
+    let defs = parse_static_line_multi(
+        "Creatures you control get +1/+1. Creatures you control have flying.",
+    );
+    assert_eq!(defs.len(), 2);
+    for def in &defs {
+        assert!(
+            matches!(&def.affected,
+                Some(TargetFilter::Typed(tf))
+                    if tf.controller == Some(ControllerRef::You)
+                        && !tf.properties.contains(&FilterProp::EnchantedBy)),
+            "non-aura anthem must stay controller-scoped, got {:?}",
+            def.affected
+        );
+    }
+}
+
 /// first-sentence parse previously swallowed the period, mangled the ward cost,
 /// and dropped the entire second sentence.
 ///
@@ -28260,7 +28451,7 @@ fn rayami_flying_grant_is_conditional_on_matching_exiled_card() {
 /// (`parse_activated_ability_cost_head`); the ONLY discriminator is the dispatch
 /// site. This test drives the real pipeline (not `parse_imperative_effect` in
 /// isolation) to prove the printed line stays a static and emits NO transient
-/// `Effect::ReduceActivatedAbilityCost`.
+/// activation-cost-reduction effect.
 #[test]
 fn training_grounds_standalone_line_stays_static_no_transient_effect() {
     // 1. The bare line is claimed by the static classifier.
@@ -28283,7 +28474,7 @@ fn training_grounds_standalone_line_stays_static_no_transient_effect() {
     );
 
     // 2. A full-card parse of Training Grounds yields the ReduceAbilityCost static
-    //    and NO transient ReduceActivatedAbilityCost effect (no abilities/triggers).
+    //    and NO transient effect (no abilities/triggers).
     let parsed = crate::parser::parse_oracle_text(
         "Activated abilities of creatures you control cost {2} less to activate.",
         "Training Grounds",
@@ -28307,5 +28498,66 @@ fn training_grounds_standalone_line_stays_static_no_transient_effect() {
          abilities={:?} triggers={:?}",
         parsed.abilities,
         parsed.triggers,
+    );
+}
+
+/// Digital-only Alchemy: a dynamic P/T pump that scales by the source's own
+/// intensity — Minthara of the Absolute / Teysa of the Ghost Council ("get
+/// +X/+0, where X is ~'s intensity") and Quickbeast Amulet ("gets +X/+X, where
+/// X is this Equipment's intensity"). X binds to `QuantityRef::Intensity {
+/// scope: Source }`, which `game::quantity` evaluates at runtime.
+#[test]
+fn dynamic_pt_pump_scales_by_source_intensity() {
+    let intensity = QuantityExpr::Ref {
+        qty: QuantityRef::Intensity {
+            scope: ObjectScope::Source,
+        },
+    };
+
+    // +X/+0: power scales by intensity, toughness untouched.
+    let s = super::shared::parse_static_line_multi(
+        "Creatures you control get +X/+0, where X is ~'s intensity.",
+    );
+    assert_eq!(s.len(), 1, "Minthara: {s:?}");
+    assert!(
+        s[0].modifications
+            .contains(&ContinuousModification::AddDynamicPower {
+                value: intensity.clone()
+            }),
+        "expected power to scale by source intensity, got {:?}",
+        s[0].modifications
+    );
+    assert!(
+        !s[0]
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
+        "+X/+0 must not pump toughness, got {:?}",
+        s[0].modifications
+    );
+
+    // +X/+X: both axes scale by intensity (Quickbeast Amulet). The card's
+    // printed "this Equipment's intensity" is rewritten to "~'s intensity" by
+    // `normalize_card_name_refs` before the static parser runs (see
+    // `normalize_card_name_refs`), so the AST test feeds the `~` form.
+    let s = super::shared::parse_static_line_multi(
+        "Equipped creature gets +X/+X, where X is ~'s intensity.",
+    );
+    assert_eq!(s.len(), 1, "Quickbeast Amulet: {s:?}");
+    assert!(
+        s[0].modifications
+            .contains(&ContinuousModification::AddDynamicPower {
+                value: intensity.clone()
+            }),
+        "expected power axis, got {:?}",
+        s[0].modifications
+    );
+    assert!(
+        s[0].modifications
+            .contains(&ContinuousModification::AddDynamicToughness {
+                value: intensity.clone()
+            }),
+        "expected toughness axis, got {:?}",
+        s[0].modifications
     );
 }

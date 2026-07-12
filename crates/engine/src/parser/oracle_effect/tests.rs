@@ -2,7 +2,9 @@ use super::*;
 use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
-use crate::types::ability::{AttachmentKind, ForEachCategoryAction, PerpetualModification};
+use crate::types::ability::{
+    AttachmentKind, ExcessRecipient, ForEachCategoryAction, PerpetualModification,
+};
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
@@ -240,6 +242,160 @@ fn the_kingpin_of_crime_full_card_has_no_unimplemented() {
             ability
         );
     }
+}
+
+/// CR 601.2c + CR 611.2c (#4751, Tail Swipe / Joust / Blizzard Brawl): the
+/// two-target fight class — "Choose target creature you control and target
+/// creature you don't control. [buff the you-control creature]. Then those
+/// creatures fight each other." — must NOT drop the second target. The buff verb
+/// ("gets +1/+1") lives in a LATER sentence, so `starts_target_continuous_clause`
+/// previously scanned across the period and mis-split the two-target declaration
+/// at its "and", leaving `Effect::unimplemented("target", "target creature you
+/// don't control")`. Both target slots must survive AND the buff must bind slot 0
+/// (the you-control creature), not the whole board.
+#[test]
+fn two_target_fight_pump_keeps_both_slots_and_buffs_slot_zero() {
+    fn collect(ability: &AbilityDefinition, out: &mut Vec<Effect>) {
+        out.push((*ability.effect).clone());
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            collect(sub, out);
+        }
+        if let Some(els) = ability.else_ability.as_deref() {
+            collect(els, out);
+        }
+    }
+
+    for (text, ty) in [
+        (
+            "Choose target creature you control and target creature you don't control. \
+             If you cast this spell during your main phase, the creature you control gets \
+             +1/+1 until end of turn. Then those creatures fight each other.",
+            "Sorcery",
+        ),
+        (
+            "Choose target creature you control and target creature you don't control. \
+             The creature you control gets +2/+1 until end of turn if it's a Knight. \
+             Then those creatures fight each other.",
+            "Sorcery",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, "Fight Card", &[], &[ty.to_string()], &[]);
+        let ability = parsed
+            .abilities
+            .first()
+            .unwrap_or_else(|| panic!("expected a spell ability for: {text}"));
+        assert!(
+            !ability_chain_has_unimplemented(ability),
+            "two-target fight chain dropped a slot to Unimplemented: {ability:#?}"
+        );
+
+        let mut effects = Vec::new();
+        collect(ability, &mut effects);
+
+        // Both target slots announced: you-control (A) and you-don't-control (B).
+        let controllers: Vec<Option<ControllerRef>> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(tf),
+                } => Some(tf.controller.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            controllers.contains(&Some(ControllerRef::You)),
+            "missing the you-control target slot: {controllers:?}"
+        );
+        assert!(
+            controllers
+                .iter()
+                .any(|c| matches!(c, Some(ControllerRef::Opponent))),
+            "missing the opponent target slot: {controllers:?}"
+        );
+
+        // CR 611.2c: the "the creature you control gets +N/+M" buff binds slot 0,
+        // never an unscoped `Any`/`ParentTarget` whole-board target.
+        let pump_target = effects.iter().find_map(|e| match e {
+            Effect::Pump { target, .. } => Some(target.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            pump_target,
+            Some(TargetFilter::ParentTargetSlot { index: 0 }),
+            "the pump must buff the first-declared you-control creature (slot 0)"
+        );
+    }
+}
+
+/// #4751 review (matthewevans): part 1's sentence-bounding drops only a STRAY
+/// `Effect::unimplemented("you")` head from Life at Stake — it does NOT remove a
+/// functional chooser. "You and target creature's controller each secretly
+/// choose a number" is unimplemented on BOTH `main` and this branch: the real
+/// mechanic is a `Choose { NumberRange }` (with the exile + lose-life tail),
+/// byte-identical either way. On `main` the leading "You" was split off its "and"
+/// by a coincidental " loses " in a LATER sentence into a bare
+/// `Unimplemented { name: "you", description: "You" }`; bounding the verb scan to
+/// the first sentence stops that coincidental split, so the chain now heads at
+/// the real `Choose` node instead of the stray "you" fragment. This pins that the
+/// card's actual choose-a-number mechanic survives (no regression) — the
+/// controller was never a *parsed* chooser to lose (that stays a pre-existing gap
+/// on both, orthogonal to this PR).
+#[test]
+fn life_at_stake_keeps_choose_mechanic_and_drops_only_the_stray_you_stub() {
+    use crate::types::ability::ChoiceType;
+
+    fn collect(a: &AbilityDefinition, out: &mut Vec<Effect>) {
+        out.push((*a.effect).clone());
+        if let Some(s) = a.sub_ability.as_deref() {
+            collect(s, out);
+        }
+        if let Some(e) = a.else_ability.as_deref() {
+            collect(e, out);
+        }
+    }
+
+    let text = "You and target creature's controller each secretly choose a number 0 or greater. \
+         Then, reveal the chosen numbers. If your number was highest or tied for the highest, \
+         exile that creature. Each player who chose the highest number loses that much life.";
+    let parsed = parse_oracle_text(text, "Life at Stake", &[], &["Instant".to_string()], &[]);
+    let ability = parsed.abilities.first().expect("expected a spell ability");
+
+    // The real mechanic — Choose a number — heads the chain (not a stray
+    // `Unimplemented("you")` fragment).
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::NumberRange { .. },
+                ..
+            }
+        ),
+        "Life at Stake must head at a NumberRange Choose, not a stray you-stub; got {:#?}",
+        ability.effect
+    );
+
+    let mut effects = Vec::new();
+    collect(ability, &mut effects);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        )),
+        "the exile-the-creature tail must survive: {effects:#?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::LoseLife { .. })),
+        "the lose-life tail must survive: {effects:#?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { name, .. } if name == "you")),
+        "the stray Unimplemented(\"you\") head must be gone: {effects:#?}"
+    );
 }
 
 /// Recursively walk an ability chain (root effect + `sub_ability` + `else_ability`)
@@ -754,6 +910,128 @@ fn multi_source_each_power_damage_back_reference_shape() {
         ),
         "expected EachTarget damage in the 'They each' sub-ability, got {:?}",
         sub.effect
+    );
+}
+
+/// CR 120.4a + CR 608.2c + CR 702: Ram Through's conditional excess-damage
+/// rider patches the preceding target-source damage effect without making the
+/// damage instruction itself conditional.
+#[test]
+fn ram_through_trample_gated_excess_rider_patches_damage() {
+    let def = parse_effect_chain(
+        "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has trample, excess damage is dealt to that creature's controller instead.",
+        AbilityKind::Spell,
+    );
+
+    // The head is `TargetOnly` (selecting "target creature you control" as the
+    // damage source); `DealDamage` is that clause's own `sub_ability`.
+    let damage_def = def
+        .sub_ability
+        .as_deref()
+        .expect("expected a DealDamage sub_ability under the TargetOnly source selection");
+    let Effect::DealDamage {
+        damage_source,
+        excess,
+        ..
+    } = &*damage_def.effect
+    else {
+        panic!("expected DealDamage, got {:?}", damage_def.effect);
+    };
+    assert_eq!(*damage_source, Some(DamageSource::Target));
+    assert_eq!(
+        *excess,
+        Some(ExcessRecipient::TargetController {
+            source_keyword: Some(crate::types::keywords::KeywordKind::Trample),
+        })
+    );
+    assert!(
+        damage_def.sub_ability.is_none(),
+        "conditional excess rider must be absorbed, got {:?}",
+        damage_def.sub_ability
+    );
+}
+
+/// CR 120.4a: Existing unconditional excess-damage riders still patch to the
+/// plain target-controller redirect.
+#[test]
+fn unconditional_excess_rider_still_patches_damage() {
+    let def = parse_effect_chain(
+        "~ deals 4 damage to target creature. Excess damage is dealt to that creature's controller instead.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::DealDamage { excess, .. } = &*def.effect else {
+        panic!("expected DealDamage, got {:?}", def.effect);
+    };
+    assert_eq!(
+        *excess,
+        Some(ExcessRecipient::TargetController {
+            source_keyword: None
+        })
+    );
+}
+
+/// CR 120.4a + CR 608.2c: Partial or misspelled conditional riders must fail
+/// closed instead of broadly matching on loose excess-damage words.
+#[test]
+fn partial_conditional_excess_rider_does_not_patch_damage() {
+    let def = parse_effect_chain(
+        "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has tramplers, excess damage is dealt to that creature's controller instead.",
+        AbilityKind::Spell,
+    );
+
+    let damage_def = def
+        .sub_ability
+        .as_deref()
+        .expect("expected a DealDamage sub_ability under the TargetOnly source selection");
+    let Effect::DealDamage { excess, .. } = &*damage_def.effect else {
+        panic!("expected DealDamage head, got {:?}", damage_def.effect);
+    };
+    assert_eq!(*excess, None);
+    assert!(
+        damage_def.sub_ability.is_some(),
+        "invalid rider should remain visible as an unparsed follow-up"
+    );
+}
+
+/// CR 120.4a + CR 608.2c + CR 702: Ram Through's real, complete Oracle text
+/// (verified against Scryfall) through the actual card pipeline
+/// (`parse_oracle_text`, not the fragment-only `parse_effect_chain`). Proves
+/// the `Unimplemented("excess", ...)` node reported by issue #5632 no longer
+/// survives when the card is parsed the way `card-data.json` parses it.
+#[test]
+fn ram_through_real_oracle_text_has_no_unimplemented_excess() {
+    let parsed = parse_oracle_text(
+        "Target creature you control deals damage equal to its power to target \
+         creature you don't control. If the creature you control has trample, \
+         excess damage is dealt to that creature's controller instead.",
+        "Ram Through",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let ability = parsed.abilities.first().expect("expected a spell ability");
+    assert!(
+        !ability_chain_has_unimplemented(ability),
+        "Ram Through must have no residual Unimplemented node, got {ability:#?}"
+    );
+
+    fn find_deal_damage(ability: &AbilityDefinition) -> Option<&AbilityDefinition> {
+        if matches!(*ability.effect, Effect::DealDamage { .. }) {
+            return Some(ability);
+        }
+        ability.sub_ability.as_deref().and_then(find_deal_damage)
+    }
+    let deal_damage = find_deal_damage(ability).expect("expected a DealDamage node in the chain");
+    let Effect::DealDamage { excess, .. } = &*deal_damage.effect else {
+        unreachable!()
+    };
+    assert_eq!(
+        *excess,
+        Some(ExcessRecipient::TargetController {
+            source_keyword: Some(crate::types::keywords::KeywordKind::Trample),
+        }),
+        "excess rider must be attached to the DealDamage node via the real pipeline"
     );
 }
 
@@ -41573,6 +41851,140 @@ fn claim_jumper_parses_repeat_once_while_opponent_lands() {
     );
 }
 
+/// CR 705.2 + CR 608.2c: the resolution-scoped coin-flip loop gate — the flip
+/// stripper maps "if you lose the flip," to `CoinFlipOutcome{Lost}` and leaves
+/// "repeat this process" as the body. Building-block coverage independent of any
+/// one card.
+#[test]
+fn strip_coin_flip_conditional_lose_maps_to_outcome() {
+    use crate::types::ability::CoinFlipResult;
+    let (cond, body) = strip_coin_flip_conditional("if you lose the flip, repeat this process");
+    assert_eq!(
+        cond,
+        Some(AbilityCondition::CoinFlipOutcome {
+            result: CoinFlipResult::Lost
+        })
+    );
+    assert_eq!(body, "repeat this process");
+}
+
+/// CR 705.2: the "win" polarity maps to `CoinFlipOutcome{Won}`.
+#[test]
+fn strip_coin_flip_conditional_win_maps_to_outcome() {
+    use crate::types::ability::CoinFlipResult;
+    let (cond, body) = strip_coin_flip_conditional("if you win the flip, repeat this process");
+    assert_eq!(
+        cond,
+        Some(AbilityCondition::CoinFlipOutcome {
+            result: CoinFlipResult::Won
+        })
+    );
+    assert_eq!(body, "repeat this process");
+}
+
+/// CR 705.2 + CR 608.2c: absent a flip gate, the stripper is a no-op that returns
+/// the original text — it must not misfire on unrelated "if you …" openers.
+#[test]
+fn strip_coin_flip_conditional_no_gate_is_noop() {
+    let (cond, body) = strip_coin_flip_conditional("if you do, repeat this process");
+    assert_eq!(cond, None);
+    assert_eq!(body, "if you do, repeat this process");
+}
+
+/// CR 705.2 + CR 608.2c: end-to-end — the flip gate feeds a `WhileCondition`
+/// repeat, mapping "if you lose the flip, repeat this process" to
+/// `CoinFlipOutcome{Lost}` with unbounded iterations.
+#[test]
+fn repeat_process_directive_lose_flip_while_condition() {
+    use crate::types::ability::{CoinFlipResult, RepeatContinuation};
+    let mut ctx = ParseContext::default();
+    let outcome =
+        try_parse_repeat_process_directive("if you lose the flip, repeat this process", &mut ctx);
+    match outcome {
+        Some(RepeatProcessOutcome::Continuation(RepeatContinuation::WhileCondition {
+            condition,
+            max_iterations,
+        })) => {
+            assert_eq!(
+                *condition,
+                AbilityCondition::CoinFlipOutcome {
+                    result: CoinFlipResult::Lost
+                }
+            );
+            assert_eq!(max_iterations, None, "bare repeat is unbounded");
+        }
+        other => panic!("expected CoinFlipOutcome WhileCondition, got {other:?}"),
+    }
+}
+
+/// Regression (CR 705.2): an inline coin-flip branch whose body is NOT "repeat
+/// this process" is body-gated OUT of the repeat directive — the whole function
+/// returns None so the chunk falls through to the inline coin-flip fold, keeping
+/// Krark / Desperate Gambit / Ral Zarek `FlipCoin.win_effect` branches intact.
+#[test]
+fn repeat_process_directive_ignores_non_repeat_flip_branch() {
+    let mut ctx = ParseContext::default();
+    assert!(
+        try_parse_repeat_process_directive("if you win the flip, draw a card", &mut ctx).is_none(),
+        "a non-repeat flip branch must not be absorbed by the repeat directive"
+    );
+}
+
+/// Unleash the Flux (Phenomenon) — full-card parse drops zero `Unimplemented`
+/// nodes; the each-player-sacrifice root carries the unbounded `WhileCondition`
+/// gated on losing the flip, and the flip sub-ability has no leftover branch.
+#[test]
+fn unleash_the_flux_parses_repeat_while_lost_flip() {
+    use crate::types::ability::{CoinFlipResult, Effect, RepeatContinuation};
+    let parsed = parse_oracle_text(
+        "When you encounter Unleash the Flux, each player sacrifices a nonland permanent of their choice, then you flip a coin. If you lose the flip, repeat this process. (Then planeswalk away from this phenomenon.)",
+        "Unleash the Flux",
+        &[],
+        &["Phenomenon".to_string()],
+        &[],
+    );
+    let json = serde_json::to_string(&parsed).unwrap();
+    assert!(
+        // allow-noncombinator: test assertion scans serialized AST JSON, not parsing dispatch
+        !json.contains("\"Unimplemented\""),
+        "Unleash the Flux must parse with zero Unimplemented nodes"
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_ref())
+        .expect("encounter trigger with an execute body");
+    match &trigger.repeat_until {
+        Some(RepeatContinuation::WhileCondition {
+            condition,
+            max_iterations,
+        }) => {
+            assert_eq!(
+                **condition,
+                AbilityCondition::CoinFlipOutcome {
+                    result: CoinFlipResult::Lost
+                }
+            );
+            assert_eq!(*max_iterations, None);
+        }
+        other => panic!("expected unbounded CoinFlipOutcome WhileCondition, got {other:?}"),
+    }
+    // The flip sub-ability must be a bare flip — no leftover Unimplemented branch.
+    let flip = trigger.sub_ability.as_ref().expect("flip sub-ability");
+    assert!(
+        matches!(
+            &*flip.effect,
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: None,
+                ..
+            }
+        ),
+        "flip must be bare, got {:?}",
+        flip.effect
+    );
+}
+
 /// CR 608.2d: The choice-list splitter must treat a double-quoted granted
 /// ability as one opaque item, so a `,`/`or` inside quoted text never
 /// fabricates extra branches. A genuine unquoted disjunction still splits.
@@ -42262,7 +42674,7 @@ fn resolution_unless_anaphoric_payers_unchanged() {
 }
 
 /// CR 101.4 + CR 707.2 + CR 122.1: the real WHO phenomenon Human—Time Lord
-/// Meta-Crisis lowers its whole `PlaneswalkedTo` body to a single
+/// Meta-Crisis lowers its whole `Planeswalked { role: To }` body to a single
 /// `EachPlayerCopyChosen` (min:1, max:2, RemoveSupertype(Legendary), scale by the
 /// second creature's power) — NOT a `CopyTokenOf` chain with a trailing
 /// `Unimplemented`.
@@ -42275,7 +42687,9 @@ fn each_player_copy_chosen_human_time_lord_trigger() {
     );
     assert_eq!(
         def.mode,
-        crate::types::triggers::TriggerMode::PlaneswalkedTo,
+        crate::types::triggers::TriggerMode::Planeswalked {
+            role: crate::types::triggers::PlaneswalkRole::To
+        },
         "phenomenon encounter trigger"
     );
     let execute = def.execute.expect("planeswalked-to execute");

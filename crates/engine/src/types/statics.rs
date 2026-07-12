@@ -1924,6 +1924,15 @@ pub enum StaticMode {
         counter_type: super::counter::CounterType,
         count: u32,
     },
+    /// CR 122.1d + CR 101.2: Counters of the specified type cannot be removed
+    /// from permanents matching the `StaticDefinition::affected` filter. The
+    /// runtime gate lives in `turns.rs` (untap-step stun-counter removal) and
+    /// generalizes to any `CounterType` axis (Fear of Sleep Paralysis = Stun). Runtime
+    /// enforcement prevents the counter from being removed during the untap step;
+    /// the creature stays tapped.
+    CountersCantBeRemoved {
+        counter_type: super::counter::CounterType,
+    },
     /// Odyssey Burst-cycle graveyard name-aliasing (no general CR governs this
     /// templating; name-matching semantics per CR 201.2a). While this card is in
     /// a graveyard, effects that count "cards named X" treat it as having the
@@ -2061,6 +2070,7 @@ pub enum StaticModeKind {
     UntapsDuringEachOtherPlayersUntapStep,
     MaxUntapPerType,
     EntersWithAdditionalCounters,
+    CountersCantBeRemoved,
     CountsAsNamed,
     Other,
 }
@@ -2207,6 +2217,7 @@ impl StaticMode {
             StaticMode::EntersWithAdditionalCounters { .. } => {
                 StaticModeKind::EntersWithAdditionalCounters
             }
+            StaticMode::CountersCantBeRemoved { .. } => StaticModeKind::CountersCantBeRemoved,
             StaticMode::CountsAsNamed { .. } => StaticModeKind::CountsAsNamed,
             StaticMode::Other(..) => StaticModeKind::Other,
         }
@@ -2407,6 +2418,9 @@ impl Hash for StaticMode {
             // CR 614.1c: data-carrying (CounterType + count); consumed by direct
             // match in change_zone.rs, never used as a HashMap key.
             | StaticMode::EntersWithAdditionalCounters { .. }
+            // CR 122.1d: data-carrying (CounterType); consumed by direct match
+            // in turns.rs counter_removal_blocked, never used as a HashMap key.
+            | StaticMode::CountersCantBeRemoved { .. }
             // Odyssey Burst-cycle (CR 201.2a): data-carrying (name alias);
             // consumed by direct match in filter.rs, never used as a HashMap key.
             | StaticMode::CountsAsNamed { .. }
@@ -2539,6 +2553,7 @@ impl StaticMode {
             | StaticMode::UntapsDuringEachOtherPlayersUntapStep
             | StaticMode::MaxUntapPerType { .. }
             | StaticMode::EntersWithAdditionalCounters { .. }
+            | StaticMode::CountersCantBeRemoved { .. }
             | StaticMode::CountsAsNamed { .. }
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::DamageNotRemovedDuringCleanup
@@ -2944,6 +2959,9 @@ impl fmt::Display for StaticMode {
                 count,
             } => {
                 write!(f, "EntersWithAdditionalCounters({counter_type:?},{count})")
+            }
+            StaticMode::CountersCantBeRemoved { ref counter_type } => {
+                write!(f, "CountersCantBeRemoved({counter_type:?})")
             }
             StaticMode::LinkedCollectionCounterPlayPermission => {
                 write!(f, "LinkedCollectionCounterPlayPermission")
@@ -3473,6 +3491,10 @@ impl FromStr for StaticMode {
                     // form uses the Debug rendering of `CounterType`, which has no
                     // FromStr inverse; round-trip is diagnostic-only and callers
                     // read the typed field. Mirrors MaximumHandSize / SuppressTriggers.
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if other.starts_with("CountersCantBeRemoved(") {
+                    // CR 122.1d: Data-carrying (CounterType). Same diagnostic-only
+                    // round-trip as EntersWithAdditionalCounters above.
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other
                     .strip_prefix("CantCastDuring(")

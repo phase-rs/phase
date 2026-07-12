@@ -1633,6 +1633,8 @@ impl GameRunner {
             WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",
             WaitingFor::PairChoice { .. } => "PairChoice",
             WaitingFor::OpponentMayChoice { .. } => "OpponentMayChoice",
+            WaitingFor::LoopShortcut { .. } => "LoopShortcut",
+            WaitingFor::RespondToShortcut { .. } => "RespondToShortcut",
             WaitingFor::TributeChoice { .. } => "TributeChoice",
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",

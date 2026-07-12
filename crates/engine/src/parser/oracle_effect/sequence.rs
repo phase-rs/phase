@@ -30,7 +30,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -640,7 +640,7 @@ fn target_filter_uses_chosen_card_predicate(filter: &TargetFilter) -> bool {
     }
 }
 
-fn deepest_effect(ability: &AbilityDefinition) -> &Effect {
+pub(super) fn deepest_effect(ability: &AbilityDefinition) -> &Effect {
     let mut cursor = ability;
     while let Some(sub) = cursor.sub_ability.as_deref() {
         cursor = sub;
@@ -2228,13 +2228,29 @@ fn starts_they_continuous_clause_lower(input: &str) -> OracleResult<'_, ()> {
 /// ("creature you control", "creature an opponent controls") up to the verb.
 fn starts_target_continuous_clause_lower(s: &str) -> OracleResult<'_, ()> {
     let (rest, _) = tag("target ").parse(s)?;
-    alt((
+    // CR 601.2c: the continuous-modification verb must live in the SAME sentence
+    // as this "target <noun>" subject. Bound the verb scan to before the first
+    // sentence-ending period so a "gets/gains/has/loses" in a LATER sentence is
+    // not pulled back onto this subject. Otherwise the second target of a
+    // two-target DECLARATION — "Choose target creature you control and target
+    // creature you don't control. The creature you control gets +1/+1 ..."
+    // (Tail Swipe / Joust / Blizzard Brawl, #4751) — is mis-read as a
+    // "target <noun> gets +1/+1" continuous clause and the declaration is split,
+    // dropping the second target slot. The verb scan runs on the bounded
+    // segment but the arm still returns `rest` (standard nom discipline; the
+    // boolean caller ignores the remainder).
+    let segment = match take_until::<_, _, OracleError<'_>>(". ").parse(rest) {
+        Ok((_, seg)) => seg,
+        Err(_) => rest,
+    };
+    let _ = alt((
         value((), (take_until(" gets "), tag(" gets "))),
         value((), (take_until(" gains "), tag(" gains "))),
         value((), (take_until(" has "), tag(" has "))),
         value((), (take_until(" loses "), tag(" loses "))),
     ))
-    .parse(rest)
+    .parse(segment)?;
+    Ok((rest, ()))
 }
 
 /// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: a second "each opponent"/"each
@@ -3572,7 +3588,9 @@ pub(super) fn apply_clause_continuation(
                 }
             }
         }
-        ContinuationAst::ExcessDamageToController => {
+        ContinuationAst::ExcessDamageToController {
+            source_keyword_condition,
+        } => {
             // CR 120.4a + CR 608.2c: bind the nearest DealDamage and attach the
             // excess-redirect rider. The clause may not be adjacent to the DealDamage
             // effect, mirroring the CantRegenerate walk above — so this is a role, not
@@ -3592,9 +3610,16 @@ pub(super) fn apply_clause_continuation(
             );
             if let Some(bound_index) = bound {
                 let def = &mut defs[bound_index];
-                match &mut *def.effect {
+                // CR 608.2c: `def` itself may be the `TargetOnly` head of a
+                // Ram Through-class "Target creature you control deals
+                // damage..." clause, with `DealDamage` nested as its
+                // `sub_ability` — unwrap the same way `def_is_damage_dealer`
+                // detected membership.
+                match super::damage_dealer_effect_mut(def) {
                     Effect::DealDamage { excess, .. } => {
-                        *excess = Some(ExcessRecipient::TargetController);
+                        *excess = Some(ExcessRecipient::TargetController {
+                            source_keyword: source_keyword_condition,
+                        });
                     }
                     _ => unreachable!(),
                 }
@@ -4562,7 +4587,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::CantRegenerate => true,
         // CR 120.4a: recognition was gated on a preceding DealDamage, so the
         // rider is always absorbed into that effect (never a standalone effect).
-        ContinuationAst::ExcessDamageToController => true,
+        ContinuationAst::ExcessDamageToController { .. } => true,
         ContinuationAst::PutRest { .. } => true,
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::SearchRevealResult => true,
@@ -5836,6 +5861,34 @@ pub(crate) fn is_moved_object_put_onto_battlefield_counters_clause(sentence: &st
     nom_primitives::scan_contains(body, "counter")
 }
 
+/// CR 120.4a + CR 608.2c + CR 702: Parse an excess-damage redirect rider,
+/// with an optional source-keyword condition such as Ram Through's "If the
+/// creature you control has trample" prefix. The body remains the same
+/// CR 120.4a redirect; only the source-keyword gate is optional.
+fn parse_excess_damage_to_controller_rider(input: &str) -> OracleResult<'_, Option<KeywordKind>> {
+    /// CR 608.2c + CR 702: Parse the source-referential keyword gate.
+    fn parse_source_keyword_condition(input: &str) -> OracleResult<'_, KeywordKind> {
+        // This is not parse_inner_condition: Ram Through's definite phrase
+        // refers to the damage source target selected by the preceding sentence,
+        // not to any matching creature on the battlefield.
+        let (input, _) = tag("if ").parse(input)?;
+        let (input, _) = tag("the creature you control has ").parse(input)?;
+        let (input, keyword_name) = parse_keyword_name(input)?;
+        let keyword: Keyword = keyword_name
+            .parse()
+            .map_err(|_| nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::Fail)))?;
+        let (input, _) = tag(", ").parse(input)?;
+        Ok((input, keyword.kind()))
+    }
+
+    let (input, source_keyword_condition) = opt(parse_source_keyword_condition).parse(input)?;
+    let (input, _) =
+        tag("excess damage is dealt to that creature's controller instead").parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    let (input, _) = eof(input)?;
+    Ok((input, source_keyword_condition))
+}
+
 pub(super) fn parse_followup_continuation_ast(
     text: &str,
     previous_effect: &Effect,
@@ -6334,21 +6387,16 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::CantRegenerate)
         }
-        // CR 120.4a: "Excess damage is dealt to that creature's controller
-        // instead." — trailing rider on a `DealDamage` (Flame Spill, Gandalf's
-        // Sanction, Ravenous Tyrannosaurus). The two negative guards defer the
-        // conditional / trample-gated form (Ram Through: "If the creature you
-        // control has trample, excess ...") to `Effect::Unimplemented` — that
-        // form requires a controlled-source trample check we do not model here.
-        Effect::DealDamage { .. }
-            if nom_primitives::scan_contains(&lower, "excess damage")
-                && nom_primitives::scan_contains(&lower, "that creature's controller")
-                && nom_primitives::scan_contains(&lower, "instead")
-                && !nom_primitives::scan_contains(&lower, "has trample")
-                && !nom_primitives::scan_contains(&lower, "if ") =>
-        {
-            Some(ContinuationAst::ExcessDamageToController)
-        }
+        // CR 120.4a + CR 608.2c + CR 702: excess-damage redirect rider on a
+        // `DealDamage` (Flame Spill, Gandalf's Sanction, Ravenous Tyrannosaurus),
+        // optionally source-keyword-gated (Ram Through's "If the creature you
+        // control has trample" prefix). The combinator owns the full rider shape
+        // so unrelated "if" clauses or partial excess-damage fragments fail closed.
+        Effect::DealDamage { .. } => parse_excess_damage_to_controller_rider(&lower)
+            .ok()
+            .map(|(_, source_keyword_condition)| ContinuationAst::ExcessDamageToController {
+                source_keyword_condition,
+            }),
         Effect::ChooseFromZone { .. } if parse_put_rest_on_bottom_line(&lower).is_ok() => {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
         }
@@ -9193,7 +9241,9 @@ mod tests {
         let env = env_for(&defs);
         apply_clause_continuation(
             &mut defs,
-            ContinuationAst::ExcessDamageToController,
+            ContinuationAst::ExcessDamageToController {
+                source_keyword_condition: None,
+            },
             AbilityKind::Spell,
             &env,
         );
@@ -9203,7 +9253,9 @@ mod tests {
         };
         assert_eq!(
             *excess,
-            Some(ExcessRecipient::TargetController),
+            Some(ExcessRecipient::TargetController {
+                source_keyword: None
+            }),
             "the rider must walk back to the DealDamage at index 0 — `LastEmitted` \
              would have bound the intervening def at index 1"
         );

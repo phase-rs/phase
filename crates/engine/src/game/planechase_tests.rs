@@ -26,7 +26,7 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
-use crate::types::triggers::TriggerMode;
+use crate::types::triggers::{PlaneswalkRole, TriggerMode};
 use crate::types::zones::Zone;
 use std::str::FromStr;
 
@@ -46,21 +46,25 @@ fn synthesized_planar_face(
     face
 }
 
-/// A `PlaneswalkedFrom` trigger that draws a card (its `valid_target` is
-/// `Controller`, like the parser emits).
+/// A `Planeswalked { role: From }` trigger that draws a card (its `valid_target`
+/// is `Controller`, like the parser emits).
 fn planeswalked_from_trigger() -> TriggerDefinition {
-    TriggerDefinition::new(TriggerMode::PlaneswalkedFrom)
-        .valid_card(TargetFilter::SelfRef)
-        .valid_target(TargetFilter::Controller)
-        .execute(draw_ability())
+    TriggerDefinition::new(TriggerMode::Planeswalked {
+        role: PlaneswalkRole::From,
+    })
+    .valid_card(TargetFilter::SelfRef)
+    .valid_target(TargetFilter::Controller)
+    .execute(draw_ability())
 }
 
-/// A `PlaneswalkedTo` trigger that draws a card.
+/// A `Planeswalked { role: To }` trigger that draws a card.
 fn planeswalked_to_trigger() -> TriggerDefinition {
-    TriggerDefinition::new(TriggerMode::PlaneswalkedTo)
-        .valid_card(TargetFilter::SelfRef)
-        .valid_target(TargetFilter::Controller)
-        .execute(draw_ability())
+    TriggerDefinition::new(TriggerMode::Planeswalked {
+        role: PlaneswalkRole::To,
+    })
+    .valid_card(TargetFilter::SelfRef)
+    .valid_target(TargetFilter::Controller)
+    .execute(draw_ability())
 }
 
 /// A `ChaosEnsues` trigger that draws a card.
@@ -243,6 +247,147 @@ fn planeswalk_rotates_deck_and_command_zone() {
     );
 }
 
+/// CR 311.2 / CR 901.7 / CR 701.31b: `StaticCondition::SourceIsFaceUp` is true
+/// for the active (face-up) plane and flips false the instant that plane is
+/// planeswalked away and turned face down. This is the enabling condition for The
+/// Doctor's Childhood Barn's "can't phase in for as long as ~ remains face up"
+/// lock — proving the lock lapses on planeswalk (so the delayed phase-in can
+/// succeed) and is not permanently stuck (the prior `Unrecognized`-is-always-true
+/// bug).
+#[test]
+fn source_is_face_up_flips_false_on_planeswalk_away() {
+    use crate::game::layers::evaluate_condition_for_test;
+    use crate::types::ability::StaticCondition;
+
+    let mut state = GameState::new_two_player(7);
+    let p0 = PlayerId(0);
+    let plane_a = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+    let plane_b = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+    let (barn_id, deck_ids) =
+        setup_planechase(&mut state, p0, ("Barn", &plane_a), &[("Plane B", &plane_b)]);
+
+    // While face up in the command zone, the Barn's SourceIsFaceUp is true and
+    // the incoming plane's is false.
+    assert!(
+        evaluate_condition_for_test(&state, &StaticCondition::SourceIsFaceUp, p0, barn_id),
+        "Barn is the active face-up plane"
+    );
+    assert!(
+        !evaluate_condition_for_test(&state, &StaticCondition::SourceIsFaceUp, p0, deck_ids[0]),
+        "a face-down plane in the planar deck is not face up"
+    );
+
+    // Planeswalk away: the Barn is turned face down and leaves the command zone.
+    let mut events = Vec::new();
+    planeswalk(&mut state, p0, &mut events);
+
+    assert!(
+        !evaluate_condition_for_test(&state, &StaticCondition::SourceIsFaceUp, p0, barn_id),
+        "Barn's SourceIsFaceUp must flip false after planeswalking away — the lock lapses"
+    );
+    assert!(
+        evaluate_condition_for_test(&state, &StaticCondition::SourceIsFaceUp, p0, deck_ids[0]),
+        "the newly promoted plane is now the active face-up plane"
+    );
+}
+
+/// CR 603.7a/b + CR 701.31 + CR 901.11: end-to-end firing proof for The Doctor's
+/// Childhood Barn's delayed phase-in. A `WhenNextEvent { Planeswalked { role: Any } }`
+/// delayed trigger (created via the real `delayed_trigger::resolve` snapshot
+/// path, mirroring the parsed AST) must (a) NOT fire on a non-planeswalk event
+/// and (b) fire and be consumed on a `Planeswalked` event — routing through the
+/// shared `delayed_trigger_event_with_index` → `trigger_matcher(Planeswalked { role: Any })`
+/// registry path and putting its `PhaseIn` ability on the stack.
+#[test]
+fn delayed_phase_in_fires_only_on_planeswalk() {
+    use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, ResolvedAbility,
+        TargetFilter, TargetRef,
+    };
+    use crate::types::ability::{DelayedTriggerLifetime, TriggerDefinition};
+
+    let mut state = GameState::new_two_player(7);
+    let p0 = PlayerId(0);
+    let plane_a = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+    let plane_b = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+    let (barn_id, _) =
+        setup_planechase(&mut state, p0, ("Barn", &plane_a), &[("Plane B", &plane_b)]);
+
+    // A phased-out opponent permanent the delayed trigger will phase back in.
+    let victim = crate::game::zones::create_object(
+        &mut state,
+        CardId(777),
+        PlayerId(1),
+        "Phased Victim".to_string(),
+        Zone::Battlefield,
+    );
+    if let Some(obj) = state.objects.get_mut(&victim) {
+        obj.phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+    }
+
+    // Create the delayed trigger exactly as the parsed Barn AST would, with the
+    // chosen permanent frozen into the snapshot (the ParentTarget population).
+    let inner = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PhaseIn {
+            target: TargetFilter::ParentTarget,
+        },
+    );
+    let create = ResolvedAbility::new(
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(TriggerDefinition::new(TriggerMode::Planeswalked {
+                    role: PlaneswalkRole::Any,
+                })),
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::Persistent,
+            },
+            effect: Box::new(inner),
+            uses_tracked_set: false,
+        },
+        vec![TargetRef::Object(victim)],
+        barn_id,
+        p0,
+    );
+    let mut events = Vec::new();
+    crate::game::effects::delayed_trigger::resolve(&mut state, &create, &mut events).unwrap();
+    assert_eq!(state.delayed_triggers.len(), 1, "delayed trigger created");
+
+    // A non-planeswalk event must NOT fire the persistent delayed trigger.
+    crate::game::triggers::check_delayed_triggers(
+        &mut state,
+        &[GameEvent::PhaseChanged { phase: Phase::End }],
+    );
+    assert_eq!(
+        state.delayed_triggers.len(),
+        1,
+        "non-planeswalk event must not fire the delayed phase-in"
+    );
+
+    // A planeswalk fires the one-shot delayed trigger (consumed) and stacks the
+    // PhaseIn ability.
+    let stack_before = state.stack.len();
+    crate::game::triggers::check_delayed_triggers(
+        &mut state,
+        &[GameEvent::Planeswalked {
+            player_id: p0,
+            from: Some(barn_id),
+            to: None,
+        }],
+    );
+    assert!(
+        state.delayed_triggers.is_empty(),
+        "Planeswalked {{ role: Any }} event fires and consumes the delayed phase-in"
+    );
+    assert!(
+        state.stack.len() > stack_before,
+        "the delayed PhaseIn ability was placed on the stack"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. planeswalk-away trigger fires via the command-zone scan (DISCRIMINATING)
 // ---------------------------------------------------------------------------
@@ -251,7 +396,7 @@ fn planeswalk_rotates_deck_and_command_zone() {
 fn planeswalk_away_trigger_fires_via_command_scan() {
     // DISCRIMINATING: fails if `synthesize_planechase` stops stamping
     // `trigger_zones = [Command]` (the command-zone scan would skip the plane's
-    // departing trigger) or if the `PlaneswalkedFrom` matcher is reverted.
+    // departing trigger) or if the `Planeswalked { role: From }` matcher is reverted.
     let mut state = GameState::new_two_player(7);
     let p0 = PlayerId(0);
     let plane_a =
@@ -687,7 +832,9 @@ fn synthesize_planechase_appends_command_zone() {
     // Guard for Finding 3: `synthesize_planechase` must PUSH Zone::Command onto
     // any pre-existing zone list, not overwrite it. A trigger/static that already
     // designated another zone must keep it and gain Command.
-    let mut trigger = TriggerDefinition::new(TriggerMode::PlaneswalkedFrom);
+    let mut trigger = TriggerDefinition::new(TriggerMode::Planeswalked {
+        role: PlaneswalkRole::From,
+    });
     trigger.trigger_zones = vec![Zone::Exile];
     let mut static_def = StaticDefinition::new(StaticMode::Continuous);
     static_def.active_zones = vec![Zone::Exile];
@@ -1187,7 +1334,7 @@ fn fixed_point_replaces_planar_die_planeswalk_with_chaos() {
     );
     // The continuation slot is drained (no leftover post-replacement effect).
     assert!(
-        state.post_replacement_continuation.is_none(),
+        !state.has_post_replacement_drain(),
         "the post-replacement continuation must be drained exactly once"
     );
 

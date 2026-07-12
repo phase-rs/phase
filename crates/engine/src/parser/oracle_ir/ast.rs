@@ -276,12 +276,13 @@ pub(crate) enum ContinuationAst {
     /// CR 701.19c: "It can't be regenerated" / "They can't be regenerated" — sets
     /// `cant_regenerate: true` on the preceding Destroy/DestroyAll effect.
     CantRegenerate,
-    /// CR 120.4a: "Excess damage is dealt to that creature's controller instead."
-    /// — sets `excess = Some(ExcessRecipient::TargetController)` on the preceding
-    /// `Effect::DealDamage` (Flame Spill, Gandalf's Sanction, Ravenous
-    /// Tyrannosaurus). The conditional / trample-gated form (Ram Through) is NOT
-    /// recognized and lowers to `Effect::Unimplemented` instead.
-    ExcessDamageToController,
+    /// CR 120.4a + CR 608.2c + CR 702: "Excess damage is dealt to that
+    /// creature's controller instead" patches the preceding `DealDamage`; an
+    /// optional source-keyword gate covers Ram Through's "If the creature you
+    /// control has trample" prefix without making the damage itself conditional.
+    ExcessDamageToController {
+        source_keyword_condition: Option<crate::types::keywords::KeywordKind>,
+    },
     /// "Choose one/N of them" / "An opponent chooses one/N of those cards" after a ChangeZone
     /// to exile → ChooseFromZone { count, zone: Exile, chooser }.
     ChooseFromExile {
@@ -1488,6 +1489,13 @@ pub(crate) enum ZoneCounterImperativeAst {
         /// ("exile a card … with N <type> counters on it"). Empty for the
         /// common no-counter case. Mirrors `Effect::ChangeZone.enter_with_counters`.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// CR 700.4 (#5649): a counted graveyard exile — "exile <N> cards from
+        /// your graveyard" (Nefarious Lich: "exile that many cards … instead").
+        /// `Effect::ChangeZone` carries no count, so the quantity rides the
+        /// clause's `MultiTargetSpec` (mirroring Forage), threaded at lowering by
+        /// `lower_imperative_family_ast`. `None` for the ordinary single-object
+        /// exile.
+        multi_target: Option<MultiTargetSpec>,
     },
     ExileTop {
         player: TargetFilter,

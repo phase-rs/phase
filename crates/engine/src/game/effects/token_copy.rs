@@ -561,7 +561,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             };
             match crate::game::replacement::replace_event(state, proposed, events) {
                 crate::game::replacement::ReplacementResult::Execute(event) => {
-                    if state.post_replacement_continuation.is_some() {
+                    if state.has_post_replacement_drain() {
                         if let Some(waiting_for) =
                             crate::game::engine_replacement::apply_pending_post_replacement_effect(
                                 state,

@@ -1027,6 +1027,42 @@ pub fn has_meaningful_priority_action(state: &GameState, actions: &[GameAction])
         || has_activatable_sacrifice_for_mana(state)
 }
 
+/// PR-7 Phase 4c (LOW-2): CR 732.2b/c + CR 104.4b — an AI opponent polled on an
+/// OPTIONAL loop shortcut. The offer is raised only for optional loops the polled
+/// player CAN break (a Path A optional drain, `WaitingFor::LoopShortcut`); the win
+/// is a loss condition for every polled opponent (single-faller: see
+/// `interactive_loop_bridge`'s Path A gate, CR 104.2a). SELF-PRESERVATION: if this
+/// player has a meaningful priority action (a way to break the loop), name
+/// `Shorten{0}` — the engine realizes Shorten as a real `WaitingFor::Priority`
+/// window (`game::engine::apply_action`'s `RespondToShortcut(Shorten)` arm) where
+/// it can act — rather than Accept its own loss. No meaningful action ⇒ Accept
+/// (nothing to do). Single authority for all 3 `RespondToShortcut` emission sites
+/// (engine `candidates.rs` + phase-ai `projection.rs`/`search.rs`) so the
+/// self-preservation heuristic can't drift between them. Reuses the exact
+/// `no_living_player_has_meaningful_priority_action` probe recipe
+/// (`game::engine`), scoped to the single polled player.
+pub fn smart_shortcut_response(
+    state: &GameState,
+    polled_player: PlayerId,
+) -> crate::analysis::loop_check::ShortcutResponse {
+    let mut probe_state = state.clone();
+    probe_state.auto_pass.clear();
+    probe_state.priority_player = polled_player;
+    probe_state.waiting_for = WaitingFor::Priority {
+        player: polled_player,
+    };
+    layers::flush_layers(&mut probe_state);
+    let probe = casting::PriorityCastProbe::from_flushed_state(probe_state, polled_player);
+    let actions = flat_priority_actions_with_probe(probe.state(), Some(&probe));
+    if has_meaningful_priority_action(probe.state(), &actions) {
+        // CR 732.2b: name an earlier stopping point — take my window instead of losing.
+        crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration: 0 }
+    } else {
+        // CR 732.2c: nothing to do — agree to take the shortcut.
+        crate::analysis::loop_check::ShortcutResponse::Accept
+    }
+}
+
 fn auto_passes_initial_priority_by_default(state: &GameState) -> bool {
     state.stack.is_empty() && matches!(state.phase, Phase::Upkeep | Phase::Draw)
 }
