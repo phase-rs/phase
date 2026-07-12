@@ -4038,6 +4038,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceIsPaired => "source is paired".into(),
         SC::SourceInZone { zone } => format!("source is in {}", fmt_zone(zone)),
         SC::EnchantedIsFaceDown => "enchanted creature is face-down".into(),
+        SC::SourceIsFaceUp => "source plane is face up".into(),
         SC::AdditionalCostPaid => "additional cost was paid".into(),
         SC::CastingAsVariant { variant } => format!("casting as {variant:?}"),
         SC::None => "none".into(),
@@ -7448,6 +7449,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         // object's zone against the specified zone. Runtime-handled.
         StaticCondition::SourceInZone { .. } => ("SourceInZone", Handled),
         StaticCondition::EnchantedIsFaceDown => ("EnchantedIsFaceDown", Handled),
+        // CR 311.2 / CR 901.7: evaluated by `layers::evaluate_condition` against
+        // the command-zone active plane. Runtime-handled.
+        StaticCondition::SourceIsFaceUp => ("SourceIsFaceUp", Handled),
         StaticCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
         StaticCondition::CastingAsVariant { .. } => ("CastingAsVariant", Handled),
     }

@@ -125,6 +125,8 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         // CR 701.31d: planeswalked-away-from / planeswalked-to (encounter) endpoints.
         TriggerMode::PlaneswalkedFrom => match_planeswalked_from,
         TriggerMode::PlaneswalkedTo => match_planeswalked_to,
+        // CR 701.31 / CR 901.11: source-independent "a player planeswalks".
+        TriggerMode::PlayerPlaneswalked => match_player_planeswalked,
         // CR 904.9 / CR 701.32b: "When you set this scheme in motion" fires for
         // the scheme set in motion.
         TriggerMode::SetInMotion => match_set_in_motion,
@@ -394,6 +396,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::ChaosEnsues, match_chaos_ensues);
     r.insert(TriggerMode::PlaneswalkedFrom, match_planeswalked_from);
     r.insert(TriggerMode::PlaneswalkedTo, match_planeswalked_to);
+    r.insert(TriggerMode::PlayerPlaneswalked, match_player_planeswalked);
     // CR 904.9 / CR 701.32b / CR 701.33b: Archenemy scheme triggers
     r.insert(TriggerMode::SetInMotion, match_set_in_motion);
     r.insert(TriggerMode::Abandoned, match_abandoned);
@@ -4101,6 +4104,23 @@ pub(super) fn match_planeswalked_to(
     }
 }
 
+/// CR 701.31 / CR 901.11: "Whenever a player planeswalks" — fires for ANY
+/// planeswalk event, regardless of which plane is left or entered
+/// (source-independent, unlike `match_planeswalked_from`/`_to` which key off the
+/// `from`/`to` endpoint being the source). The Doctor's Childhood Barn's delayed
+/// phase-in trigger keys off this. The default (`valid_target: None`)
+/// `TriggerDefinition` matches every player; `valid_player_matches` narrows it if
+/// a player filter is ever attached.
+pub(super) fn match_player_planeswalked(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::Planeswalked { player_id, .. }
+        if valid_player_matches(trigger, state, *player_id, source_id))
+}
+
 /// CR 904.9 / CR 701.32b: "When you set this scheme in motion" — fires for the
 /// scheme set in motion; "you" resolves to the archenemy via the scheme's
 /// controller (stamped in `archenemy::set_in_motion`).
@@ -4755,6 +4775,46 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    /// CR 701.31 / CR 901.11: the source-independent "a player planeswalks" matcher
+    /// fires for ANY `Planeswalked` event regardless of which plane is the `from`
+    /// or `to` endpoint (unlike `match_planeswalked_from`/`_to`), and ignores
+    /// non-planeswalk events. Building block for The Doctor's Childhood Barn's
+    /// delayed phase-in.
+    #[test]
+    fn match_player_planeswalked_fires_for_any_planeswalk() {
+        let state = setup();
+        let trigger = make_trigger(TriggerMode::PlayerPlaneswalked);
+        // A different card is the source; the matcher must not require the source
+        // to be either endpoint.
+        let source_id = ObjectId(99);
+
+        // Fires for a plain planeswalk with unrelated endpoints.
+        let ev = GameEvent::Planeswalked {
+            player_id: PlayerId(0),
+            from: Some(ObjectId(10)),
+            to: Some(ObjectId(11)),
+        };
+        assert!(match_player_planeswalked(&ev, &trigger, source_id, &state));
+
+        // Fires even when both endpoints are absent (e.g. empty deck edge cases).
+        let ev_empty = GameEvent::Planeswalked {
+            player_id: PlayerId(1),
+            from: None,
+            to: None,
+        };
+        assert!(match_player_planeswalked(
+            &ev_empty, &trigger, source_id, &state
+        ));
+
+        // Does NOT fire for a non-planeswalk event.
+        let other = GameEvent::ChaosEnsued {
+            plane_id: source_id,
+        };
+        assert!(!match_player_planeswalked(
+            &other, &trigger, source_id, &state
+        ));
     }
 
     #[test]

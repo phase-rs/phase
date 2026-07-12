@@ -4379,6 +4379,10 @@ pub(crate) fn static_condition_to_ability_condition(
         | StaticCondition::CompletedADungeon
         | StaticCondition::ControlsCommander { .. }
         | StaticCondition::EnchantedIsFaceDown
+        // CR 311.2 / CR 901.7: plane face-up status is a duration-only continuous-
+        // effect condition (evaluated in the layer system), never an
+        // effect-resolution-time `AbilityCondition` — lowering returns `None`.
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::SourceControllerEquals { .. }
         // CR 702.166a: Bargain payment is a cost-determination predicate with no
         // effect-resolution (`AbilityCondition`) equivalent.

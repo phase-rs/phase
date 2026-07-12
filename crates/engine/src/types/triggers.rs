@@ -459,6 +459,11 @@ pub enum TriggerMode {
     PlanarDice,
     PlaneswalkedFrom,
     PlaneswalkedTo,
+    /// CR 701.31 + CR 901.11: "Whenever a player planeswalks" — fires for ANY
+    /// planeswalk event, source-independent (unlike `PlaneswalkedFrom`/`To`,
+    /// which bind the source plane to the `from`/`to` endpoint of the event).
+    /// The Doctor's Childhood Barn keys its delayed phase-in off this event.
+    PlayerPlaneswalked,
     ChaosEnsues,
 
     // Dice / coin
@@ -706,6 +711,7 @@ impl FromStr for TriggerMode {
             "PlanarDice" => TriggerMode::PlanarDice,
             "PlaneswalkedFrom" => TriggerMode::PlaneswalkedFrom,
             "PlaneswalkedTo" => TriggerMode::PlaneswalkedTo,
+            "PlayerPlaneswalked" => TriggerMode::PlayerPlaneswalked,
             "Proliferate" => TriggerMode::Proliferate,
             "Revealed" => TriggerMode::Revealed,
             "RingTemptsYou" => TriggerMode::RingTemptsYou,
@@ -832,6 +838,20 @@ mod tests {
         assert_eq!(
             TriggerMode::from_str("LoyaltyAbilityActivated").unwrap(),
             TriggerMode::LoyaltyAbilityActivated
+        );
+    }
+
+    /// CR 701.31 / CR 901.11: the source-independent planar planeswalk mode must
+    /// survive Display -> from_str without degrading to `Unknown` (a missing
+    /// `from_str` arm would silently no-fire the Barn's delayed phase-in). Also
+    /// guards the `all_modes` validation list.
+    #[test]
+    fn player_planeswalked_mode_string_round_trips() {
+        let mode = TriggerMode::PlayerPlaneswalked;
+        assert_eq!(mode.to_string(), "PlayerPlaneswalked");
+        assert_eq!(
+            TriggerMode::from_str("PlayerPlaneswalked").unwrap(),
+            TriggerMode::PlayerPlaneswalked
         );
     }
 
@@ -995,6 +1015,7 @@ mod tests {
             "PlanarDice",
             "PlaneswalkedFrom",
             "PlaneswalkedTo",
+            "PlayerPlaneswalked",
             "Proliferate",
             "Revealed",
             "RingTemptsYou",

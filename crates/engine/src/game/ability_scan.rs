@@ -3024,6 +3024,7 @@ fn scan_static_condition(x: &StaticCondition) -> Axes {
         StaticCondition::SourceIsPaired => Axes::NONE,
         StaticCondition::SourceInZone { zone: _ } => Axes::NONE,
         StaticCondition::EnchantedIsFaceDown => Axes::NONE,
+        StaticCondition::SourceIsFaceUp => Axes::NONE,
         StaticCondition::AdditionalCostPaid => Axes::NONE,
         StaticCondition::CastingAsVariant { variant: _ } => Axes::NONE,
         StaticCondition::None => Axes::NONE,

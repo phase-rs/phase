@@ -1975,6 +1975,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::ControlsCommander { .. }
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
@@ -6047,6 +6048,10 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceInZone { .. }
+        // CR 311.2: the source plane's face-up status is a source-object status
+        // read (command-zone membership), grouped with the other frozen source
+        // status flags (saddled/monstrous/…).
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::WasStartingPlayer { .. } => frozen_source_read(),
         StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::RecipientMatchesFilter { .. }

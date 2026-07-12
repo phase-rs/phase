@@ -6797,6 +6797,15 @@ pub enum StaticCondition {
     IsTapped {
         scope: ObjectScope,
     },
+    /// CR 311.2 + CR 901.7 + CR 611.2b: True while the source plane/phenomenon is
+    /// the active FACE-UP card in the command zone (`planechase::active_plane`).
+    /// A player planeswalking away (CR 701.31b) turns it face down and moves it to
+    /// the planar deck, so any `ForAsLongAs { SourceIsFaceUp }` continuous effect
+    /// (The Doctor's Childhood Barn's "can't phase in for as long as ~ remains
+    /// face up") ends. This is the planar face-up status (a command-zone state,
+    /// CR 311.2/901.7), NOT morph face-up (a per-object `face_down` flag, CR 708 —
+    /// see `EnchantedIsFaceDown`). Negation is `Not { Box::new(SourceIsFaceUp) }`.
+    SourceIsFaceUp,
     /// CR 702.171b: True when the source permanent is saddled. Negation via Not { SourceIsSaddled }.
     SourceIsSaddled,
     /// CR 702.62a + CR 611.2b: True when the source object's current controller

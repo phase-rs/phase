@@ -1168,6 +1168,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::PlanarDice
         | TriggerMode::PlaneswalkedFrom
         | TriggerMode::PlaneswalkedTo
+        | TriggerMode::PlayerPlaneswalked
         | TriggerMode::ChaosEnsues
         | TriggerMode::RolledDie
         | TriggerMode::RolledDieOnce

@@ -884,6 +884,10 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::EnchantedIsFaceDown
+        // CR 311.2: plane face-up status is command-zone state, never
+        // battlefield-population-dependent and unperturbed by a battlefield
+        // entry — `false` exactly like `SourceIsTapped`.
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
@@ -1013,6 +1017,10 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::EnchantedIsFaceDown
+        // CR 311.2: plane face-up status is command-zone state, never
+        // battlefield-population-dependent and unperturbed by a battlefield
+        // entry — `false` exactly like `SourceIsTapped`.
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
@@ -1231,6 +1239,14 @@ fn evaluate_condition_with_context(
         // Callous Oppressor dying while tapped) fails this predicate and any
         // `ForAsLongAs { SourceIsTapped }` continuous effect (gain-control, etc.) ends.
         StaticCondition::SourceIsTapped => eval_source_is_tapped_on_battlefield(state, source_id),
+        // CR 311.2 / CR 901.7 / CR 701.31b: the source plane/phenomenon is face up
+        // iff it is the active plane in the command zone. Planeswalking away turns
+        // it face down and removes it from the command zone (CR 701.31b), so this
+        // flips false and any `ForAsLongAs { SourceIsFaceUp }` continuous effect
+        // (the Barn's "can't phase in ... face up" lock) ends.
+        StaticCondition::SourceIsFaceUp => {
+            crate::game::planechase::active_plane(state) == Some(source_id)
+        }
         // CR 110.5b + CR 110.5d: scope-parameterized tap check (the non-source
         // sibling of `SourceIsTapped`). Resolve the scope to a concrete object,
         // then reuse the same zone-guarded battlefield tap predicate. The parser

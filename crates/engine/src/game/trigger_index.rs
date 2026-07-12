@@ -336,6 +336,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::PlanarDice
         | TriggerMode::PlaneswalkedFrom
         | TriggerMode::PlaneswalkedTo
+        | TriggerMode::PlayerPlaneswalked
         | TriggerMode::ChaosEnsues => return (keys, true),
 
         // --- Dice / coin ---
