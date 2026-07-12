@@ -2275,6 +2275,54 @@ pub(crate) fn any_active_static_reads_zone_membership(state: &GameState, zone: Z
     found
 }
 
+/// True when `condition` (recursively through the And/Or/Not combinators) reads
+/// the top card of a library — `StaticCondition::TopOfLibraryMatches`.
+fn static_condition_reads_top_of_library(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::TopOfLibraryMatches { .. } => true,
+        StaticCondition::Not { condition } => static_condition_reads_top_of_library(condition),
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            conditions.iter().any(static_condition_reads_top_of_library)
+        }
+        _ => false,
+    }
+}
+
+/// CR 401.5 + CR 611.3a: True when any active continuous static is gated on the
+/// top card of a library (`TopOfLibraryMatches`, Vampire Nocturnus). The
+/// continuous effect isn't locked in (CR 611.3a), so a library-top change must
+/// re-evaluate it — but only when such a static is live, so routine library
+/// churn (draws, mills, shuffles with no top-gated static) stays cheap. Mirrors
+/// `any_active_static_reads_zone_membership`.
+pub(crate) fn any_active_static_reads_top_of_library(state: &GameState) -> bool {
+    let mut found = false;
+    for_each_static_effect_source(state, |_state, obj| {
+        if found {
+            return;
+        }
+        if obj.static_definitions.iter_all().any(|def| {
+            def.mode == StaticMode::Continuous
+                && def
+                    .condition
+                    .as_ref()
+                    .is_some_and(static_condition_reads_top_of_library)
+        }) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// CR 401.5 + CR 611.3a: Force a full layer recompute after a library-top-changing
+/// event (shuffle, mill, put-on-top, draw), but only when a `TopOfLibraryMatches`
+/// static is actually live. Single authority called by every top-changing library
+/// move and shuffle helper so a stale layer cache can't survive the change.
+pub(crate) fn mark_layers_full_if_top_of_library_static_live(state: &mut GameState) {
+    if any_active_static_reads_top_of_library(state) {
+        mark_layers_full(state);
+    }
+}
+
 /// Mark the layer system as requiring a FULL battlefield re-evaluation. The
 /// conservative escalation used by every mutation other than a battlefield entry.
 pub fn mark_layers_full(state: &mut GameState) {
@@ -12255,6 +12303,155 @@ mod tests {
             PlayerId(0),
             source
         ));
+    }
+
+    /// CR 401.5 + CR 611.3a production-path harness: a battlefield permanent whose
+    /// continuous static grants itself Flying as long as the top card of its
+    /// controller's library is black (the Vampire Nocturnus shape). The library
+    /// starts black-on-top (`black`) over `white`. Returns
+    /// (state, permanent, black, white).
+    fn top_gated_flying_scenario() -> (GameState, ObjectId, ObjectId, ObjectId) {
+        let mut state = setup();
+        let permanent = make_creature(&mut state, "Vampire Nocturnus", 2, 2, PlayerId(0));
+        {
+            let def = StaticDefinition::new(StaticMode::Continuous)
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }])
+                .condition(StaticCondition::TopOfLibraryMatches {
+                    filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::HasColor {
+                            color: ManaColor::Black,
+                        },
+                    ])),
+                });
+            state
+                .objects
+                .get_mut(&permanent)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+        let black = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Black Card".to_string(),
+            Zone::Library,
+        );
+        let white = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "White Card".to_string(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&black).unwrap().color = vec![ManaColor::Black];
+        state.objects.get_mut(&white).unwrap().color = vec![ManaColor::White];
+        {
+            let p0 = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == PlayerId(0))
+                .unwrap();
+            p0.library.retain(|&id| id != black && id != white);
+            p0.library.push_back(white); // beneath
+            p0.library.push_front(black); // CR 401.1: front() == top.
+        }
+        (state, permanent, black, white)
+    }
+
+    fn has_flying(state: &GameState, id: ObjectId) -> bool {
+        state
+            .objects
+            .get(&id)
+            .unwrap()
+            .has_keyword(&Keyword::Flying)
+    }
+
+    // CR 401.5 + CR 611.3a: a `Library → Graveyard` mill of the black top card
+    // must re-evaluate the top-gated static through the real `move_to_zone` path,
+    // not leave the granted Flying stale.
+    #[test]
+    fn top_of_library_static_reevaluated_after_mill_to_graveyard() {
+        let (mut state, vampire, black, _white) = top_gated_flying_scenario();
+        flush_layers(&mut state);
+        assert!(has_flying(&state, vampire), "black top → Flying granted");
+
+        let mut events = vec![];
+        crate::game::zones::move_to_zone(&mut state, black, Zone::Graveyard, &mut events);
+        flush_layers(&mut state);
+        assert!(
+            !has_flying(&state, vampire),
+            "after milling the black top away, the white top must strip Flying"
+        );
+    }
+
+    // CR 401.5 + CR 611.3a: placing a white card on top via `move_to_library_at_index`
+    // (the put-on-top path that bypasses `move_to_zone`) must recompute the static.
+    #[test]
+    fn top_of_library_static_reevaluated_after_put_on_top() {
+        let (mut state, vampire, _black, _white) = top_gated_flying_scenario();
+        flush_layers(&mut state);
+        assert!(has_flying(&state, vampire), "black top → Flying granted");
+
+        let white_top = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "New White".to_string(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&white_top).unwrap().color = vec![ManaColor::White];
+        let mut events = vec![];
+        crate::game::zones::move_to_library_at_index(&mut state, white_top, Some(0), &mut events);
+        flush_layers(&mut state);
+        assert!(
+            !has_flying(&state, vampire),
+            "a white card put on top must strip Flying"
+        );
+    }
+
+    // CR 401.5 + CR 611.3a: a real shuffle reorders the library, so the static is
+    // no longer locked in. The shuffle must invalidate layers, and after a flush
+    // the granted Flying must match whatever card is actually on top now.
+    #[test]
+    fn top_of_library_static_reevaluated_after_shuffle() {
+        let (mut state, vampire, _black, _white) = top_gated_flying_scenario();
+        flush_layers(&mut state);
+        assert!(has_flying(&state, vampire), "black top → Flying granted");
+
+        let mut events = vec![];
+        crate::game::effects::change_zone::shuffle_library(&mut state, PlayerId(0), &mut events);
+        // The shuffle alone must force a recompute — a stale clean cache would
+        // otherwise survive the reorder.
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "shuffle must invalidate layers while a top-gated static is live"
+        );
+        flush_layers(&mut state);
+
+        let top_is_black = state
+            .players
+            .iter()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap()
+            .library
+            .front()
+            .is_some_and(|&id| {
+                state
+                    .objects
+                    .get(&id)
+                    .unwrap()
+                    .color
+                    .contains(&ManaColor::Black)
+            });
+        assert_eq!(
+            has_flying(&state, vampire),
+            top_is_black,
+            "after shuffle + flush, Flying must match the recomputed top card, not the stale one"
+        );
     }
 
     // --- CR 305.7: SetBasicLandType tests ---

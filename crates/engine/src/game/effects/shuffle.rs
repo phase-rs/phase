@@ -76,6 +76,14 @@ pub fn resolve(
         crate::util::im_ext::shuffle_vector(&mut player.library, rng);
     }
 
+    // CR 401.5 + CR 611.3a: shuffling reorders the library, changing its top
+    // card, so a continuous static gated on the top (`TopOfLibraryMatches`) must
+    // be re-evaluated. Only when the shuffle actually happened and such a static
+    // is live (the helper self-gates).
+    if !suppressed {
+        crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+    }
+
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Shuffle,
         source_id: ability.source_id,

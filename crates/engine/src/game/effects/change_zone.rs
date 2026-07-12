@@ -151,10 +151,15 @@ pub(crate) fn resolve_search_continuation_attach_host(
 /// CR 701.24a: Shuffle a player's library using the game's seeded RNG.
 /// Reusable helper for auto-shuffle after zone moves to Library.
 pub fn shuffle_library(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
-    let GameState { players, rng, .. } = state;
-    if let Some(p) = players.iter_mut().find(|p| p.id == player) {
-        crate::util::im_ext::shuffle_vector(&mut p.library, rng);
+    {
+        let GameState { players, rng, .. } = state;
+        if let Some(p) = players.iter_mut().find(|p| p.id == player) {
+            crate::util::im_ext::shuffle_vector(&mut p.library, rng);
+        }
     }
+    // CR 401.5 + CR 611.3a: shuffling changes the library's top card, so a
+    // `TopOfLibraryMatches` static must be re-evaluated (self-gated on liveness).
+    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
     // CR 701.24a: Emit player-action event so trigger matchers can filter
     // by the identity of the shuffling player.
     events.push(GameEvent::PlayerPerformedAction {
