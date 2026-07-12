@@ -242,6 +242,26 @@ pub(crate) fn audit_units<'a>(
         }
     }
 
+    // A card that produced NO items at all is still accountable for its text. This is
+    // not a curiosity — it is the worst case there is. Chorus of the Conclave lowers to
+    // an entirely empty `ParsedAbilities` (no ability, no static, no additional cost, no
+    // keyword) and does not even leave an `Effect::Unimplemented` behind: the parser
+    // drops the whole card in silence. With no items there are no units, and a
+    // unit-iterating audit would then say nothing at all — going quiet at exactly the
+    // moment the parser failed hardest. That is the precise shape of a false green.
+    //
+    // So such a card becomes ONE unit owning all of its text, with no items and
+    // therefore NO evidence. Every semantic its text raises is then correctly reported
+    // as swallowed, because nothing represents any of it.
+    if units.is_empty() {
+        units.push(AuditUnit {
+            text: source_text.to_string(),
+            first_line: 0,
+            items: Vec::new(),
+        });
+        return units;
+    }
+
     // Give each unit the lines it owns: its own start through the line before the next
     // unit's start. The first unit absorbs any leading lines, and the last unit runs to
     // the end of the card, so the partition covers every line.

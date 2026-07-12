@@ -4817,6 +4817,46 @@ mod tests {
     /// Drown in the Loch's dynamic quantity ("less than or equal to the number of cards
     /// in its controller's graveyard") lives only on the bullets. It is reported as a
     /// swallowed DynamicQty in the shipped card data; it must stay reported.
+    /// A card the parser drops ENTIRELY must still be audited — the most dangerous
+    /// false green there is.
+    ///
+    /// Chorus of the Conclave lowers to a completely empty `ParsedAbilities`: no
+    /// ability, no static, no additional cost, not even an `Effect::Unimplemented` to
+    /// declare the gap. It produces no items, so a unit-iterating audit has nothing to
+    /// iterate and says nothing at all — going silent at exactly the moment the parser
+    /// failed hardest. The card-wide audit correctly reported its swallowed clauses.
+    ///
+    /// With no item claiming any text, nothing represents anything, so every semantic
+    /// the text raises is swallowed. That is what must be reported.
+    #[test]
+    fn a_card_that_parses_to_nothing_is_still_audited() {
+        // Parsed the way production does: with the MTGJSON keyword list populated. That
+        // is load-bearing — with the keyword list EMPTY the "Forestwalk" line falls
+        // through to an ability and the card is no longer item-less, so the very
+        // condition under test disappears.
+        let parsed = parse_oracle_text(
+            "Forestwalk (This creature can't be blocked as long as defending player controls a Forest.)\n\
+             As an additional cost to cast creature spells, you may pay any amount of mana. \
+             If you do, that creature enters with that many additional +1/+1 counters on it.",
+            "Chorus of the Conclave",
+            &["Forestwalk".to_string()],
+            &["Creature".to_string()],
+            &["Centaur".to_string()],
+        );
+        assert!(
+            parsed.abilities.is_empty()
+                && parsed.statics.is_empty()
+                && parsed.additional_cost.is_none(),
+            "premise: this card still parses to nothing; if that changed, re-point this test"
+        );
+        assert!(
+            has_swallowed_detector(&parsed, "Optional_YouMay"),
+            "a card that produced NO parsed output at all must report its text as \
+             swallowed, not fall silent. Warnings: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
     #[test]
     fn modal_bullet_lines_are_audited_not_orphaned() {
         let parsed = parse_named(
