@@ -269,11 +269,21 @@ pub enum ApplyResult {
 /// CR 614.6: Install a mandatory post-effect's continuation — the replacement's own
 /// actions, which run as part of the modified event that occurs instead.
 ///
-/// Policy is [`ResidentDrainPolicy::KeepResident`], preserving this function's
-/// long-standing behaviour: when a continuation is already resident, the incoming
-/// one is **discarded**. That is lossy — CR 616.1g contemplates a replacement
-/// applying to an event contained within another — but it is what the engine does
-/// today, and changing it is a separate, characterized commit.
+/// Policy is [`ResidentDrainPolicy::KeepResident`]: when a **Ready** continuation
+/// is already pending, the incoming one is discarded.
+///
+/// This is NOT the CR 616.1g case. A replacement applying to an event *contained
+/// within* another nests correctly — the outer drain is `Dispatching` while its
+/// continuation runs, so it is not "pending work" and the inner stash installs
+/// above it.
+///
+/// The discard only fires for **sibling** events (two combat-damage instances in one
+/// batch, CR 510.2; two coin flips of one instruction), where the same definition is
+/// applied once to each — which CR 614.5 licenses, since it grants one opportunity
+/// *per event*. Those sibling continuations are never dispatched today, so nothing
+/// observable is lost; the discard keeps an un-dispatchable drain from pinning
+/// `has_ready()` true forever. That they are stashed at all is the real defect
+/// (issue #5676). See [`ResidentDrainPolicy`] for the measured census.
 fn stash_post_replacement_continuation(
     state: &mut GameState,
     continuation: PostReplacementContinuation,

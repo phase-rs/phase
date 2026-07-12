@@ -8485,39 +8485,63 @@ pub struct PostReplacementDrain {
 /// Naming them is the point: today the policy is an accident of where the
 /// assignment happens to sit.
 ///
-/// # `KeepResident` is currently correct BY ACCIDENT. Read this before "fixing" it.
+/// # What the `KeepResident` drop actually is — measured, not inferred
 ///
-/// Discarding the incoming continuation looks like a plain bug, and dropping it in
-/// favour of a real stack looks like the obvious fix. **It is not.** Instrumenting
-/// every collision across the full suite finds exactly two live occupants, and in
-/// both the discarded continuation is *byte-identical to the resident one*:
+/// An earlier reading of this code held that the drop was an *accidental CR 614.5
+/// dedup*: the same replacement's continuation stashed twice, the second discarded,
+/// so the effect runs once — and that letting the stack nest would therefore make
+/// Wolverine, Fierce Fighter heal twice and Krark's Thumb double twice. **That is
+/// false in every part, and this comment is the correction.** It was inferred from
+/// the observation that the dropped payload is byte-identical to the resident one;
+/// payload equality was then read as evidence of a dedup. It is not.
 ///
-///   * Wolverine, Fierce Fighter — `RemoveAllDamage { target: SelfRef }`, stashed
-///     once per damage instance in a combat batch;
-///   * Krark's Thumb — `FlipCoins { count: Multiply { 2, EventContextAmount } }`.
+/// Instrumenting the engine integration suite (2732 tests) records **96 installs, 2
+/// collision-drops**, owned by
+/// `wolverine_noncombat_separate_instance_heals_prior_damage` and
+/// `flip_coins_three_with_krark_prompts_three_times`. Three facts about them:
 ///
-/// So the discard is *accidentally de-duplicating*: the same replacement's
-/// continuation is stashed twice and the second is dropped, so the effect runs
-/// once — which is right. **Letting the stack nest naively runs both: Wolverine
-/// heals twice, Krark's Thumb doubles twice.** No pin covers that.
+///   * **They are SIBLING events, not one event twice.** Wolverine's two stashes come
+///     from two distinct `Damage` events (two blockers, CR 510.2 simultaneity);
+///     Krark's from two distinct `CoinFlip` events. Each event applies the definition
+///     exactly once, which is what CR 614.5 licenses — it grants one opportunity *per
+///     event*, and there are two events. The applied-set dedup is fully wired
+///     (`already_applied` gates candidate selection) and correctly declines to
+///     suppress here. Nothing is missing from this path.
+///   * **The dropped continuation never runs — in either regime.** Dispatch counts are
+///     identical with the drop and with the stack forced to nest: Wolverine dispatches
+///     its continuation **zero** times ever (its heal is delivered by
+///     `dealt_damage_applier`, never by this stack); Krark dispatches **once**, drop or
+///     push. So the drop de-duplicates nothing. Forcing a naive nest leaves the whole
+///     engine suite green (16220 passing) — the only casualty is the unit test that
+///     tautologically asserts the drop.
+///   * **Neither cited rule governs them.** CR 614.5 is per-event; CR 616.1g is about an
+///     event *contained within* another. Sibling events fall through both.
 ///
-/// The slot is conflating two different rules:
+/// So the drop is not a dedup and not a rules gate. It is a **leak-guard**: it keeps
+/// an un-dispatchable sibling-event stash from accumulating on the stack, where a
+/// resident `Ready` drain would make `has_ready()` true forever and permanently gate
+/// `draw_through_replacement`.
 ///
-///   * CR 614.5 — a replacement "gets only one opportunity to affect an event or
-///     any modified events that may replace that event": the SAME definition
-///     arriving twice must be suppressed.
-///   * CR 616.1g — "one replacement or prevention effect may apply to an event, and
-///     another may apply to an event contained within the first event": a DIFFERENT
-///     definition on a contained event must nest.
+/// # CR 616.1g nesting already works — it does not need this policy relaxed
 ///
-/// A blind "is the slot occupied?" test satisfies the first by accident (for
-/// today's occupants) while destroying the second (which has no occupant today).
+/// A genuinely *different* definition on a *contained* event nests today, because the
+/// outer drain is `Dispatching` (not `Ready`) while its continuation runs, and
+/// `KeepResident` collides on [`PostReplacementDrainStack::has_ready`] rather than on
+/// residency. The suite records **3 live dispatches at depth 2**, pinned by
+/// `nested_mandatory_post_effect_runs_when_a_dispatching_continuation_draws`.
 ///
-/// The fix therefore gates on the **identity of the replacement**, not the
-/// **occupancy of the slot**: suppress when the incoming `ReplacementId` is already
-/// in the event's `applied` set (CR 614.5), nest otherwise (CR 616.1g). Those two
-/// cards are the regression tests — Wolverine must heal once, Krark must double
-/// once. Tracked in GitHub issue #5676.
+/// # The real open defect
+///
+/// A sibling-event mandatory post-effect is *stashed and never dispatched* — dead
+/// work. It is invisible today only because both witnesses deliver their effect by
+/// another path. A future card whose sibling continuation is the **only** delivery
+/// path would lose it silently. That, not an identity gate, is what GitHub issue
+/// #5676 tracks.
+///
+/// An identity gate keyed on "is the incoming `ReplacementId` already in the event's
+/// `applied` set" was designed and **withdrawn**: `mark_applied(rid)` runs *before*
+/// the stash, so that predicate is true at 100% of stashes. It would suppress every
+/// mandatory post-effect, Swans of Bryn Argoll included — an off-switch, not a gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidentDrainPolicy {
     KeepResident,
@@ -8615,7 +8639,22 @@ impl PostReplacementDrainStack {
                 true
             }
             ResidentDrainPolicy::Replace => {
-                self.drains.pop();
+                // CR 615.5: evict a READY resident, never a DISPATCHING one. A
+                // `Dispatching` drain is not stale state to overwrite — it is the
+                // event context of a continuation running right now, and it is what
+                // `TargetFilter::PostReplacementSourceController` reads to answer
+                // "the source's controller draws cards" (Swans of Bryn Argoll).
+                // Popping it mid-dispatch destroys that answer under the running
+                // effect. The incoming continuation nests above it instead
+                // (CR 616.1g) — the same READY-not-RESIDENT predicate `KeepResident`
+                // uses.
+                if self
+                    .drains
+                    .last()
+                    .is_some_and(|resident| matches!(resident.status, DrainStatus::Ready(_)))
+                {
+                    self.drains.pop();
+                }
                 self.drains.push(drain);
                 true
             }
@@ -10441,20 +10480,101 @@ mod drain_stack_reentrancy_tests {
         );
     }
 
-    /// The dedup that `KeepResident` performs BY ACCIDENT is on a READY resident,
-    /// and must survive the fix above. (Wolverine / Krark's Thumb — see the
-    /// `ResidentDrainPolicy` docs and issue #5676.)
+    /// `KeepResident` drops a stash that arrives while a READY drain is pending.
+    ///
+    /// This pins the drop as a **leak-guard**, which is what it actually is — not,
+    /// as an earlier reading held, an accidental CR 614.5 dedup that Wolverine and
+    /// Krark's Thumb depend on. Both of those witnesses are *sibling-event* stashes
+    /// whose continuations are never dispatched at all (Wolverine: zero dispatches,
+    /// ever; Krark: one, drop or push), so the drop de-duplicates nothing. See the
+    /// `ResidentDrainPolicy` docs for the measured census.
+    ///
+    /// What the drop does buy: a `Ready` drain that can never be dispatched would
+    /// make `has_ready()` true forever and permanently gate
+    /// `draw_through_replacement`. Dropping it keeps the stack honest. Removing this
+    /// guard is only safe once the sibling-event stash is fixed at its source
+    /// (issue #5676) — an un-dispatchable drain must not be *installed*, rather than
+    /// installed and then leaked.
     #[test]
-    fn keep_resident_still_drops_a_stash_arriving_while_a_ready_drain_is_pending() {
+    fn keep_resident_drops_a_stash_arriving_while_a_ready_drain_is_pending() {
         let mut stack = PostReplacementDrainStack::default();
         assert!(stack.install(ready_drain("first"), ResidentDrainPolicy::KeepResident));
         let dropped = !stack.install(ready_drain("second"), ResidentDrainPolicy::KeepResident);
         assert!(
             dropped,
-            "a stash arriving while a READY continuation is still pending is still \
-             discarded — that is the pre-existing accidental CR 614.5 dedup the \
-             Wolverine and Krark witnesses depend on. Task #39 replaces it with an \
-             identity gate; this fix must not prejudge that."
+            "a stash arriving while a READY continuation is still pending is \
+             discarded — the leak-guard against an un-dispatchable sibling-event \
+             stash pinning `has_ready()` true forever. Contrast \
+             `keep_resident_does_not_drop_a_stash_arriving_while_the_outer_drain_dispatches`: \
+             a DISPATCHING resident is not pending work, and a stash arriving then \
+             must install (CR 616.1g)."
+        );
+    }
+
+    fn dispatching_drain_event_source(stack: &PostReplacementDrainStack) -> Option<ObjectId> {
+        stack
+            .drains
+            .iter()
+            .find(|drain| matches!(drain.status, DrainStatus::Dispatching))
+            .and_then(|drain| drain.event_source)
+    }
+
+    /// CR 615.5: `Replace` must never evict a **Dispatching** drain.
+    ///
+    /// A `Dispatching` drain is not idle state to be overwritten — it is the
+    /// event context of a continuation that is running *right now*. That context
+    /// is how `TargetFilter::PostReplacementSourceController` resolves "the
+    /// source's controller draws cards" (Swans of Bryn Argoll): the answer is read
+    /// out of the drain *while* the continuation resolves. `install(Replace)`
+    /// popped unconditionally, so a `Replace`-policy install arriving mid-dispatch
+    /// destroyed the running continuation's event context and left it resolving
+    /// against whatever landed on top.
+    ///
+    /// Reachable via the optional accept/decline path (`replacement.rs`) during a
+    /// dispatch. No live victim in today's suite — the census over the engine
+    /// integration suite (2732 tests) records 14 `Replace` installs, all at depth 0
+    /// — so this pins the seam before a card walks into it.
+    ///
+    /// The predicate is the same one `KeepResident` already uses: act on READY,
+    /// never on DISPATCHING.
+    #[test]
+    fn replace_evicts_a_ready_resident_but_never_a_dispatching_one() {
+        // (1) Against a READY resident, `Replace` still replaces — unchanged.
+        let mut stack = PostReplacementDrainStack::default();
+        assert!(stack.install(ready_drain("stale"), ResidentDrainPolicy::KeepResident));
+        assert!(stack.install(ready_drain("winner"), ResidentDrainPolicy::Replace));
+        assert_eq!(
+            stack.drains.len(),
+            1,
+            "Replace evicts a READY resident: that is the policy's whole purpose"
+        );
+
+        // (2) Against a DISPATCHING resident, it must NOT.
+        let mut stack = PostReplacementDrainStack::default();
+        let mut outer = ready_drain("outer");
+        outer.event_source = Some(ObjectId(7));
+        assert!(stack.install(outer, ResidentDrainPolicy::KeepResident));
+        assert!(
+            stack.begin_dispatch().is_some(),
+            "the outer continuation is handed out to run"
+        );
+
+        // A Replace-policy install arrives while that continuation is still running.
+        assert!(stack.install(ready_drain("incoming"), ResidentDrainPolicy::Replace));
+
+        assert_eq!(
+            dispatching_drain_event_source(&stack),
+            Some(ObjectId(7)),
+            "CR 615.5: the RUNNING continuation's event context must survive a \
+             Replace-policy install. Popping the Dispatching drain destroys the \
+             answer to `PostReplacementSourceController` mid-flight — Swans of Bryn \
+             Argoll resolves 'the source's controller draws cards' out of exactly \
+             this field, while the continuation is resolving."
+        );
+        assert!(
+            stack.has_ready(),
+            "the incoming continuation still installs — it is nested above the \
+             dispatching drain (CR 616.1g), not dropped"
         );
     }
 }
