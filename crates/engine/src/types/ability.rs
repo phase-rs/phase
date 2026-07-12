@@ -12785,6 +12785,10 @@ pub enum PileSource {
     /// Objects are revealed from the top of the controller's library
     /// (Fact or Fiction shape). `count` is the number of cards to reveal.
     RevealedFromLibraryTop { count: u32 },
+    /// Objects were exiled earlier in the same resolution chain
+    /// (Boneyard Parley shape). The eligible set is derived from
+    /// `linked_exile_cards_for_source` keyed on the ability's source.
+    ExiledThisWay,
 }
 
 /// Default pile source is Battlefield (backward-compatible with Make an Example).

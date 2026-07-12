@@ -11,10 +11,10 @@ use super::ability::{
     CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
     ChosenAttribute, Comparator, ContinuousModification, ControlWindow, CopyScale,
     CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, QuantityExpr,
-    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
-    TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause, TriggerCondition,
-    TriggerDefinition,
+    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, PileSource,
+    QuantityExpr, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
+    StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause,
+    TriggerCondition, TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, TokenImageRef};
@@ -4653,6 +4653,9 @@ pub enum WaitingFor {
         unchosen_pile_effect: Option<Box<super::ability::AbilityDefinition>>,
         /// Source ability's object ID.
         source_id: ObjectId,
+        /// CR 700.3: Where the objects originate (battlefield, library top, exile).
+        #[serde(default = "default_pile_source_battlefield")]
+        pile_source: PileSource,
     },
     /// CR 700.3 + CR 700.3a + CR 101.4: A subject is partitioning their own
     /// objects into two piles for an `Effect::SeparateIntoPiles`. `pile_a`
@@ -4687,6 +4690,9 @@ pub enum WaitingFor {
         unchosen_pile_effect: Option<Box<super::ability::AbilityDefinition>>,
         /// Source ability's object ID — for logging and state filter echoes.
         source_id: ObjectId,
+        /// CR 700.3: Where the objects originate (battlefield, library top, exile).
+        #[serde(default = "default_pile_source_battlefield")]
+        pile_source: PileSource,
     },
     /// CR 700.3 + CR 101.4c: The chooser picks one pile (A or B) per
     /// completed `PileResult`. CR 101.4c allows the chooser to make
@@ -4709,6 +4715,9 @@ pub enum WaitingFor {
         unchosen_pile_effect: Option<Box<super::ability::AbilityDefinition>>,
         /// Source ability's object ID — for logging and state filter echoes.
         source_id: ObjectId,
+        /// CR 700.3: Where the objects originate (battlefield, library top, exile).
+        #[serde(default = "default_pile_source_battlefield")]
+        pile_source: PileSource,
     },
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
@@ -9808,6 +9817,12 @@ impl PartialEq for GameState {
 }
 
 impl Eq for GameState {}
+
+/// Default pile source is Battlefield (backward-compatible with pre-existing
+/// serialized `WaitingFor::SeparatePiles*` states).
+fn default_pile_source_battlefield() -> PileSource {
+    PileSource::Battlefield
+}
 
 #[cfg(test)]
 mod tests {

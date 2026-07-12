@@ -69,6 +69,14 @@ pub fn resolve(
             chosen_pile_effect,
             unchosen_pile_effect,
         ),
+        PileSource::ExiledThisWay => resolve_exiled_this_way(
+            state,
+            ability,
+            events,
+            chooser_id,
+            chosen_pile_effect,
+            unchosen_pile_effect,
+        ),
     }
 }
 
@@ -161,6 +169,7 @@ fn resolve_battlefield(
         chosen_pile_effect: Box::new(chosen_pile_effect.clone()),
         unchosen_pile_effect: unchosen_pile_effect.clone(),
         source_id: ability.source_id,
+        pile_source: PileSource::Battlefield,
     };
 
     Ok(())
@@ -225,6 +234,7 @@ fn resolve_revealed_from_library_top(
 
     let eligible: crate::im::Vector<ObjectId> = revealed_ids.into_iter().collect();
 
+    let ps = PileSource::RevealedFromLibraryTop { count };
     if candidates.len() >= 2 {
         // Multiplayer: surface a choice prompt for the controller.
         state.waiting_for = WaitingFor::SeparatePilesChooseOpponent {
@@ -235,6 +245,7 @@ fn resolve_revealed_from_library_top(
             chosen_pile_effect: Box::new(chosen_pile_effect.clone()),
             unchosen_pile_effect: unchosen_pile_effect.clone(),
             source_id: ability.source_id,
+            pile_source: ps,
         };
     } else {
         // Two-player game: single opponent, no decision needed.
@@ -248,6 +259,76 @@ fn resolve_revealed_from_library_top(
             chosen_pile_effect: Box::new(chosen_pile_effect.clone()),
             unchosen_pile_effect: unchosen_pile_effect.clone(),
             source_id: ability.source_id,
+            pile_source: ps,
+        };
+    }
+
+    Ok(())
+}
+
+/// CR 700.3 + CR 607.2a: ExiledThisWay pile source — the Boneyard Parley
+/// path. The eligible set is derived from `exile_links` keyed on the
+/// ability's source, which were populated by the preceding exile instruction
+/// in the same resolution chain.
+fn resolve_exiled_this_way(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    chooser_id: PlayerId,
+    chosen_pile_effect: &crate::types::ability::AbilityDefinition,
+    unchosen_pile_effect: &Option<Box<crate::types::ability::AbilityDefinition>>,
+) -> Result<(), EffectError> {
+    let controller = ability.controller;
+
+    // CR 607.2a: Collect cards exiled by this source during the current
+    // resolution chain. The preceding exile instruction populates
+    // `exile_links` before the pile step runs.
+    let eligible: crate::im::Vector<ObjectId> =
+        crate::game::players::linked_exile_cards_for_source(state, ability.source_id)
+            .iter()
+            .map(|entry| entry.exiled_id)
+            .collect();
+
+    if eligible.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::SeparateIntoPiles,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
+    // CR 608.2d + CR 700.3: "An opponent" — the controller chooses which
+    // opponent performs the partition (trivial in two-player).
+    let candidates: Vec<PlayerId> = state
+        .players
+        .iter()
+        .filter(|p| p.id != controller && !p.is_eliminated)
+        .map(|p| p.id)
+        .collect();
+
+    if candidates.len() >= 2 {
+        state.waiting_for = WaitingFor::SeparatePilesChooseOpponent {
+            player: controller,
+            candidates,
+            eligible,
+            chooser: chooser_id,
+            chosen_pile_effect: Box::new(chosen_pile_effect.clone()),
+            unchosen_pile_effect: unchosen_pile_effect.clone(),
+            source_id: ability.source_id,
+            pile_source: PileSource::ExiledThisWay,
+        };
+    } else {
+        let partitioner = candidates.into_iter().next().unwrap_or(controller);
+        state.waiting_for = WaitingFor::SeparatePilesPartition {
+            player: partitioner,
+            eligible,
+            remaining_subjects: crate::im::Vector::new(),
+            completed: crate::im::Vector::new(),
+            chooser: chooser_id,
+            chosen_pile_effect: Box::new(chosen_pile_effect.clone()),
+            unchosen_pile_effect: unchosen_pile_effect.clone(),
+            source_id: ability.source_id,
+            pile_source: PileSource::ExiledThisWay,
         };
     }
 
@@ -263,6 +344,26 @@ pub fn apply_pile_effect(
     results: &[(PileResult, crate::types::game_state::PileSide)],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 608.2c + CR 110.2a: The sub-effect controller must be the source's
+    // controller (the spell caster), NOT `result.subject` (the partitioner).
+    // `ControllerRef::You` on an `enters_under` field resolves against
+    // `ability.controller`; using the partitioner would put cards onto the
+    // battlefield under the opponent's control instead of the caster's.
+    // If the source left the battlefield/stack, fall back to the chooser
+    // stored in `WaitingFor::SeparatePilesChoice` (guaranteed to be the
+    // spell controller during this resolution window).
+    let source_controller = state
+        .objects
+        .get(&source_id)
+        .map(|o| o.controller)
+        .or_else(|| {
+            if let WaitingFor::SeparatePilesChoice { player, .. } = state.waiting_for {
+                Some(player)
+            } else {
+                results.first().map(|(r, _)| r.subject)
+            }
+        })
+        .ok_or(EffectError::PlayerNotFound)?;
     for (result, side) in results {
         let chosen: &crate::im::Vector<ObjectId> = match side {
             crate::types::game_state::PileSide::A => &result.pile_a,
@@ -272,7 +373,8 @@ pub fn apply_pile_effect(
             continue;
         }
         for &object_id in chosen.iter() {
-            let mut chain = sub_effect_as_resolved(chosen_pile_effect, source_id, result.subject);
+            let mut chain =
+                sub_effect_as_resolved(chosen_pile_effect, source_id, source_controller);
             chain.targets = vec![crate::types::ability::TargetRef::Object(object_id)];
             super::resolve_ability_chain(state, &chain, events, 1)?;
         }
@@ -293,6 +395,19 @@ pub fn apply_unchosen_pile_effect(
     results: &[(PileResult, crate::types::game_state::PileSide)],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 608.2c: Same source-controller reasoning as `apply_pile_effect`.
+    let source_controller = state
+        .objects
+        .get(&source_id)
+        .map(|o| o.controller)
+        .or_else(|| {
+            if let WaitingFor::SeparatePilesChoice { player, .. } = state.waiting_for {
+                Some(player)
+            } else {
+                results.first().map(|(r, _)| r.subject)
+            }
+        })
+        .ok_or(EffectError::PlayerNotFound)?;
     for (result, chosen_side) in results {
         let unchosen: &crate::im::Vector<ObjectId> = match chosen_side {
             crate::types::game_state::PileSide::A => &result.pile_b,
@@ -302,7 +417,8 @@ pub fn apply_unchosen_pile_effect(
             continue;
         }
         for &object_id in unchosen.iter() {
-            let mut chain = sub_effect_as_resolved(unchosen_pile_effect, source_id, result.subject);
+            let mut chain =
+                sub_effect_as_resolved(unchosen_pile_effect, source_id, source_controller);
             chain.targets = vec![crate::types::ability::TargetRef::Object(object_id)];
             super::resolve_ability_chain(state, &chain, events, 1)?;
         }
@@ -332,7 +448,13 @@ fn sub_effect_as_resolved(
     resolved.min_x_value = def.min_x_value;
     resolved.cant_be_copied = def.cant_be_copied;
     resolved.forward_result = def.forward_result;
-    resolved.player_scope = def.player_scope.clone();
+    // CR 700.3: The per-object loop in `apply_pile_effect` already iterates
+    // over each pile member — the parsed `player_scope` (e.g. "Each opponent")
+    // is the pile-separation iteration, NOT a per-effect fan-out. Carrying it
+    // through would cause `resolve_chain_body` to re-enter the player_scope
+    // sacrifice-collection path, ignoring the explicit `TargetRef::Object` we
+    // set. Clear it so the sub-effect resolves as a direct targeted sacrifice.
+    resolved.player_scope = None;
     resolved.starting_with = def.starting_with.clone();
     resolved.target_selection_mode = def.target_selection_mode;
     resolved.sub_link = def.sub_link;

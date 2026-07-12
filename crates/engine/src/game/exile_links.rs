@@ -10,6 +10,9 @@ const LINKED_EXILE_CONSUMER_TAGS: &[&str] = &[
     "OwnersOfCardsExiledBySource",
     "ChoiceAmongExiledColors",
     "TargetSharesNameWithOtherExiledThisWay",
+    // CR 700.3: PileSource::ExiledThisWay — the pile-separation effect
+    // consumes cards exiled earlier in the same resolution chain.
+    "ExiledThisWay",
     // CR 601.2a + CR 113.6b: A source carrying `StaticMode::ExileCastPermission`
     // (Maralen, Fae Ascendant) consumes its own linked-exile pool to grant
     // casting permission. Detection by externally-tagged serde key ensures the
