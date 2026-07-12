@@ -1008,9 +1008,9 @@ Use `--warning-detector <detector>` for broad-family triage and `--warning-patte
 3. Classify the pattern: detector false positive, parsed primary effect with missing modifier, or real parser gap.
 4. When fixing a real swallow, identify the dispatch site that *recognized* the marker but failed to either capture or chomp it. The fix is almost always at one of two places: the upstream recognition (route through the right `try_parse_*` interceptor) or the downstream chomping loop (add a missing arm). The peek-vs-chomp pitfall in §10 is the recurring root cause.
 5. After fixing, regenerate (`./scripts/gen-card-data.sh`) and rerun the same drilldown; warnings should drop by exactly the affected class size unless other detectors were un-muted.
-6. **Suppression rule** — `swallow_check.rs` may skip detectors when a card already has stronger parser failures; fixing one issue can un-mute additional detector warnings on the same cards.
+6. **Suppression rule** — suppression is **per source unit**, never card-wide. A unit that owns an `Effect::Unimplemented` has already declared its gap explicitly, so its own expectations are not re-reported as swallowed clauses; every *other* unit on the card is still audited. Fixing one unit's gap can therefore un-mute that unit's own detector warnings, but never another unit's.
 
-**Companion Python audit:** `scripts/swallow_audit.py` runs the same heuristics over `coverage-data.json` independently of the Rust runtime. Use it for cross-checking, or for exploring novel detector classes before promoting them to `swallow_check.rs`.
+**Scope** — the audit runs once per source unit (a distinct span of Oracle text), not once per card. Both halves are unit-scoped: the expectation comes from that unit's own fragment, and the evidence from the definitions that unit produced. `line_index` names the line the clause was swallowed on.
 
 ---
 
