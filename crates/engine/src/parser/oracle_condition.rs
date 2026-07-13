@@ -1333,14 +1333,6 @@ mod tests {
         );
     }
 
-    fn describe(parse: SharedRestrictionParse) -> String {
-        match parse {
-            SharedRestrictionParse::NoMatch => "NoMatch".to_string(),
-            SharedRestrictionParse::Converted(c) => format!("Converted({c:?})"),
-            SharedRestrictionParse::Unsupported => "Unsupported".to_string(),
-        }
-    }
-
     /// CR 903.3d: "you control a commander" refers to a permanent on the battlefield that
     /// is a commander — regardless of owner. It converts to an `ObjectCount` over the
     /// `IsCommander` filter scoped to your control.

@@ -768,8 +768,8 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         AdditionalCostRepeatability, BeholdCostAction, CardSelectionMode, Comparator,
-        ControllerRef, CountScope, FilterProp, ParsedCondition, PlayerFilter, QuantityExpr,
-        QuantityRef, TargetFilter, TypeFilter,
+        ControllerRef, CountScope, FilterProp, ParsedCondition, QuantityExpr, QuantityRef,
+        TargetFilter, TypeFilter,
     };
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost};

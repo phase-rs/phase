@@ -8682,7 +8682,7 @@ fn parses_activate_only_if_condition_and_only_once_each_turn() {
     // CR 602.5b: "Activate only if [condition] and only once each turn" must produce
     // both a RequiresCondition restriction (with the condition) and OnlyOnceEachTurn.
     // Tests the general pattern, not a single card.
-    use crate::types::ability::{ParsedCondition, PlayerFilter};
+    use crate::types::ability::ParsedCondition;
     let r = parse(
             "{1}{R}: Put a +1/+1 counter on this creature. Activate only if an opponent lost life this turn and only once each turn.",
             "Test Card",
