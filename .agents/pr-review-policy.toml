@@ -11,6 +11,30 @@ rules_domain = "mtg-cr"
 frontend_deferred = "defer-fe"
 quality = "quality"
 
+# Artifact verification remains audit-only until the contributor contract is
+# published and an immutable post-publication cutoff is configured.
+[admission]
+mode = "audit"
+enforced_after = ""
+accepted_issue_label = "accepted"
+
+[architecture_scope]
+# Independently calibrated against 80 merged and 39 open PRs. This gate does
+# not depend on the artifact publication cutoff.
+mode = "enforce"
+span_threshold = 3
+patterns = [
+  "crates/engine/src/types/format.rs",
+  "crates/engine/src/types/card_type.rs",
+  "crates/engine/src/game/mod.rs",
+  "crates/engine/src/game/deck_loading.rs",
+  "crates/engine/src/game/deck_validation.rs",
+  "crates/engine/src/game/match_flow.rs",
+  "crates/engine/src/game/mulligan.rs",
+  "crates/server-core/**",
+  "crates/phase-server/src/main.rs",
+]
+
 [requested_changes]
 warning_after_days = 7
 close_after_warning_days = 7
@@ -52,6 +76,16 @@ patterns = [
   "crates/engine/**",
   "crates/phase-ai/**",
   "crates/phase-server/**",
+]
+
+[path_classes.server]
+patterns = [
+  "crates/server-core/**",
+]
+
+[path_classes.draft]
+patterns = [
+  "crates/draft-core/**",
 ]
 
 [path_classes.skill]

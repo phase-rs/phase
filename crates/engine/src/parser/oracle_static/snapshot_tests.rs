@@ -797,6 +797,35 @@ fn panharmonicon_doubler_has_no_source_filter() {
     );
 }
 
+/// CR 603.2d + CR 603.6a + CR 603.6c: Gandalf the White — legendary OR
+/// artifact entering/leaving doubles controlled triggers (issue #5332).
+#[test]
+fn gandalf_the_white_doubler_static() {
+    let def = parse_static_line(
+        "If a legendary permanent or an artifact entering or leaving the battlefield causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+    )
+    .expect("expected DoubleTriggers static for Gandalf the White");
+    assert_eq!(
+        def.mode,
+        StaticMode::DoubleTriggers {
+            cause: TriggerCause::BattlefieldTransition {
+                enter: true,
+                leave: true,
+                qualifiers: vec![
+                    ZoneChangeQualifier::Supertype(Supertype::Legendary),
+                    ZoneChangeQualifier::CoreType(CoreType::Artifact),
+                ],
+            }
+        },
+        "Gandalf must parse as legendary-or-artifact battlefield transition doubling"
+    );
+    assert!(
+        def.affected.is_none(),
+        "bare 'permanent you control' source must leave affected None, got {:?}",
+        def.affected
+    );
+}
+
 #[test]
 fn hama_pashar_room_ability_doubler_static() {
     let def = parse_static_line("Room abilities of dungeons you own trigger an additional time.")

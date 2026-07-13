@@ -60,7 +60,12 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
-use super::oracle_ir::doc::{OracleDocIr, OracleItemIr};
+use super::oracle_ir::doc::{
+    OracleDocBuilder, OracleDocIr, OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan,
+    OracleUnitSource, PrintedAbilityIndex, PrintedTriggerIndex,
+};
+use super::oracle_ir::feature::ItemIdTracks;
+use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     extract_keyword_line, is_keyword_cost_line, parse_keyword_from_oracle,
@@ -618,18 +623,20 @@ fn parse_begin_game_counter_clause(
     ))
 }
 
-fn parsed_result_recently_granted_flashback(result: &ParsedAbilities) -> bool {
-    result
-        .abilities
-        .last()
+fn parsed_result_recently_granted_flashback(emitter: &DocEmitter<'_>) -> bool {
+    // u4-c2: reads the emitter's last-emitted-per-category peeks instead of
+    // `result.{abilities,triggers,statics}.last()` (the vectors moved into the
+    // source-ordered builder). Same semantics: was flashback just granted?
+    emitter
+        .last_ability()
         .is_some_and(definition_grants_flashback)
-        || result.triggers.last().is_some_and(|trigger| {
+        || emitter.last_trigger().is_some_and(|trigger| {
             trigger
                 .execute
                 .as_deref()
                 .is_some_and(definition_grants_flashback)
         })
-        || result.statics.last().is_some_and(|static_def| {
+        || emitter.last_static().is_some_and(|static_def| {
             static_def.modifications.iter().any(|modification| {
                 matches!(
                     modification,
@@ -910,6 +917,8 @@ fn parse_static_line_with_graveyard_keyword_continuation(
         vec![def]
     } else if let Some(def) = try_parse_graveyard_keyword_grant_static(line) {
         vec![def]
+    } else if let Some(def) = crate::parser::oracle_static::try_parse_counts_as_named_static(line) {
+        vec![def]
     } else {
         parse_static_line_multi(line)
     };
@@ -1021,48 +1030,143 @@ fn split_dual_cant_clause<'a>(line: &'a str, lower: &str) -> Option<(&'a str, &'
     Some((subject, p1, p2))
 }
 
-/// CR 607.2d: Reconcile self-chosen type statics with the source's linked
-/// persisted choice.
-/// CR 614.1c + CR 608.2d: Cards like Banner of Kinship parse "as ~ enters,
-/// choose a creature type" and "~ enters with a fellowship counter … for each
-/// creature you control of the chosen type" as two Moved replacements. The
-/// counter count depends on the persisted choice, so it must chain after the
-/// `Choose` post-entry effect — not fold into `enter_with_counters` during the
-/// replacement pipeline.
-fn reconcile_choose_then_chosen_dependent_etb_counters(result: &mut ParsedAbilities) {
-    let choose_idx = result.replacements.iter().position(|replacement| {
-        replacement.event == ReplacementEvent::Moved
-            && replacement
-                .execute
-                .as_ref()
-                .is_some_and(|def| is_persisted_as_enters_choice(def))
-    });
-    let counter_idx = result.replacements.iter().position(|replacement| {
-        replacement.event == ReplacementEvent::Moved
-            && replacement
-                .execute
-                .as_ref()
-                .is_some_and(|def| is_chosen_dependent_self_etb_counter(def))
-    });
-    let (Some(choose_idx), Some(counter_idx)) = (choose_idx, counter_idx) else {
-        return;
-    };
-    if choose_idx == counter_idx {
-        return;
-    }
+// ===========================================================================
+// Cross-item document relations (CR 607.2d)
+//
+// A document relation links two (or more) parsed items — a producer of a fact
+// and a consumer that reads it back. These links are recovered at PARSE time by
+// pairing items by `OracleItemId`, stored on `OracleDocIr.relations`, and applied
+// at the single `lower_oracle_ir` seam by resolving those ids back to their
+// lowered definitions. This is the single authority; it replaces five former
+// post-passes that rediscovered each pair by rescanning the lowered category
+// vectors for a matching shape (a dual authority the parse/lower split removes).
+// ===========================================================================
 
-    let counter_repl = result.replacements.remove(counter_idx);
-    let choose_idx = if counter_idx < choose_idx {
-        choose_idx - 1
-    } else {
-        choose_idx
-    };
-    let Some(counter_exec) = counter_repl.execute else {
-        return;
-    };
-    let choose_repl = &mut result.replacements[choose_idx];
-    if let Some(ref mut choose_exec) = choose_repl.execute {
-        append_sub_ability(choose_exec, *counter_exec);
+/// The lowered replacement definition an item carries, if it is a replacement.
+/// Only `PreLowered*` nodes are inspected: the dedicated IR variants
+/// (`Spell`/`Trigger`/`Static`/`Replacement`) are never constructed today, and
+/// gain relation participation when the dispatch-cutover unit builds them.
+fn item_replacement(item: &OracleItemIr) -> Option<&ReplacementDefinition> {
+    match &item.node {
+        OracleNodeIr::PreLoweredReplacement(def) => Some(def),
+        _ => None,
+    }
+}
+
+fn item_ability(item: &OracleItemIr) -> Option<&AbilityDefinition> {
+    match &item.node {
+        OracleNodeIr::PreLoweredSpell(def) => Some(def),
+        _ => None,
+    }
+}
+
+fn item_trigger(item: &OracleItemIr) -> Option<&TriggerDefinition> {
+    match &item.node {
+        OracleNodeIr::PreLoweredTrigger(def) => Some(def),
+        _ => None,
+    }
+}
+
+fn item_static(item: &OracleItemIr) -> Option<&StaticDefinition> {
+    match &item.node {
+        OracleNodeIr::PreLoweredStatic(def) => Some(def),
+        _ => None,
+    }
+}
+
+/// CR 607.2d: Recover every cross-item document relation from the assembled item
+/// list, pairing producer/consumer items by `OracleItemId`. Runs at parse time;
+/// both the main and Class document-construction paths converge here.
+fn finalize_document_relations(mut doc: OracleDocIr, types: &[String]) -> OracleDocIr {
+    doc.relations = detect_document_relations(&doc.items, types);
+    doc
+}
+
+fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<DocumentRelationIr> {
+    let mut relations = Vec::new();
+    detect_linked_choice_etb_counter(items, &mut relations);
+    detect_linked_choice_type_statics(items, types, &mut relations);
+    detect_linked_choice_persisted_player(items, &mut relations);
+    detect_etb_exile_ltb_return(items, &mut relations);
+    detect_active_player_punisher(items, &mut relations);
+    relations
+}
+
+/// Position of the lowered definition produced by `id` within its category track.
+fn position_of(ids: &[OracleItemId], id: OracleItemId) -> Option<usize> {
+    ids.iter().position(|candidate| *candidate == id)
+}
+
+// --- CR 607.2d + CR 614.1c: enters-choice → chosen-dependent ETB counter ------
+
+/// Pair the "as this enters, choose a creature type/color" replacement (producer)
+/// with the self-ETB counter replacement (consumer) whose count reads the chosen
+/// value. First-match of each mirrors the former `position()` over the folded
+/// replacement vector (replacements fold in item order).
+fn detect_linked_choice_etb_counter(
+    items: &[OracleItemIr],
+    relations: &mut Vec<DocumentRelationIr>,
+) {
+    let chooser = items.iter().find(|item| {
+        item_replacement(item).is_some_and(|replacement| {
+            replacement.event == ReplacementEvent::Moved
+                && replacement
+                    .execute
+                    .as_ref()
+                    .is_some_and(|def| is_persisted_as_enters_choice(def))
+        })
+    });
+    let counter = items.iter().find(|item| {
+        item_replacement(item).is_some_and(|replacement| {
+            replacement.event == ReplacementEvent::Moved
+                && replacement
+                    .execute
+                    .as_ref()
+                    .is_some_and(|def| is_chosen_dependent_self_etb_counter(def))
+        })
+    });
+    if let (Some(chooser), Some(counter)) = (chooser, counter) {
+        if chooser.id != counter.id {
+            relations.push(DocumentRelationIr::LinkedChoice(
+                LinkedChoiceKind::EtbCounterCount {
+                    chooser: chooser.id,
+                    counter: counter.id,
+                },
+            ));
+        }
+    }
+}
+
+/// Fold the counter replacement's execute into the chooser replacement's
+/// sub-ability chain and drop the standalone counter replacement. Positions are
+/// resolved by id *after* the removal, so no manual index fix-up is needed.
+fn apply_linked_choice_etb_counter(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    replacement_ids: &mut Vec<OracleItemId>,
+) {
+    for relation in relations {
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::EtbCounterCount {
+            chooser,
+            counter,
+        }) = relation
+        else {
+            continue;
+        };
+        let Some(counter_pos) = position_of(replacement_ids, *counter) else {
+            continue;
+        };
+        let counter_repl = result.replacements.remove(counter_pos);
+        replacement_ids.remove(counter_pos);
+        let Some(counter_exec) = counter_repl.execute else {
+            continue;
+        };
+        let Some(chooser_pos) = position_of(replacement_ids, *chooser) else {
+            continue;
+        };
+        if let Some(ref mut choose_exec) = result.replacements[chooser_pos].execute {
+            append_sub_ability(choose_exec, *counter_exec);
+        }
     }
 }
 
@@ -1157,52 +1261,166 @@ fn append_sub_ability(chain: &mut AbilityDefinition, tail: AbilityDefinition) {
     cursor.sub_ability = Some(Box::new(tail));
 }
 
-fn reconcile_self_chosen_type_statics(result: &mut ParsedAbilities, types: &[String]) {
-    let persisted_kind = chosen_subtype_kind_from_persisted_choice(result);
+// --- CR 607.2d + CR 205.3: chosen-subtype source → self-chosen-type surfaces ---
 
-    // CR 607.2d + CR 205.3 + CR 601.2f: A cost reducer that refers to "the chosen
-    // type" ("Spells of the chosen type you cast cost {W}{U}{B}{R}{G} less",
-    // Morophon) is LINKED to the same card's "choose a [value]" clause and must
-    // match whatever that clause picks. `static_helpers` defaults a bare-"spells"
-    // base (no creature type word) to `IsChosenCardType` — correct only for
-    // card-type choosers (Cloud Key / Umori / Stenn) — so a creature-type chooser
-    // is mis-discriminated and the reduction never matches a spell. Realign here,
-    // the only point with cross-clause visibility, keying STRICTLY on the
-    // persisted choice: a creature that chooses a CARD type (Umori) returns a
-    // card-type kind and must keep `IsChosenCardType`, so the creature-card-type
-    // fallback below must not drive this.
+/// Detect a chosen-subtype relation. The chosen kind comes from a persisted
+/// creature/land-type choice or, when the card's type line fixes it, its printed
+/// types (CR 205.3 — a Creature is its chosen creature type). Two consumer sets
+/// are gathered by id:
+///   * `retarget` — statics' `ModifyCost` spell filters and abilities'/triggers'
+///     `Dig` filters whose `IsChosenCardType` discriminator must become
+///     `IsChosenCreatureType`; gathered ONLY for a creature-type chooser, since a
+///     card-type chooser (Umori) legitimately keeps `IsChosenCardType`.
+///   * `set_subtype` — "~ is the chosen type" statics whose `AddChosenSubtype`
+///     kind is set to the resolved subtype.
+fn detect_linked_choice_type_statics(
+    items: &[OracleItemIr],
+    types: &[String],
+    relations: &mut Vec<DocumentRelationIr>,
+) {
+    let persisted_kind = chosen_subtype_kind_from_persisted_choice_items(items);
+
+    let mut retarget = Vec::new();
     if matches!(persisted_kind, Some(ChosenSubtypeKind::CreatureType)) {
-        for static_def in &mut result.statics {
-            if let crate::types::statics::StaticMode::ModifyCost {
-                spell_filter: Some(filter),
-                ..
-            } = &mut static_def.mode
-            {
-                retarget_chosen_card_type_to_creature_type(filter);
+        for item in items {
+            let is_cost_reducer = item_static(item).is_some_and(|s| {
+                matches!(
+                    &s.mode,
+                    crate::types::statics::StaticMode::ModifyCost {
+                        spell_filter: Some(_),
+                        ..
+                    }
+                )
+            });
+            let is_dig = item_ability(item).is_some_and(ability_chain_has_dig)
+                || item_trigger(item)
+                    .and_then(|trigger| trigger.execute.as_deref())
+                    .is_some_and(ability_chain_has_dig);
+            if is_cost_reducer || is_dig {
+                retarget.push(item.id);
             }
         }
-        retarget_creature_type_choice_dig_filters(result);
     }
 
-    let Some(chosen_kind) = persisted_kind.or_else(|| chosen_kind_from_card_types(types)) else {
+    let Some(chosen) = persisted_kind.or_else(|| chosen_kind_from_card_types(types)) else {
         return;
     };
 
-    for static_def in &mut result.statics {
-        let is_self_chosen_type_static = static_def.affected == Some(TargetFilter::SelfRef)
-            && static_def
-                .description
-                .as_deref()
-                .is_some_and(is_self_chosen_type_description);
-        if !is_self_chosen_type_static {
-            continue;
+    let mut set_subtype = Vec::new();
+    for item in items {
+        if item_static(item).is_some_and(static_is_self_chosen_type_with_add_subtype) {
+            set_subtype.push(item.id);
         }
-        for modification in &mut static_def.modifications {
-            if let ContinuousModification::AddChosenSubtype { kind } = modification {
-                *kind = chosen_kind.clone();
+    }
+
+    if !retarget.is_empty() || !set_subtype.is_empty() {
+        relations.push(DocumentRelationIr::LinkedChoice(
+            LinkedChoiceKind::ChosenTypeStatic {
+                chosen,
+                retarget,
+                set_subtype,
+            },
+        ));
+    }
+}
+
+/// CR 607.2d + CR 205.3: A cost reducer / dig filter that refers to "the chosen
+/// type" (Morophon, For the Ancestors) is LINKED to the same card's "choose a
+/// [value]" clause and must match whatever it picks; the bare-"spells"/"cards"
+/// base defaults to `IsChosenCardType`, so a creature-type chooser needs its
+/// discriminator realigned. Self-"~ is the chosen type" statics get their
+/// `AddChosenSubtype` kind set. Applied by id — the parallel track the id lands
+/// in selects the surface, so no lowered shape is rescanned to find it.
+fn apply_linked_choice_type_statics(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    ability_ids: &[OracleItemId],
+    trigger_ids: &[OracleItemId],
+    static_ids: &[OracleItemId],
+) {
+    for relation in relations {
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::ChosenTypeStatic {
+            chosen,
+            retarget,
+            set_subtype,
+        }) = relation
+        else {
+            continue;
+        };
+        for id in retarget {
+            if let Some(pos) = position_of(static_ids, *id) {
+                if let crate::types::statics::StaticMode::ModifyCost {
+                    spell_filter: Some(filter),
+                    ..
+                } = &mut result.statics[pos].mode
+                {
+                    retarget_chosen_card_type_to_creature_type(filter);
+                }
+            } else if let Some(pos) = position_of(ability_ids, *id) {
+                retarget_creature_type_choice_dig_filters_in_ability(&mut result.abilities[pos]);
+            } else if let Some(pos) = position_of(trigger_ids, *id) {
+                if let Some(execute) = result.triggers[pos].execute.as_mut() {
+                    retarget_creature_type_choice_dig_filters_in_ability(execute);
+                }
+            }
+        }
+        for id in set_subtype {
+            if let Some(pos) = position_of(static_ids, *id) {
+                for modification in &mut result.statics[pos].modifications {
+                    if let ContinuousModification::AddChosenSubtype { kind } = modification {
+                        *kind = chosen.clone();
+                    }
+                }
             }
         }
     }
+}
+
+/// Whether an ability's effect chain (recursing the sub-ability chain) contains a
+/// `Dig` effect — a chosen-type dig-filter consumer surface.
+fn ability_chain_has_dig(def: &AbilityDefinition) -> bool {
+    matches!(*def.effect, Effect::Dig { .. })
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_chain_has_dig)
+}
+
+/// Whether a static is a self-"~ is the chosen type" `AddChosenSubtype` surface.
+fn static_is_self_chosen_type_with_add_subtype(def: &StaticDefinition) -> bool {
+    def.affected == Some(TargetFilter::SelfRef)
+        && def
+            .description
+            .as_deref()
+            .is_some_and(is_self_chosen_type_description)
+        && def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddChosenSubtype { .. }))
+}
+
+/// The persisted creature/land-type choice on the card, if any. Priority mirrors
+/// the former result-vector scan exactly: replacements' executes first, then
+/// abilities, then triggers' executes.
+fn chosen_subtype_kind_from_persisted_choice_items(
+    items: &[OracleItemIr],
+) -> Option<ChosenSubtypeKind> {
+    items
+        .iter()
+        .filter_map(|item| item_replacement(item)?.execute.as_deref())
+        .find_map(chosen_subtype_kind_from_ability)
+        .or_else(|| {
+            items
+                .iter()
+                .filter_map(item_ability)
+                .find_map(chosen_subtype_kind_from_ability)
+        })
+        .or_else(|| {
+            items
+                .iter()
+                .filter_map(|item| item_trigger(item)?.execute.as_deref())
+                .find_map(chosen_subtype_kind_from_ability)
+        })
 }
 
 /// CR 607.2d: Within a creature-type chooser's cost-modifier spell filter,
@@ -1234,19 +1452,9 @@ fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilter) {
 
 /// CR 608.2c: Dig/reveal continuations after "Choose a creature type" refer to
 /// creature subtypes ("cards of the chosen type", For the Ancestors). The bare
-/// "cards" base defaults to `IsChosenCardType`; realign those dig filters once
-/// the persisted choice is known to be creature-type.
-fn retarget_creature_type_choice_dig_filters(result: &mut ParsedAbilities) {
-    for ability in &mut result.abilities {
-        retarget_creature_type_choice_dig_filters_in_ability(ability);
-    }
-    for trigger in &mut result.triggers {
-        if let Some(execute) = trigger.execute.as_mut() {
-            retarget_creature_type_choice_dig_filters_in_ability(execute);
-        }
-    }
-}
-
+/// "cards" base defaults to `IsChosenCardType`; realign a dig filter once the
+/// persisted choice is known to be creature-type. Applied per resolved consumer
+/// item by `apply_linked_choice_type_statics`.
 fn retarget_creature_type_choice_dig_filters_in_ability(def: &mut AbilityDefinition) {
     if let Effect::Dig { filter, .. } = &mut *def.effect {
         retarget_chosen_card_type_to_creature_type(filter);
@@ -1285,50 +1493,89 @@ fn reconcile_host_bound_phase_outs_in_ability(def: &mut AbilityDefinition) {
     }
 }
 
+// --- CR 607.2d + CR 613.1: player choice → durable SourceChosenPlayer reader ---
+
 /// CR 613.1 + CR 608.2c: A `choose a player` / `choose an opponent` instruction
 /// whose chosen player is later read by a CONTINUOUS ability must persist that
-/// choice durably on the source as a `ChosenAttribute::Player`; otherwise the
-/// resolution-scoped choice vanishes when the trigger finishes resolving and the
-/// static reads nothing. Triarch Stalker / Beckoning Will-o'-Wisp pair a combat
-/// trigger (`At the beginning of combat on your turn, choose an opponent`) with a
-/// separate static (`Creatures attacking the last chosen player ...`) that reads
-/// the choice via `ControllerRef::SourceChosenPlayer`.
+/// choice durably on the source; otherwise the resolution-scoped choice vanishes
+/// when the trigger finishes resolving and the static reads nothing. Triarch
+/// Stalker / Beckoning Will-o'-Wisp pair a combat trigger (`choose an opponent`)
+/// with a separate static (`Creatures attacking the last chosen player ...`) that
+/// reads the choice via `ControllerRef::SourceChosenPlayer`.
 ///
-/// The general path (`lower_choose_ast`) leaves player/opponent choices
-/// `persist: false` because most such choices are consumed within the same
-/// resolution (Ruhan's `choose an opponent. ~ attacks that player`, which reads
-/// the resolution-scoped `ChosenPlayer { index }`). This pass flips `persist` to
-/// `true` on those choices ONLY when the card also carries a durable
-/// `SourceChosenPlayer` reference — mirroring the "persist when referred back to"
-/// intent documented on `Effect::Choose`. The reference can live in a static
-/// (`Creatures attacking the last chosen player ...`), an activated ability, or a
-/// triggered ability — a phase trigger scoped to "the chosen player's" step
-/// (`oracle_trigger.rs`) or an effect keyed to the chosen player — so all three
-/// surfaces are scanned as readers.
-fn reconcile_persisted_player_choice_for_source_chosen_ref(result: &mut ParsedAbilities) {
-    let references_source_chosen_player = result
-        .statics
-        .iter()
-        .any(static_references_source_chosen_player)
-        || result
-            .abilities
-            .iter()
-            .any(ability_references_source_chosen_player)
-        || result
-            .triggers
-            .iter()
-            .any(trigger_references_source_chosen_player);
-    if !references_source_chosen_player {
+/// The relation is emitted ONLY when the card carries a durable
+/// `SourceChosenPlayer` reader — living in a static, an activated ability, or a
+/// triggered ability — so a resolution-scoped choice with no durable reader stays
+/// non-persisted. `choosers` names every ability/trigger item whose effect chain
+/// makes a player/opponent choice; each is persisted at lowering.
+fn detect_linked_choice_persisted_player(
+    items: &[OracleItemIr],
+    relations: &mut Vec<DocumentRelationIr>,
+) {
+    let has_durable_reader = items.iter().any(|item| {
+        item_static(item).is_some_and(static_references_source_chosen_player)
+            || item_ability(item).is_some_and(ability_references_source_chosen_player)
+            || item_trigger(item).is_some_and(trigger_references_source_chosen_player)
+    });
+    if !has_durable_reader {
         return;
     }
-    for ability in &mut result.abilities {
-        persist_player_choice_in_ability(ability);
+    let choosers: Vec<OracleItemId> = items
+        .iter()
+        .filter(|item| {
+            item_ability(item).is_some_and(ability_chain_has_player_choice)
+                || item_trigger(item)
+                    .and_then(|trigger| trigger.execute.as_deref())
+                    .is_some_and(ability_chain_has_player_choice)
+        })
+        .map(|item| item.id)
+        .collect();
+    if !choosers.is_empty() {
+        relations.push(DocumentRelationIr::LinkedChoice(
+            LinkedChoiceKind::PersistedPlayer { choosers },
+        ));
     }
-    for trigger in &mut result.triggers {
-        if let Some(execute) = trigger.execute.as_mut() {
-            persist_player_choice_in_ability(execute);
+}
+
+/// Flip `persist: true` on every player/opponent choice made by the linked
+/// chooser items, resolved by id.
+fn apply_linked_choice_persisted_player(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    ability_ids: &[OracleItemId],
+    trigger_ids: &[OracleItemId],
+) {
+    for relation in relations {
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::PersistedPlayer { choosers }) =
+            relation
+        else {
+            continue;
+        };
+        for id in choosers {
+            if let Some(pos) = position_of(ability_ids, *id) {
+                persist_player_choice_in_ability(&mut result.abilities[pos]);
+            } else if let Some(pos) = position_of(trigger_ids, *id) {
+                if let Some(execute) = result.triggers[pos].execute.as_mut() {
+                    persist_player_choice_in_ability(execute);
+                }
+            }
         }
     }
+}
+
+/// Whether an ability's effect chain (recursing sub-abilities) makes a
+/// player/opponent choice.
+fn ability_chain_has_player_choice(def: &AbilityDefinition) -> bool {
+    matches!(
+        def.effect.as_ref(),
+        Effect::Choose {
+            choice_type: ChoiceType::Player | ChoiceType::Opponent { .. },
+            ..
+        }
+    ) || def
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_chain_has_player_choice)
 }
 
 /// Whether a static definition's `affected` filter reads the source's persisted
@@ -1539,29 +1786,6 @@ fn chosen_kind_from_card_types(types: &[String]) -> Option<ChosenSubtypeKind> {
     }
 }
 
-fn chosen_subtype_kind_from_persisted_choice(
-    result: &ParsedAbilities,
-) -> Option<ChosenSubtypeKind> {
-    result
-        .replacements
-        .iter()
-        .filter_map(|replacement| replacement.execute.as_deref())
-        .find_map(chosen_subtype_kind_from_ability)
-        .or_else(|| {
-            result
-                .abilities
-                .iter()
-                .find_map(chosen_subtype_kind_from_ability)
-        })
-        .or_else(|| {
-            result
-                .triggers
-                .iter()
-                .filter_map(|trigger| trigger.execute.as_deref())
-                .find_map(chosen_subtype_kind_from_ability)
-        })
-}
-
 fn chosen_subtype_kind_from_ability(def: &AbilityDefinition) -> Option<ChosenSubtypeKind> {
     match def.effect.as_ref() {
         Effect::Choose {
@@ -1595,7 +1819,8 @@ fn is_self_chosen_type_description(description: &str) -> bool {
 }
 
 fn push_same_is_true_static_tail<F>(
-    result: &mut ParsedAbilities,
+    emitter: &mut DocEmitter<'_>,
+    item_line: usize,
     line: &str,
     lower: &str,
     parse_modeled_sentence: F,
@@ -1606,14 +1831,12 @@ where
     if let Some((modeled_sentence, unmodeled_tail)) =
         split_same_is_true_static_tail(line, lower, parse_modeled_sentence)
     {
-        result
-            .statics
-            .extend(parse_static_line_with_graveyard_keyword_continuation(
-                modeled_sentence,
-                None,
-                None,
-            ));
-        result.abilities.push(make_unimplemented(unmodeled_tail));
+        for __item in
+            parse_static_line_with_graveyard_keyword_continuation(modeled_sentence, None, None)
+        {
+            emitter.static_at(item_line, __item);
+        }
+        emitter.ability_at(item_line, make_unimplemented(unmodeled_tail));
         return true;
     }
 
@@ -1642,7 +1865,8 @@ where
 /// rather than an inert `AddKeyword(Unknown)` static, so it stays a loud
 /// unsupported gap in coverage instead of silently reading as supported.
 fn push_graveyard_keyword_same_is_true_tail(
-    result: &mut ParsedAbilities,
+    emitter: &mut DocEmitter<'_>,
+    item_line: usize,
     line: &str,
     lower: &str,
 ) -> bool {
@@ -1695,12 +1919,14 @@ fn push_graveyard_keyword_same_is_true_tail(
         }
         statics.push(new_def);
     }
-    result.statics.extend(statics);
+    for __item in statics {
+        emitter.static_at(item_line, __item);
+    }
     if !unqualified.is_empty() {
-        result.abilities.push(make_unimplemented(&format!(
-            "the same is true for {}",
-            unqualified.join(", ")
-        )));
+        emitter.ability_at(
+            item_line,
+            make_unimplemented(&format!("the same is true for {}", unqualified.join(", "))),
+        );
     }
     true
 }
@@ -2396,11 +2622,21 @@ fn parse_flash_cleanup_sacrifice_casting_option(
 }
 
 /// Lower an `OracleDocIr` into the final `ParsedAbilities` via exhaustive match
-/// on each `OracleItemIr` variant.
+/// on each item's `OracleNodeIr` payload.
 ///
 /// Core IR variants are lowered through their dedicated lowering functions.
 /// PreLowered variants are identity-lowered (pushed directly to the result).
-pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
+///
+/// `ParsedAbilities` stays category-grouped because it is the runtime-facing
+/// type; only *within*-category order and explicit cross-item relations are
+/// semantic after lowering.
+///
+/// Takes `ir` by `&mut` so the swallow audit — whose input is the assembled
+/// result, and which therefore cannot run before the fold — can still emit into
+/// `OracleDocIr.diagnostics`. That keeps the doc IR the single warning channel
+/// (`OracleDocIr.diagnostics` → `ParsedAbilities.parse_warnings`) rather than
+/// letting the audit direct-append to `parse_warnings` behind the doc's back.
+pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     let mut result = ParsedAbilities {
         abilities: Vec::new(),
         triggers: Vec::new(),
@@ -2415,147 +2651,249 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
         strive_cost: None,
         parse_warnings: Vec::new(),
     };
+    // CR 607.2d: Parallel `OracleItemId` tracks per category, so cross-item
+    // relations (recovered at parse time, `ir.relations`) can be applied by
+    // resolving a producer/consumer id back to its lowered definition's position
+    // — never by rescanning a category vector for a matching lowered shape.
+    // `_ids[k]` is the id of the item that lowered into `result.<category>[k]`.
+    let mut ability_ids: Vec<OracleItemId> = Vec::new();
+    let mut trigger_ids: Vec<OracleItemId> = Vec::new();
+    let mut static_ids: Vec<OracleItemId> = Vec::new();
+    let mut replacement_ids: Vec<OracleItemId> = Vec::new();
     for item in &ir.items {
-        match item {
-            OracleItemIr::Spell(effect_ir) => {
+        match &item.node {
+            OracleNodeIr::Spell(effect_ir) => {
                 result.abilities.push(lower_effect_chain_ir(effect_ir));
+                ability_ids.push(item.id);
             }
-            OracleItemIr::Trigger(trigger_ir) => {
+            OracleNodeIr::Trigger(trigger_ir) => {
                 result.triggers.push(lower_trigger_ir(trigger_ir));
+                trigger_ids.push(item.id);
             }
-            OracleItemIr::Static(static_ir) => {
+            OracleNodeIr::Static(static_ir) => {
                 result.statics.push(lower_static_ir(static_ir));
+                static_ids.push(item.id);
             }
-            OracleItemIr::Replacement(replacement_ir) => {
+            OracleNodeIr::Replacement(replacement_ir) => {
                 result
                     .replacements
                     .push(lower_replacement_ir(replacement_ir));
+                replacement_ids.push(item.id);
             }
-            OracleItemIr::Keyword(kw) => {
+            OracleNodeIr::Keyword(kw) => {
                 result.extracted_keywords.push(kw.clone());
             }
-            OracleItemIr::Modal(modal) => {
+            OracleNodeIr::Modal(modal) => {
                 result.modal = Some(modal.clone());
             }
-            OracleItemIr::AdditionalCost(cost) => {
+            OracleNodeIr::AdditionalCost(cost) => {
                 result.additional_cost = Some(cost.clone());
             }
-            OracleItemIr::CastingRestriction(restriction) => {
+            OracleNodeIr::CastingRestriction(restriction) => {
                 result.casting_restrictions.push(restriction.clone());
             }
-            OracleItemIr::CastingOption(option) => {
+            OracleNodeIr::CastingOption(option) => {
                 result.casting_options.push(option.clone());
             }
-            OracleItemIr::SolveCondition(condition) => {
+            OracleNodeIr::SolveCondition(condition) => {
                 result.solve_condition = Some(condition.clone());
             }
-            OracleItemIr::StriveCost(cost) => {
+            OracleNodeIr::StriveCost(cost) => {
                 result.strive_cost = Some(cost.clone());
             }
-            OracleItemIr::PreLoweredTrigger(def) => {
+            OracleNodeIr::PreLoweredTrigger(def) => {
                 result.triggers.push(def.clone());
+                trigger_ids.push(item.id);
             }
-            OracleItemIr::PreLoweredStatic(def) => {
+            OracleNodeIr::PreLoweredStatic(def) => {
                 result.statics.push(def.clone());
+                static_ids.push(item.id);
             }
-            OracleItemIr::PreLoweredReplacement(def) => {
+            OracleNodeIr::PreLoweredReplacement(def) => {
                 result.replacements.push(def.clone());
+                replacement_ids.push(item.id);
             }
-            OracleItemIr::PreLoweredSpell(def) => {
+            OracleNodeIr::PreLoweredSpell(def) => {
                 result.abilities.push(def.clone());
+                ability_ids.push(item.id);
             }
         }
     }
+
+    // ---- Cross-item document relation application (CR 607.2d) -----------------
+    // `ir.relations` were recovered at parse time by pairing producer/consumer
+    // items by `OracleItemId` (see `oracle_ir::relation` + `detect_document_
+    // relations`). They are applied HERE, post-fold, by resolving each id back to
+    // its lowered definition through the parallel `_ids` tracks — the single
+    // authority, replacing the former five lowered-shape post-passes.
+    //
+    // PLACEMENT PIN: the two enters-choice relations run first, then the
+    // within-item `reconcile_host_bound_phase_outs` chain repair (NOT a document
+    // relation — it belongs to unit 7), then the persisted-player relation, then
+    // the swallow audit, then the two enters/attack relations — reproducing the
+    // exact order the five standalone passes ran in (choose-counter → self-chosen
+    // type → host-bound → persisted-player → swallow → etb-exile → punisher).
+    // Order is behavior-load-bearing: the swallow audit reads `result` between the
+    // player-persist and the etb-exile/punisher applications.
+    apply_linked_choice_etb_counter(&mut result, &ir.relations, &mut replacement_ids);
+    apply_linked_choice_type_statics(
+        &mut result,
+        &ir.relations,
+        &ability_ids,
+        &trigger_ids,
+        &static_ids,
+    );
+    reconcile_host_bound_phase_outs(&mut result);
+    apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
+
+    // Architectural rule: the parser must never silently discard Oracle text. Run
+    // the swallow audit against the parsed result so any unrepresented clause
+    // surfaces as a parse_warning. The audit's INPUT is the assembled `result`, so
+    // it cannot run before the fold; its OUTPUT nonetheless belongs in the doc's
+    // one warning channel, so it emits into `ir.diagnostics` (the reason this
+    // function borrows `ir` mutably). `parse_warnings` is then assigned ONCE, from
+    // that channel, at the end — no direct-append behind the doc's back.
+    //
+    // The audit is now PER ITEM: each item's own source fragment supplies the
+    // expectation and its own lowered definitions — resolved through the id tracks
+    // below — supply the evidence. It therefore takes the items and the tracks
+    // rather than the whole card's text. The draft-matters (CR 905) filter that used
+    // to strip lines from the whole-card text moves inside as a per-item skip.
+    //
+    // The tracks are sound to zip here: of the four relation passes above, three are
+    // length-preserving and `apply_linked_choice_etb_counter` removes from
+    // `result.replacements` and `replacement_ids` at the same index. This is also
+    // exactly why the audit stays HERE, post-relation: a pre-lowering audit is blind
+    // to relation-synthesized semantics (that pass *synthesizes a replacement*), so
+    // the false-positive wave U1 bounded to 31 faces would be caused, not avoided.
+    //
+    // Emitted into a local vec and appended, rather than passing `&mut
+    // ir.diagnostics` directly: the audit reads `ir.items` and writes the
+    // diagnostics channel, and those are two borrows of the same `ir`. Appending
+    // preserves the ordering the channel guarantees (parse-time diagnostics first,
+    // then swallow findings).
+    let tracks = ItemIdTracks {
+        abilities: &ability_ids,
+        triggers: &trigger_ids,
+        statics: &static_ids,
+        replacements: &replacement_ids,
+    };
+    let mut swallow_diagnostics = Vec::new();
+    super::swallow_check::check_swallowed_clauses(
+        &ir.items,
+        &ir.source_text,
+        &result,
+        &tracks,
+        &mut swallow_diagnostics,
+    );
+    ir.diagnostics.append(&mut swallow_diagnostics);
+    // ---------------------------------------------------------------------------
+
+    // CR 607.1 + CR 610.3: Two-trigger exile-return synthesis (Journey to
+    // Nowhere, Oblivion Ring — see `DocumentRelationIr::EtbExileLtbReturn`).
+    // CR 102.1 + CR 603.7c + CR 608.2c: active-player punisher rebinding (Siren's
+    // Call — see `DocumentRelationIr::ActivePlayerPunisher`). Applied here, after
+    // the swallow audit, to preserve the pre-relocation order in which the two
+    // former `synthesize`/`bind` passes ran (the audit reads `result` first).
+    apply_etb_exile_ltb_return(&mut result, &ir.relations, &trigger_ids);
+    apply_active_player_punisher(&mut result, &ir.relations, &ability_ids);
+
+    // The doc IR's diagnostics channel is the single source of parse warnings.
+    // Assigned once, here, so it carries BOTH the parse-time diagnostics sealed by
+    // `finish()` and the swallow-audit diagnostics emitted above, in that order.
+    // None of the relation passes touch `parse_warnings`, so this placement is
+    // equivalent to assigning before them.
     result.parse_warnings = ir.diagnostics.clone();
-    // CR 607.1 + CR 610.3: Two-trigger exile-return synthesis. Cards like
-    // Journey to Nowhere and Oblivion Ring use a two-trigger design:
-    //   Line 1 (ETB): "When ~ enters, exile target creature."
-    //   Line 2 (LTB): "When ~ leaves the battlefield, return the exiled card
-    //                  to the battlefield under its owner's control."
-    // The ETB exile produces no duration (the oracle text has no "until" clause),
-    // so no ExileLink::UntilSourceLeaves is created and the exiled card is
-    // never returned. Fix: when we detect this paired pattern, set
-    // Duration::UntilHostLeavesPlay on the ETB exile's execute ability so the
-    // existing exile-link mechanism handles the return correctly. The LTB
-    // trigger stays registered as-is (its TrackedSet target gracefully resolves
-    // to nothing when the exile link has already returned the card).
-    synthesize_etb_exile_ltb_return_pair(&mut result.triggers);
-    bind_active_player_punisher_target(&mut result.abilities);
     result
 }
 
-/// CR 102.1 + CR 603.7c + CR 608.2c: Bind the delayed punisher's "that player
-/// controls" anaphor to the active player named by the sibling mass-attack
-/// coerce clause (Siren's Call). The two lines parse to two abilities: a
-/// mass-`MustAttack` `GenericEffect` over an `ActivePlayer` subject, and a
-/// sibling delayed `DestroyAll` over a non-Wall creature filter carrying
-/// `Not(AttackedThisTurn)` whose controller parsed to the default `You`. When
-/// BOTH siblings co-exist in one card's abilities (frame-local), rewrite the
-/// DestroyAll target's controller to `ActivePlayer`. A standalone "destroy all
-/// creatures you control" with no coerce sibling is untouched.
-fn bind_active_player_punisher_target(abilities: &mut [AbilityDefinition]) {
-    use crate::parser::oracle_effect::{
-        set_target_filter_controller_ref, target_filter_controller_ref,
-    };
+// --- CR 102.1 + CR 603.7c + CR 608.2c: active-player coerce → delayed punisher --
 
-    // Detect the mass-MustAttack coerce clause over an ActivePlayer subject.
-    let ability_has_active_player_coerce = |a: &AbilityDefinition| {
-        let Effect::GenericEffect {
-            static_abilities, ..
-        } = a.effect.as_ref()
-        else {
-            return false;
-        };
-        static_abilities.iter().any(|st| {
-            matches!(st.mode, StaticMode::MustAttack)
-                && st.affected.as_ref().and_then(target_filter_controller_ref)
-                    == Some(ControllerRef::ActivePlayer)
-        })
+/// Whether an ability is the mass-`MustAttack` coerce clause over an
+/// `ActivePlayer` subject (Siren's Call, first line).
+fn ability_is_active_player_coerce(def: &AbilityDefinition) -> bool {
+    use crate::parser::oracle_effect::target_filter_controller_ref;
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = def.effect.as_ref()
+    else {
+        return false;
     };
-    let has_active_player_coerce = abilities.iter().any(ability_has_active_player_coerce);
-    if !has_active_player_coerce {
+    static_abilities.iter().any(|st| {
+        matches!(st.mode, StaticMode::MustAttack)
+            && st.affected.as_ref().and_then(target_filter_controller_ref)
+                == Some(ControllerRef::ActivePlayer)
+    })
+}
+
+/// Whether an ability is the sibling delayed `DestroyAll` punisher whose
+/// "that player controls" anaphor defaulted to `You` (Siren's Call, second line).
+fn ability_is_active_player_punisher(def: &AbilityDefinition) -> bool {
+    use crate::parser::oracle_effect::target_filter_controller_ref;
+    let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() else {
+        return false;
+    };
+    let Effect::DestroyAll { target, .. } = effect.effect.as_ref() else {
+        return false;
+    };
+    target_filter_has_not_attacked_this_turn(target)
+        && target_filter_controller_ref(target) == Some(ControllerRef::You)
+}
+
+/// CR 102.1 + CR 603.7c + CR 608.2c: Pair the mass-attack coerce clause
+/// (`coerce`) with each sibling delayed punisher (`punisher`) on the same card.
+fn detect_active_player_punisher(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
+    let Some(coerce) = items
+        .iter()
+        .find(|item| item_ability(item).is_some_and(ability_is_active_player_coerce))
+    else {
         return;
-    }
-
-    for ability in abilities.iter_mut() {
-        // Siren's Call route: the coerce and the delayed DestroyAll are SEPARATE
-        // top-level abilities. Rewrite the delayed punisher whose target carries
-        // `Not(AttackedThisTurn)` and defaulted to `controller: You`.
-        if let Effect::CreateDelayedTrigger { effect, .. } = ability.effect.as_mut() {
-            let inner = effect.as_mut();
-            if let Effect::DestroyAll { target, .. } = inner.effect.as_mut() {
-                if target_filter_has_not_attacked_this_turn(target)
-                    && target_filter_controller_ref(target) == Some(ControllerRef::You)
-                {
-                    set_target_filter_controller_ref(target, ControllerRef::ActivePlayer);
-
-                    // CR 302.6 + CR 508.1a: Siren's Call exemption — "Ignore this
-                    // effect for each creature the player didn't control
-                    // continuously since the beginning of the turn." Attach the
-                    // continuity predicate to the destroyed set and CONSUME the
-                    // redundant `Unimplemented{"ignore"}` sibling, so the destroyed
-                    // set = non-Wall ∧ ActivePlayer ∧ Not(AttackedThisTurn) ∧
-                    // ControlledContinuouslySinceTurnBegan.
-                    if sub_ability_is_continuity_exemption(inner.sub_ability.as_deref()) {
-                        add_filter_prop_to_typed(
-                            target,
-                            FilterProp::ControlledContinuouslySinceTurnBegan,
-                        );
-                        inner.sub_ability = None;
-                    }
-                }
-            }
+    };
+    for item in items {
+        if item_ability(item).is_some_and(ability_is_active_player_punisher) {
+            relations.push(DocumentRelationIr::ActivePlayerPunisher {
+                coerce: coerce.id,
+                punisher: item.id,
+            });
         }
+    }
+}
 
-        // CR 608.2c: Maddening Imp's "each of those creatures that didn't attack
-        // this turn" is now a FROZEN tracked-set snapshot — the mass-MustAttack
-        // coerce publishes the population it named at resolution
-        // (`is_mass_coerce_static` → `publish_tracked_set_with_causes`) and the
-        // delayed `DestroyAll{TrackedSetFiltered{0, Not(AttackedThisTurn)}}`
-        // consumes it (sentinel pinned to the concrete id at delayed-trigger
-        // creation by `bind_tracked_set_to_effect`). No card-assembly rewrite is
-        // needed here for Maddening Imp; the former live-refilter route (and its
-        // `coerce_affected_filter` helper) was superseded and removed.
+/// Rebind the punisher's destroyed-set controller from `You` to `ActivePlayer`
+/// and fold the CR 302.6 / CR 508.1a continuous-control exemption sibling into
+/// the set predicate. Applied to the punisher ability resolved by id.
+fn apply_active_player_punisher(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    ability_ids: &[OracleItemId],
+) {
+    use crate::parser::oracle_effect::set_target_filter_controller_ref;
+    for relation in relations {
+        let DocumentRelationIr::ActivePlayerPunisher { punisher, .. } = relation else {
+            continue;
+        };
+        let Some(pos) = position_of(ability_ids, *punisher) else {
+            continue;
+        };
+        let Effect::CreateDelayedTrigger { effect, .. } = result.abilities[pos].effect.as_mut()
+        else {
+            continue;
+        };
+        let inner = effect.as_mut();
+        let Effect::DestroyAll { target, .. } = inner.effect.as_mut() else {
+            continue;
+        };
+        set_target_filter_controller_ref(target, ControllerRef::ActivePlayer);
+        // CR 302.6 + CR 508.1a: Siren's Call exemption — "Ignore this effect for
+        // each creature the player didn't control continuously since the
+        // beginning of the turn." Attach the continuity predicate to the
+        // destroyed set and CONSUME the redundant `Unimplemented{"ignore"}`
+        // sibling, so the destroyed set = non-Wall ∧ ActivePlayer ∧
+        // Not(AttackedThisTurn) ∧ ControlledContinuouslySinceTurnBegan.
+        if sub_ability_is_continuity_exemption(inner.sub_ability.as_deref()) {
+            add_filter_prop_to_typed(target, FilterProp::ControlledContinuouslySinceTurnBegan);
+            inner.sub_ability = None;
+        }
     }
 }
 
@@ -2578,6 +2916,28 @@ fn sub_ability_is_continuity_exemption(sub: Option<&AbilityDefinition>) -> bool 
     parse_continuity_exemption_clause(text.trim()).is_ok_and(|(rest, ())| rest.trim().is_empty())
 }
 
+// KNOWN GAP (Total War, tracked as a separate follow-up): this recognizer
+// covers only Siren's Call's "ignore this effect for each creature ... didn't
+// control continuously since the beginning of the turn" phrasing. Total War
+// carries the SAME CR 302.6 + CR 508.1a continuity exemption, but through a
+// DIFFERENT shape:
+//   - it is a triggered ability ("Whenever a player attacks with one or more
+//     creatures ..."), NOT an `ActivePlayerPunisher` delayed trigger, so it
+//     never reaches `apply_active_player_punisher`, the only caller of
+//     `sub_ability_is_continuity_exemption` above; and
+//   - it phrases the exemption as "except for creatures the player hasn't
+//     controlled continuously ...", which the "ignore this effect for each
+//     creature ..." tag below does not match.
+// As a result Total War's continuity exemption is currently silently dropped —
+// its DestroyAll filter parses only as [Untapped, Not(AttackedThisTurn)] with
+// no `ControlledContinuouslySinceTurnBegan` restriction and no `Unimplemented`
+// marker. This is a distinct dropped-modifier root cause (NOT the player-scope
+// bug fixed alongside it in `condition_introduces_attacking_player`) and is
+// intentionally left unfixed here. Fixing it means recognizing the "except for
+// <continuity>" clause on the triggered-ability DestroyAll effect body and
+// attaching `FilterProp::ControlledContinuouslySinceTurnBegan` — either by
+// generalizing this recognizer's phrasing or adding a sibling on the effect
+// parse path.
 fn parse_continuity_exemption_clause(i: &str) -> OracleResult<'_, ()> {
     let (i, _) = tag::<_, _, OracleError<'_>>("ignore this effect for each creature").parse(i)?;
     // Optional subject anaphor: " the player" / " that player" / "".
@@ -2621,61 +2981,119 @@ fn target_filter_has_not_attacked_this_turn(filter: &TargetFilter) -> bool {
     }
 }
 
-/// CR 607.1 + CR 610.3: Detect an (ETB exile, LTB return) trigger pair and
-/// upgrade the ETB exile to `Duration::UntilHostLeavesPlay` so the
-/// `ExileLink::UntilSourceLeaves` mechanism returns the exiled card when the
-/// source leaves. Covers Journey to Nowhere, Oblivion Ring, and the broader
-/// "exile target X … LTB return" two-trigger class.
-fn synthesize_etb_exile_ltb_return_pair(triggers: &mut [TriggerDefinition]) {
-    let has_ltb_return = triggers.iter().any(|t| {
-        t.mode == TriggerMode::LeavesBattlefield
-            && t.execute.as_deref().is_some_and(|ex| {
-                matches!(
+// --- CR 607.1 + CR 610.3: ETB exile → LTB return two-trigger pair --------------
+
+/// Whether a trigger is the LTB "return the exiled card to the battlefield" side.
+fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
+    def.mode == TriggerMode::LeavesBattlefield
+        && def.execute.as_deref().is_some_and(|ex| {
+            matches!(
+                ex.effect.as_ref(),
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::TrackedSet { .. },
+                    ..
+                }
+            )
+        })
+}
+
+/// Whether a trigger is the ETB "exile target X" side with no printed duration
+/// (the side that must gain `Duration::UntilHostLeavesPlay`).
+fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
+    def.mode == TriggerMode::ChangesZone
+        && def.destination == Some(Zone::Battlefield)
+        && def.execute.as_deref().is_some_and(|ex| {
+            ex.duration.is_none()
+                && matches!(
                     ex.effect.as_ref(),
                     Effect::ChangeZone {
-                        destination: Zone::Battlefield,
-                        target: TargetFilter::TrackedSet { .. },
+                        destination: Zone::Exile,
                         ..
                     }
                 )
-            })
-    });
+        })
+}
 
-    if !has_ltb_return {
+/// CR 607.1 + CR 610.3: Pair each ETB "exile target X" trigger with the LTB
+/// "return the exiled card" trigger (Journey to Nowhere, Oblivion Ring, and the
+/// broader two-trigger class). Emitted only when the LTB-return side exists.
+fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
+    let Some(ltb) = items
+        .iter()
+        .find(|item| item_trigger(item).is_some_and(trigger_is_ltb_return))
+    else {
         return;
-    }
-
-    for trig in triggers.iter_mut() {
-        if trig.mode != TriggerMode::ChangesZone || trig.destination != Some(Zone::Battlefield) {
-            continue;
-        }
-        let Some(execute) = trig.execute.as_deref_mut() else {
-            continue;
-        };
-        if !matches!(
-            execute.effect.as_ref(),
-            Effect::ChangeZone {
-                destination: Zone::Exile,
-                ..
-            }
-        ) {
-            continue;
-        }
-        if execute.duration.is_none() {
-            execute.duration = Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+    };
+    for item in items {
+        if item_trigger(item).is_some_and(trigger_is_etb_exile_pending_duration) {
+            relations.push(DocumentRelationIr::EtbExileLtbReturn {
+                etb_exile: item.id,
+                ltb_return: ltb.id,
+            });
         }
     }
 }
 
+/// Stamp `Duration::UntilHostLeavesPlay` on the ETB exile's execute so the
+/// existing `ExileLink::UntilSourceLeaves` mechanism returns the exiled card.
+fn apply_etb_exile_ltb_return(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    trigger_ids: &[OracleItemId],
+) {
+    for relation in relations {
+        let DocumentRelationIr::EtbExileLtbReturn { etb_exile, .. } = relation else {
+            continue;
+        };
+        let Some(pos) = position_of(trigger_ids, *etb_exile) else {
+            continue;
+        };
+        if let Some(execute) = result.triggers[pos].execute.as_deref_mut() {
+            if execute.duration.is_none() {
+                execute.duration = Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+            }
+        }
+    }
+}
+
+/// CR 207.2c + CR 601.2f: Extract the per-target cost-increase clause,
+/// "[Strive — ]This spell costs {N} more to cast for each target beyond
+/// the first." Two surface forms exist for the identical CR 601.2f cost
+/// increase.
+///
+/// Labeled (~17 cards since Strive was introduced in 2014, e.g. Aerial
+/// Formation, Ajani's Presence, Twinflame): "Strive — This spell costs…".
+///
+/// Bare, no ability-word label (Fireball, Alpha 1993 — predates Strive by
+/// 21 years; Officious Interrogation, MKM 2024 — WotC printed this nine
+/// years after Strive existed and chose not to apply the label): "This
+/// spell costs…" with no em-dash prefix at all.
+///
+/// Try the labeled form first (unchanged behavior for existing Strive
+/// cards); on `None`, fall back to the same cost-pattern pipeline run
+/// directly on the un-stripped line. If a DIFFERENT ability word labels the
+/// line, the labeled branch's `ability_word != "strive"` guard still
+/// correctly returns `None` without ever reaching the bare fallback.
 fn parse_strive_cost_line(line: &str) -> Option<ManaCost> {
     let stripped = strip_reminder_text(line.trim());
-    let (ability_word, effect_text) = strip_ability_word_with_name(&stripped)?;
-    if ability_word != "strive" {
-        return None;
+
+    if let Some((ability_word, effect_text)) = strip_ability_word_with_name(&stripped) {
+        if ability_word != "strive" {
+            return None;
+        }
+        return parse_strive_cost_body(&effect_text);
     }
 
+    parse_strive_cost_body(&stripped)
+}
+
+/// Shared nom pipeline for the cost-increase clause body, used by both the
+/// labeled and bare entry points in `parse_strive_cost_line` so the two
+/// surface forms parse identically.
+fn parse_strive_cost_body(effect_text: &str) -> Option<ManaCost> {
     let effect_lower = effect_text.to_lowercase();
-    let ((), rest_original) = nom_on_lower(&effect_text, &effect_lower, |i| {
+    let ((), rest_original) = nom_on_lower(effect_text, &effect_lower, |i| {
         value((), tag("this spell costs ")).parse(i)
     })?;
     let (cost, rest_original) = parse_mana_symbols(rest_original)?;
@@ -2692,6 +3110,243 @@ fn parse_strive_cost_line(line: &str) -> Option<ManaCost> {
         .parse(i)
     })?;
     Some(cost)
+}
+
+/// Single-authority source-order emission surface for the unit-4 cutover.
+///
+/// Owns the `OracleDocBuilder` and the parse-local line→byte geometry so EVERY
+/// emission in `parse_oracle_ir` — the per-line dispatch loop, the preprocessors,
+/// and the post-loop singletons — routes through ONE place that (a) computes the
+/// item's exact source span, (b) draws its `ordinal_within_span` from the
+/// builder's single `next_ordinal_for_line` authority, and (c) calls
+/// `begin_item` + `emit`. Every typed method is trivial and uniform — it does
+/// EXACTLY `begin_item(exact_span, Some(fragment)) + emit(node)` and nothing else
+/// (no reordering, no per-method divergence): the method bodies are the fidelity
+/// surface, so the source-order guarantee is a property of this one type rather
+/// than of 90 hand-written call sites.
+///
+/// This is the single emission authority for EVERY path — the dispatch loop and
+/// every preprocessor, Class included. The category-ordered
+/// `parsed_abilities_to_doc_ir` façade it replaced is gone, and with it the last
+/// producer of whole-document spans.
+struct DocEmitter<'a> {
+    builder: OracleDocBuilder,
+    lines: &'a [&'a str],
+    /// Byte offset of the start of each line in the normalized Oracle text:
+    /// `line_start[i] = Σ_{j<i} (lines[j].len() + 1)` (one `'\n'` per prior line).
+    /// Byte values only order items — they are parser-internal and never reach
+    /// `card-data.json` (spans are not serialized into the lowered output).
+    line_start: Vec<usize>,
+    /// Last-emitted TRIGGER / STATIC, for the ONE mid-loop reader that inspects
+    /// `result.{triggers,statics}.last()` (`parsed_result_recently_granted_flashback`).
+    /// INSERTION recency: overwritten on each emit of that category. Safe as a
+    /// clone-on-emit slot because NO `triggers.pop()`/`statics.pop()` exists in the
+    /// parser (doc.rs verifies this) — nothing can revert them. The ABILITY peek is
+    /// deliberately NOT here: it must be pop-aware, so `last_ability()` reads the
+    /// builder's `spells_emitted` stack via `peek_last_spell` instead.
+    ///
+    /// If a trigger/static pop is ever introduced, make these
+    /// `*_emitted: Vec<OracleItemId>` stacks (like `spells_emitted`) first.
+    last_trigger: Option<TriggerDefinition>,
+    last_static: Option<StaticDefinition>,
+}
+
+impl<'a> DocEmitter<'a> {
+    fn new(lines: &'a [&'a str]) -> Self {
+        let mut line_start = Vec::with_capacity(lines.len());
+        let mut acc = 0usize;
+        for line in lines {
+            line_start.push(acc);
+            acc += line.len() + 1; // +1 for the '\n' separator split() removed.
+        }
+        Self {
+            builder: OracleDocBuilder::new(),
+            lines,
+            line_start,
+            last_trigger: None,
+            last_static: None,
+        }
+    }
+
+    /// Exact byte range `[start, end)` of `line` in the normalized text.
+    fn byte_range(&self, line: usize) -> (usize, usize) {
+        let start = self.line_start[line];
+        (start, start + self.lines[line].len())
+    }
+
+    /// An Exact span for `line`, drawing a fresh ordinal from the single per-line
+    /// authority so no two items on one line can collide on the map key.
+    fn exact_span(&mut self, line: usize) -> OracleSourceSpan {
+        let ordinal = self.builder.next_ordinal_for_line(line);
+        let (start, end) = self.byte_range(line);
+        OracleSourceSpan::exact(line, line, start, end, ordinal)
+    }
+
+    /// The one emit primitive; every typed method funnels here. The `expect` is
+    /// sound: `emit` only rejects a duplicate `(first_line, start_byte, ordinal)`
+    /// key or an overlapping same-ordinal sibling, and the single-authority
+    /// ordinal makes every same-line item's key distinct.
+    fn emit_at(&mut self, line: usize, node: OracleNodeIr) {
+        let span = self.exact_span(line);
+        let fragment = self.lines[line];
+        let slot = self.builder.begin_item(span, Some(fragment));
+        self.builder.emit(slot, node).expect(
+            "single-authority ordinals keep same-line item keys distinct, so emit cannot reject",
+        );
+    }
+
+    /// Emit an item spanning `first_line..=last_line` (a multi-line unit, e.g. a
+    /// leveler block-summary static whose span ends at the last
+    /// modification-contributing line). Ordinal is drawn on `first_line`.
+    fn emit_span(&mut self, first_line: usize, last_line: usize, node: OracleNodeIr) {
+        let ordinal = self.builder.next_ordinal_for_line(first_line);
+        let (start, _) = self.byte_range(first_line);
+        let (_, end) = self.byte_range(last_line);
+        let span = OracleSourceSpan::exact(first_line, last_line, start, end, ordinal);
+        // Fragment must be the verbatim covered slice for an Exact span; the
+        // caller passes contiguous lines, so the byte range is honest.
+        let slot = self.builder.begin_item(span, Some(self.lines[first_line]));
+        self.builder
+            .emit(slot, node)
+            .expect("single-authority ordinals keep multi-line item keys distinct");
+    }
+
+    fn ability_at(&mut self, line: usize, def: AbilityDefinition) {
+        // No `last_ability` clone: the ability peek is pop-aware, read from the
+        // builder's `spells_emitted` stack (see `last_ability`).
+        self.emit_at(line, OracleNodeIr::PreLoweredSpell(def));
+    }
+    fn trigger_at(&mut self, line: usize, def: TriggerDefinition) {
+        self.last_trigger = Some(def.clone());
+        self.emit_at(line, OracleNodeIr::PreLoweredTrigger(def));
+    }
+    fn static_at(&mut self, line: usize, def: StaticDefinition) {
+        self.last_static = Some(def.clone());
+        self.emit_at(line, OracleNodeIr::PreLoweredStatic(def));
+    }
+
+    /// Last-emitted definition per category — the read-only peeks for
+    /// `parsed_result_recently_granted_flashback` (the one mid-loop reader of
+    /// `result.{abilities,triggers,statics}.last()`). All three are INSERTION
+    /// recency; `last_ability` is pop-aware (via `spells_emitted`), the other two
+    /// are clone-on-emit slots (no pop exists to revert them).
+    fn last_ability(&self) -> Option<&AbilityDefinition> {
+        self.builder.peek_last_spell()
+    }
+    fn last_trigger(&self) -> Option<&TriggerDefinition> {
+        self.last_trigger.as_ref()
+    }
+    fn last_static(&self) -> Option<&StaticDefinition> {
+        self.last_static.as_ref()
+    }
+
+    /// Move every vector item a `&mut ParsedAbilities`-taking mutator just pushed
+    /// into the builder at `item_line`, then clear them. Used for the complex
+    /// cross-file mutators (modal / enters-replacement lowering) that the (B)
+    /// tuple-return design does NOT rewrite internally: they still push into a
+    /// scratch `ParsedAbilities`, and this drains that scratch into source-ordered
+    /// emission. `result`'s SINGLETON fields (modal/additional_cost/…) are left
+    /// untouched — the caller handles those.
+    fn drain_result_vectors(&mut self, item_line: usize, result: &mut ParsedAbilities) {
+        for def in std::mem::take(&mut result.abilities) {
+            self.ability_at(item_line, def);
+        }
+        for def in std::mem::take(&mut result.triggers) {
+            self.trigger_at(item_line, def);
+        }
+        for def in std::mem::take(&mut result.statics) {
+            self.static_at(item_line, def);
+        }
+        for def in std::mem::take(&mut result.replacements) {
+            self.replacement_at(item_line, def);
+        }
+        for kw in std::mem::take(&mut result.extracted_keywords) {
+            self.keyword_at(item_line, kw);
+        }
+        for r in std::mem::take(&mut result.casting_restrictions) {
+            self.casting_restriction_at(item_line, r);
+        }
+        for o in std::mem::take(&mut result.casting_options) {
+            self.casting_option_at(item_line, o);
+        }
+    }
+    fn replacement_at(&mut self, line: usize, def: ReplacementDefinition) {
+        self.emit_at(line, OracleNodeIr::PreLoweredReplacement(def));
+    }
+    fn keyword_at(&mut self, line: usize, kw: Keyword) {
+        self.emit_at(line, OracleNodeIr::Keyword(kw));
+    }
+    fn casting_restriction_at(&mut self, line: usize, r: CastingRestriction) {
+        self.emit_at(line, OracleNodeIr::CastingRestriction(r));
+    }
+    fn casting_option_at(&mut self, line: usize, o: SpellCastingOption) {
+        self.emit_at(line, OracleNodeIr::CastingOption(o));
+    }
+    fn additional_cost_at(&mut self, line: usize, c: AdditionalCost) {
+        self.emit_at(line, OracleNodeIr::AdditionalCost(c));
+    }
+    fn solve_condition_at(&mut self, line: usize, c: SolveCondition) {
+        self.emit_at(line, OracleNodeIr::SolveCondition(c));
+    }
+    fn strive_cost_at(&mut self, line: usize, c: ManaCost) {
+        self.emit_at(line, OracleNodeIr::StriveCost(c));
+    }
+    fn modal_at(&mut self, line: usize, m: ModalChoice) {
+        self.emit_at(line, OracleNodeIr::Modal(m));
+    }
+
+    /// Remove and return the most recently emitted spell item — the typed
+    /// `result.abilities.pop()` for the cross-line "instead" fold. The caller
+    /// folds it into a new ability and re-emits via `reemit_spell` at the base
+    /// item's ORIGINAL span.
+    fn pop_last_spell(&mut self) -> Option<OracleItemIr> {
+        self.builder.take_last_spell()
+    }
+
+    /// Re-emit a spell at a template item's ORIGINAL span — same `first_line`,
+    /// bytes, AND `ordinal_within_span`, the key `take_last_spell` just freed.
+    ///
+    /// m2-shell correction: reuse the original ordinal, never fresh-allocate. The
+    /// key was freed by the take, so re-emit cannot collide; and a fresh (higher)
+    /// ordinal would REORDER the spell past any co-located sibling that shares its
+    /// `(first_line, start_byte)` (e.g. a `push_same_is_true_*` static + ability
+    /// from one line). Original-ordinal re-emit is position- and slot-preserving.
+    fn reemit_spell(&mut self, source: &OracleUnitSource, def: AbilityDefinition) {
+        let span = source.span().clone();
+        let fragment = source.fragment();
+        let slot = self.builder.begin_item(span, fragment);
+        self.builder
+            .emit(slot, OracleNodeIr::PreLoweredSpell(def))
+            .expect("re-emitting at the just-freed original key cannot collide");
+    }
+
+    /// The typed `result.abilities.last_mut()` for min_x_value stamping: pop the
+    /// last emitted spell, mutate it, re-emit at its original span. A no-op when
+    /// no spell has been emitted (mirrors `last_mut()` returning `None`).
+    ///
+    /// `take_last_spell` pops the emission-ordered spell stack, which equals
+    /// `abilities.last_mut()` regardless of triggers/statics emitted in between.
+    fn mutate_last_spell(&mut self, f: impl FnOnce(&mut AbilityDefinition)) {
+        let Some(item) = self.builder.take_last_spell() else {
+            return;
+        };
+        let OracleItemIr { source, node, .. } = item;
+        let OracleNodeIr::PreLoweredSpell(mut def) = node else {
+            unreachable!("take_last_spell returns only PreLoweredSpell items");
+        };
+        f(&mut def);
+        self.reemit_spell(&source, def);
+    }
+
+    /// Finish, producing items already in Oracle source order.
+    fn finish(
+        self,
+        oracle_text: &str,
+        card_name: &str,
+        diagnostics: Vec<OracleDiagnostic>,
+    ) -> OracleDocIr {
+        self.builder.finish(oracle_text, card_name, diagnostics)
+    }
 }
 
 /// Produce an `OracleDocIr` from Oracle text — the IR-production half of the
@@ -2758,11 +3413,53 @@ pub(crate) fn parse_oracle_ir(
     let oracle_text_owned = normalize_card_name_refs(oracle_text, card_name);
     let lines: Vec<&str> = oracle_text_owned.split('\n').collect();
 
-    // CR 714 / CR 717: Pre-parse Saga chapters and Attraction visit lines.
+    // u4-c2 source-order emission: the document builder, wrapped in the emitter
+    // that owns the single per-line ordinal authority. Every non-Class emission —
+    // preprocessors and the dispatch loop — routes through it, in printed source
+    // order. `result` is retained ONLY as the holder for the four order-agnostic
+    // SINGLETON fields (additional_cost / solve_condition / strive_cost / modal),
+    // which need mid-loop read-back/merge/dedup; its VECTOR fields stay empty and
+    // are emitted through the builder instead. The singletons are emitted post-loop
+    // at their captured source line.
+    let mut emitter = DocEmitter::new(&lines);
+    let mut additional_cost_line: Option<usize> = None;
+    let mut solve_condition_line: Option<usize> = None;
+    let mut strive_cost_line: Option<usize> = None;
+    let mut modal_line: Option<usize> = None;
+
+    // CR 716: Class cards are a preprocessor like any other — they emit through
+    // `DocEmitter` at their printed source line. HOISTED above the
+    // saga/attraction/level/spacecraft pre-loop blocks so the early return can
+    // never drop a pre-emitted builder item: the emitter is provably empty here.
+    //
+    // `parse_class_oracle_text` returns items already in printed source order, so
+    // no sort is needed — the builder keys them by span anyway. Emission is via the
+    // `emit_at` primitive rather than the typed `*_at` helpers because this branch
+    // returns immediately: the `last_trigger`/`last_static` mirrors those helpers
+    // maintain exist solely for the dispatch loop's mid-loop readers, and no
+    // dispatch loop runs on a Class card.
+    if subtypes.iter().any(|s| s == "Class") {
+        for (line, node) in parse_class_oracle_text(&lines, card_name, mtgjson_keyword_names) {
+            emitter.emit_at(line, node);
+        }
+        // `oracle_text` (the ORIGINAL, un-normalized text), not `oracle_text_owned`
+        // — matching the main path's `finish` below. `OracleDocIr.source_text` is
+        // the swallow audit's input, so normalizing it here would change which
+        // clauses the audit sees.
+        let doc = emitter.finish(oracle_text, card_name, std::mem::take(&mut ctx.diagnostics));
+        return finalize_document_relations(doc, types);
+    }
+
+    // CR 714 / CR 717: Pre-parse Saga chapters and Attraction visit lines, emitting
+    // each at its printed source line (multi-numeral chapters share a line and get
+    // ascending ordinals from the single authority in numeral order — CR 714.2c).
     let mut preparsed_consumed = if subtypes.iter().any(|s| s == "Saga") {
-        let (chapter_triggers, etb_replacement, consumed) = parse_saga_chapters(&lines, card_name);
-        result.triggers.extend(chapter_triggers);
-        result.replacements.push(etb_replacement);
+        let (chapter_triggers, (etb_line, etb_replacement), consumed) =
+            parse_saga_chapters(&lines, card_name);
+        for (line, trigger) in chapter_triggers {
+            emitter.trigger_at(line, trigger);
+        }
+        emitter.replacement_at(etb_line, etb_replacement);
         consumed
     } else {
         std::collections::HashSet::new()
@@ -2772,26 +3469,23 @@ pub(crate) fn parse_oracle_ir(
         .any(|s| s.eq_ignore_ascii_case("Attraction"))
     {
         let (visit_triggers, consumed) = parse_attraction_visit_triggers(&lines, card_name);
-        result.triggers.extend(visit_triggers);
+        for (line, trigger) in visit_triggers {
+            emitter.trigger_at(line, trigger);
+        }
         preparsed_consumed.extend(consumed);
     }
 
-    // CR 716: Pre-parse Class level sections into level-gated abilities.
-    if subtypes.iter().any(|s| s == "Class") {
-        let class_result =
-            parse_class_oracle_text(&lines, card_name, mtgjson_keyword_names, result);
-        return parsed_abilities_to_doc_ir(class_result, oracle_text, card_name, &mut ctx);
-    }
-
-    // CR 711: Pre-parse leveler LEVEL blocks into counter-gated static abilities.
+    // CR 711: Pre-parse leveler LEVEL blocks into counter-gated static abilities,
+    // each emitted at its own source span (block-summary statics span
+    // header..=max(mod_lines) via `emit_span`).
     let (level_statics, level_consumed, level_ability_lines) =
         parse_level_blocks(&lines, card_name);
-    if !level_statics.is_empty() {
-        result.statics.extend(level_statics);
+    for (sd, first_line, last_line) in level_statics {
+        emitter.emit_span(first_line, last_line, OracleNodeIr::PreLoweredStatic(sd));
     }
     // CR 711.2a + CR 711.2b: Re-parse ability lines found within LEVEL blocks through
     // the normal trigger/activated/static pipeline, then attach the level counter condition.
-    for (ability_text, level_condition) in &level_ability_lines {
+    for (ability_text, level_condition, level_line) in &level_ability_lines {
         let (minimum, maximum) = match level_condition {
             StaticCondition::HasCounters {
                 minimum, maximum, ..
@@ -2831,7 +3525,7 @@ pub(crate) fn parse_oracle_ir(
             def.activation_restrictions = restrictions;
             extract_cost_reduction_from_chain(&mut def);
             extract_mana_spend_trigger_from_chain(&mut def);
-            result.abilities.push(def);
+            emitter.ability_at(*level_line, def);
             continue;
         }
 
@@ -2850,13 +3544,24 @@ pub(crate) fn parse_oracle_ir(
         let mut triggers = parse_trigger_lines_at_index(
             ability_text,
             card_name,
-            Some(result.triggers.len()),
+            Some(PrintedTriggerIndex::placeholder()),
             &mut ctx,
         );
         for trigger in &mut triggers {
-            trigger.condition = Some(trigger_condition.clone());
+            trigger.condition = Some(match trigger.condition.take() {
+                // CR 711.2a + CR 711.2b + CR 603.4: a level-gated trigger's
+                // level-counter range is an additional gate; it must compose
+                // with any printed intervening-if condition instead of
+                // replacing it.
+                Some(existing) => TriggerCondition::And {
+                    conditions: vec![existing, trigger_condition.clone()],
+                },
+                None => trigger_condition.clone(),
+            });
         }
-        result.triggers.extend(triggers);
+        for trigger in triggers {
+            emitter.trigger_at(*level_line, trigger);
+        }
     }
 
     // CR 702.184a + CR 721.2: Pre-parse Spacecraft "N+ | body" threshold lines
@@ -2870,13 +3575,19 @@ pub(crate) fn parse_oracle_ir(
         // retain modification inside a Spacecraft threshold trigger body
         // resolves to the correct printed-trigger slot.
         let (sc_statics, sc_triggers, sc_abilities, consumed) =
-            parse_spacecraft_threshold_lines(&lines, card_name, result.triggers.len());
-        result.statics.extend(sc_statics);
-        result.triggers.extend(sc_triggers);
-        for mut def in sc_abilities {
+            parse_spacecraft_threshold_lines(&lines, card_name, PrintedTriggerIndex::placeholder());
+        for (line, sd) in sc_statics {
+            emitter.static_at(line, sd);
+        }
+        for (line, trigger) in sc_triggers {
+            emitter.trigger_at(line, trigger);
+        }
+        // Post-processing runs here (pre-emit), exactly as before — the (B)
+        // tuple-return design obviates moving it inside the preprocessor.
+        for (line, mut def) in sc_abilities {
             extract_cost_reduction_from_chain(&mut def);
             extract_mana_spend_trigger_from_chain(&mut def);
-            result.abilities.push(def);
+            emitter.ability_at(line, def);
         }
         consumed
             .into_iter()
@@ -2887,10 +3598,12 @@ pub(crate) fn parse_oracle_ir(
 
     // CR 207.2c + CR 601.2f: Pre-parse Strive ability word cost before main loop.
     // Strive lines have the form: "Strive — This spell costs {X} more to cast for each
-    // target beyond the first." — extract the per-target surcharge cost.
-    for raw in &lines {
+    // target beyond the first." — extract the per-target surcharge cost. Captured as
+    // a loop-local singleton (emitted post-loop at its source line).
+    for (idx, raw) in lines.iter().enumerate() {
         if let Some(cost) = parse_strive_cost_line(raw) {
             result.strive_cost = Some(cost);
+            strive_cost_line = Some(idx);
             break;
         }
     }
@@ -2913,6 +3626,12 @@ pub(crate) fn parse_oracle_ir(
             i += 1;
             continue;
         }
+
+        // u4-c2: the source line where THIS iteration's dispatch begins. Every item
+        // emitted this iteration anchors here — not at `i`, which some multi-line
+        // consumers advance mid-iteration (a 2-line ability's printed line is its
+        // first line, the dispatch-start line, regardless of how many `i` consumes).
+        let item_line = i;
 
         let raw_line = lines[i].trim();
         if raw_line.is_empty() {
@@ -2942,9 +3661,9 @@ pub(crate) fn parse_oracle_ir(
         let line = strip_x_cant_be_zero_suffix(&line);
         if line.is_empty() {
             if min_x_value > 0 {
-                if let Some(previous) = result.abilities.last_mut() {
+                emitter.mutate_last_spell(|previous| {
                     previous.min_x_value = previous.min_x_value.max(min_x_value);
-                }
+                });
             }
             // Priority 14: entirely parenthesized reminder text
             i += 1;
@@ -2963,6 +3682,9 @@ pub(crate) fn parse_oracle_ir(
                 split_additional_cost_trailing_spell_reduction(&line, &lower);
             let cost_lower = cost_line.to_lowercase();
             result.additional_cost = parse_additional_cost_line(&cost_lower, cost_line);
+            if result.additional_cost.is_some() {
+                additional_cost_line.get_or_insert(item_line);
+            }
             if let Some(reduction_text) = trailing_reduction {
                 if let Some(mut def) = parse_static_line(reduction_text) {
                     // CR 702.166a analogue: reduction only applies when the optional
@@ -2973,7 +3695,7 @@ pub(crate) fn parse_oracle_ir(
                         },
                         None => StaticCondition::AdditionalCostPaid,
                     });
-                    result.statics.push(def);
+                    emitter.static_at(item_line, def);
                 }
             }
             i += 1;
@@ -2996,7 +3718,9 @@ pub(crate) fn parse_oracle_ir(
                 if all_keywords {
                     for part in &parts {
                         if let Some(extracted) = extract_keyword_line(part, mtgjson_keyword_names) {
-                            result.extracted_keywords.extend(extracted);
+                            for __item in extracted {
+                                emitter.keyword_at(item_line, __item);
+                            }
                         }
                     }
                     i += 1;
@@ -3009,12 +3733,19 @@ pub(crate) fn parse_oracle_ir(
         // Must run before keyword extraction so "Spree" header + follow-on `+` lines
         // are consumed as a modal block, not swallowed as a keyword-only line.
         if let Some((block, next_i)) = parse_oracle_block(&lines, i) {
+            // Modal lowering still pushes into a scratch `ParsedAbilities`; drain
+            // its vector output into source-ordered emission at the block's line,
+            // and capture the `modal` singleton's line for post-loop emission.
             lower_oracle_block(
                 block,
                 card_name,
                 ctx.host_self_reference.clone(),
                 &mut result,
             );
+            emitter.drain_result_vectors(item_line, &mut result);
+            if result.modal.is_some() {
+                modal_line.get_or_insert(item_line);
+            }
             i = next_i;
             continue;
         }
@@ -3026,7 +3757,7 @@ pub(crate) fn parse_oracle_ir(
         // ability and still needs the synthesized activation body.
         if lower_starts_with(&lower, "equip") && !lower_starts_with(&lower, "equipped") {
             if let Some(ability) = try_parse_equip(&line) {
-                result.abilities.push(ability);
+                emitter.ability_at(item_line, ability);
                 i += 1;
                 continue;
             }
@@ -3038,7 +3769,7 @@ pub(crate) fn parse_oracle_ir(
         // and would consume the line, dropping the cadence sentence.
         if lower_starts_with(&lower, "crew ") {
             if let Some(crew_kw) = parse_crew_keyword(&lower) {
-                result.extracted_keywords.push(crew_kw);
+                emitter.keyword_at(item_line, crew_kw);
                 i += 1;
                 continue;
             }
@@ -3052,8 +3783,11 @@ pub(crate) fn parse_oracle_ir(
             if let Some(extracted) = extract_keyword_line(&line, mtgjson_keyword_names) {
                 if let Some(cost) = parse_kicker_additional_cost_line(&line, &lower) {
                     merge_kicker_additional_cost(&mut result.additional_cost, cost);
+                    additional_cost_line.get_or_insert(item_line);
                 }
-                result.extracted_keywords.extend(extracted);
+                for __item in extracted {
+                    emitter.keyword_at(item_line, __item);
+                }
                 i += 1;
                 continue;
             }
@@ -3067,12 +3801,18 @@ pub(crate) fn parse_oracle_ir(
         // (Cairn Wanderer) — distribute the gated grant per keyword before the
         // chosen/every-type same-is-true arms (which gap the tail) or the generic
         // static path (which mis-tokenizes the keyword list) can claim the line.
-        if push_graveyard_keyword_same_is_true_tail(&mut result, &static_line, &static_line_lower) {
+        if push_graveyard_keyword_same_is_true_tail(
+            &mut emitter,
+            item_line,
+            &static_line,
+            &static_line_lower,
+        ) {
             i += 1;
             continue;
         }
         if push_same_is_true_static_tail(
-            &mut result,
+            &mut emitter,
+            item_line,
             &static_line,
             &static_line_lower,
             parse_chosen_creature_type_static_prefix,
@@ -3081,7 +3821,8 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
         if push_same_is_true_static_tail(
-            &mut result,
+            &mut emitter,
+            item_line,
             &static_line,
             &static_line_lower,
             parse_every_creature_type_static_prefix,
@@ -3095,7 +3836,8 @@ pub(crate) fn parse_oracle_ir(
         // leaves the non-battlefield-zone tail as an `Unimplemented` residual,
         // mirroring Arcane Adaptation / Maskwood Nexus.
         if push_same_is_true_static_tail(
-            &mut result,
+            &mut emitter,
+            item_line,
             &static_line,
             &static_line_lower,
             parse_compound_you_control_chosen_type_static_prefix,
@@ -3112,7 +3854,7 @@ pub(crate) fn parse_oracle_ir(
                     if let Some(static_def) =
                         try_parse_graveyard_keyword_static_with_continuation(&combined_static_line)
                     {
-                        result.statics.push(static_def);
+                        emitter.static_at(item_line, static_def);
                         i += 2;
                         continue;
                     }
@@ -3142,14 +3884,16 @@ pub(crate) fn parse_oracle_ir(
                     ContinuousModification::SetColor { .. }
                 );
             if is_self_color_cda {
-                result.statics.extend(defs);
+                for __item in defs {
+                    emitter.static_at(item_line, __item);
+                }
                 i += 1;
                 continue;
             }
         }
 
         if lower == "start your engines!" || lower == "start your engines" {
-            result.extracted_keywords.push(Keyword::StartYourEngines);
+            emitter.keyword_at(item_line, Keyword::StartYourEngines);
             i += 1;
             continue;
         }
@@ -3161,7 +3905,9 @@ pub(crate) fn parse_oracle_ir(
                 Some(card_name),
             );
             if !defs.is_empty() {
-                result.statics.extend(defs);
+                for __item in defs {
+                    emitter.static_at(item_line, __item);
+                }
                 i += 1;
                 continue;
             }
@@ -3198,14 +3944,14 @@ pub(crate) fn parse_oracle_ir(
                 .trim_start_matches(" \u{2014} ")
                 .trim_start_matches(" - ");
             if let Some(ability) = try_parse_equip(equip_part) {
-                result.abilities.push(ability);
+                emitter.ability_at(item_line, ability);
                 i += 1;
                 continue;
             }
         }
         // Priority 11: Planeswalker loyalty abilities: +N:, −N:, 0:, [+N]:, [−N]:, [0]:
         if let Some(ability) = try_parse_loyalty_line(&line, &mut ctx) {
-            result.abilities.push(ability);
+            emitter.ability_at(item_line, ability);
             i += 1;
             continue;
         }
@@ -3217,13 +3963,13 @@ pub(crate) fn parse_oracle_ir(
                     let trimmed = clause.trim().trim_end_matches('.');
                     if !trimmed.is_empty() {
                         let clause_dot = format!("{trimmed}.");
-                        result.statics.extend(
-                            parse_static_line_with_graveyard_keyword_continuation(
-                                &clause_dot,
-                                None,
-                                None,
-                            ),
-                        );
+                        for __item in parse_static_line_with_graveyard_keyword_continuation(
+                            &clause_dot,
+                            None,
+                            None,
+                        ) {
+                            emitter.static_at(item_line, __item);
+                        }
                     }
                 }
                 i += 1;
@@ -3238,7 +3984,9 @@ pub(crate) fn parse_oracle_ir(
                 Some(card_name),
             );
             if !defs.is_empty() {
-                result.statics.extend(defs);
+                for __item in defs {
+                    emitter.static_at(item_line, __item);
+                }
                 i += 1;
                 continue;
             }
@@ -3250,6 +3998,7 @@ pub(crate) fn parse_oracle_ir(
         }) {
             let rest_lower = rest_original.to_lowercase();
             result.solve_condition = Some(parse_solve_condition(&rest_lower));
+            solve_condition_line.get_or_insert(item_line);
             i += 1;
             continue;
         }
@@ -3279,7 +4028,7 @@ pub(crate) fn parse_oracle_ir(
                 if !constraints.restrictions.is_empty() {
                     def.activation_restrictions.extend(constraints.restrictions);
                 }
-                result.abilities.push(def);
+                emitter.ability_at(item_line, def);
                 i += 1;
                 continue;
             }
@@ -3309,7 +4058,7 @@ pub(crate) fn parse_oracle_ir(
                 // sub_ability in the chain (it may be several levels deep).
                 extract_cost_reduction_from_chain(&mut def);
                 extract_mana_spend_trigger_from_chain(&mut def);
-                result.abilities.push(def);
+                emitter.ability_at(item_line, def);
                 i += 1;
                 continue;
             }
@@ -3347,7 +4096,7 @@ pub(crate) fn parse_oracle_ir(
                 def.ability_tag = Some(AbilityTag::Boast);
                 extract_cost_reduction_from_chain(&mut def);
                 extract_mana_spend_trigger_from_chain(&mut def);
-                result.abilities.push(def);
+                emitter.ability_at(item_line, def);
                 i += 1;
                 continue;
             }
@@ -3376,7 +4125,7 @@ pub(crate) fn parse_oracle_ir(
                 def.ability_tag = Some(AbilityTag::Exhaust);
                 extract_cost_reduction_from_chain(&mut def);
                 extract_mana_spend_trigger_from_chain(&mut def);
-                result.abilities.push(def);
+                emitter.ability_at(item_line, def);
                 i += 1;
                 continue;
             }
@@ -3416,7 +4165,7 @@ pub(crate) fn parse_oracle_ir(
                     },
                     condition: Some(ParsedCondition::SourceEnteredThisTurn),
                 });
-                result.abilities.push(def);
+                emitter.ability_at(item_line, def);
                 i += 1;
                 continue;
             }
@@ -3454,7 +4203,7 @@ pub(crate) fn parse_oracle_ir(
                     .push(ActivationRestriction::OnlyOnceEachTurn);
                 extract_cost_reduction_from_chain(&mut def);
                 extract_mana_spend_trigger_from_chain(&mut def);
-                result.abilities.push(def);
+                emitter.ability_at(item_line, def);
                 i += 1;
                 continue;
             }
@@ -3479,7 +4228,7 @@ pub(crate) fn parse_oracle_ir(
                 effect_text,
                 &line,
                 card_name,
-                Some(result.abilities.len()),
+                Some(PrintedAbilityIndex::placeholder()),
                 &mut ctx,
             );
             // CR 702.186b: ∞ ("As long as harnessed, it has [ability]") gates an
@@ -3504,7 +4253,7 @@ pub(crate) fn parse_oracle_ir(
             if has_roll_die_pattern(&effect_text.to_lowercase()) {
                 i = attach_die_result_branches_to_chain(&mut def, &lines, i);
             }
-            result.abilities.push(def);
+            emitter.ability_at(item_line, def);
             continue;
         }
 
@@ -3533,7 +4282,7 @@ pub(crate) fn parse_oracle_ir(
             && !scan_contains(&lower, "enters this way,")
         {
             if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                result.replacements.push(rep_def);
+                emitter.replacement_at(item_line, rep_def);
                 i += 1;
                 continue;
             }
@@ -3548,7 +4297,7 @@ pub(crate) fn parse_oracle_ir(
         if is_spell && has_trigger_prefix(&lower) {
             if let Some(def) = try_parse_temporal_delayed_trigger_ability(&line, AbilityKind::Spell)
             {
-                result.abilities.push(def);
+                emitter.ability_at(item_line, def);
                 i += 1;
                 continue;
             }
@@ -3564,7 +4313,7 @@ pub(crate) fn parse_oracle_ir(
             let mut triggers = parse_trigger_lines_at_index(
                 &line,
                 card_name,
-                Some(result.triggers.len()),
+                Some(PrintedTriggerIndex::placeholder()),
                 &mut ctx,
             );
             i += 1;
@@ -3577,7 +4326,9 @@ pub(crate) fn parse_oracle_ir(
                     }
                 }
             }
-            result.triggers.extend(triggers);
+            for __item in triggers {
+                emitter.trigger_at(item_line, __item);
+            }
             continue;
         }
 
@@ -3601,10 +4352,10 @@ pub(crate) fn parse_oracle_ir(
                         activated_effect_text,
                         &line,
                         card_name,
-                        Some(result.abilities.len()),
+                        Some(PrintedAbilityIndex::placeholder()),
                         &mut ctx,
                     );
-                    result.abilities.push(def);
+                    emitter.ability_at(item_line, def);
                     i += 1;
                     continue;
                 }
@@ -3614,7 +4365,7 @@ pub(crate) fn parse_oracle_ir(
                 let mut triggers = parse_trigger_lines_at_index(
                     &effect_text,
                     card_name,
-                    Some(result.triggers.len()),
+                    Some(PrintedTriggerIndex::placeholder()),
                     &mut ctx,
                 );
                 // B7: Attach ability-word condition as fallback when extract_if_condition
@@ -3632,7 +4383,9 @@ pub(crate) fn parse_oracle_ir(
                         }
                     }
                 }
-                result.triggers.extend(triggers);
+                for __item in triggers {
+                    emitter.trigger_at(item_line, __item);
+                }
                 continue;
             }
         }
@@ -3671,7 +4424,7 @@ pub(crate) fn parse_oracle_ir(
                     .trigger_zones(vec![Zone::Battlefield])
                     .execute(effect_def)
                     .description(line.to_string());
-                result.triggers.push(trigger);
+                emitter.trigger_at(item_line, trigger);
             }
             i += 1;
             continue;
@@ -3694,7 +4447,7 @@ pub(crate) fn parse_oracle_ir(
                     .trigger_zones(vec![Zone::Battlefield])
                     .execute(effect_def)
                     .description(line.to_string());
-                result.triggers.push(trigger);
+                emitter.trigger_at(item_line, trigger);
             }
             i += 1;
             continue;
@@ -3717,7 +4470,7 @@ pub(crate) fn parse_oracle_ir(
                     .trigger_zones(vec![Zone::Battlefield])
                     .execute(effect_def)
                     .description(line.to_string());
-                result.triggers.push(trigger);
+                emitter.trigger_at(item_line, trigger);
             }
             i += 1;
             continue;
@@ -3732,7 +4485,7 @@ pub(crate) fn parse_oracle_ir(
                     lines.get(i + 1).map(|l| l.to_lowercase())
                 })
             {
-                result.statics.push(static_def);
+                emitter.static_at(item_line, static_def);
                 i += if consumes_next_line { 2 } else { 1 };
                 continue;
             }
@@ -3746,7 +4499,7 @@ pub(crate) fn parse_oracle_ir(
         // Effect::PayCost.
         if is_spells_alternative_cost_pattern(&lower) {
             if let Some(static_def) = parse_spells_alternative_cost(&line) {
-                result.statics.push(static_def);
+                emitter.static_at(item_line, static_def);
                 i += 1;
                 continue;
             }
@@ -3758,7 +4511,9 @@ pub(crate) fn parse_oracle_ir(
         if is_cast_spells_alternative_cost_pattern(&lower) {
             let defs = parse_cast_spells_alternative_cost_multi(&line);
             if !defs.is_empty() {
-                result.statics.extend(defs);
+                for __item in defs {
+                    emitter.static_at(item_line, __item);
+                }
                 i += 1;
                 continue;
             }
@@ -3771,7 +4526,7 @@ pub(crate) fn parse_oracle_ir(
         // and would miss this verb form.
         if is_collect_evidence_alt_cost_pattern(&lower) {
             if let Some(static_def) = parse_collect_evidence_alt_cost(&line) {
-                result.statics.push(static_def);
+                emitter.static_at(item_line, static_def);
                 i += 1;
                 continue;
             }
@@ -3787,7 +4542,9 @@ pub(crate) fn parse_oracle_ir(
                 Some(card_name),
             );
             if !defs.is_empty() {
-                result.statics.extend(defs);
+                for __item in defs {
+                    emitter.static_at(item_line, __item);
+                }
                 i += 1;
                 continue;
             }
@@ -3798,7 +4555,7 @@ pub(crate) fn parse_oracle_ir(
         // New Perspectives (cycling) / Heart of Kiran (crew) / Gavi class.
         if is_alternative_keyword_cost_pattern(&lower) {
             if let Some(static_def) = parse_alternative_keyword_cost(&line) {
-                result.statics.push(static_def);
+                emitter.static_at(item_line, static_def);
                 i += 1;
                 continue;
             }
@@ -3814,7 +4571,7 @@ pub(crate) fn parse_oracle_ir(
         if is_enters_tapped_cant_untap_compound(&lower) {
             let mut consumed = false;
             if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                result.replacements.push(rep_def);
+                emitter.replacement_at(item_line, rep_def);
                 consumed = true;
             }
             let defs = parse_static_line_with_graveyard_keyword_continuation(
@@ -3823,7 +4580,9 @@ pub(crate) fn parse_oracle_ir(
                 Some(card_name),
             );
             if !defs.is_empty() {
-                result.statics.extend(defs);
+                for __item in defs {
+                    emitter.static_at(item_line, __item);
+                }
                 consumed = true;
             }
             if consumed {
@@ -3833,8 +4592,8 @@ pub(crate) fn parse_oracle_ir(
         }
 
         if let Some((option, trigger)) = parse_flash_cleanup_sacrifice_casting_option(&line) {
-            result.casting_options.push(option);
-            result.triggers.push(trigger);
+            emitter.casting_option_at(item_line, option);
+            emitter.trigger_at(item_line, trigger);
             i += 1;
             continue;
         }
@@ -3851,8 +4610,12 @@ pub(crate) fn parse_oracle_ir(
         if let Some((statics, replacements)) =
             parse_static_replacement_compound(&static_line, &static_line_lower, card_name)
         {
-            result.statics.extend(statics);
-            result.replacements.extend(replacements);
+            for __item in statics {
+                emitter.static_at(item_line, __item);
+            }
+            for __item in replacements {
+                emitter.replacement_at(item_line, __item);
+            }
             i += 1;
             continue;
         }
@@ -3886,10 +4649,8 @@ pub(crate) fn parse_oracle_ir(
                     let rider_gap =
                         TriggerDefinition::new(TriggerMode::Unknown("when you do".to_string()))
                             .description(line.to_string());
-                    result
-                        .statics
-                        .push(static_def.description(line.to_string()));
-                    result.triggers.push(rider_gap);
+                    emitter.static_at(item_line, static_def.description(line.to_string()));
+                    emitter.trigger_at(item_line, rider_gap);
                     i += 1;
                     continue;
                 }
@@ -3904,7 +4665,7 @@ pub(crate) fn parse_oracle_ir(
             if line.contains('\u{2014}') {
                 let lower_clean = lower.trim_end_matches('.').trim();
                 if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
-                    result.extracted_keywords.push(kw);
+                    emitter.keyword_at(item_line, kw);
                     i += 1;
                     continue;
                 }
@@ -3913,12 +4674,12 @@ pub(crate) fn parse_oracle_ir(
             {
                 let flashback_lower = flashback_part.to_lowercase();
                 if let Some(kw) = parse_keyword_from_oracle(&flashback_lower) {
-                    result.extracted_keywords.push(kw);
+                    emitter.keyword_at(item_line, kw);
                 }
                 if let Some(def) =
                     parse_flashback_trailing_self_spell_cost_reduction(reduction_part)
                 {
-                    result.statics.push(def);
+                    emitter.static_at(item_line, def);
                 }
                 i += 1;
                 continue;
@@ -3967,18 +4728,20 @@ pub(crate) fn parse_oracle_ir(
             // routes the duration-gated replacement fallback.
             if find_copy_verb_present(&lower) {
                 if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name) {
-                    result.replacements.extend(rep_defs);
+                    for __item in rep_defs {
+                        emitter.replacement_at(item_line, __item);
+                    }
                     i += 1;
                     continue;
                 }
                 if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                    result.replacements.push(rep_def);
+                    emitter.replacement_at(item_line, rep_def);
                     i += 1;
                     continue;
                 }
             } else if lower_starts_with(&lower, "as long as ") && is_replacement_pattern(&lower) {
                 if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                    result.replacements.push(rep_def);
+                    emitter.replacement_at(item_line, rep_def);
                     i += 1;
                     continue;
                 }
@@ -3992,7 +4755,7 @@ pub(crate) fn parse_oracle_ir(
                 // enters-with-counter replacement returns `None` and falls
                 // through to the static parser below.
                 if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                    result.replacements.push(rep_def);
+                    emitter.replacement_at(item_line, rep_def);
                     i += 1;
                     continue;
                 }
@@ -4028,7 +4791,9 @@ pub(crate) fn parse_oracle_ir(
                         for def in &mut defs {
                             def.description = Some(line.to_string());
                         }
-                        result.statics.extend(defs);
+                        for __item in defs {
+                            emitter.static_at(item_line, __item);
+                        }
                         i += 1;
                         continue;
                     }
@@ -4041,13 +4806,13 @@ pub(crate) fn parse_oracle_ir(
                         let trimmed = clause.trim().trim_end_matches('.');
                         if !trimmed.is_empty() {
                             let clause_dot = format!("{trimmed}.");
-                            result.statics.extend(
-                                parse_static_line_with_graveyard_keyword_continuation(
-                                    &clause_dot,
-                                    None,
-                                    None,
-                                ),
-                            );
+                            for __item in parse_static_line_with_graveyard_keyword_continuation(
+                                &clause_dot,
+                                None,
+                                None,
+                            ) {
+                                emitter.static_at(item_line, __item);
+                            }
                         }
                     }
                     i += 1;
@@ -4062,13 +4827,13 @@ pub(crate) fn parse_oracle_ir(
                         let trimmed = clause.trim().trim_end_matches('.');
                         if !trimmed.is_empty() {
                             let clause_dot = format!("{trimmed}.");
-                            result.statics.extend(
-                                parse_static_line_with_graveyard_keyword_continuation(
-                                    &clause_dot,
-                                    None,
-                                    None,
-                                ),
-                            );
+                            for __item in parse_static_line_with_graveyard_keyword_continuation(
+                                &clause_dot,
+                                None,
+                                None,
+                            ) {
+                                emitter.static_at(item_line, __item);
+                            }
                         }
                     }
                     i += 1;
@@ -4084,7 +4849,9 @@ pub(crate) fn parse_oracle_ir(
                     Some(card_name),
                 );
                 if !defs.is_empty() {
-                    result.statics.extend(defs);
+                    for __item in defs {
+                        emitter.static_at(item_line, __item);
+                    }
                     i += 1;
                     continue;
                 }
@@ -4127,7 +4894,7 @@ pub(crate) fn parse_oracle_ir(
                 },
             ))
             .description(line.to_string());
-            result.abilities.push(def);
+            emitter.ability_at(item_line, def);
             i += 1;
             continue;
         }
@@ -4157,7 +4924,7 @@ pub(crate) fn parse_oracle_ir(
             ctx.actor = None;
             let def = parse_effect_chain_with_context(&line, AbilityKind::Spell, &mut ctx);
             if !has_unimplemented(&def) {
-                result.abilities.push(def);
+                emitter.ability_at(item_line, def);
                 i += 1;
                 continue;
             }
@@ -4177,6 +4944,10 @@ pub(crate) fn parse_oracle_ir(
             if is_as_enters_becomes_choice_pattern(&lower)
                 && lower_as_enters_becomes_choice_modal(&line, &mut result)
             {
+                emitter.drain_result_vectors(item_line, &mut result);
+                if result.modal.is_some() {
+                    modal_line.get_or_insert(item_line);
+                }
                 i += 1;
                 continue;
             }
@@ -4190,6 +4961,7 @@ pub(crate) fn parse_oracle_ir(
             // PutCounter-SelfRef guard makes it fall through on any non-counter
             // as-enters line, so the choose/becomes/enters-with siblings are safe.
             if lower_as_enters_or_face_up_counters(&line, &mut result) {
+                emitter.drain_result_vectors(item_line, &mut result);
                 i += 1;
                 continue;
             }
@@ -4201,12 +4973,14 @@ pub(crate) fn parse_oracle_ir(
             // replacement sentences. Parse each replacement sentence instead of
             // letting the first successful parser drop sibling modifiers.
             if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name) {
-                result.replacements.extend(rep_defs);
+                for __item in rep_defs {
+                    emitter.replacement_at(item_line, __item);
+                }
                 i += 1;
                 continue;
             }
             if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                result.replacements.push(rep_def);
+                emitter.replacement_at(item_line, rep_def);
                 i += 1;
                 continue;
             }
@@ -4221,12 +4995,14 @@ pub(crate) fn parse_oracle_ir(
             if let Some(effect_text) = strip_ability_word(&line) {
                 if let Some(rep_defs) = parse_replacement_sentence_sequence(&effect_text, card_name)
                 {
-                    result.replacements.extend(rep_defs);
+                    for __item in rep_defs {
+                        emitter.replacement_at(item_line, __item);
+                    }
                     i += 1;
                     continue;
                 }
                 if let Some(rep_def) = parse_replacement_line(&effect_text, card_name) {
-                    result.replacements.push(rep_def);
+                    emitter.replacement_at(item_line, rep_def);
                     i += 1;
                     continue;
                 }
@@ -4234,7 +5010,7 @@ pub(crate) fn parse_oracle_ir(
         }
 
         if let Some(def) = try_parse_opening_hand_reveal_delayed_trigger(&line, &lower) {
-            result.abilities.push(def);
+            emitter.ability_at(item_line, def);
             i += 1;
             continue;
         }
@@ -4244,7 +5020,7 @@ pub(crate) fn parse_oracle_ir(
         // through the stack — see `AbilityKind::Mulligan` and the guard in
         // `effects/mod.rs`. Runtime dispatch lives in `mulligan.rs`.
         if let Some(def) = try_parse_mulligan_time_ability(&line, &lower) {
-            result.abilities.push(def);
+            emitter.ability_at(item_line, def);
             i += 1;
             continue;
         }
@@ -4256,7 +5032,7 @@ pub(crate) fn parse_oracle_ir(
         // optional "with [counters] on it" clause and the optional "If you do,
         // [effect]" dependent sub-ability.
         if let Some(def) = parse_begin_game_clause(&line, &lower) {
-            result.abilities.push(def);
+            emitter.ability_at(item_line, def);
             i += 1;
             continue;
         }
@@ -4271,13 +5047,15 @@ pub(crate) fn parse_oracle_ir(
 
         // CR 601.3: "Cast this spell only [condition]" — applies to any card type, not just instants/sorceries.
         if let Some(restrictions) = parse_casting_restriction_line(&line) {
-            result.casting_restrictions.extend(restrictions);
+            for __item in restrictions {
+                emitter.casting_restriction_at(item_line, __item);
+            }
             i += 1;
             continue;
         }
 
         if let Some(option) = parse_spell_casting_option_line(&line, card_name) {
-            result.casting_options.push(option);
+            emitter.casting_option_at(item_line, option);
             i += 1;
             continue;
         }
@@ -4294,7 +5072,7 @@ pub(crate) fn parse_oracle_ir(
                 AbilityKind::Activated
             },
         ) {
-            result.abilities.push(def);
+            emitter.ability_at(item_line, def);
             i = next_i;
             continue;
         }
@@ -4306,7 +5084,7 @@ pub(crate) fn parse_oracle_ir(
         // the is_spell branch and produce an Unimplemented effect.
         if lower_starts_with(&lower, "suspend ") {
             if let Some(kw) = parse_keyword_from_oracle(&lower) {
-                result.extracted_keywords.push(kw);
+                emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
             }
@@ -4316,7 +5094,7 @@ pub(crate) fn parse_oracle_ir(
         // when it appears as a standalone rules line; intercept before dispatch fallback.
         if lower_starts_with(&lower, "specialize ") {
             if let Some(kw) = parse_keyword_from_oracle(&lower) {
-                result.extracted_keywords.push(kw);
+                emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
             }
@@ -4331,7 +5109,7 @@ pub(crate) fn parse_oracle_ir(
         // priority 1b already handles this. This is a fallback for test/edge cases.
         if lower_starts_with(&lower, "harmonize ") {
             if let Some(harmonize_kw) = parse_harmonize_keyword(&line) {
-                result.extracted_keywords.push(harmonize_kw);
+                emitter.keyword_at(item_line, harmonize_kw);
                 i += 1;
                 continue;
             }
@@ -4343,7 +5121,7 @@ pub(crate) fn parse_oracle_ir(
         // imperative catch-all so the line is a keyword, not an effect.
         if lower_starts_with(&lower, "mayhem ") {
             if let Some(mayhem_kw) = parse_mayhem_keyword(&line) {
-                result.extracted_keywords.push(mayhem_kw);
+                emitter.keyword_at(item_line, mayhem_kw);
                 i += 1;
                 continue;
             }
@@ -4368,7 +5146,7 @@ pub(crate) fn parse_oracle_ir(
                 merge_kicker_additional_cost(&mut result.additional_cost, cost);
             }
             if let Some(kw) = parse_keyword_from_oracle(&lower) {
-                result.extracted_keywords.push(kw);
+                emitter.keyword_at(item_line, kw);
             }
             i += 1;
             continue;
@@ -4384,7 +5162,7 @@ pub(crate) fn parse_oracle_ir(
         if lower_starts_with(&lower, "buyback") && line.contains('\u{2014}') {
             let lower_clean = lower.trim_end_matches('.').trim();
             if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
-                result.extracted_keywords.push(kw);
+                emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
             }
@@ -4400,7 +5178,7 @@ pub(crate) fn parse_oracle_ir(
         {
             let lower_clean = lower.trim_end_matches('.').trim();
             if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
-                result.extracted_keywords.push(kw);
+                emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
             }
@@ -4419,7 +5197,7 @@ pub(crate) fn parse_oracle_ir(
             // case where the keyword-cost line is its own main-loop iteration.
             if is_keyword_cost_line(&lower) {
                 if let Some(kw) = parse_keyword_from_oracle(&lower) {
-                    result.extracted_keywords.push(kw);
+                    emitter.keyword_at(item_line, kw);
                     i += 1;
                     continue;
                 }
@@ -4564,7 +5342,19 @@ pub(crate) fn parse_oracle_ir(
             // ability becomes the fallback when the condition is not met.
             if is_instead || is_instead_replacement_line(&effect_line) {
                 if let Some(condition) = def.condition.take() {
-                    if let Some(mut base) = result.abilities.pop() {
+                    if let Some(base_item) = emitter.pop_last_spell() {
+                        // Re-emit the merged ability at the BASE item's ORIGINAL
+                        // span (recoverable from the popped item) — NOT the current
+                        // line — so the composed ability keeps the base's printed
+                        // slot and source position.
+                        let OracleItemIr {
+                            source: base_source,
+                            node: base_node,
+                            ..
+                        } = base_item;
+                        let OracleNodeIr::PreLoweredSpell(mut base) = base_node else {
+                            unreachable!("pop_last_spell returns only PreLoweredSpell items");
+                        };
                         // Save the base ability's continuation chain in else_ability
                         // so the engine can run it when the condition is NOT met.
                         def.condition = Some(AbilityCondition::ConditionInstead {
@@ -4572,14 +5362,14 @@ pub(crate) fn parse_oracle_ir(
                         });
                         def.else_ability = base.sub_ability.take();
                         base.sub_ability = Some(Box::new(def));
-                        result.abilities.push(base);
+                        emitter.reemit_spell(&base_source, base);
                         continue;
                     }
                     // No previous ability to compose with — restore condition and push standalone.
                     def.condition = Some(condition);
                 }
             }
-            result.abilities.push(def);
+            emitter.ability_at(item_line, def);
             continue;
         }
 
@@ -4591,15 +5381,16 @@ pub(crate) fn parse_oracle_ir(
 
         // "The flashback cost is equal to its mana cost" → extract Flashback keyword
         if is_flashback_equal_mana_cost(&lower) {
-            if parsed_result_recently_granted_flashback(&result) {
+            if parsed_result_recently_granted_flashback(&emitter) {
                 i += 1;
                 continue;
             }
-            result.extracted_keywords.push(Keyword::Flashback(
-                crate::types::keywords::FlashbackCost::Mana(
+            emitter.keyword_at(
+                item_line,
+                Keyword::Flashback(crate::types::keywords::FlashbackCost::Mana(
                     crate::types::mana::ManaCost::SelfManaCost,
-                ),
-            ));
+                )),
+            );
             i += 1;
             continue;
         }
@@ -4607,7 +5398,7 @@ pub(crate) fn parse_oracle_ir(
         // CR 702.49d: Commander ninjutsu is not in MTGJSON keywords — extract explicitly.
         if lower_starts_with(&lower, "commander ninjutsu ") {
             if let Some(kw) = parse_keyword_from_oracle(&lower) {
-                result.extracted_keywords.push(kw);
+                emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
             }
@@ -4625,7 +5416,7 @@ pub(crate) fn parse_oracle_ir(
         // Format: "Cumulative upkeep—[cost]" or "Cumulative upkeep {mana}" (space-separated).
         if lower_starts_with(&lower, "cumulative upkeep") {
             if let Some(kw) = parse_cumulative_upkeep_keyword(&line) {
-                result.extracted_keywords.push(kw);
+                emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
             }
@@ -4640,12 +5431,12 @@ pub(crate) fn parse_oracle_ir(
             {
                 let flashback_lower = flashback_part.to_lowercase();
                 if let Some(kw) = parse_keyword_from_oracle(&flashback_lower) {
-                    result.extracted_keywords.push(kw);
+                    emitter.keyword_at(item_line, kw);
                 }
                 if let Some(def) =
                     parse_flashback_trailing_self_spell_cost_reduction(reduction_part)
                 {
-                    result.statics.push(def);
+                    emitter.static_at(item_line, def);
                 }
                 i += 1;
                 continue;
@@ -4653,7 +5444,7 @@ pub(crate) fn parse_oracle_ir(
         }
         if is_keyword_cost_line(&lower) {
             if let Some(kw) = parse_keyword_from_oracle(&lower) {
-                result.extracted_keywords.push(kw);
+                emitter.keyword_at(item_line, kw);
             }
             i += 1;
             continue;
@@ -4685,9 +5476,9 @@ pub(crate) fn parse_oracle_ir(
         // handling stamps the previous ability's `min_x_value`; this guard is a
         // defensive fallback for already-normalized forms.
         if lower.trim_end_matches('.') == "x can't be 0" {
-            if let Some(previous) = result.abilities.last_mut() {
+            emitter.mutate_last_spell(|previous| {
                 previous.min_x_value = previous.min_x_value.max(1);
-            }
+            });
             i += 1;
             continue;
         }
@@ -4705,7 +5496,7 @@ pub(crate) fn parse_oracle_ir(
                 let mut triggers = parse_trigger_lines_at_index(
                     &effect_text,
                     card_name,
-                    Some(result.triggers.len()),
+                    Some(PrintedTriggerIndex::placeholder()),
                     &mut ctx,
                 );
                 i += 1;
@@ -4717,7 +5508,9 @@ pub(crate) fn parse_oracle_ir(
                         }
                     }
                 }
-                result.triggers.extend(triggers);
+                for __item in triggers {
+                    emitter.trigger_at(item_line, __item);
+                }
                 continue;
             }
             // Try as keyword — the ability-word prefix ("Void Shields —") was
@@ -4725,7 +5518,7 @@ pub(crate) fn parse_oracle_ir(
             // missed because it ran on the unprefixed original line.
             if let Some(kw) = parse_keyword_from_oracle(&effect_lower) {
                 if !matches!(kw, Keyword::Unknown(_)) {
-                    result.extracted_keywords.push(kw);
+                    emitter.keyword_at(item_line, kw);
                     i += 1;
                     continue;
                 }
@@ -4746,7 +5539,9 @@ pub(crate) fn parse_oracle_ir(
                             }
                         }
                     }
-                    result.statics.extend(defs);
+                    for __item in defs {
+                        emitter.static_at(item_line, __item);
+                    }
                     i += 1;
                     continue;
                 }
@@ -4756,7 +5551,7 @@ pub(crate) fn parse_oracle_ir(
             ctx.actor = None;
             let def = parse_effect_chain_with_context(&effect_text, AbilityKind::Spell, &mut ctx);
             if !has_unimplemented(&def) {
-                result.abilities.push(def);
+                emitter.ability_at(item_line, def);
                 i += 1;
                 continue;
             }
@@ -4772,7 +5567,9 @@ pub(crate) fn parse_oracle_ir(
             Some(card_name),
         );
         if !defs.is_empty() {
-            result.statics.extend(defs);
+            for __item in defs {
+                emitter.static_at(item_line, __item);
+            }
             i += 1;
             continue;
         }
@@ -4782,7 +5579,7 @@ pub(crate) fn parse_oracle_ir(
         // `effect` (e.g. `distribute`, `multi_target`) are preserved.
         let nom_def = dispatch_line_nom(&line, card_name, ctx.host_self_reference.clone());
         if !matches!(*nom_def.effect, Effect::Unimplemented { .. }) {
-            result.abilities.push(nom_def);
+            emitter.ability_at(item_line, nom_def);
             i += 1;
             continue;
         }
@@ -4790,45 +5587,33 @@ pub(crate) fn parse_oracle_ir(
         // Priority 15: Final fallback — the unimplemented def already carries
         // diagnostic info from dispatch_line_nom; push it as-is.
         tracing::debug!(oracle_text = line, "unimplemented ability line");
-        result.abilities.push(nom_def);
+        emitter.ability_at(item_line, nom_def);
         i += 1;
     }
 
-    reconcile_choose_then_chosen_dependent_etb_counters(&mut result);
-    reconcile_self_chosen_type_statics(&mut result, types);
-    reconcile_host_bound_phase_outs(&mut result);
-    reconcile_persisted_player_choice_for_source_chosen_ref(&mut result);
+    // NOTE (u4-c2): the 4 reconciles and the swallow audit that ran here now run
+    // post-fold in `lower_oracle_ir` (they read the assembled `result` vectors,
+    // which the source-order cutover moves into the document builder). Reconciles
+    // run once, at the placement pin, preserving today's reconciles→swallow order.
 
-    // Architectural rule: the parser must never silently discard Oracle
-    // text. Run the swallow audit against the parsed result so any unrep-
-    // resented clause surfaces as a parse_warning instead of disappearing
-    // (Phase 1: observability only — see swallow_check.rs for detector
-    // catalog and Phase 2 demotion plan).
-    let mut swallow_diags = Vec::new();
-    // Draft-time "draft matters" lines (CR 905) are intentionally consumed as
-    // no-ops by `is_draft_matters_sentence` — they never produce a parsed
-    // ability, so the swallow detectors must not scan them (their "you may",
-    // "if you do", and "as long as" markers would otherwise be reported as
-    // swallowed clauses). Strip them before the audit; constructed-play lines
-    // on the same card remain and are still checked. Cards with no draft text
-    // (the overwhelming majority) feed the unmodified Oracle text unchanged.
-    let swallow_text;
-    let swallow_input: &str = if oracle_text.lines().any(is_draft_matters_sentence) {
-        swallow_text = oracle_text
-            .lines()
-            .filter(|line| !is_draft_matters_sentence(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        &swallow_text
-    } else {
-        oracle_text
-    };
-    super::swallow_check::check_swallowed_clauses(swallow_input, &result, &mut swallow_diags);
-    for d in swallow_diags {
-        ctx.push_diagnostic(d);
+    // Emit the four order-agnostic SINGLETONS (held on `result` for mid-loop
+    // read-back/merge/dedup) as Exact items at their captured source line, then
+    // finish — producing items already in Oracle source order.
+    if let Some(modal) = result.modal {
+        emitter.modal_at(modal_line.unwrap_or(0), modal);
+    }
+    if let Some(cost) = result.additional_cost {
+        emitter.additional_cost_at(additional_cost_line.unwrap_or(0), cost);
+    }
+    if let Some(condition) = result.solve_condition {
+        emitter.solve_condition_at(solve_condition_line.unwrap_or(0), condition);
+    }
+    if let Some(cost) = result.strive_cost {
+        emitter.strive_cost_at(strive_cost_line.unwrap_or(0), cost);
     }
 
-    parsed_abilities_to_doc_ir(result, oracle_text, card_name, &mut ctx)
+    let doc = emitter.finish(oracle_text, card_name, std::mem::take(&mut ctx.diagnostics));
+    finalize_document_relations(doc, types)
 }
 
 fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
@@ -4898,7 +5683,7 @@ fn parse_activated_ability_definition(
     effect_text: &str,
     description: &str,
     card_name: &str,
-    current_ability_index: Option<usize>,
+    current_ability_index: Option<PrintedAbilityIndex>,
     ctx: &mut ParseContext,
 ) -> (AbilityDefinition, String) {
     let (effect_text, constraints) = strip_activated_constraints(effect_text);
@@ -4919,7 +5704,8 @@ fn parse_activated_ability_definition(
     // CR 707.9a: thread the activated-ability index so "except it has this
     // ability" inside the effect body resolves to RetainPrintedAbilityFromSource.
     let prev_ability_index = ctx.current_ability_index;
-    ctx.current_ability_index = current_ability_index;
+    // `ParseContext` stores a raw `usize`; unwrap the printed-slot newtype here.
+    ctx.current_ability_index = current_ability_index.map(PrintedAbilityIndex::get);
 
     // Retry with `~` normalization if the first pass left an Unimplemented node
     // or emitted a target-fallback warning.
@@ -4952,59 +5738,6 @@ fn parse_activated_ability_definition(
     (def, effect_text)
 }
 
-/// Convert a `ParsedAbilities` into an `OracleDocIr` using `PreLowered*` variants.
-///
-/// Preserves source ordering: abilities, triggers, statics, replacements are pushed
-/// in their parsed order. Scalar fields (modal, additional_cost, solve_condition,
-/// strive_cost) are pushed as their corresponding `OracleItemIr` variants.
-fn parsed_abilities_to_doc_ir(
-    result: ParsedAbilities,
-    oracle_text: &str,
-    card_name: &str,
-    ctx: &mut ParseContext,
-) -> OracleDocIr {
-    let mut items: Vec<OracleItemIr> = Vec::new();
-    for def in result.abilities {
-        items.push(OracleItemIr::PreLoweredSpell(def));
-    }
-    for def in result.triggers {
-        items.push(OracleItemIr::PreLoweredTrigger(def));
-    }
-    for def in result.statics {
-        items.push(OracleItemIr::PreLoweredStatic(def));
-    }
-    for def in result.replacements {
-        items.push(OracleItemIr::PreLoweredReplacement(def));
-    }
-    for kw in result.extracted_keywords {
-        items.push(OracleItemIr::Keyword(kw));
-    }
-    if let Some(modal) = result.modal {
-        items.push(OracleItemIr::Modal(modal));
-    }
-    if let Some(cost) = result.additional_cost {
-        items.push(OracleItemIr::AdditionalCost(cost));
-    }
-    for restriction in result.casting_restrictions {
-        items.push(OracleItemIr::CastingRestriction(restriction));
-    }
-    for option in result.casting_options {
-        items.push(OracleItemIr::CastingOption(option));
-    }
-    if let Some(condition) = result.solve_condition {
-        items.push(OracleItemIr::SolveCondition(condition));
-    }
-    if let Some(cost) = result.strive_cost {
-        items.push(OracleItemIr::StriveCost(cost));
-    }
-    OracleDocIr {
-        items,
-        source_text: oracle_text.to_string(),
-        card_name: card_name.to_string(),
-        diagnostics: std::mem::take(&mut ctx.diagnostics),
-    }
-}
-
 /// Parse Oracle text into structured ability definitions.
 ///
 /// This is the public API entry point — a thin wrapper around [`parse_oracle_ir`]
@@ -5022,14 +5755,14 @@ pub fn parse_oracle_text(
     types: &[String],
     subtypes: &[String],
 ) -> ParsedAbilities {
-    let ir = parse_oracle_ir(
+    let mut ir = parse_oracle_ir(
         oracle_text,
         card_name,
         mtgjson_keyword_names,
         types,
         subtypes,
     );
-    let mut parsed = lower_oracle_ir(&ir);
+    let mut parsed = lower_oracle_ir(&mut ir);
     scrub_granting_placeholder_descriptions(&mut parsed);
     parsed
 }
@@ -5718,14 +6451,66 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         }
     }
     // CR 602.5: "if <condition>" gate (Lightning Storm "if ~ is on the stack").
+    // An unrecognized condition fails the whole gate (the `?`) — see
+    // `require_restriction_condition`.
     if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>("if ")).parse(lower.as_str()) {
         let condition_start = phrase.len() - rest.len();
         let condition_text = phrase[condition_start..].trim();
-        return Some(vec![ActivationRestriction::RequiresCondition {
-            condition: parse_restriction_condition(condition_text),
-        }]);
+        return Some(vec![require_restriction_condition(condition_text)?]);
     }
     None
+}
+
+/// CR 602.5: Build a `RequiresCondition` activation restriction, or fail.
+///
+/// The single authority for turning restriction text into an `ActivationRestriction`.
+/// It returns `None` — never `RequiresCondition { condition: None }` — when the
+/// condition does not parse.
+///
+/// This distinction is the whole point: `restrictions::evaluate_activation_restriction`
+/// evaluates a `None` condition with `Option::is_none_or`, i.e. as ALWAYS TRUE. So an
+/// unparsed condition stored as `None` does not merely lose the restriction — it
+/// consumes the source clause (removing it from the text that would otherwise become
+/// `Effect::Unimplemented`) and then reports the ability as fully supported while
+/// letting it be activated in precisely the situations the card forbids. Callers must
+/// propagate this `None` so the source text stays visible to the ordinary fallback.
+fn require_restriction_condition(condition_text: &str) -> Option<ActivationRestriction> {
+    Some(ActivationRestriction::RequiresCondition {
+        condition: Some(parse_restriction_condition(condition_text)?),
+    })
+}
+
+/// CR 602.5: Atomically commit an "activate only if <condition>" gate found while
+/// peeling activation constraints off the end of an ability line.
+///
+/// The single authority for that commit. Every peeling branch must route through it,
+/// because the commit is not one mutation but three that have to succeed or fail
+/// together: the trailing cadence suffix ("… and only once each turn") records its own
+/// restriction, the condition records another, and the caller truncates the source line
+/// to drop the text it just consumed.
+///
+/// Returns `false` having mutated NOTHING when the condition does not parse. The caller
+/// must then leave `remaining` intact so the clause stays in the ability text and
+/// surfaces as `Effect::Unimplemented`. Committing the cadence restriction while
+/// dropping the condition — the pre-`SharedRestrictionParse` behavior — produced an
+/// ability that was rate-limited but otherwise activatable at will, which is not what
+/// any of these cards say.
+fn commit_requires_condition(
+    condition_text: &str,
+    restrictions: &mut Vec<ActivationRestriction>,
+) -> bool {
+    let mut text = condition_text.trim().to_string();
+    // Stage the cadence restrictions so a failed condition parse commits none of them.
+    let mut staged: Vec<ActivationRestriction> = Vec::new();
+    strip_once_per_turn_suffix(&mut text, &mut staged);
+    let Some(condition) = parse_restriction_condition(&text) else {
+        return false;
+    };
+    restrictions.append(&mut staged);
+    restrictions.push(ActivationRestriction::RequiresCondition {
+        condition: Some(condition),
+    });
+    true
 }
 
 // CR 602.1b: Activation instructions after the colon restrict when an ability
@@ -5811,17 +6596,15 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
 
         if let Some((before, after)) = tp.rsplit_around(" and only if ") {
             if !before.original.trim().is_empty() {
-                let mut condition_text = after.original.trim().to_string();
-                strip_once_per_turn_suffix(&mut condition_text, &mut constraints.restrictions);
+                // Commit before truncating: an unparsed condition must leave `remaining`
+                // whole so the clause reaches the Unimplemented fallback.
+                if !commit_requires_condition(after.original, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = before
                     .original
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&condition_text),
-                    });
                 continue;
             }
         }
@@ -6059,80 +6842,62 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
 
         if let Some(idx) = tp.rfind("activate only if ") {
             if idx == 0 {
-                let mut condition_text = remaining["activate only if ".len()..].trim().to_string();
-                strip_once_per_turn_suffix(&mut condition_text, &mut constraints.restrictions);
+                let condition_text = remaining["activate only if ".len()..].to_string();
+                if !commit_requires_condition(&condition_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining.clear();
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&condition_text),
-                    });
                 break;
             }
             if lower[..idx].ends_with(". ") {
-                let mut condition_text = remaining[idx + "activate only if ".len()..]
-                    .trim()
-                    .to_string();
-                strip_once_per_turn_suffix(&mut condition_text, &mut constraints.restrictions);
+                let condition_text = remaining[idx + "activate only if ".len()..].to_string();
+                if !commit_requires_condition(&condition_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&condition_text),
-                    });
                 continue;
             }
         }
 
         if let Some(idx) = tp.rfind("activate only from ") {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate only from ".len()..]
-                    .trim()
-                    .to_string();
+                let restriction_text = remaining[idx + "activate only from ".len()..].trim();
+                let full_text = format!("from {restriction_text}");
+                if !commit_requires_condition(&full_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                let full_text = format!("from {restriction_text}");
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&full_text),
-                    });
                 continue;
             }
         }
 
         if let Some(idx) = tp.rfind("activate only ") {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate only ".len()..].trim().to_string();
+                let restriction_text = remaining[idx + "activate only ".len()..].to_string();
+                if !commit_requires_condition(&restriction_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&restriction_text),
-                    });
                 continue;
             }
         }
 
         if let Some(idx) = tp.rfind("activate no more than ") {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate no more than ".len()..]
-                    .trim()
-                    .to_string();
+                let restriction_text = remaining[idx + "activate no more than ".len()..].trim();
+                let full_text = format!("no more than {restriction_text}");
+                if !commit_requires_condition(&full_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                let full_text = format!("no more than {restriction_text}");
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&full_text),
-                    });
                 continue;
             }
         }

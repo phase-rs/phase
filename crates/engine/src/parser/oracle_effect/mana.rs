@@ -10,7 +10,7 @@ use nom::Parser;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
-    AbilityKind, AbilityTag, Comparator, Effect, LinkedExileScope, ManaContribution,
+    AbilityKind, AbilityTag, Comparator, Duration, Effect, LinkedExileScope, ManaContribution,
     ManaProduction, ManaSpendRestriction, ObjectScope, QuantityExpr, QuantityRef,
 };
 use crate::types::keywords::KeywordKind;
@@ -21,9 +21,12 @@ use crate::types::mana::{
 use crate::types::zones::Zone;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
-use super::super::oracle_quantity::{parse_cda_quantity, parse_event_context_quantity};
+use super::super::oracle_quantity::{
+    parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
+};
 use super::super::oracle_target::parse_type_phrase;
 use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
+use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::TargetFilter;
 
 /// Bridge: run a nom combinator on a lowercase copy, mapping the consumed length
@@ -160,13 +163,26 @@ fn parse_object_colors_scope(text: &str) -> Option<ObjectScope> {
     parser.parse(lower.as_str()).ok().map(|(_, scope)| scope)
 }
 
+#[cfg(test)]
 pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
+    try_parse_add_mana_effect_with_context(text, &mut ParseContext::default())
+}
+
+/// Context-aware `try_parse_add_mana_effect`. The `ctx` carries the trigger
+/// subject so a count clause referencing the triggering object ("… equal to the
+/// number of creatures you control that share a creature type with it", Mana
+/// Echoes) resolves "it" to `TriggeringSource` rather than an empty
+/// `ParentTarget`.
+pub(super) fn try_parse_add_mana_effect_with_context(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<Effect> {
     // CR 505.1 + CR 106.4: A subject-led mana clause routes the produced mana
     // to the named player. Strip the subject, parse the bare "add …" clause,
     // and stamp the recipient onto the resulting `Effect::Mana.target`.
     if let Some((recipient, rest)) = strip_mana_subject_prefix(text.trim()) {
         let synthetic = format!("add {rest}");
-        let mut effect = try_parse_add_mana_effect(&synthetic)?;
+        let mut effect = try_parse_add_mana_effect_with_context(&synthetic, ctx)?;
         if let Effect::Mana { target, .. } = &mut effect {
             if target.is_none() {
                 *target = Some(recipient);
@@ -202,7 +218,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
     // `parse_mana_production_clause` so the where-X count is resolved here,
     // co-located with `apply_where_x_count_expression`.
     if let Some((count, color_options)) = parse_repeated_count_color_choice(clause) {
-        let (count, target) = apply_where_x_count_expression(count, where_x_expression.as_deref());
+        let (count, target) = apply_where_x_count_expression(count, where_x_expression.as_deref())?;
         return Some(Effect::Mana {
             produced: ManaProduction::AnyOneColor {
                 count,
@@ -275,13 +291,13 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
 
     // CR 106.1 / CR 106.3: "an amount of {color} equal to [quantity]"
     // e.g. "an amount of {G} equal to ~'s power"
-    if let Some(effect) = try_parse_amount_equal_to(clause, contribution) {
+    if let Some(effect) = try_parse_amount_equal_to_with_context(clause, contribution, ctx) {
         return Some(effect);
     }
 
     if let Some((count, rest)) = parse_mana_count_prefix(clause) {
         let (count, where_x_target) =
-            apply_where_x_count_expression(count, where_x_expression.as_deref());
+            apply_where_x_count_expression(count, where_x_expression.as_deref())?;
         let rest = rest.trim().trim_end_matches(['.', '"']).trim();
         let rest_lower = rest.to_lowercase();
 
@@ -629,7 +645,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         .map(|(count, _)| count)
         .unwrap_or(QuantityExpr::Fixed { value: 1 });
     let (fallback_count, fallback_target) =
-        apply_where_x_count_expression(fallback_count, where_x_expression.as_deref());
+        apply_where_x_count_expression(fallback_count, where_x_expression.as_deref())?;
 
     // Scan for mana production type at word boundaries using nom combinators.
     let produced = scan_mana_production_type(&clause_lower, fallback_count.clone(), contribution)?;
@@ -1032,10 +1048,13 @@ pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)
     ))
 }
 
+/// CR 107.3c: Bind a "where X is …" mana count, or FAIL (`None`) when the
+/// definition has no typed home. Never fabricates a raw-text placeholder — see
+/// `apply_where_x_quantity_expression` for why such a node is dead at runtime.
 pub(super) fn apply_where_x_count_expression(
     count: QuantityExpr,
     where_x_expression: Option<&str>,
-) -> (QuantityExpr, Option<TargetFilter>) {
+) -> Option<(QuantityExpr, Option<TargetFilter>)> {
     match (&count, where_x_expression) {
         (
             QuantityExpr::Ref {
@@ -1043,19 +1062,15 @@ pub(super) fn apply_where_x_count_expression(
             },
             Some(expression),
         ) if name.eq_ignore_ascii_case("X") => {
-            if let Some(count) = super::parse_where_x_quantity_expression(expression) {
-                return (count, where_x_expression_target_filter(expression));
-            }
-            (
-                QuantityExpr::Ref {
-                    qty: QuantityRef::Variable {
-                        name: expression.to_string(),
-                    },
-                },
-                None,
-            )
+            // CR 107.3c: the clause DEFINES X. An unrepresentable definition is a
+            // PARSE FAILURE (`None`), never a raw-text placeholder: the fabricated
+            // `QuantityRef::Variable { name: "<oracle text>" }` is dead at runtime
+            // (game/quantity.rs resolves a non-`X` variable name to 0), so the mana
+            // clause produced ZERO mana while still reading as supported.
+            let count = super::parse_where_x_quantity_expression(expression)?;
+            Some((count, where_x_expression_target_filter(expression)))
         }
-        _ => (count, None),
+        _ => Some((count, None)),
     }
 }
 
@@ -2364,36 +2379,61 @@ pub(super) fn parse_mana_spell_grant(lower: &str) -> Option<Vec<ManaSpellGrant>>
     None
 }
 
-/// CR 106.6 + CR 702: Parse mana-rider keyword grants:
-/// "If that mana is spent on a Dragon creature spell, it gains haste until end of turn."
+/// CR 106.6 + CR 702.10: Parse mana-rider keyword grants:
+/// - "If that mana is spent on a Dragon creature spell, it gains haste until end of turn."
+/// - "If that mana is spent on a creature spell, it gains haste." (Hall of the Bandit Lord)
 fn parse_conditional_keyword_grant(lower: &str) -> Option<ManaSpellGrant> {
+    let trimmed = lower.trim().trim_end_matches('.');
     let (rest, _) = tag::<_, _, OracleError<'_>>("if that mana is spent on ")
-        .parse(lower)
+        .parse(trimmed)
         .ok()?;
     let (rest, _) = opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))))
         .parse(rest)
         .ok()?;
-    let (rest, subtype) = terminated(
-        take_until::<_, _, OracleError<'_>>(" creature spell, it gains "),
-        tag(" creature spell, it gains "),
-    )
-    .parse(rest)
-    .ok()?;
-    let (rest, keyword_text) = terminated(
+
+    // Filter axis: bare "creature spell" vs "[subtype] creature spell".
+    let (rest, restriction) = if let Ok((remainder, _)) =
+        tag::<_, _, OracleError<'_>>("creature spell, it gains ").parse(rest)
+    {
+        (
+            remainder,
+            Some(ManaRestriction::OnlyForSpellType("Creature".to_string())),
+        )
+    } else {
+        let (remainder, subtype) = terminated(
+            take_until::<_, _, OracleError<'_>>(" creature spell, it gains "),
+            tag(" creature spell, it gains "),
+        )
+        .parse(rest)
+        .ok()?;
+        (
+            remainder,
+            Some(ManaRestriction::OnlyForCreatureType(super::capitalize(
+                subtype.trim(),
+            ))),
+        )
+    };
+
+    let (keyword, duration) = if let Ok((remainder, keyword_text)) = terminated(
         take_until::<_, _, OracleError<'_>>(" until end of turn"),
         tag(" until end of turn"),
     )
     .parse(rest)
-    .ok()?;
-    if !rest.trim().is_empty() {
-        return None;
-    }
-    let keyword = parse_keyword_from_oracle(keyword_text.trim())?;
+    {
+        if !remainder.trim().is_empty() {
+            return None;
+        }
+        let keyword = parse_keyword_from_oracle(keyword_text.trim())?;
+        (keyword, Duration::UntilEndOfTurn)
+    } else {
+        let keyword = parse_keyword_from_oracle(rest.trim())?;
+        (keyword, Duration::Permanent)
+    };
+
     Some(ManaSpellGrant::AddKeywordUntilEndOfTurn {
         keyword,
-        restriction: Some(ManaRestriction::OnlyForCreatureType(super::capitalize(
-            subtype.trim(),
-        ))),
+        restriction,
+        duration: Box::new(duration),
     })
 }
 
@@ -2614,7 +2654,11 @@ fn parse_pure_color_symbol(
 
 /// CR 106.1 / CR 106.3: Parse "an amount of {color} equal to [quantity]"
 /// e.g. "an amount of {G} equal to ~'s power" -> AnyOneColor { count: SelfPower, [Green] }
-fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Option<Effect> {
+fn try_parse_amount_equal_to_with_context(
+    clause: &str,
+    contribution: ManaContribution,
+    ctx: &mut ParseContext,
+) -> Option<Effect> {
     let clause_lower = clause.to_lowercase();
     let (_, rest) = nom_on_lower(clause, &clause_lower, |i| {
         value((), tag("an amount of ")).parse(i)
@@ -2633,7 +2677,7 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
     }) {
         let quantity_text = quantity_text.trim().trim_end_matches(['.', '"']);
         let count = parse_event_context_quantity(quantity_text)
-            .or_else(|| parse_cda_quantity(quantity_text))?;
+            .or_else(|| parse_cda_quantity_with_context(quantity_text, ctx))?;
         return Some(Effect::Mana {
             produced: ManaProduction::ChosenColor {
                 count,
@@ -2663,7 +2707,7 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
         // triggering-spell spent-mana ref; fall back to `parse_cda_quantity` for
         // non-event quantities (e.g. "~'s power").
         let count = parse_event_context_quantity(quantity_text)
-            .or_else(|| parse_cda_quantity(quantity_text))?;
+            .or_else(|| parse_cda_quantity_with_context(quantity_text, ctx))?;
         return Some(Effect::Mana {
             produced: ManaProduction::Colorless { count },
             restrictions: vec![],
@@ -2708,6 +2752,51 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
 mod tests {
     use super::*;
     use crate::types::ability::{ControllerRef, TypeFilter};
+
+    #[test]
+    fn shares_type_with_it_in_trigger_context_uses_triggering_source() {
+        // #5329 Mana Echoes: with a trigger subject in context, "the number of
+        // creatures you control that share a creature type with it" must resolve
+        // "it" to `TriggeringSource`, not an empty `ParentTarget` (which counts
+        // nothing → adds no mana).
+        use crate::types::ability::{
+            FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+        };
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::default())),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_add_mana_effect_with_context(
+            "Add an amount of {C} equal to the number of creatures you control that share a creature type with it.",
+            &mut ctx,
+        )
+        .expect("mana amount clause must parse");
+        let Effect::Mana {
+            produced:
+                ManaProduction::Colorless {
+                    count:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        },
+                },
+            ..
+        } = effect
+        else {
+            panic!("expected Colorless ObjectCount, got {effect:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        let reference = tf.properties.iter().find_map(|p| match p {
+            FilterProp::SharesQuality { reference, .. } => reference.as_deref(),
+            _ => None,
+        });
+        assert_eq!(
+            reference,
+            Some(&TargetFilter::TriggeringSource),
+            "\"share a creature type with it\" must reference the triggering object, got {reference:?}",
+        );
+    }
 
     fn extract_combinations(oracle: &str) -> Option<Vec<Vec<ManaColor>>> {
         match try_parse_add_mana_effect(oracle) {
@@ -3167,7 +3256,7 @@ mod tests {
         );
     }
 
-    /// CR 106.1 + CR 609.3 + CR 122.1: Coalition Relic — "add one mana of any
+    /// CR 106.1 + CR 608.2c + CR 122.1: Coalition Relic — "add one mana of any
     /// color for each charge counter removed this way". This is the AnyOneColor
     /// equivalent of the fixed-color "Add {R} for each X" pattern. Class also
     /// includes the Storage Counter cycle (Saprazzan Cove, Dwarven Hold, etc.).
@@ -3645,6 +3734,24 @@ mod tests {
             vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
                 keyword: crate::types::keywords::Keyword::Haste,
                 restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
+                duration: Box::new(Duration::UntilEndOfTurn),
+            }]
+        );
+    }
+
+    /// CR 106.6 + CR 702.10a: Hall of the Bandit Lord — any creature spell,
+    /// permanent haste (no "until end of turn" rider).
+    #[test]
+    fn parses_hall_of_bandit_lord_creature_spell_haste_grant() {
+        let grants =
+            parse_mana_spell_grant("if that mana is spent on a creature spell, it gains haste.")
+                .expect("Hall of the Bandit Lord mana rider must parse");
+        assert_eq!(
+            grants,
+            vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                keyword: crate::types::keywords::Keyword::Haste,
+                restriction: Some(ManaRestriction::OnlyForSpellType("Creature".to_string())),
+                duration: Box::new(Duration::Permanent),
             }]
         );
     }

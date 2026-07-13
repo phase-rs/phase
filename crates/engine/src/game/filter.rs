@@ -27,6 +27,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenSpec};
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 /// True when the filter's matched SET depends on the population of objects on
@@ -91,12 +92,15 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
+        // CR 201.5a: a fixed source-relative object ref (concretized to
+        // SpecificObject before runtime) — never whole-board population.
+        | TargetFilter::OriginalSource
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         // CR 201.5a: append-only; GrantingObject is concretized to SpecificObject
@@ -121,6 +125,10 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         // so any entry/exit of a matching permanent can flip membership for a
         // pre-existing object. Unconditionally population dependent.
         FilterProp::DifferentNameFrom { .. } => true,
+        // CR 109.1: identity-exclusion against a resolved reference (e.g. the
+        // ability's chosen target) — the reference set can change, so treat as
+        // population dependent, mirroring `DifferentNameFrom`.
+        FilterProp::DistinctFrom { .. } => true,
         // CR 603.4: "shares a quality with" a reference set is population
         // dependent ONLY when a reference filter is present — the reference set
         // is battlefield-derived. The multi-target group-share form
@@ -149,6 +157,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         // `ColorCount` carries a `u8` constant, not a QuantityExpr.
         // `ManaSymbolCount` reads only the candidate's own printed mana cost.
         FilterProp::CanEnchant { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::TargetsOnly { .. }
@@ -159,6 +168,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
@@ -220,6 +230,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::HasXInManaCost
         | FilterProp::WasKicked
         | FilterProp::HasXInActivationCost
@@ -304,12 +315,15 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
+        // CR 201.5a: a fixed source-relative object ref (concretized to
+        // SpecificObject before runtime) — never whole-board population.
+        | TargetFilter::OriginalSource
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         // CR 201.5a: append-only; GrantingObject is concretized to SpecificObject
@@ -345,6 +359,11 @@ fn entered_object_perturbs_filter_prop(
         FilterProp::DifferentNameFrom { filter } => {
             matches_target_filter(state, entered_id, filter, ctx)
         }
+        // CR 109.1: an entering object perturbs the identity-exclusion iff it
+        // matches the reference filter (it could become a new reference object).
+        FilterProp::DistinctFrom { reference } => {
+            matches_target_filter(state, entered_id, reference, ctx)
+        }
         // CR 603.4: the reference set is battlefield-derived only when a
         // reference filter is present (classifier returns false for `None`). The
         // `None` arm is therefore unreachable here, but enumerated as `false`
@@ -373,6 +392,7 @@ fn entered_object_perturbs_filter_prop(
         // `filter_prop_uses_object_population` — candidate-local, stack-relative,
         // single-object, or threshold-free, so a board entry cannot perturb them.
         FilterProp::CanEnchant { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::TargetsOnly { .. }
@@ -383,6 +403,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
@@ -444,6 +465,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::HasXInManaCost
         | FilterProp::WasKicked
         | FilterProp::HasXInActivationCost
@@ -1164,6 +1186,22 @@ pub fn matches_target_filter_on_battlefield_entry(
         ProposedEvent::ZoneChange { object_id, to, .. } if *to == Zone::Battlefield => {
             matches_target_filter(state, *object_id, filter, ctx)
         }
+        ProposedEvent::TokenEntry { entry_ref, .. } => {
+            state.liminal_entries.get(entry_ref).is_some_and(|entry| {
+                filter_inner_for_object(
+                    state,
+                    &entry.object,
+                    *entry_ref,
+                    filter,
+                    ctx.source_id,
+                    ctx.source_controller,
+                    ctx.ability,
+                    ctx.recipient_id,
+                    ctx.scoped_iteration_player,
+                    ControllerLookup::LiveOrLki,
+                )
+            })
+        }
         ProposedEvent::CreateToken {
             owner,
             spec,
@@ -1522,6 +1560,10 @@ fn filter_inner_for_object(
         TargetFilter::SourceChosenPlayer => false,
         TargetFilter::ScopedPlayer => false, // ScopedPlayer is a player, not an object
         TargetFilter::SelfRef => object_id == source_id,
+        // CR 608.2c: the original (pre-rebind) source object; concretized to
+        // SpecificObject before runtime, so this arm is defense-in-depth and
+        // mirrors SelfRef's source-identity semantics.
+        TargetFilter::OriginalSource => object_id == source_id,
         TargetFilter::SourceOrPaired => state
             .objects
             .get(&source_id)
@@ -1797,34 +1839,62 @@ fn filter_inner_for_object(
                 })
         }
         // CR 603.7: Match objects in a tracked set from the originating effect.
-        TargetFilter::TrackedSet { id } => state
-            .tracked_object_sets
-            .get(id)
-            .is_some_and(|set| set.contains(&object_id)),
+        // CR 608.2c: `TrackedSetId(0)` is the parser's "most recent set" sentinel.
+        // Resolve it via `targeting::resolve_tracked_set_id` — the single
+        // id-resolution authority (chain-first, then latest non-empty set) — so
+        // effect resolvers that match objects directly against the filter
+        // (`DestroyAll { TrackedSet }` — "destroy each permanent chosen this
+        // way", Druid of Purification #4780) read the just-published set instead
+        // of looking up the literal sentinel id and matching nothing. With no
+        // set published, a sentinel still matches nothing (fail-closed).
+        //
+        // Ladder inventory (per reviews on #5505 / #5512): every id-level
+        // `TrackedSetId(0)` consumer — this arm AND the `TrackedSetFiltered`
+        // sibling below (unified by #5512) — resolves through
+        // `resolve_tracked_set_id` (chain → latest non-empty). The one
+        // remaining, legitimately separate ladder is the FILTER-level
+        // `targeting::resolve_tracked_set_sentinel`, which inserts an extra
+        // rung between chain and latest — `current_combat_damage_source_filter`
+        // (CR 510.2) — that yields a `TargetFilter` rather than an id and so
+        // cannot fold into the shared id helper.
+        TargetFilter::TrackedSet { id } => {
+            let set_id = if id.0 == 0 {
+                crate::game::targeting::resolve_tracked_set_id(state)
+            } else {
+                Some(*id)
+            };
+            set_id
+                .and_then(|sid| state.tracked_object_sets.get(&sid))
+                .is_some_and(|set| set.contains(&object_id))
+        }
         // CR 701.33 + CR 701.18: Intersection of a tracked set with an inner
         // type filter. Used by Zimone's Experiment to route "X cards revealed
         // this way" — the Dig resolver populates a tracked set with the kept
         // (revealed) cards; this filter restricts the target space to the
-        // subset matching the inner type. The `id` here is already concrete:
-        // the parser emits `TrackedSetId(0)` as a sentinel, but every resolver
-        // path binds it to a real set before this match is reached via
-        // `targeting::resolve_tracked_set_sentinel`. A still-sentinel `0`
-        // therefore matches no objects, which is the correct fallback when no
-        // tracked set is available.
+        // subset matching the inner type. Resolver paths usually bind the
+        // parser's `TrackedSetId(0)` sentinel to a real set before this match
+        // is reached (via `targeting::resolve_tracked_set_sentinel`); a
+        // still-sentinel `0` resolves through the shared id ladder below,
+        // identically to the sibling `TrackedSet` arm (#5512). With no set
+        // published it matches no objects — the correct fail-closed fallback.
         TargetFilter::TrackedSetFiltered {
             id,
             filter,
             caused_by,
         } => {
             // CR 608.2c: `TrackedSetId(0)` is a sentinel for "the most recent
-            // tracked set"; resolve it to the concrete set so the `caused_by`
-            // check can consult the same set's producer-action provenance.
+            // tracked set"; resolve it through the single id-resolution
+            // authority (`resolve_tracked_set_id`: chain set first, else the
+            // latest NON-EMPTY published set) so (a) a set published by the
+            // active resolution chain is preferred, and (b) a trailing empty
+            // set with a higher id cannot shadow an earlier populated one —
+            // the same ladder every other `TrackedSetId(0)` consumer uses
+            // (#5512 unified this arm's previously divergent ladder). The
+            // resolved id also keys the `caused_by` provenance lookup, so
+            // producer-action checks consult the same set that was matched.
             let resolved = if id.0 == 0 {
-                state
-                    .tracked_object_sets
-                    .iter()
-                    .max_by_key(|(tracked_id, _)| tracked_id.0)
-                    .map(|(tracked_id, set)| (*tracked_id, set))
+                crate::game::targeting::resolve_tracked_set_id(state)
+                    .and_then(|sid| state.tracked_object_sets.get(&sid).map(|set| (sid, set)))
             } else {
                 state.tracked_object_sets.get(id).map(|set| (*id, set))
             };
@@ -1922,7 +1992,7 @@ fn filter_inner_for_object(
         }
         // CR 609.7a: "the chosen source" — match the ObjectId selected by
         // the prior damage-source choice while its continuation resolves.
-        TargetFilter::ChosenDamageSource => {
+        TargetFilter::ChosenDamageSource { .. } => {
             let recheck_ctx = FilterContext {
                 source_id,
                 source_controller,
@@ -1939,7 +2009,7 @@ fn filter_inner_for_object(
                     choice.source_id == object_id
                         && (matches!(
                             &choice.source_filter,
-                            TargetFilter::Any | TargetFilter::ChosenDamageSource
+                            TargetFilter::Any | TargetFilter::ChosenDamageSource { .. }
                         ) || matches_target_filter(
                             state,
                             object_id,
@@ -2019,6 +2089,9 @@ fn zone_change_filter_inner(
         TargetFilter::SourceChosenPlayer => false,
         TargetFilter::ScopedPlayer => false,
         TargetFilter::SelfRef => record.object_id == source_id,
+        // CR 608.2c: the original (pre-rebind) source object; concretized to
+        // SpecificObject before runtime — mirrors SelfRef's source identity.
+        TargetFilter::OriginalSource => record.object_id == source_id,
         TargetFilter::SourceOrPaired => false,
         TargetFilter::Typed(TypedFilter {
             type_filters,
@@ -2152,7 +2225,7 @@ fn zone_change_filter_inner(
             });
             chosen_name.is_some_and(|name| record.name.eq_ignore_ascii_case(name))
         }
-        TargetFilter::ChosenDamageSource => false,
+        TargetFilter::ChosenDamageSource { .. } => false,
         TargetFilter::Named { name } => record.name == *name,
 
         // CR 603.10a + CR 603.6e + CR 702.6: `AttachedTo` against a zone-change
@@ -2463,6 +2536,9 @@ pub fn spell_record_matches_filter(
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
         | TargetFilter::OriginalController
+        // CR 201.5a: source-relative object ref, concretized to SpecificObject
+        // before runtime — inapplicable to a spell-cast history record.
+        | TargetFilter::OriginalSource
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -2497,7 +2573,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         // CR 201.5a: append-only (concretized before runtime).
         | TargetFilter::GrantingObject
         | TargetFilter::Owner => false,
@@ -2770,6 +2846,9 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
         | TargetFilter::OriginalController
+        // CR 201.5a: source-relative object ref, concretized to SpecificObject
+        // before runtime — inapplicable to a spell-cast history record.
+        | TargetFilter::OriginalSource
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -2804,7 +2883,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         // CR 201.5a: append-only (concretized before runtime).
         | TargetFilter::GrantingObject
@@ -3006,6 +3085,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // CR 303.4: "could enchant [target]" needs live target context and
         // Aura attachment legality; stack snapshots only record keyword values.
         FilterProp::CanEnchant { .. } => false,
+        FilterProp::CouldBeTargetedByTriggeringSpell => false,
         FilterProp::HasColor { color } => record.colors.contains(color),
         FilterProp::NotColor { color } => !record.colors.contains(color),
         FilterProp::HasSupertype { value } => record.supertypes.contains(value),
@@ -3084,6 +3164,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // CR 607 (by analogy): the controller's per-player anchor label is a
         // live-game read, not a cast-time snapshot property — fail closed.
         FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -3126,6 +3207,10 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::DifferentNameFrom { .. }
+        // CR 109.1: a spell on the stack is not the ability's chosen target
+        // permanent; identity-exclusion is a live-battlefield predicate the
+        // spell-cast snapshot cannot represent. Fail closed.
+        | FilterProp::DistinctFrom { .. }
         | FilterProp::SharesQuality { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
@@ -3138,6 +3223,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // permanent — fail closed against the spell-cast snapshot.
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         // CR 201.2: Source-/target-relative name predicates require
@@ -3443,6 +3529,17 @@ fn matches_filter_prop(
         FilterProp::ControllerChoseLabel { label } => {
             crate::game::players::player_last_chose_label(state, obj.controller, label)
         }
+        // CR 109.4 + CR 608.2c: the matched object's CONTROLLER satisfies the inner
+        // player predicate. Delegates to the single-authority player-scope matcher
+        // (obj.controller as the candidate; source controller/id for opponent-relative
+        // inner filters like OpponentDealtDamage).
+        FilterProp::ControllerMatches { player } => crate::game::effects::matches_player_scope(
+            state,
+            obj.controller,
+            player,
+            source.controller.unwrap_or(obj.controller),
+            source.id,
+        ),
         // CR 305.1 + CR 601.2a: "played by" entry replacements (Uphill Battle).
         FilterProp::WasPlayed => obj.played_from_zone.is_some() || obj.cast_from_zone.is_some(),
         // CR 508.1b: Attacking creatures may be scoped by defending player
@@ -3523,6 +3620,10 @@ fn matches_filter_prop(
                 && !combat::has_summoning_sickness(obj)
         }
         FilterProp::WithKeyword { value } => obj.has_keyword(value),
+        // CR 115.1 + CR 707.10: Zada — "creature you control that the spell could target".
+        FilterProp::CouldBeTargetedByTriggeringSpell => {
+            crate::game::targeting::object_could_be_targeted_by_triggering_spell(state, object_id)
+        }
         FilterProp::CanEnchant { target } => obj.keywords.iter().any(|keyword| {
             let Keyword::Enchant(enchant_filter) = keyword else {
                 return false;
@@ -3621,8 +3722,26 @@ fn matches_filter_prop(
         // CR 113.1 + CR 113.3: "no abilities" means no keyword abilities and
         // no activated, triggered, replacement, or static abilities.
         FilterProp::HasNoAbilities => object_has_no_abilities(obj),
-        // CR 201.2: Name matching is exact (case-insensitive comparison).
-        FilterProp::Named { name } => obj.name.eq_ignore_ascii_case(name),
+        // CR 201.2a: Name matching is exact (case-insensitive comparison).
+        // Also check CountsAsNamed statics (Odyssey Burst cycle).
+        // NOTE: The alias applies to ANY FilterProp::Named check, not only effects
+        // from spells named X. This is safe for the entire Burst cycle because each
+        // Burst spell is the only effect referencing its own name — but if a future
+        // non-self-referential "counts as named" card appears, this may need a
+        // source-filter check.
+        FilterProp::Named { name } => {
+            obj.name.eq_ignore_ascii_case(name)
+                || obj.static_definitions.iter_all().any(|sd| {
+                    // Only count the alias if the static's active_zones include
+                    // the object's current zone (or active_zones is empty = always).
+                    if let StaticMode::CountsAsNamed { name: alias } = &sd.mode {
+                        (sd.active_zones.is_empty() || sd.active_zones.contains(&obj.zone))
+                            && alias.eq_ignore_ascii_case(name)
+                    } else {
+                        false
+                    }
+                })
+        }
         // SameName: matches objects with the same name as the tracked card from context.
         // At runtime, this checks against the source object's name (the event context card).
         FilterProp::SameName => {
@@ -4074,6 +4193,39 @@ fn matches_filter_prop(
                 .collect();
             !controlled_names.contains(&obj.name.as_str())
         }
+        // CR 109.1 + CR 120.3: Match objects that are NOT the same object as any
+        // object the `reference` filter resolves to. `ParentTarget` resolves to
+        // the ability's chosen object target(s); other context refs resolve via
+        // the shared event-context machinery (mirrors the `SharesQuality`
+        // reference resolution below). Used by Radiance's "each OTHER creature
+        // that shares a color with it" — excludes the already-damaged target.
+        FilterProp::DistinctFrom { reference } => {
+            // `matches_filter_prop` runs once per candidate object, so short-circuit
+            // via `.any()` rather than collecting the reference ids into a `Vec`.
+            //
+            // NOTE (fail-open asymmetry): the `ParentTarget` arm reads ONLY
+            // `ability.targets` — it lacks the LKI / `recipient_id` /
+            // effect-context fallback ladder that `SharesQuality`'s `ParentTarget`
+            // path carries (see `parent_target_shared_quality_values` below). When
+            // `ability` is `None` or its targets are empty this excludes nothing
+            // (fails open). That is safe for the current Radiance class — the
+            // resolving `DamageAll` sub-ability always carries the chosen target —
+            // but a future reuse in a layer-eval or recipient context would need
+            // the same fallback ladder to avoid a silent double-hit.
+            let is_referenced = if matches!(**reference, TargetFilter::ParentTarget) {
+                source.ability.is_some_and(|ability| {
+                    ability
+                        .targets
+                        .iter()
+                        .any(|t| matches!(t, TargetRef::Object(id) if *id == object_id))
+                })
+            } else {
+                crate::game::targeting::resolve_event_context_targets(state, reference, source.id)
+                    .into_iter()
+                    .any(|t| matches!(t, TargetRef::Object(id) if id == object_id))
+            };
+            !is_referenced
+        }
         // CR 604.3: Match objects in any of the listed zones (OR semantics).
         FilterProp::InAnyZone { zones } => zones.contains(&obj.zone),
         FilterProp::SharesQuality {
@@ -4165,6 +4317,9 @@ fn matches_filter_prop(
         // stack entry's actual targets.
         // CR 707.2: Match face-down permanents on the battlefield.
         FilterProp::FaceDown => obj.face_down,
+        // CR 701.27g: Match transformed permanents (a transforming DFC on the
+        // battlefield with its back face up).
+        FilterProp::Transformed => obj.transformed,
         // CR 115.9c: If the object is a stack entry, ALL of its targets must match
         // the inner filter. Falls back permissive for non-stack objects so trigger
         // matchers remain the primary authority (they validate separately).
@@ -4279,6 +4434,7 @@ fn zone_change_record_matches_property(
         // CR 303.4: Requires live target context; zone-change snapshots cannot
         // prove attachment legality against a referenced target.
         FilterProp::CanEnchant { .. } => false,
+        FilterProp::CouldBeTargetedByTriggeringSpell => false,
         // CR 205.4a: Supertype membership as of the zone change.
         FilterProp::HasSupertype { value } => record.supertypes.contains(value),
         FilterProp::NotSupertype { value } => !record.supertypes.contains(value),
@@ -4586,6 +4742,7 @@ fn zone_change_record_matches_property(
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::Foretold
         // CR 201.2: Name-matches-any-permanent is a live-battlefield predicate
         // — a zone-change snapshot cannot represent it. Fail closed.
@@ -4620,6 +4777,9 @@ fn zone_change_record_matches_property(
         // attachments) — a zone-change snapshot cannot represent it.
         | FilterProp::Modified
         | FilterProp::DifferentNameFrom { .. }
+        // CR 109.1: identity-exclusion is a live-battlefield predicate; a
+        // zone-change snapshot cannot represent it. Fail closed.
+        | FilterProp::DistinctFrom { .. }
         | FilterProp::InAnyZone { .. }
         | FilterProp::SharesQuality { .. }
         | FilterProp::EnteredThisTurn
@@ -4651,6 +4811,9 @@ fn zone_change_record_matches_property(
         // CR 607 (by analogy): the controller's per-player anchor label is a
         // live-game read; a zone-change snapshot does not carry it. Fail closed.
         | FilterProp::ControllerChoseLabel { .. }
+        // CR 608.2c + CR 608.2i: the controller's look-back player predicate is a
+        // live turn-history read; a zone-change snapshot does not carry it. Fail closed.
+        | FilterProp::ControllerMatches { .. }
         // CR 608.2c: Tracked-set membership is a live resolution-chain selection
         // over battlefield objects; a zone-change snapshot is not consulted for
         // "chosen this way" / "the rest" filters. Fail closed.
@@ -6812,6 +6975,26 @@ mod tests {
         assert!(matches_target_filter(&state, id, &filter, id));
     }
 
+    // CR 701.27g: `Transformed` matches only permanents whose back face is up.
+    #[test]
+    fn transformed_property_matches_only_transformed() {
+        let mut state = setup();
+        let transformed = add_creature(&mut state, PlayerId(0), "Back Face");
+        let normal = add_creature(&mut state, PlayerId(0), "Front Face");
+        state.objects.get_mut(&transformed).unwrap().transformed = true;
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Transformed]));
+        assert!(
+            matches_target_filter(&state, transformed, &filter, transformed),
+            "a transformed permanent must match"
+        );
+        assert!(
+            !matches_target_filter(&state, normal, &filter, normal),
+            "a non-transformed permanent must not match"
+        );
+    }
+
     // CR 702.171b: `IsSaddled` matches only objects with the saddled designation.
     #[test]
     fn is_saddled_property_matches_only_saddled() {
@@ -7434,6 +7617,290 @@ mod tests {
     }
 
     #[test]
+    fn game_scenario_mana_echoes_shares_type_count_with_triggering_source() {
+        use crate::game::quantity::object_count_matching_ids;
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::{ManaProduction, QuantityExpr, QuantityRef};
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::ZoneChangeRecord;
+        use crate::types::zones::Zone;
+
+        const ORACLE: &str = "Whenever a creature enters, you may add an amount of {C} equal to the number of creatures you control that share a creature type with it.";
+
+        let mut scenario = GameScenario::new();
+        let mana_echoes = scenario
+            .add_creature_from_oracle(P0, "Mana Echoes", 0, 0, ORACLE)
+            .id();
+        scenario
+            .add_creature(P0, "Goblin A", 1, 1)
+            .with_subtypes(vec!["Goblin"]);
+        scenario
+            .add_creature(P0, "Goblin B", 1, 1)
+            .with_subtypes(vec!["Goblin"]);
+        let mut runner = scenario.build();
+        runner.state_mut().all_creature_types = vec!["Goblin".to_string()];
+
+        let entering = {
+            let state = runner.state_mut();
+            let card_id = crate::types::identifiers::CardId(state.next_object_id);
+            let id = crate::game::zones::create_object(
+                state,
+                card_id,
+                P0,
+                "Goblin C".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+            id
+        };
+
+        let trigger = &runner.state().objects[&mana_echoes].trigger_definitions[0];
+        let execute = trigger.execute.as_ref().expect("execute");
+        let ability = crate::game::triggers::build_triggered_ability(
+            runner.state(),
+            trigger,
+            mana_echoes,
+            P0,
+        );
+
+        let filter = match execute.effect.as_ref() {
+            crate::types::ability::Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => {
+                let QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                } = count
+                else {
+                    panic!("expected ObjectCount quantity");
+                };
+                filter
+            }
+            other => panic!("expected colorless mana, got {other:?}"),
+        };
+
+        let mut state = runner.state().clone();
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: entering,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                entering,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        });
+        let ctx = super::FilterContext::from_ability_with_controller(&ability, P0);
+        assert_eq!(
+            object_count_matching_ids(&state, filter, &ctx, mana_echoes).len(),
+            3,
+            "GameScenario-built Mana Echoes must count three sharing Goblins"
+        );
+    }
+
+    #[test]
+    fn mana_echoes_optional_stack_pause_preserves_shares_type_count() {
+        use crate::game::quantity::{object_count_matching_ids, resolve_quantity_with_targets};
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::triggers::{drain_order_triggers_with_identity, process_triggers};
+        use crate::game::zones::move_to_zone;
+        use crate::types::ability::{ManaProduction, QuantityExpr, QuantityRef};
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        const ORACLE: &str = "Whenever a creature enters, you may add an amount of {C} equal to the number of creatures you control that share a creature type with it.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let mana_echoes = scenario
+            .add_creature_from_oracle(P0, "Mana Echoes", 0, 0, ORACLE)
+            .id();
+        scenario
+            .add_creature(P0, "Goblin A", 1, 1)
+            .with_subtypes(vec!["Goblin"]);
+        scenario
+            .add_creature(P0, "Goblin B", 1, 1)
+            .with_subtypes(vec!["Goblin"]);
+        let mut runner = scenario.build();
+        runner.state_mut().all_creature_types = vec!["Goblin".to_string()];
+        runner.advance_until_stack_empty();
+
+        let entering = {
+            let state = runner.state_mut();
+            let card_id = CardId(state.next_object_id);
+            let id = crate::game::zones::create_object(
+                state,
+                card_id,
+                P0,
+                "Goblin C".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+            id
+        };
+
+        let mut events = Vec::new();
+        move_to_zone(runner.state_mut(), entering, Zone::Battlefield, &mut events);
+        process_triggers(runner.state_mut(), &events);
+        drain_order_triggers_with_identity(runner.state_mut());
+
+        for _ in 0..48 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ) {
+                break;
+            }
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority to optional mana");
+        }
+
+        let pending = runner
+            .state()
+            .pending_optional_effect
+            .as_ref()
+            .expect("optional mana must stash pending ability");
+        let pending_event = runner
+            .state()
+            .pending_optional_trigger_event
+            .clone()
+            .expect("optional mana must stash trigger event");
+
+        let filter = match &pending.effect {
+            crate::types::ability::Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => {
+                let QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                } = count
+                else {
+                    panic!("expected ObjectCount");
+                };
+                filter.clone()
+            }
+            other => panic!("expected Mana effect, got {other:?}"),
+        };
+
+        let mut probe = runner.state().clone();
+        probe.current_trigger_event = Some(pending_event);
+        let ctx = super::FilterContext::from_ability_with_controller(pending, P0);
+        assert_eq!(
+            object_count_matching_ids(&probe, &filter, &ctx, mana_echoes).len(),
+            3,
+            "paused optional ability must count three sharing Goblins"
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(
+                &probe,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: filter.clone()
+                    },
+                },
+                pending,
+            ),
+            3
+        );
+
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("accept optional mana");
+        assert_eq!(
+            runner.state().players[P0.0 as usize]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Colorless),
+            3,
+            "accepting optional Mana Echoes must add three colorless"
+        );
+    }
+
+    #[test]
+    fn object_count_shares_creature_type_with_triggering_source_for_mana_echoes() {
+        use crate::game::quantity::object_count_matching_ids;
+        use crate::types::ability::{
+            ControllerRef, Effect, ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility,
+            SharedQualityRelation, TypedFilter,
+        };
+        use crate::types::events::GameEvent;
+
+        let mut state = setup();
+        state.all_creature_types = vec!["Goblin".to_string()];
+        let mana_echoes = add_creature(&mut state, PlayerId(0), "Mana Echoes");
+        let goblin_a = add_creature(&mut state, PlayerId(0), "Goblin A");
+        let goblin_b = add_creature(&mut state, PlayerId(0), "Goblin B");
+        let entering = add_creature(&mut state, PlayerId(0), "Goblin C");
+        for id in [goblin_a, goblin_b, entering] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .subtypes
+                .push("Goblin".to_string());
+        }
+
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: entering,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                entering,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        });
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::CreatureType,
+                    reference: Some(Box::new(TargetFilter::TriggeringSource)),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: filter.clone(),
+                        },
+                    },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            vec![],
+            mana_echoes,
+            PlayerId(0),
+        );
+        let ctx = FilterContext::from_ability(&ability);
+
+        assert_eq!(
+            object_count_matching_ids(&state, &filter, &ctx, mana_echoes).len(),
+            3,
+            "all three Goblins share a creature type with the entering creature"
+        );
+    }
+
+    #[test]
     fn shares_quality_reference_can_use_discarded_trigger_object() {
         let mut state = setup();
         let source = add_creature(&mut state, PlayerId(0), "Diviner");
@@ -8036,6 +8503,147 @@ mod tests {
         assert!(matches_target_filter(&state, chosen, &all_others, chosen));
         assert!(matches_target_filter(&state, other_a, &all_others, chosen));
         assert!(matches_target_filter(&state, other_b, &all_others, chosen));
+    }
+
+    /// Builds the sentinel `TrackedSetFiltered` consumers use ("X cards revealed
+    /// this way", "exiled this way"): `id: 0`, an inner creature type filter,
+    /// and an optional producer-action binding.
+    fn sentinel_tracked_set_filtered(
+        caused_by: Option<crate::types::ability::ThisWayCause>,
+    ) -> TargetFilter {
+        TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            caused_by,
+        }
+    }
+
+    /// #5512 failure mode 2 (empty-set shadowing): `TrackedSetFiltered`'s
+    /// sentinel previously resolved via `max_by_key` over ALL sets, so a
+    /// trailing EMPTY set with a higher id shadowed an earlier populated one
+    /// and the filter matched nothing. Routed through
+    /// `resolve_tracked_set_id`, the latest NON-EMPTY set wins.
+    #[test]
+    fn tracked_set_filtered_sentinel_skips_trailing_empty_set() {
+        let mut state = setup();
+        let member = add_creature(&mut state, PlayerId(0), "Set Member");
+        let outsider = add_creature(&mut state, PlayerId(0), "Outsider");
+
+        let populated = crate::types::identifiers::TrackedSetId(7);
+        state.tracked_object_sets.insert(populated, vec![member]);
+        // A later effect published an empty set with a higher id (e.g. a
+        // zero-picked selection). No chain set is active.
+        let empty = crate::types::identifiers::TrackedSetId(8);
+        state.tracked_object_sets.insert(empty, Vec::new());
+        assert_eq!(state.chain_tracked_set_id, None);
+
+        let filter = sentinel_tracked_set_filtered(None);
+        assert!(
+            matches_target_filter(&state, member, &filter, member),
+            "the latest NON-EMPTY set (7) must win — a trailing empty set (8) must not shadow it"
+        );
+        assert!(
+            !matches_target_filter(&state, outsider, &filter, member),
+            "objects outside the resolved set must not match"
+        );
+    }
+
+    /// #5512 failure mode 1 (no chain rung): `TrackedSetFiltered`'s sentinel
+    /// previously ignored `chain_tracked_set_id`, so a set published by the
+    /// ACTIVE resolution chain lost to any later-published set. Routed through
+    /// `resolve_tracked_set_id`, the chain set is preferred — matching every
+    /// other `TrackedSetId(0)` consumer.
+    #[test]
+    fn tracked_set_filtered_sentinel_prefers_chain_set() {
+        let mut state = setup();
+        let chain_member = add_creature(&mut state, PlayerId(0), "Chain Member");
+        let later_member = add_creature(&mut state, PlayerId(0), "Later Member");
+
+        let chain_set = crate::types::identifiers::TrackedSetId(5);
+        state
+            .tracked_object_sets
+            .insert(chain_set, vec![chain_member]);
+        let later_set = crate::types::identifiers::TrackedSetId(9);
+        state
+            .tracked_object_sets
+            .insert(later_set, vec![later_member]);
+        state.chain_tracked_set_id = Some(chain_set);
+
+        let filter = sentinel_tracked_set_filtered(None);
+        assert!(
+            matches_target_filter(&state, chain_member, &filter, chain_member),
+            "the active resolution chain's set (5) must win over a later published set (9)"
+        );
+        assert!(
+            !matches_target_filter(&state, later_member, &filter, chain_member),
+            "members of the non-chain set must not match while a chain set is active"
+        );
+    }
+
+    /// #5512 regression guard for the Zimone's Experiment / Living Death class:
+    /// the `caused_by` producer-action provenance must key off the RESOLVED set
+    /// id — the same set whose membership was matched — not the raw max id.
+    /// With a trailing empty set (higher id) present, the cause lookup for a
+    /// member of the populated set must consult set 7's causes and still match;
+    /// a member whose recorded cause differs must still be rejected.
+    #[test]
+    fn tracked_set_filtered_caused_by_keys_off_resolved_set_id() {
+        use crate::types::ability::ThisWayCause;
+        let mut state = setup();
+        let sacrificed = add_creature(&mut state, PlayerId(0), "Sacrificed Member");
+        let exiled = add_creature(&mut state, PlayerId(0), "Exiled Member");
+
+        let populated = crate::types::identifiers::TrackedSetId(7);
+        state
+            .tracked_object_sets
+            .insert(populated, vec![sacrificed, exiled]);
+        let mut causes = std::collections::HashMap::new();
+        causes.insert(sacrificed, ThisWayCause::Sacrificed);
+        causes.insert(exiled, ThisWayCause::Exiled);
+        state.tracked_set_member_causes.insert(populated, causes);
+        // The shadowing empty set that previously broke sentinel resolution.
+        let empty = crate::types::identifiers::TrackedSetId(8);
+        state.tracked_object_sets.insert(empty, Vec::new());
+
+        let sacrificed_this_way = sentinel_tracked_set_filtered(Some(ThisWayCause::Sacrificed));
+        assert!(
+            matches_target_filter(&state, sacrificed, &sacrificed_this_way, sacrificed),
+            "the cause lookup must consult the RESOLVED set's (7) provenance and match"
+        );
+        assert!(
+            !matches_target_filter(&state, exiled, &sacrificed_this_way, sacrificed),
+            "a member whose recorded producer action differs (Exiled) must not match Sacrificed"
+        );
+    }
+
+    /// Concrete (non-sentinel) `TrackedSetFiltered` ids bypass the ladder
+    /// entirely — the Zimone's Experiment / Living Death resolver paths bind a
+    /// real id before evaluation, and #5512 must not change that path.
+    #[test]
+    fn tracked_set_filtered_concrete_id_unaffected_by_ladder() {
+        use crate::types::ability::ThisWayCause;
+        let mut state = setup();
+        let member = add_creature(&mut state, PlayerId(0), "Bound Member");
+
+        let bound = crate::types::identifiers::TrackedSetId(3);
+        state.tracked_object_sets.insert(bound, vec![member]);
+        let mut causes = std::collections::HashMap::new();
+        causes.insert(member, ThisWayCause::Exiled);
+        state.tracked_set_member_causes.insert(bound, causes);
+        // Chain and later sets exist but must be ignored for a concrete id.
+        let later = crate::types::identifiers::TrackedSetId(9);
+        state.tracked_object_sets.insert(later, Vec::new());
+        state.chain_tracked_set_id = Some(later);
+
+        let filter = TargetFilter::TrackedSetFiltered {
+            id: bound,
+            filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            caused_by: Some(ThisWayCause::Exiled),
+        };
+        assert!(
+            matches_target_filter(&state, member, &filter, member),
+            "a concrete id must resolve directly, ignoring chain/latest ladder state"
+        );
     }
 
     /// De Morgan: `[Not(Attacked), Not(Entered)]` AND-combines, so it matches
@@ -10906,6 +11514,189 @@ mod tests {
         assert!(
             !spell_record_matches_filter(&from_hand, &filter, controller, &[]),
             "a spell cast from hand must NOT satisfy InAnyZone[everything except hand]"
+        );
+    }
+
+    /// CR 109.4 + CR 608.2i (Admiral Beckett Brass #4735): the object-side
+    /// controller-predicate bridge `FilterProp::ControllerMatches`. Builds the
+    /// exact filter the parser emits for Beckett's steal target and drives it
+    /// through the real filter-eval pipeline (`matches_target_filter`) — the
+    /// candidate matches iff its CONTROLLER was dealt combat damage by THREE OR
+    /// MORE distinct Pirates this turn (Beckett's real `min_sources = 3`). Uses
+    /// the explicit-controller wrapper so the source ability (Beckett, controlled
+    /// by P0) is an opponent of the damaged controller (P1), as
+    /// `opponent_dealt_damage_matches` requires.
+    fn beckett_controller_matches_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::ControllerMatches {
+                player: Box::new(crate::types::ability::PlayerFilter::OpponentDealtDamage {
+                    kind: crate::types::ability::DamageKindFilter::CombatOnly,
+                    source: Some(Box::new(TargetFilter::Typed(
+                        TypedFilter::creature().with_type(
+                            crate::types::ability::TypeFilter::Subtype("Pirate".to_string()),
+                        ),
+                    ))),
+                    min_sources: 3,
+                }),
+            },
+        ]))
+    }
+
+    /// Stage one combat-damage-by-a-Pirate record with a DISTINCT `source_id` so
+    /// the distinct-source count can be exercised (Beckett needs ≥3 distinct
+    /// Pirate sources).
+    fn push_combat_damage_by_distinct_pirate(
+        state: &mut GameState,
+        victim: PlayerId,
+        pirate_source: ObjectId,
+    ) {
+        state
+            .damage_dealt_this_turn
+            .push_back(crate::types::game_state::DamageRecord {
+                source_id: pirate_source,
+                source_controller: victim, // irrelevant to the match
+                target: crate::types::ability::TargetRef::Player(victim),
+                target_controller: victim,
+                amount: 2,
+                is_combat: true,
+                source_core_types: vec![CoreType::Creature],
+                source_subtypes: vec!["Pirate".to_string()],
+                ..Default::default()
+            });
+    }
+
+    #[test]
+    fn controller_matches_pirate_combat_damage_positive() {
+        let mut state = setup();
+        // Beckett (source) controlled by P0; the steal candidate controlled by P1.
+        let beckett = add_creature(&mut state, PlayerId(0), "Admiral Beckett Brass");
+        let candidate = add_creature(&mut state, PlayerId(1), "Stolen Goblin");
+        // Three DISTINCT Pirate sources dealt P1 combat damage this turn.
+        push_combat_damage_by_distinct_pirate(&mut state, PlayerId(1), ObjectId(901));
+        push_combat_damage_by_distinct_pirate(&mut state, PlayerId(1), ObjectId(902));
+        push_combat_damage_by_distinct_pirate(&mut state, PlayerId(1), ObjectId(903));
+
+        let filter = beckett_controller_matches_filter();
+        assert!(
+            matches_target_filter_controlled(&state, candidate, &filter, beckett, PlayerId(0)),
+            "candidate's controller (P1) was dealt combat damage by 3 distinct Pirates this turn — must match"
+        );
+    }
+
+    #[test]
+    fn controller_matches_two_distinct_pirates_below_threshold_negative() {
+        let mut state = setup();
+        let beckett = add_creature(&mut state, PlayerId(0), "Admiral Beckett Brass");
+        let candidate = add_creature(&mut state, PlayerId(1), "Stolen Goblin");
+        // Only TWO distinct Pirates — below Beckett's "three or more" threshold.
+        // This is the defining restriction of the card: 1–2 Pirates must NOT
+        // qualify even though the source/kind predicate matches.
+        push_combat_damage_by_distinct_pirate(&mut state, PlayerId(1), ObjectId(901));
+        push_combat_damage_by_distinct_pirate(&mut state, PlayerId(1), ObjectId(902));
+
+        let filter = beckett_controller_matches_filter();
+        assert!(
+            !matches_target_filter_controlled(&state, candidate, &filter, beckett, PlayerId(0)),
+            "combat damage by only 2 distinct Pirates is below min_sources=3 — must NOT match"
+        );
+    }
+
+    #[test]
+    fn controller_matches_same_pirate_twice_is_one_source_negative() {
+        let mut state = setup();
+        let beckett = add_creature(&mut state, PlayerId(0), "Admiral Beckett Brass");
+        let candidate = add_creature(&mut state, PlayerId(1), "Stolen Goblin");
+        // The SAME Pirate dealing combat damage across two combat steps is ONE
+        // distinct source (CR 120.9 counts distinct sources, not damage events),
+        // so three records from two objects (901 twice, 902 once) = 2 distinct.
+        push_combat_damage_by_distinct_pirate(&mut state, PlayerId(1), ObjectId(901));
+        push_combat_damage_by_distinct_pirate(&mut state, PlayerId(1), ObjectId(901));
+        push_combat_damage_by_distinct_pirate(&mut state, PlayerId(1), ObjectId(902));
+
+        let filter = beckett_controller_matches_filter();
+        assert!(
+            !matches_target_filter_controlled(&state, candidate, &filter, beckett, PlayerId(0)),
+            "the same Pirate counted once — 2 distinct sources is below min_sources=3, must NOT match"
+        );
+    }
+
+    #[test]
+    fn controller_matches_non_pirate_source_negative() {
+        let mut state = setup();
+        let beckett = add_creature(&mut state, PlayerId(0), "Admiral Beckett Brass");
+        let candidate = add_creature(&mut state, PlayerId(1), "Stolen Goblin");
+        // Combat damage, but the source is a Goblin, not a Pirate.
+        state
+            .damage_dealt_this_turn
+            .push_back(crate::types::game_state::DamageRecord {
+                source_id: ObjectId(999),
+                target: crate::types::ability::TargetRef::Player(PlayerId(1)),
+                target_controller: PlayerId(1),
+                amount: 2,
+                is_combat: true,
+                source_core_types: vec![CoreType::Creature],
+                source_subtypes: vec!["Goblin".to_string()],
+                ..Default::default()
+            });
+
+        let filter = beckett_controller_matches_filter();
+        assert!(
+            !matches_target_filter_controlled(&state, candidate, &filter, beckett, PlayerId(0)),
+            "combat damage by a non-Pirate must NOT satisfy the Pirate-source predicate"
+        );
+    }
+
+    #[test]
+    fn controller_matches_noncombat_pirate_damage_negative() {
+        let mut state = setup();
+        let beckett = add_creature(&mut state, PlayerId(0), "Admiral Beckett Brass");
+        let candidate = add_creature(&mut state, PlayerId(1), "Stolen Goblin");
+        // A Pirate source, but NONCOMBAT damage (e.g. a Pirate's activated ability).
+        state
+            .damage_dealt_this_turn
+            .push_back(crate::types::game_state::DamageRecord {
+                source_id: ObjectId(999),
+                target: crate::types::ability::TargetRef::Player(PlayerId(1)),
+                target_controller: PlayerId(1),
+                amount: 2,
+                is_combat: false,
+                source_core_types: vec![CoreType::Creature],
+                source_subtypes: vec!["Pirate".to_string()],
+                ..Default::default()
+            });
+
+        let filter = beckett_controller_matches_filter();
+        assert!(
+            !matches_target_filter_controlled(&state, candidate, &filter, beckett, PlayerId(0)),
+            "noncombat damage by a Pirate must NOT satisfy the combat-only predicate"
+        );
+    }
+
+    #[test]
+    fn controller_matches_undamaged_controller_negative() {
+        let mut state = setup();
+        let beckett = add_creature(&mut state, PlayerId(0), "Admiral Beckett Brass");
+        let candidate = add_creature(&mut state, PlayerId(1), "Stolen Goblin");
+        // No damage record at all — controller was not dealt any damage this turn.
+        let filter = beckett_controller_matches_filter();
+        assert!(
+            !matches_target_filter_controlled(&state, candidate, &filter, beckett, PlayerId(0)),
+            "an undamaged controller must NOT match the look-back predicate"
+        );
+    }
+
+    #[test]
+    fn controller_matches_serde_round_trips() {
+        let filter = beckett_controller_matches_filter();
+        let TargetFilter::Typed(typed) = &filter else {
+            panic!("expected Typed filter");
+        };
+        let prop = &typed.properties[0];
+        let json = serde_json::to_string(prop).expect("serialize ControllerMatches");
+        let back: FilterProp = serde_json::from_str(&json).expect("deserialize ControllerMatches");
+        assert_eq!(
+            *prop, back,
+            "ControllerMatches must round-trip through serde"
         );
     }
 }

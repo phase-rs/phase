@@ -41,6 +41,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseDrawnThisTurnPayOrTopdeck,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -122,6 +123,7 @@ pub fn handle_topdeck_choice(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseDrawnThisTurnPayOrTopdeck,
         source_id: choice.source_id,
+        subject: None,
     });
     Ok(())
 }

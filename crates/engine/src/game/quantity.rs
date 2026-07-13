@@ -350,6 +350,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::ObjectCount { .. }
         | QuantityRef::ObjectCountDistinct { .. }
         | QuantityRef::ObjectCountBySharedQuality { .. }
@@ -569,11 +570,13 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsHarnessed
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
         | StaticCondition::RecipientAttackingOwnerTarget { .. }
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
@@ -627,6 +630,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
@@ -821,6 +825,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
@@ -1663,6 +1668,10 @@ fn resolve_ref(
         }),
         // CR 103.4: The format's starting life total.
         QuantityRef::StartingLifeTotal => state.format_config.starting_life,
+        // CR 701.57a: the mana-value limit of the discover that fired the current
+        // "whenever you discover" trigger (Curator of Sun's Creation, "the same
+        // value"). 0 outside a discover-trigger context.
+        QuantityRef::TriggeringDiscoverValue => state.last_discover_value.unwrap_or(0),
         // CR 118.4 + CR 119.3: Life lost this turn, scoped via PlayerScope (Π-3).
         QuantityRef::LifeLostThisTurn { player } => {
             resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
@@ -2364,10 +2373,10 @@ fn resolve_ref(
             }
             count
         }
-        // CR 609.3: Numeric result from the preceding effect in a sub_ability chain.
+        // CR 608.2c: Numeric result from the preceding effect in a sub_ability chain.
         // The resolver stamps this from the parent effect's semantic event class.
         QuantityRef::PreviousEffectAmount => state.last_effect_amount.unwrap_or(0),
-        // CR 609.3: "for each [thing] this way" — read the most recent tracked set size.
+        // CR 608.2c: "for each [thing] this way" — read the most recent tracked set size.
         QuantityRef::TrackedSetSize => state
             .tracked_object_sets
             .iter()
@@ -2410,7 +2419,7 @@ fn resolve_ref(
                 .count();
             usize_to_i32_saturating(count)
         }
-        // CR 608.2c + CR 609.3 + CR 107.3e + CR 202.3: Reduce a numeric property
+        // CR 608.2c + CR 107.3e + CR 202.3: Reduce a numeric property
         // over the most recent chain tracked set. Mirrors `FilteredTrackedSetSize`'s set
         // selection (highest id = the set the preceding chain effect published)
         // but aggregates a per-member value instead of counting. The members are
@@ -2478,8 +2487,12 @@ fn resolve_ref(
         //      many"; "dealt excess damage this way, add that much {R}").
         //   6. `0` — undefined.
         QuantityRef::EventContextAmount => state
-            .current_trigger_match_count
-            .map(u32_to_i32_saturating)
+            // CR 614.1a: Moonlit-scoped "that many" copy count — highest priority,
+            // un-shadowable. `Some` only while a `CopyTokenOf` substitution
+            // continuation resolves (Moonlit Meditation); `None` otherwise, so it
+            // falls straight through to the existing trigger/effect cascade.
+            .post_replacement_token_substitution_count
+            .or(state.current_trigger_match_count.map(u32_to_i32_saturating))
             // CR 706.4: Die results recorded earlier in THIS resolution
             // outrank the triggering event's own amount, so "roll one or more
             // dice. <effect> equal to the result(s)" consumes the roll total,
@@ -4474,6 +4487,11 @@ fn resolve_single_player_scope(
         }
         // Aggregate scopes have no single-player reading.
         PlayerScope::Opponent { .. } | PlayerScope::AllPlayers { .. } => None,
+        PlayerScope::AnyTurn => {
+            unreachable!(
+                "PlayerScope::AnyTurn is duration-timing-only; never reached via QuantityRef"
+            )
+        }
     }
 }
 
@@ -4568,6 +4586,11 @@ where
                 state.players.iter().filter(|p| Some(p.id) != excluded_id),
                 *aggregate,
                 &mut extract,
+            )
+        }
+        PlayerScope::AnyTurn => {
+            unreachable!(
+                "PlayerScope::AnyTurn is duration-timing-only; never reached via QuantityRef"
             )
         }
     }
@@ -4796,13 +4819,14 @@ pub(crate) fn opponent_dealt_damage_matches(
     controller: PlayerId,
     kind: crate::types::ability::DamageKindFilter,
     source: &Option<Box<TargetFilter>>,
+    min_sources: u32,
     ability_source_id: ObjectId,
 ) -> bool {
     if player == controller {
         return false;
     }
     let ctx = FilterContext::from_source_with_controller(ability_source_id, controller);
-    state.damage_dealt_this_turn.iter().any(|r| {
+    let record_matches = |r: &crate::types::game_state::DamageRecord| {
         damage_record_matches_kind(r, kind)
             && matches!(r.target, TargetRef::Player(pid) if pid == player)
             && match source {
@@ -4812,7 +4836,28 @@ pub(crate) fn opponent_dealt_damage_matches(
                 // no separate short-circuit is needed here.
                 Some(f) => matches_target_filter_on_damage_record_source(state, r, f, &ctx),
             }
-    })
+    };
+    // CR 120.9: the fast, allocation-free `≥1` path for the common `min_sources
+    // == 1` case (every existing card). Only "N or more <source>" clauses
+    // (min_sources > 1, Admiral Beckett Brass) need to count DISTINCT sources.
+    if min_sources <= 1 {
+        return state.damage_dealt_this_turn.iter().any(record_matches);
+    }
+    // CR 120.9 + CR 608.2i: count DISTINCT damaging sources by `source_id` (a
+    // single Pirate dealing combat damage across two combat steps is ONE source,
+    // not two), then require at least `min_sources` of them.
+    let mut distinct: std::collections::HashSet<ObjectId> = std::collections::HashSet::new();
+    for r in state
+        .damage_dealt_this_turn
+        .iter()
+        .filter(|r| record_matches(r))
+    {
+        distinct.insert(r.source_id);
+        if distinct.len() as u32 >= min_sources {
+            return true;
+        }
+    }
+    false
 }
 
 /// Count players matching a PlayerFilter relative to the controller.
@@ -4873,11 +4918,19 @@ pub(crate) fn resolve_player_count(
                         // CR 120.2a/120.2b: Each opponent who was dealt damage of
                         // the given kind this turn, optionally restricted to a
                         // matching source.
-                        PlayerFilter::OpponentDealtDamage { kind, source } => {
-                            opponent_dealt_damage_matches(
-                                state, p.id, controller, *kind, source, source_id,
-                            )
-                        }
+                        PlayerFilter::OpponentDealtDamage {
+                            kind,
+                            source,
+                            min_sources,
+                        } => opponent_dealt_damage_matches(
+                            state,
+                            p.id,
+                            controller,
+                            *kind,
+                            source,
+                            *min_sources,
+                            source_id,
+                        ),
                         // CR 508.6: opponent the subject attacked within scope.
                         PlayerFilter::OpponentAttacked { subject, scope } => {
                             p.id != controller
@@ -8673,6 +8726,8 @@ mod tests {
                 filter: PlayerFilter::OpponentDealtDamage {
                     kind: DamageKindFilter::CombatOnly,
                     source: None,
+
+                    min_sources: 1,
                 },
             },
         };
@@ -8719,7 +8774,11 @@ mod tests {
                 &state,
                 &QuantityExpr::Ref {
                     qty: QuantityRef::PlayerCount {
-                        filter: PlayerFilter::OpponentDealtDamage { kind, source: None },
+                        filter: PlayerFilter::OpponentDealtDamage {
+                            kind,
+                            source: None,
+                            min_sources: 1,
+                        },
                     },
                 },
                 PlayerId(0),
@@ -8757,7 +8816,8 @@ mod tests {
             legacy,
             PlayerFilter::OpponentDealtDamage {
                 kind: DamageKindFilter::CombatOnly,
-                source: None
+                source: None,
+                min_sources: 1,
             }
         );
 
@@ -8768,7 +8828,8 @@ mod tests {
             any,
             PlayerFilter::OpponentDealtDamage {
                 kind: DamageKindFilter::Any,
-                source: None
+                source: None,
+                min_sources: 1,
             }
         );
         let reser = serde_json::to_string(&any).unwrap();
@@ -8787,6 +8848,8 @@ mod tests {
                 filter: PlayerFilter::OpponentDealtDamage {
                     kind: DamageKindFilter::CombatOnly,
                     source: None,
+
+                    min_sources: 1,
                 },
             },
         };
@@ -8833,6 +8896,8 @@ mod tests {
                 filter: PlayerFilter::OpponentDealtDamage {
                     kind: DamageKindFilter::CombatOnly,
                     source: Some(Box::new(dragon_filter)),
+
+                    min_sources: 1,
                 },
             },
         };
@@ -8874,6 +8939,8 @@ mod tests {
                         filter: PlayerFilter::OpponentDealtDamage {
                             kind: DamageKindFilter::CombatOnly,
                             source: Some(Box::new(source)),
+
+                            min_sources: 1,
                         },
                     },
                 },
@@ -12330,6 +12397,22 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 3);
+    }
+
+    #[test]
+    fn triggering_discover_value_reads_last_discover_scalar() {
+        // CR 701.57a: "discover again for the same value" (Curator of Sun's
+        // Creation) reads `GameState::last_discover_value`, set when the prior
+        // discover resolved.
+        let mut state = GameState::new_two_player(42);
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::TriggeringDiscoverValue,
+        };
+        // Unset → 0 (fail-safe outside a discover-trigger context).
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 0);
+        // Set by a resolved `discover 5` → 5.
+        state.last_discover_value = Some(5);
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 5);
     }
 
     #[test]

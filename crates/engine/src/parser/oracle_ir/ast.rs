@@ -23,6 +23,20 @@ pub(crate) struct ParsedEffectClause {
     pub(crate) effect: Effect,
     pub(crate) duration: Option<Duration>,
     /// Compound "and" remainder parsed into a sub_ability chain.
+    ///
+    /// **#13 / gate-9 residual (DEFERRED, not closed by Unit 5).** This holds a
+    /// fully-lowered `AbilityDefinition` with NO clause identity of its own. It is
+    /// constructed deep in imperative/subject parsing (e.g. `imperative.rs`), long
+    /// before the enclosing clause reaches `ClauseIrBuilder`, so no `ClauseId` is
+    /// in scope at construction. The enclosing `ClauseIr` IS addressed (it carries
+    /// a `ClauseId` + `OracleUnitSource`), so this nested def is covered
+    /// transitively by its parent clause's id — but it has no INDEPENDENT clause
+    /// identity. Minting one requires U6's `ClauseId`-keyed assembly arena
+    /// (Plan 01 §6, line 823), which owns the nested sub-clause id-space; a bespoke
+    /// nested id-space here would preempt that decision. The `rg 'ClauseIr {'`
+    /// removal gate does not cover this field (it holds an `AbilityDefinition`, not
+    /// a `ClauseIr`), so this doc comment is the honest marker: independent
+    /// sub-clause identity upgrades in U6.
     pub(crate) sub_ability: Option<Box<AbilityDefinition>>,
     /// CR 601.2d: When set, this effect requires distribution among targets at cast time.
     pub(crate) distribute: Option<DistributionUnit>,
@@ -262,12 +276,13 @@ pub(crate) enum ContinuationAst {
     /// CR 701.19c: "It can't be regenerated" / "They can't be regenerated" — sets
     /// `cant_regenerate: true` on the preceding Destroy/DestroyAll effect.
     CantRegenerate,
-    /// CR 120.4a: "Excess damage is dealt to that creature's controller instead."
-    /// — sets `excess = Some(ExcessRecipient::TargetController)` on the preceding
-    /// `Effect::DealDamage` (Flame Spill, Gandalf's Sanction, Ravenous
-    /// Tyrannosaurus). The conditional / trample-gated form (Ram Through) is NOT
-    /// recognized and lowers to `Effect::Unimplemented` instead.
-    ExcessDamageToController,
+    /// CR 120.4a + CR 608.2c + CR 702: "Excess damage is dealt to that
+    /// creature's controller instead" patches the preceding `DealDamage`; an
+    /// optional source-keyword gate covers Ram Through's "If the creature you
+    /// control has trample" prefix without making the damage itself conditional.
+    ExcessDamageToController {
+        source_keyword_condition: Option<crate::types::keywords::KeywordKind>,
+    },
     /// "Choose one/N of them" / "An opponent chooses one/N of those cards" after a ChangeZone
     /// to exile → ChooseFromZone { count, zone: Exile, chooser }.
     ChooseFromExile {
@@ -410,7 +425,7 @@ pub(crate) enum ContinuationAst {
     /// and Destroy the Evidence where "those cards" refers to all cards revealed
     /// during the RevealUntil resolution, not only the non-matching ones.
     RevealUntilAllToZone { destination: Zone },
-    /// CR 406.3 + CR 701.16a: "[then] exile it/them [face down]" after a private
+    /// CR 406.3 + CR 701.20e: "[then] exile it/them [face down]" after a private
     /// `Dig` (the "look at the top N cards of <player>'s library" look step).
     /// Rewrites the preceding `Dig` into an `Effect::ExileTop` so the looked-at
     /// card(s) actually leave the library — the Gonti, Canny Acquisitor impulse
@@ -434,7 +449,17 @@ pub(crate) enum ContinuationAst {
     /// flow, then chains a `HideawayConceal` sub-ability to turn the chosen card
     /// face down and link it to the source. Gated on the exile-the-dug-card
     /// continuation, so genuine pure-peek Digs (Delver of Secrets) are untouched.
-    ExileOneOfThemFaceDown,
+    ExileOneOfThemFaceDown {
+        /// CR 122.1: A "... face down with <count> <type> counter(s) on it"
+        /// rider (The Dragon-Kami Reborn: "Exile one of them face down with a
+        /// hatching counter on it"). Threaded into the fused exile as a
+        /// `PutCounter { target: ParentTarget }` sub-ability chain appended
+        /// after the conceal, so the player-selected dug card — NOT the trigger
+        /// source — receives the counters. Empty for the bare "exile one of
+        /// them face down" form (Gonti, Lord of Luxury).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+    },
     /// CR 608.2c + CR 701.21a: absorbs the explicit/bare sacrifice-rest clause
     /// following a choose-and-sacrifice-rest effect, optionally narrowing the
     /// final sacrifice sweep ("all other nonland permanents they control").
@@ -874,7 +899,7 @@ pub(crate) enum TargetedImperativeAst {
     },
     Sacrifice {
         target: TargetFilter,
-        /// CR 701.16a: Number of permanents to sacrifice. Defaults to
+        /// CR 701.21a: Number of permanents to sacrifice. Defaults to
         /// `QuantityExpr::Fixed { value: 1 }` for the common "sacrifice a X"
         /// case; "sacrifice N X" / "sacrifice half the permanents they
         /// control" carry the parsed dynamic count.
@@ -954,6 +979,9 @@ pub(crate) enum TargetedImperativeAst {
         target: TargetFilter,
         origin: Option<Zone>,
         destination: Zone,
+        /// CR 107.1c: "return any number of [filter] cards" — zero-or-more
+        /// resolution-time zone selection (Grave Sifter class).
+        up_to: bool,
     },
     /// CR 400.7 + CR 608.2c: Mass return to a non-default zone. Lowers to
     /// `ChangeZoneAll` so the resolver scans every matching object instead of
@@ -1055,7 +1083,7 @@ pub(crate) enum SearchCreationImperativeAst {
     },
     Dig {
         count: QuantityExpr,
-        /// CR 701.20a vs CR 701.16a: True = revealed (public), false = looked at (private).
+        /// CR 701.20a vs CR 701.20e: True = revealed (public), false = looked at (private).
         reveal: bool,
         player: TargetFilter,
     },
@@ -1129,6 +1157,11 @@ pub(crate) enum MultiZoneExileQuantifier {
 pub(crate) enum UtilityImperativeAst {
     Prevent {
         text: String,
+        /// CR 608.2c: true when an earlier clause in the same effect chain
+        /// selected a target this clause's anaphor can bind to. Captured from
+        /// `ctx.parent_target_available` at the one construction site where
+        /// `ParseContext` is live (issue #1094).
+        parent_target_available: bool,
     },
     Regenerate {
         text: String,
@@ -1320,6 +1353,15 @@ pub(crate) enum PutImperativeAst {
         /// the rest zone. `None` for non-partition forms.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rest_destination: Option<Zone>,
+        /// CR 401.4: Library placement for the "rest" pile when the complement
+        /// returns to the library ("… and the rest on the bottom of your
+        /// library in a random order" — The Fourteenth Doctor — or "… in any
+        /// order" — Garruk, Caller of Beasts / Goblin Ringleader et al.).
+        /// Independent of `library_position` (which governs the PRIMARY move)
+        /// because the two piles may target different positions. `None` when the
+        /// rest does not go to a specific library position.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_library_position: Option<LibraryPosition>,
     },
     TopOfLibrary,
     BottomOfLibrary,
@@ -1466,6 +1508,13 @@ pub(crate) enum ZoneCounterImperativeAst {
         /// ("exile a card … with N <type> counters on it"). Empty for the
         /// common no-counter case. Mirrors `Effect::ChangeZone.enter_with_counters`.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// CR 700.4 (#5649): a counted graveyard exile — "exile <N> cards from
+        /// your graveyard" (Nefarious Lich: "exile that many cards … instead").
+        /// `Effect::ChangeZone` carries no count, so the quantity rides the
+        /// clause's `MultiTargetSpec` (mirroring Forage), threaded at lowering by
+        /// `lower_imperative_family_ast`. `None` for the ordinary single-object
+        /// exile.
+        multi_target: Option<MultiTargetSpec>,
     },
     ExileTop {
         player: TargetFilter,
@@ -1590,6 +1639,22 @@ pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
         optional: false,
         unless_pay: None,
     }
+}
+
+/// A `.parsed` placeholder for a clause whose real semantics live in its
+/// `ClauseDisposition` (e.g. a `Special` action), not in its effect. Distinct
+/// from `Effect::unimplemented`: it carries no fragment (`description: None`)
+/// because it marks an intentional structural non-effect, not an unparsed gap —
+/// a `Some(fragment)` here would leak into the coverage report as a false parse
+/// gap. `name` is a stable snake_case pattern-class key.
+pub(crate) fn placeholder_parsed_clause(name: &str) -> ParsedEffectClause {
+    // Structural placeholder for a disposition-carried clause; the None fragment is
+    // load-bearing (a Some(_) would surface as a false parse gap in coverage).
+    // allow-noncombinator: intentional Effect::Unimplemented placeholder, not parse dispatch.
+    parsed_clause(Effect::Unimplemented {
+        name: name.to_string(),
+        description: None,
+    })
 }
 
 pub(crate) fn with_clause_duration(

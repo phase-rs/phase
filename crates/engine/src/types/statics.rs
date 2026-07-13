@@ -562,6 +562,16 @@ pub struct CastExtraCost {
 /// This is a typed enum rather than a boolean because the design space is
 /// open-ended: new cards routinely introduce novel cause predicates, and
 /// `bool` fields cannot grow to accommodate them.
+///
+/// CR 603.6a + CR 603.6c: Disjunctive qualifier on the permanent whose
+/// battlefield transition caused a trigger (Gandalf the White-class). The
+/// causing object matches if it satisfies ANY listed qualifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ZoneChangeQualifier {
+    CoreType(super::card_type::CoreType),
+    Supertype(super::card_type::Supertype),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TriggerCause {
     /// Unrestricted doubler — matches any trigger cause.
@@ -604,6 +614,24 @@ pub enum TriggerCause {
     /// CR 309.4c: Trigger was caused by entering a dungeon room
     /// (Hama Pashar-class). Matches `GameEvent::RoomEntered` events.
     RoomEntered,
+    /// CR 603.6a + CR 603.6c: Trigger was caused by a permanent entering
+    /// and/or leaving the battlefield (Gandalf the White-class). `enter` /
+    /// `leave` select which directions qualify; when both are true, either
+    /// direction matches. `qualifiers` narrows the causing permanent against
+    /// its zone-change snapshot (CR 603.10a LKI) — empty means any permanent;
+    /// Gandalf uses `[Supertype(Legendary), CoreType(Artifact)]` (disjunctive).
+    BattlefieldTransition {
+        #[serde(default = "default_true")]
+        enter: bool,
+        #[serde(default)]
+        leave: bool,
+        #[serde(default)]
+        qualifiers: Vec<ZoneChangeQualifier>,
+    },
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl fmt::Display for TriggerCause {
@@ -624,6 +652,24 @@ impl fmt::Display for TriggerCause {
                 write!(f, "ControllerCastOrCopiedSpell([{}])", names.join(","))
             }
             TriggerCause::RoomEntered => write!(f, "RoomEntered"),
+            TriggerCause::BattlefieldTransition {
+                enter,
+                leave,
+                qualifiers,
+            } => {
+                let qual_names: Vec<String> = qualifiers
+                    .iter()
+                    .map(|q| match q {
+                        ZoneChangeQualifier::CoreType(ct) => format!("{ct:?}"),
+                        ZoneChangeQualifier::Supertype(st) => format!("{st:?}"),
+                    })
+                    .collect();
+                write!(
+                    f,
+                    "BattlefieldTransition(enter={enter},leave={leave},[{}])",
+                    qual_names.join(",")
+                )
+            }
         }
     }
 }
@@ -1139,6 +1185,16 @@ pub enum StaticMode {
         /// (Lurrus, Karador, Conduit). Routed through `pay_additional_cost`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         extra_cost: Option<CastExtraCost>,
+        /// CR 122.1 + CR 614.1c + CR 607.1: Optional enters-with counter rider
+        /// linked to the "cast a spell this way" permission — "If you cast a
+        /// spell this way, that <permanent> enters with a [counter] counter on
+        /// it." (Noctis, Prince of Lucis; Leonardo, Sewer Samurai — both
+        /// finality). `None` (default) preserves the existing graveyard-cast
+        /// shapes. Placed at the shared `finalize_cast` seam via
+        /// `casting::selected_static_permission_enters_with_counter`. Mirrors
+        /// `Effect::CastFromZone.enters_with_counter`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_with_counter: Option<super::counter::CounterType>,
     },
     /// CR 401.5 + CR 118.9 + CR 601.2a: Static ability granting permission to
     /// play/cast the top card of the controller's library when it matches
@@ -1317,6 +1373,16 @@ pub enum StaticMode {
         /// `TopOfLibraryCastPermission.alt_cost`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         extra_cost: Option<CastExtraCost>,
+        /// CR 122.1 + CR 614.1c + CR 607.1: Optional enters-with counter rider
+        /// linked to the "cast a spell this way" permission — "If you cast a
+        /// spell this way, that <permanent> enters with a [counter] counter on
+        /// it." (Intrepid Paleontologist — finality). `None` (default)
+        /// preserves the existing exile-cast shapes (Maralen, The Matrix of
+        /// Time, Azula, Valgavoth). Placed at the shared `finalize_cast` seam
+        /// via `casting::selected_static_permission_enters_with_counter`.
+        /// Mirrors `Effect::CastFromZone.enters_with_counter`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_with_counter: Option<super::counter::CounterType>,
     },
     /// CR 113.6 + CR 601.2a: Marker static identifying a source whose linked
     /// "play a card from exile with a collection counter on it" permission is
@@ -1493,6 +1559,13 @@ pub enum StaticMode {
     CantBeBlockedByMoreThan {
         max: u32,
     },
+    /// CR 509.1b: This creature can't be blocked unless all creatures the
+    /// defending player controls block it (Tromokratis). A structural blocking
+    /// restriction enforced in `validate_blockers_for_player`: if any creature
+    /// is declared as a blocker of this attacker, then EVERY creature the
+    /// defending player controls that is able to block it must also be declared
+    /// as a blocker. Partial blocks are illegal.
+    CantBeBlockedUnlessAllBlock,
     /// CR 301.5 + CR 303.4 + CR 701.3a: Positive attachment restriction — this
     /// Aura/Equipment "can be attached only to" a permanent matching `filter`.
     /// The complement of the negative `Other("CantBeEquipped" | "CantBeEnchanted"
@@ -1871,6 +1944,22 @@ pub enum StaticMode {
         counter_type: super::counter::CounterType,
         count: u32,
     },
+    /// CR 122.1d + CR 101.2: Counters of the specified type cannot be removed
+    /// from permanents matching the `StaticDefinition::affected` filter. The
+    /// runtime gate lives in `turns.rs` (untap-step stun-counter removal) and
+    /// generalizes to any `CounterType` axis (Fear of Sleep Paralysis = Stun). Runtime
+    /// enforcement prevents the counter from being removed during the untap step;
+    /// the creature stays tapped.
+    CountersCantBeRemoved {
+        counter_type: super::counter::CounterType,
+    },
+    /// Odyssey Burst-cycle graveyard name-aliasing (no general CR governs this
+    /// templating; name-matching semantics per CR 201.2a). While this card is in
+    /// a graveyard, effects that count "cards named X" treat it as having the
+    /// given name.
+    CountsAsNamed {
+        name: String,
+    },
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -1947,6 +2036,7 @@ pub enum StaticModeKind {
     CantBeBlockedExceptBy,
     CantBeBlockedBy,
     CantBeBlockedByMoreThan,
+    CantBeBlockedUnlessAllBlock,
     AttachmentRestriction,
     Protection,
     Indestructible,
@@ -2000,6 +2090,8 @@ pub enum StaticModeKind {
     UntapsDuringEachOtherPlayersUntapStep,
     MaxUntapPerType,
     EntersWithAdditionalCounters,
+    CountersCantBeRemoved,
+    CountsAsNamed,
     Other,
 }
 
@@ -2083,6 +2175,7 @@ impl StaticMode {
             StaticMode::CantBeBlockedExceptBy { .. } => StaticModeKind::CantBeBlockedExceptBy,
             StaticMode::CantBeBlockedBy { .. } => StaticModeKind::CantBeBlockedBy,
             StaticMode::CantBeBlockedByMoreThan { .. } => StaticModeKind::CantBeBlockedByMoreThan,
+            StaticMode::CantBeBlockedUnlessAllBlock => StaticModeKind::CantBeBlockedUnlessAllBlock,
             StaticMode::AttachmentRestriction { .. } => StaticModeKind::AttachmentRestriction,
             StaticMode::Protection => StaticModeKind::Protection,
             StaticMode::Indestructible => StaticModeKind::Indestructible,
@@ -2144,6 +2237,8 @@ impl StaticMode {
             StaticMode::EntersWithAdditionalCounters { .. } => {
                 StaticModeKind::EntersWithAdditionalCounters
             }
+            StaticMode::CountersCantBeRemoved { .. } => StaticModeKind::CountersCantBeRemoved,
+            StaticMode::CountsAsNamed { .. } => StaticModeKind::CountsAsNamed,
             StaticMode::Other(..) => StaticModeKind::Other,
         }
     }
@@ -2253,6 +2348,10 @@ impl Hash for StaticMode {
                 play_mode,
                 graveyard_destination_replacement,
                 extra_cost,
+                // `CounterType` derives Hash but is collision-safe to skip: the
+                // enters-with rider never distinguishes two otherwise-equal
+                // permissions in the interned set (mirrors `extra_cost` below).
+                ..
             } => {
                 frequency.hash(state);
                 play_mode.hash(state);
@@ -2285,6 +2384,9 @@ impl Hash for StaticMode {
                 mana_spend_permission,
                 grants_flash,
                 extra_cost,
+                // Collision-safe skip of the enters-with rider (see the
+                // `GraveyardCastPermission` note above).
+                ..
             } => {
                 frequency.hash(state);
                 play_mode.hash(state);
@@ -2343,6 +2445,12 @@ impl Hash for StaticMode {
             // CR 614.1c: data-carrying (CounterType + count); consumed by direct
             // match in change_zone.rs, never used as a HashMap key.
             | StaticMode::EntersWithAdditionalCounters { .. }
+            // CR 122.1d: data-carrying (CounterType); consumed by direct match
+            // in turns.rs counter_removal_blocked, never used as a HashMap key.
+            | StaticMode::CountersCantBeRemoved { .. }
+            // Odyssey Burst-cycle (CR 201.2a): data-carrying (name alias);
+            // consumed by direct match in filter.rs, never used as a HashMap key.
+            | StaticMode::CountsAsNamed { .. }
             // CR 116.2 + CR 118.7a: data-carrying (SpecialAction is not Hash);
             // consumed by direct match in the special-action cost-reduction
             // resolver, never used as a HashMap key.
@@ -2429,6 +2537,7 @@ impl StaticMode {
             | StaticMode::CantBeBlockedExceptBy { .. }
             | StaticMode::CantBeBlockedBy { .. }
             | StaticMode::CantBeBlockedByMoreThan { .. }
+            | StaticMode::CantBeBlockedUnlessAllBlock
             | StaticMode::AttachmentRestriction { .. }
             | StaticMode::Protection
             | StaticMode::CantBeDestroyed
@@ -2471,6 +2580,8 @@ impl StaticMode {
             | StaticMode::UntapsDuringEachOtherPlayersUntapStep
             | StaticMode::MaxUntapPerType { .. }
             | StaticMode::EntersWithAdditionalCounters { .. }
+            | StaticMode::CountersCantBeRemoved { .. }
+            | StaticMode::CountsAsNamed { .. }
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::DamageNotRemovedDuringCleanup
             | StaticMode::Other(_) => None,
@@ -2604,6 +2715,10 @@ impl fmt::Display for StaticMode {
                 play_mode,
                 graveyard_destination_replacement,
                 extra_cost,
+                // CR 122.1: the enters-with counter payload rides on serde, not
+                // the Display round-trip (mirrors `extra_cost`); FromStr
+                // defaults it to None.
+                ..
             } => {
                 write!(f, "GraveyardCastPermission({play_mode},{frequency}")?;
                 if matches!(graveyard_destination_replacement, Some(Zone::Exile)) {
@@ -2660,6 +2775,9 @@ impl fmt::Display for StaticMode {
                 mana_spend_permission,
                 grants_flash,
                 extra_cost,
+                // CR 122.1: enters-with counter payload rides on serde, not the
+                // Display round-trip (see `GraveyardCastPermission` above).
+                ..
             } => {
                 // Positional, lossless round-trip. Segments 1-2 (play_mode,
                 // frequency) are always present; the optional "free" cost
@@ -2750,6 +2868,9 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::CantBeBlockedByMoreThan { max } => {
                 write!(f, "CantBeBlockedByMoreThan({max})")
+            }
+            StaticMode::CantBeBlockedUnlessAllBlock => {
+                write!(f, "CantBeBlockedUnlessAllBlock")
             }
             StaticMode::Protection => write!(f, "Protection"),
             StaticMode::Indestructible => write!(f, "Indestructible"),
@@ -2873,8 +2994,15 @@ impl fmt::Display for StaticMode {
             } => {
                 write!(f, "EntersWithAdditionalCounters({counter_type:?},{count})")
             }
+            StaticMode::CountersCantBeRemoved { ref counter_type } => {
+                write!(f, "CountersCantBeRemoved({counter_type:?})")
+            }
             StaticMode::LinkedCollectionCounterPlayPermission => {
                 write!(f, "LinkedCollectionCounterPlayPermission")
+            }
+            // Odyssey Burst-cycle graveyard name alias (CR 201.2a).
+            StaticMode::CountsAsNamed { ref name } => {
+                write!(f, "CountsAsNamed({name})")
             }
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
@@ -2910,6 +3038,7 @@ impl FromStr for StaticMode {
                     max: parse_static_mode_u32_arg(s, "CantBeBlockedByMoreThan").unwrap(),
                 }
             }
+            "CantBeBlockedUnlessAllBlock" => StaticMode::CantBeBlockedUnlessAllBlock,
             "CantBeTargeted" => StaticMode::CantBeTargeted,
             "CantBeCast" => StaticMode::CantBeCast {
                 who: ProhibitionScope::Controller,
@@ -3062,6 +3191,7 @@ impl FromStr for StaticMode {
                 play_mode: CardPlayMode::Cast,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             s if s.starts_with("GraveyardCastPermission(") => {
                 let inner = s
@@ -3080,6 +3210,7 @@ impl FromStr for StaticMode {
                         // serde, not the FromStr round-trip, so FromStr defaults
                         // to None.
                         extra_cost: None,
+                        enters_with_counter: None,
                     }
                 } else {
                     StaticMode::GraveyardCastPermission {
@@ -3087,6 +3218,7 @@ impl FromStr for StaticMode {
                         play_mode: CardPlayMode::Cast,
                         graveyard_destination_replacement: None,
                         extra_cost: None,
+                        enters_with_counter: None,
                     }
                 }
             }
@@ -3160,6 +3292,7 @@ impl FromStr for StaticMode {
                 mana_spend_permission: None,
                 grants_flash: false,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             s if s.starts_with("ExileCastPermission(") => {
                 // Display form: "ExileCastPermission(<play_mode>,<frequency>[,free]
@@ -3217,6 +3350,7 @@ impl FromStr for StaticMode {
                     mana_spend_permission,
                     grants_flash,
                     extra_cost: None,
+                    enters_with_counter: None,
                 }
             }
             "CantBeCountered" => StaticMode::CantBeCountered,
@@ -3383,11 +3517,23 @@ impl FromStr for StaticMode {
                     // CR 603.2g: Data-carrying — round-trip preserves discriminant only.
                     // Callers that need the full filter/events read from the typed field.
                     return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("CountsAsNamed(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // Odyssey Burst-cycle graveyard name alias (CR 201.2a).
+                    return Ok(StaticMode::CountsAsNamed {
+                        name: inner.to_string(),
+                    });
                 } else if other.starts_with("EntersWithAdditionalCounters(") {
                     // CR 614.1c: Data-carrying (CounterType + count). The Display
                     // form uses the Debug rendering of `CounterType`, which has no
                     // FromStr inverse; round-trip is diagnostic-only and callers
                     // read the typed field. Mirrors MaximumHandSize / SuppressTriggers.
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if other.starts_with("CountersCantBeRemoved(") {
+                    // CR 122.1d: Data-carrying (CounterType). Same diagnostic-only
+                    // round-trip as EntersWithAdditionalCounters above.
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other
                     .strip_prefix("CantCastDuring(")
@@ -3857,12 +4003,14 @@ mod tests {
                 play_mode: CardPlayMode::Cast,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             // CR 601.2f: Festival of Embers — graveyard cast with an additional
             // pay-life cost. NOTE: `extra_cost`-bearing variants are NOT in this
@@ -3893,6 +4041,7 @@ mod tests {
                 mana_spend_permission: None,
                 grants_flash: false,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -3903,6 +4052,7 @@ mod tests {
                 mana_spend_permission: None,
                 grants_flash: false,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             // Persistent, your-turn-only exile-play permission
             // (The Matrix of Time; Prosper/Tibalt impulse-commander class).
@@ -3915,6 +4065,7 @@ mod tests {
                 mana_spend_permission: None,
                 grants_flash: false,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             // CR 609.4b + CR 702.8a: Azula, Cunning Usurper — Cast mode from a
             // persistent pool, your-turn-only, granting any-type mana and flash.
@@ -3929,6 +4080,7 @@ mod tests {
                 ),
                 grants_flash: true,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             // NOTE: Valgavoth (alternative pay-life) and Dawnhand (additional
             // remove-counters) `extra_cost`-bearing exile permissions are
@@ -4030,6 +4182,7 @@ mod tests {
                     },
                     mode: CastCostMode::Alternative,
                 }),
+                enters_with_counter: None,
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -4041,6 +4194,7 @@ mod tests {
                     },
                     mode: CastCostMode::Additional,
                 }),
+                enters_with_counter: None,
             },
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -4059,6 +4213,7 @@ mod tests {
                     },
                     mode: CastCostMode::Additional,
                 }),
+                enters_with_counter: None,
             },
             StaticMode::Other("Custom".to_string()),
         ];

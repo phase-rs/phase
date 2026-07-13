@@ -149,6 +149,7 @@ pub(crate) fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Forage,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())

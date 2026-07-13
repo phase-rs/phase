@@ -19,6 +19,7 @@ fn draft_ability(
         Effect::DraftFromSpellbook {
             destination,
             tapped: false,
+            random: false,
         },
         Vec::new(),
         source,
@@ -181,6 +182,7 @@ fn parser_maps_draft_clauses_to_the_right_destination() {
         Effect::DraftFromSpellbook {
             destination: Zone::Hand,
             tapped: false,
+            random: false,
         }
     ));
     assert!(matches!(
@@ -190,6 +192,7 @@ fn parser_maps_draft_clauses_to_the_right_destination() {
         Effect::DraftFromSpellbook {
             destination: Zone::Battlefield,
             tapped: false,
+            random: false,
         }
     ));
     assert!(matches!(
@@ -197,6 +200,7 @@ fn parser_maps_draft_clauses_to_the_right_destination() {
         Effect::DraftFromSpellbook {
             destination: Zone::Exile,
             tapped: false,
+            random: false,
         }
     ));
 }
@@ -211,6 +215,7 @@ fn parser_honours_the_tapped_rider() {
         Effect::DraftFromSpellbook {
             destination: Zone::Battlefield,
             tapped: true,
+            random: false,
         }
     ));
 }
@@ -258,6 +263,7 @@ fn spellbook_pick_drives_the_draft_and_conjures_the_chosen_card() {
                 Effect::DraftFromSpellbook {
                     destination: Zone::Hand,
                     tapped: false,
+                    random: false,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -298,6 +304,65 @@ fn spellbook_pick_drives_the_draft_and_conjures_the_chosen_card() {
     );
 }
 
+/// Runtime guard for the RANDOM spellbook draft ("conjure a random card from
+/// ~'s spellbook"): unlike the interactive draft it must NOT pause for a pick —
+/// the engine picks from the source's spellbook and conjures immediately. A
+/// single-card spellbook makes the pick deterministic regardless of the RNG.
+/// Reverting the `random` resolver arm re-introduces the `SpellbookDraft` pause,
+/// so resolution would halt there instead of returning to `Priority`, flipping
+/// both assertions.
+#[test]
+fn random_spellbook_draft_conjures_without_pausing() {
+    use crate::game::scenario::GameScenario;
+    use crate::types::ability::{AbilityCost, AbilityDefinition, AbilityKind};
+    use crate::types::phase::Phase;
+
+    let p0 = PlayerId(0);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(p0, "Alchemist", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DraftFromSpellbook {
+                    destination: Zone::Hand,
+                    tapped: false,
+                    random: true,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        )
+        .id();
+    let mut runner = scenario.build();
+
+    // Single-card spellbook -> the random pick is deterministic.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .spellbook = vec!["Lion Sash".to_string()];
+
+    // No `.spellbook_pick(..)`: a random draft must resolve without pausing.
+    let outcome = runner.activate(source, 0).resolve();
+
+    let drafted = outcome.state().players[0]
+        .hand
+        .iter()
+        .filter_map(|id| outcome.state().objects.get(id))
+        .any(|o| o.name == "Lion Sash");
+    assert!(
+        drafted,
+        "a random spellbook draft must conjure a card from the list into hand"
+    );
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "a random draft must not pause on SpellbookDraft; got {:?}",
+        outcome.final_waiting_for()
+    );
+}
+
 /// Multi-authority provenance: with two permanents carrying DIFFERENT
 /// spellbooks, activating one must offer ONLY that source's list — proving the
 /// offered options come from the drafting source, not any other permanent.
@@ -316,6 +381,7 @@ fn spellbook_draft_offers_only_the_activated_sources_list() {
             Effect::DraftFromSpellbook {
                 destination: Zone::Hand,
                 tapped: false,
+                random: false,
             },
         )
         .cost(AbilityCost::Tap)

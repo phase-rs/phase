@@ -213,13 +213,17 @@ gh pr view <N> --json body --jq '.body' | grep -E '^Tier: (Frontier|Standard)'
 2. `Tier: Standard` PRs second.
 3. PRs with no `Tier:` line (including all PRs predating the §0.1 policy) → process last; treat as Standard for scrutiny purposes.
 
-**The gauge below is a triage signal, not a kill switch.** This skill exists to merge PRs, not close them. Existing PRs predate the §0.1 policy and will not have `## Gate A` or `## Anchored on` sections — that is not their fault and not grounds for closure. Use the gauge to decide *how much scrutiny* and *how much inline cleanup* a PR needs, not whether to engage with it at all.
+**Legacy or audit mode only; an enforced decline exits before this section.** The gauge below is a triage signal, not a kill switch. Existing PRs may predate the §0.1 policy and lack `## Gate A` or `## Anchored on`; in legacy/audit handling, use the gauge to decide *how much scrutiny* and *how much inline cleanup* a PR needs, not whether to engage with it at all.
 
 ### Gate quality gauge (informs scrutiny level)
 
-Per `AI-CONTRIBUTOR.md` §0.1.2, the Gate A / Gate B requirements are universal: every PR opened under the current policy — Frontier or Standard — should include `## Gate A` (script output) and `## Anchored on` (≥2 `file:line` citations). PRs predating the universal-gate policy will lack them on Frontier submissions; treat absence as "older PR", not a violation.
+Per `AI-CONTRIBUTOR.md` §0.1.2, Gate A, anchors, final review-impl, method, and actual required verification evidence are universal. Artifact verification remains audit-only until its immutable post-publication cutoff is activated; in artifact audit mode, report `audit_would_decline` and continue the existing review flow unchanged. Architecture scope has an independent mode and, when enforced, an unauthorized trigger must decline before checkout or diff review regardless of PR creation time. Audit results authorize no extra mutation. Enforced failures are not context, and Tier, proof overrides, standing, quality, praise, or frontend permission cannot waive them. Claimed parse impact remains optional manual quality evidence only.
 
-**Gate A check.** If `## Gate A` is present and shows violations from `./scripts/check-parser-combinators.sh`, run the script yourself on the diff and treat the violations as a required fix inline (manual string manipulation in parser dispatch must be converted to nom combinators before merge). If the section is absent (older PR or contributor unaware), run the script yourself silently and address violations during normal Architecture Review.
+**Insufficient admission data is a terminal pre-diff hold.** When `recommend` returns `hold` or `hold_ci` with reason `insufficient_admission_data`, live-recheck `state`, `headRefOid`, body, and `createdAt`, then rerun `recommend`. If the same current head still returns that reason, do not checkout, inspect the implementation diff, comment, close, dequeue, label, or otherwise mutate the PR. Report the missing/malformed GitHub creation-time evidence as a maintainer/GitHub data blocker, release the assignment lock, and stop.
+
+**Decline means close without diff review.** Live-recheck `state`, `headRefOid`, body, and auto-merge, rerun `recommend`, and proceed only if the same current head still declines. Disable auto-merge if necessary; write the packet's complete `decline_comment` to a temp file; post it with `gh pr comment <PR> --body-file <file>`; run `gh pr close <PR>`; record the `decline` event and structured evidence; release the assignment lock; stop. Do not inspect, fix, type-label, approve, or enqueue. Audit-only would-decline results never authorize mutation.
+
+**Legacy or audit mode only; an enforced decline exits before this section. Gate A check.** If `## Gate A` is present and shows violations from `./scripts/check-parser-combinators.sh`, run the script yourself on the diff and treat the violations as a required fix inline (manual string manipulation in parser dispatch must be converted to nom combinators before merge). If the section is absent (older PR or contributor unaware), run the script yourself silently and address violations during normal Architecture Review.
 
 **Anchored-on check.** If `## Anchored on` is present, sanity-check the citations:
 
@@ -229,7 +233,7 @@ Per `AI-CONTRIBUTOR.md` §0.1.2, the Gate A / Gate B requirements are universal:
 
 The judgement is yours (the maintainer or the agent executing the skill) — keep it lightweight, the citations are short. Weak, fabricated, or unrelated citations are a **signal to apply elevated scrutiny in Architecture Review**, not a reason to close the PR. Note the gap in the final report; the maintainer decides whether to push back on the contributor.
 
-If `## Anchored on` is absent, do not penalize — the policy is new and most existing PRs will lack it. Just apply normal Architecture Review.
+**Legacy or audit mode only; an enforced decline exits before this section.** If `## Anchored on` is absent, do not penalize — the policy is new and most existing PRs will lack it. Just apply normal Architecture Review.
 
 ### Contributor standing gauge (informs scrutiny level)
 
@@ -242,9 +246,9 @@ If `## Anchored on` is absent, do not penalize — the policy is new and most ex
 
 ### Required proof gate
 
-`python3 scripts/pr_review.py recommend <N>` and `inspect <N>` also return a `proof` block. A PR with `proof.proof_gap == true` has not supplied enough evidence for its risk profile. Missing `docs/AI-CONTRIBUTOR.md` template sections and unchecked/manual verification items are context, not blockers by themselves. Skipped local verification, every commit coauthored by an agent account, elevated/maintainer-attention contributor scrutiny, or `gittensor-closed-heavy` from the public Gittensor PR feed raise the proof bar.
+`python3 scripts/pr_review.py recommend <N>` and `inspect <N>` also return a `proof` block. A PR with `proof.proof_gap == true` has not supplied enough evidence for its risk profile. The “context, not blockers” treatment for old template gaps applies only before artifact enforcement; after the immutable cutoff, `artifacts.decline` is independently dispositive. Skipped local verification, every commit coauthored by an agent account, elevated/maintainer-attention contributor scrutiny, or `gittensor-closed-heavy` from the public Gittensor PR feed raise the proof bar.
 
-Do not approve, enqueue, or leave auto-merge enabled for a PR with a proof gap. Request concrete proof first: template-complete verification, discriminating runtime tests or equivalent boundary tests, exact commands/checks run, and the behavioral trace needed for the touched seam. Use discretion for network/manual steps: if the behavior can be asserted in a focused test, that test can be stronger proof than a manual curl/browser checklist item. For a narrow refactor with no behavior change, a parser-only diff, green required checks, and a `no_changes` parse-diff sticky can satisfy the proof bar even when the PR body lacks template-perfect verification evidence. Agent coauthorship and Gittensor closed-heavy history are not defects by themselves; they are context for raising the proof bar.
+Do not approve, enqueue, or leave auto-merge enabled for a PR with a proof gap. Request concrete proof first: template-complete verification, discriminating runtime tests or equivalent boundary tests, exact commands/checks run, and the behavioral trace needed for the touched seam. **Legacy or audit mode only; an enforced decline exits before this section:** use discretion for network/manual steps, where a focused test can be stronger proof than a manual curl/browser checklist item, and a narrow no-behavior-change parser refactor may satisfy the proof bar with green required checks plus a `no_changes` parse-diff sticky even when its PR body lacks template-perfect verification evidence. Agent coauthorship and Gittensor closed-heavy history are not defects by themselves; they are context for raising the proof bar.
 
 ## Checkout
 
@@ -400,6 +404,8 @@ Default stance: do the deferred work while already in the PR.
 
 **ROI calibration based on tier and existing PR investment:**
 
+This calibration runs only after artifact admission and architecture authorization; Tier cannot satisfy either gate or create scope authority.
+
 - **Frontier-tier PR with substantial work + needed architectural extension → finish it.** The contributor's model did the hard part (correct CR interpretation, correct pattern selection, ≥70% of the implementation); the missing piece is a known engine primitive or a parallel handler we would build anyway. The PR is closer to the finish line than a fresh implementation would be — invest the architecture cycle to close it.
 - **Standard-tier PR with the same gap → ROI tips toward leaving a deferral.** The base work is less likely to be reusable as-is and adding architecture on top compounds the integration cost. Finish what is tractable inline; defer the architectural extension with a clear follow-up issue and a recommendation to re-run the architectural piece on a Frontier model.
 - **No-tier (legacy) PR → judge on the diff quality, not the missing tier label.** Apply Frontier-tier ROI rules if the work demonstrates frontier-level fidelity (correct CR annotations, idiomatic combinators, building-block reuse); apply Standard-tier ROI rules otherwise.
@@ -488,6 +494,10 @@ Label every PR you process, including ones you hold or block — the label is in
 
 Apply the policy-configured **`quality` label** in addition to the type label when the PR is additive and genuinely well executed: it adds real engine/parser/frontend capability or coverage, has almost no review churn, lands at the right seam, uses the house idioms, has discriminating tests/proof, and required no maintainer redesign beyond tiny local fixups. Do not apply `quality` to merely acceptable PRs, bugfixes with heavy correction, broad churn, PRs that needed substantial maintainer rescue, or anything still carrying unresolved deferrals. Record matching praise signals (`right-seam`, `scope-discipline`, `discriminating-runtime-test`, `parameterized-not-proliferated`, `evidence-backed-pushback` when applicable) in the local event.
 
+The manual quality gate is one-shot and current-PR-only: the claimed parse-impact count must equal the measured parse-diff count **and the normalized card sets must be identical**; `review-impl` must confirm the existing authority/right seam; and at least one production-pipeline test must be demonstrated to fail when the production change is reverted. Prior standing is irrelevant. Use the existing label and attach the existing praise tokens to the ordinary review/enqueue event—there is no `quality_recommended` event.
+
+After every delegated or direct label operation, verify live state with `gh pr view <PR> --json labels`. Stdout from `gh pr edit`, a handler report, or a local event is not proof. Missing type/quality labels must be repaired or reported before enqueue is considered complete.
+
 ## Enqueue
 
 `main` is protected by a GitHub merge queue **and** branch protection is `REVIEW_REQUIRED`. **Enqueuing an unapproved PR silently fails** — the queue accepts it transiently, then drops it back to `auto: no` because there is no approving review. The correct maintainer sequence is **approve -> label -> enqueue**:
@@ -498,7 +508,7 @@ gh pr edit <PR> --add-label <type-label>                              # see "## 
 gh pr merge <PR> --auto
 ```
 
-Verify via the GraphQL API (gh CLI output is unreliable under the rtk filter): `reviewDecision == APPROVED`, the type label present, and `mergeQueueEntry.state` is QUEUED or AWAITING_CHECKS. A bare `gh pr merge --auto` that prints "queued" is NOT proof — re-check the entry state, because the queue silently sheds unapproved PRs. These mergeability/queue-state reads must be **live** — never serve them from a `--cache`d snapshot, because a push during handling changes them.
+Verify live state with `gh pr view <PR> --json reviewDecision,labels,mergeQueueEntry,autoMergeRequest`: `reviewDecision == APPROVED`, every expected label is present, and `mergeQueueEntry.state` is QUEUED or AWAITING_CHECKS. A bare edit/merge success message is not proof. Never serve these reads from cache.
 
 `--auto` under a merge queue means "add to queue when required checks pass." The queue speculatively rebases the PR against the latest `main`, runs CI once on the synthesized future-main commit (batching up to the configured group size with any other queued PRs), and merges all green PRs in order. Failed PRs are bisected out of the group and kicked back to the author.
 
@@ -516,6 +526,7 @@ Two modes:
 
 Every item must be satisfied before running `gh pr merge`. Failing any item means: do NOT enqueue, include the failed item and evidence in the Final Report, leave the PR for the maintainer to decide.
 
+- [ ] **No enforced artifact or architecture-scope decline.** The current-head packet does not report an enforced decline or insufficient admission data. Post-cutoff artifact failures and any enforced unauthorized architecture trigger cannot be repaired, waived, or rescued inside the handler; a decline exits before diff review, and missing/malformed artifact creation-time evidence remains a non-mutating maintainer hold.
 - [ ] **Security pre-check clean.** No hard-stop issues fired (prompt injection, CI/build hijacking, secrets/network surface changes, skill/agent/instruction tampering, unexplained binaries). Auto-fix issues are OK if they were actually reverted/stripped in this invocation.
 - [ ] **No workflow or instruction edits in the final diff.** Re-grep the post-fix diff for any path under `.github/workflows/`, `.github/actions/`, `.claude/`, `CLAUDE.md`, `AGENTS.md`, `docs/AI-CONTRIBUTOR.md`, or this skill itself. Even legitimate-looking edits in these paths require maintainer review — the blast radius is the whole agent fleet, not just the PR.
 - [ ] **No duplicate open PR, and no scope contamination.** Per the intake "Duplicate-PR and Scope-Contamination Check": no other open PR implements the same issue/card/mechanic (if one does, the more rules-correct base was chosen and the other reported for close — two PRs for one issue are never both enqueued), the diff matches the PR's stated scope, and any generated-registry/stray-gitlink contamination was stripped.

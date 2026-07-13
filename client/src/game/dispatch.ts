@@ -1,4 +1,4 @@
-import type { BatchResolveResult, GameAction, GameEvent, GameLogEntry, GameState, LegalActionsResult, WaitingFor } from "../adapter/types";
+import type { BatchResolveResult, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, WaitingFor } from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
@@ -12,7 +12,7 @@ import { flashInGameRolls } from "./diceContest";
 import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
-import { isMultiplayerMode, useGameStore, legalResultState, saveGame, saveCheckpoints } from "../stores/gameStore";
+import { isMultiplayerMode, useGameStore, saveGame, saveCheckpoints } from "../stores/gameStore";
 import { getOpponentDisplayName } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
@@ -61,10 +61,9 @@ interface PendingLocalAction {
 
 interface PendingRemoteUpdate {
   kind: "remote";
-  state: GameState;
+  snapshot: EngineSnapshot;
   events: GameEvent[];
   logEntries?: GameLogEntry[];
-  legalResult: LegalActionsResult;
   resolve: () => void;
   reject: (err: unknown) => void;
 }
@@ -276,42 +275,53 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   }
   const events: GameEvent[] = result.events;
 
-  // 3b. Fetch new state eagerly and persist before animations so a mid-animation
-  //     page reload (e.g. PWA service-worker update) doesn't lose the latest state.
+  // 3b. Fetch the state AND its legal actions as ONE atomic snapshot, and persist
+  //     before animations so a mid-animation page reload (e.g. PWA service-worker
+  //     update) doesn't lose the latest state.
+  //
+  // This single fetch is the fix for the observed softlock. The old flow read
+  // `getState()` here and `getLegalActions()` again *after* the animation window
+  // (step 8), pairing values from two different engine versions: any advance
+  // during the animation produced e.g. `waiting_for = Priority` alongside
+  // `DecideOptionalEffect` legal actions, so the UI rendered Resolve/Resolve All
+  // while the engine waited on an optional-effect choice whose modal never
+  // appeared. The pair is now captured together and committed together.
+  //
   // Recover from STATE_LOST here too — a worker restart could happen between
-  // submitAction and getState. Critically: if recovery fails, do NOT call
+  // submitAction and this fetch. Critically: if recovery fails, do NOT call
   // saveGame — earlier revisions silently wrote a default empty GameState to
   // IDB on null, corrupting the checkpoint we now rely on for Layer 3 reload.
-  let newState: GameState;
+  let snapshotResult: EngineSnapshot;
   try {
-    newState = await adapter.getState();
+    snapshotResult = await adapter.getSnapshot();
   } catch (err) {
     if (isEnginePanic(err)) {
-      await routePanic("getState-panic", err.panic);
+      await routePanic("getSnapshot-panic", err.panic);
       throw err;
     }
     if (isEngineUnresponsive(err)) {
-      notifyEngineLost("getState-timeout");
+      notifyEngineLost("getSnapshot-timeout");
       throw err;
     }
     if (!isStateLost(err)) throw err;
-    debugLog("processAction: STATE_LOST on getState; attempting rehydrate", "warn");
+    debugLog("processAction: STATE_LOST on getSnapshot; attempting rehydrate", "warn");
     const recovered = await attemptStateRehydrate();
     if (!recovered) {
-      notifyEngineLost("getState");
+      notifyEngineLost("getSnapshot");
       throw err;
     }
     try {
-      newState = await adapter.getState();
+      snapshotResult = await adapter.getSnapshot();
     } catch (retryErr) {
       if (isEnginePanic(retryErr)) {
-        notifyEngineLost("getState-retry-panic", retryErr.panic);
+        notifyEngineLost("getSnapshot-retry-panic", retryErr.panic);
       } else {
-        notifyEngineLost("getState-retry");
+        notifyEngineLost("getSnapshot-retry");
       }
       throw retryErr;
     }
   }
+  const newState = snapshotResult.state;
   const { gameId } = useGameStore.getState();
   if (gameId) saveGame(gameId, newState);
 
@@ -392,61 +402,25 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     }
   }
 
-  // 8. Update game state (deferred after animations — state already fetched in step 3b).
-  // Engine state could have been lost during the animation window; rehydrate
-  // once if needed so the UI doesn't render empty legal actions.
-  let legalResult;
-  try {
-    legalResult = await adapter.getLegalActions();
-  } catch (err) {
-    if (isEnginePanic(err)) {
-      notifyEngineLost("getLegalActions-panic", err.panic);
-      throw err;
-    }
-    if (isEngineUnresponsive(err)) {
-      notifyEngineLost("getLegalActions-timeout");
-      throw err;
-    }
-    if (!isStateLost(err)) throw err;
-    const recovered = await attemptStateRehydrate();
-    if (!recovered) {
-      notifyEngineLost("getLegalActions");
-      throw err;
-    }
-    try {
-      legalResult = await adapter.getLegalActions();
-    } catch (retryErr) {
-      if (isEnginePanic(retryErr)) {
-        notifyEngineLost("getLegalActions-retry-panic", retryErr.panic);
-      } else {
-        notifyEngineLost("getLegalActions-retry");
-      }
-      throw retryErr;
-    }
-  }
-
-  useGameStore.setState((prev) => {
-    const newHistory = shouldSaveHistory
-      ? [...prev.stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
-      : prev.stateHistory;
-
-    // Assign monotonic sequence numbers to new log entries
-    let seq = prev.nextLogSeq;
-    const newLogEntries = (result.log_entries ?? []).map((entry) => ({
-      ...entry,
-      seq: seq++,
-    }));
-
-    return {
-      gameState: newState,
-      events,
-      eventHistory: [...prev.eventHistory, ...events].slice(-1000),
-      logHistory: [...prev.logHistory, ...newLogEntries].slice(-2000),
-      nextLogSeq: seq,
-      waitingFor: newState.waiting_for,
-      ...legalResultState(legalResult),
-      stateHistory: newHistory,
-    };
+  // 8. Commit the snapshot captured in step 3b — the pair, together.
+  //
+  // There is deliberately NO second engine fetch here. Re-reading legal actions
+  // after the animation window is what created the mixed-epoch pair in the first
+  // place. Recovery for a state lost *during* the animation window is now lazy:
+  // the next engine call classifies and recovers, exactly as it already does for
+  // every other window between calls.
+  //
+  // The commit is revision-gated, so if a newer commit landed mid-animation
+  // (a `gameStore.dispatch` from a modal, a remote update, an AI-loop advance),
+  // THIS older pair is dropped rather than clobbering it.
+  const store = useGameStore.getState();
+  const stateHistory = shouldSaveHistory
+    ? [...store.stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
+    : undefined;
+  store.commitEngineSnapshot(snapshotResult, {
+    events,
+    logEntries: result.log_entries ?? [],
+    stateHistory,
   });
 
   // Play victory/defeat stinger on GameOver
@@ -480,7 +454,7 @@ async function processQueue(): Promise<void> {
           inFlightLocalAction = null;
         }
       } else {
-        await processRemoteUpdateInner(next.state, next.events, next.legalResult, next.logEntries);
+        await processRemoteUpdateInner(next.snapshot, next.events, next.logEntries);
       }
       next.resolve();
     } catch (err) {
@@ -605,14 +579,14 @@ export async function dispatchAction(
  * Inner implementation for remote state updates — runs the animation pipeline.
  */
 async function processRemoteUpdateInner(
-  state: GameState,
+  snapshot: EngineSnapshot,
   events: GameEvent[],
-  legalResult: LegalActionsResult,
   logEntries: GameLogEntry[] = [],
 ): Promise<void> {
-  // 1. Capture snapshot before updating state (for position lookups during animation)
-  const snapshot = useAnimationStore.getState().captureSnapshot();
-  currentSnapshot = snapshot;
+  const state = snapshot.state;
+
+  // 1. Capture positions before updating state (for lookups during animation)
+  currentSnapshot = useAnimationStore.getState().captureSnapshot();
 
   // 2. Flash turn banner
   const turnEvent = events.find((e) => e.type === "TurnStarted");
@@ -654,24 +628,10 @@ async function processRemoteUpdateInner(
     }
   }
 
-  // 5. Update game state after animations complete
-  useGameStore.setState((prev) => {
-    let seq = prev.nextLogSeq;
-    const newLogEntries = logEntries.map((entry) => ({
-      ...entry,
-      seq: seq++,
-    }));
-
-    return {
-      gameState: state,
-      events,
-      eventHistory: [...prev.eventHistory, ...events].slice(-1000),
-      logHistory: [...prev.logHistory, ...newLogEntries].slice(-2000),
-      nextLogSeq: seq,
-      waitingFor: state.waiting_for,
-      ...legalResultState(legalResult),
-    };
-  });
+  // 5. Commit the pair after animations complete — revision-gated, so a remote
+  //    update that was superseded while its animation played is dropped rather
+  //    than clobbering the newer state.
+  useGameStore.getState().commitEngineSnapshot(snapshot, { events, logEntries });
 
   // 6. Play victory/defeat stinger on GameOver
   const gameOverEvent = events.find((e) => e.type === "GameOver");
@@ -692,20 +652,19 @@ async function processRemoteUpdateInner(
  * local actions and vice versa — no overlapping animations.
  */
 export async function processRemoteUpdate(
-  state: GameState,
+  snapshot: EngineSnapshot,
   events: GameEvent[],
-  legalResult: LegalActionsResult,
   logEntries?: GameLogEntry[],
 ): Promise<void> {
   if (isAnimating) {
     return new Promise<void>((resolve, reject) => {
-      pendingQueue.push({ kind: "remote", state, events, logEntries, legalResult, resolve, reject });
+      pendingQueue.push({ kind: "remote", snapshot, events, logEntries, resolve, reject });
     });
   }
 
   isAnimating = true;
   try {
-    await processRemoteUpdateInner(state, events, legalResult, logEntries);
+    await processRemoteUpdateInner(snapshot, events, logEntries);
   } finally {
     if (pendingQueue.length > 0) {
       processQueue().catch(() => { isAnimating = false; });
@@ -732,24 +691,23 @@ export async function restoreGameState(
     return err instanceof Error ? err.message : "Failed to restore state";
   }
 
-  const restoredState = await adapter.getState();
-  const legalResult = await adapter.getLegalActions();
+  // Post-restore fetch — newest-by-construction, so it always passes the gate.
+  const snapshot = await adapter.getSnapshot();
   const preservedCheckpoints = options.preserveCheckpoints
     ? useGameStore.getState().turnCheckpoints
     : [];
-  useGameStore.setState({
-    gameState: restoredState,
-    waitingFor: restoredState.waiting_for,
-    ...legalResultState(legalResult),
-    events: [],
-    eventHistory: [],
-    logHistory: [],
-    nextLogSeq: 0,
-    stateHistory: [],
-    turnCheckpoints: preservedCheckpoints,
+  useGameStore.getState().commitEngineSnapshot(snapshot, {
+    extraState: {
+      events: [],
+      eventHistory: [],
+      logHistory: [],
+      nextLogSeq: 0,
+      stateHistory: [],
+      turnCheckpoints: preservedCheckpoints,
+    },
   });
   if (gameId) {
-    await saveGame(gameId, restoredState);
+    await saveGame(gameId, snapshot.state);
     await saveCheckpoints(gameId, preservedCheckpoints);
   }
 
@@ -760,7 +718,7 @@ const BATCH_CHUNK_SIZE = 5;
 // Under "Instant" stack pressure (a multi-hundred/thousand identical-trigger
 // storm, e.g. Scute Swarm) the 5-at-a-time animated countdown is wasted. Keep
 // large storms in engine-owned fast-forward batches so partial stacks collapse
-// before the frontend pays the per-chunk `getState` + `getLegalActions` cost.
+// before the frontend pays the per-chunk `getSnapshot` cost.
 // The value is intentionally large: the worker boundary already keeps the main
 // thread responsive, while this still lets the overlay update during truly
 // pathological stacks.
@@ -837,20 +795,21 @@ export async function dispatchResolveAll(
         });
       }
 
-      const newState = await adapter.getState();
-      const legalResult = await adapter.getLegalActions();
+      // One atomic pair per chunk, committed through the single authority. The
+      // store's `waitingFor` therefore comes from the snapshot's own state, not
+      // from `batchResult.waitingFor` — the pair must stay self-consistent.
+      // Equivalent or fresher: only `WasmAdapter` implements `resolveAll`, and
+      // worker FIFO guarantees this snapshot reflects at least the chunk's end
+      // state.
+      const snapshot = await adapter.getSnapshot();
+      useGameStore.getState().commitEngineSnapshot(snapshot);
 
-      useGameStore.setState({
-        gameState: newState,
-        waitingFor: batchResult.waitingFor,
-        ...legalResultState(legalResult),
-      });
-
+      // Anything other than Priority ends the drain — GameOver included, since
+      // the drain only continues while this seat keeps receiving priority.
       const done =
         batchResult.itemsResolved === 0 ||
-        newState.stack.length === 0 ||
-        batchResult.waitingFor.type === "GameOver" ||
-        batchResult.waitingFor.type !== "Priority";
+        snapshot.state.stack.length === 0 ||
+        snapshot.state.waiting_for.type !== "Priority";
       if (done) break;
 
       if (instant) {

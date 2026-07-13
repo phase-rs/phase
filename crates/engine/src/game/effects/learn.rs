@@ -30,6 +30,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Learn,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }

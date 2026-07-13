@@ -17,10 +17,13 @@ use super::turn_control;
 /// is split into [`finalize_display_state`] so engine-owned fast-forward loops
 /// can keep rules state current while batching expensive display recomputes.
 pub fn finalize_rules_state(state: &mut GameState) {
-    // CR 614.12a + CR 615.5: Backward-compat for the 2026-05-09 audit M4
+    // Backward-compat for the 2026-05-09 audit M4
     // post-replacement-continuation slot fold. Idempotent on already-migrated
     // states; cheap on every other invocation.
     state.migrate_post_replacement_continuation();
+    // CR 121.2: Backward-compat for the single-slot `pending_multi_draw` →
+    // `draw_sequences` stack conversion. Idempotent on already-migrated states.
+    state.migrate_pending_multi_draw();
     normalize_legacy_attach_waiting_for(state);
     sync_priority_player_from_waiting_for(state);
     flush_layers(state);

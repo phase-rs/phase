@@ -15,6 +15,8 @@
 //! source object (`GameObject::spellbook`, copied from
 //! `CardFace::metadata.spellbook`); the resolver reads it from the source.
 
+use rand::Rng;
+
 use crate::types::ability::{
     ConjureCard, ConjureSource, Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility,
 };
@@ -33,6 +35,7 @@ pub fn resolve(
     let Effect::DraftFromSpellbook {
         destination,
         tapped,
+        random,
     } = &ability.effect
     else {
         return Err(EffectError::MissingParam("DraftFromSpellbook".to_string()));
@@ -51,8 +54,28 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
+    }
+
+    // "conjure a random card from ~'s spellbook": the engine picks one uniformly at random
+    // and conjures it immediately, instead of pausing for the controller to choose. Random
+    // vs. choice is the only difference from draft-from-spellbook, so both share this
+    // resolver and the same card-creation path (`complete_draft`).
+    if *random {
+        let index = state.rng.random_range(0..spellbook.len());
+        let card = spellbook[index].clone();
+        return complete_draft(
+            state,
+            ability.controller,
+            ability.source_id,
+            &spellbook,
+            &card,
+            *destination,
+            *tapped,
+            events,
+        );
     }
 
     // Digital-only Alchemy spellbook choice: pause for the controller to choose

@@ -751,7 +751,8 @@ pub fn collect_block_restriction_statics(state: &GameState) -> Vec<(ObjectId, St
     if !(static_kind_present(state, StaticModeKind::CantBeBlocked)
         || static_kind_present(state, StaticModeKind::CantBeBlockedExceptBy)
         || static_kind_present(state, StaticModeKind::CantBeBlockedBy)
-        || static_kind_present(state, StaticModeKind::CantBeBlockedByMoreThan))
+        || static_kind_present(state, StaticModeKind::CantBeBlockedByMoreThan)
+        || static_kind_present(state, StaticModeKind::CantBeBlockedUnlessAllBlock))
     {
         return Vec::new();
     }
@@ -763,6 +764,7 @@ pub fn collect_block_restriction_statics(state: &GameState) -> Vec<(ObjectId, St
                     | StaticMode::CantBeBlockedExceptBy { .. }
                     | StaticMode::CantBeBlockedBy { .. }
                     | StaticMode::CantBeBlockedByMoreThan { .. }
+                    | StaticMode::CantBeBlockedUnlessAllBlock
             )
         })
         .map(|(src, def)| (src.id, def.clone()))
@@ -1564,6 +1566,89 @@ pub fn validate_blockers_for_player(
                 return Err(format!(
                     "{:?} can't be blocked by more than {} creature(s)",
                     attacker_id, max
+                ));
+            }
+        }
+    }
+
+    // CR 509.1b (Tromokratis): "can't be blocked unless all creatures defending
+    // player controls block it." If the attacker carries this static and has at
+    // least one blocker assigned, then EVERY untapped creature the defending player
+    // controls that could legally block it must also be assigned as a blocker.
+    // Unblocked (zero blockers) is always legal — the restriction only fires when
+    // at least one creature is declared as a blocker.
+    //
+    // NOTE: In shared-team-turn games (CR 802), `player` is the one declaring
+    // blockers and may be a teammate rather than the attacked player. We look up
+    // `defending_player` from `AttackerInfo` to correctly scope the "all creatures"
+    // requirement to the player being attacked.
+    for (attacker_id, blockers) in &blockers_per_attacker {
+        let has_unless_all = block_restriction_statics_against_from_precomputed(
+            state,
+            *attacker_id,
+            &block_restriction,
+        )
+        .any(|(def, _src_id)| def.mode == StaticMode::CantBeBlockedUnlessAllBlock);
+        if !has_unless_all {
+            continue;
+        }
+        // Determine the defending player from combat state (falls back to `player`
+        // when combat state is unavailable, e.g. in unit tests).
+        let defending = state
+            .combat
+            .as_ref()
+            .and_then(|combat| {
+                combat
+                    .attackers
+                    .iter()
+                    .find(|a| a.object_id == *attacker_id)
+                    .map(|a| a.defending_player)
+            })
+            .unwrap_or(player);
+        // At least one blocker is assigned — verify every able creature also blocks.
+        for &obj_id in &state.battlefield {
+            // Skip creatures already assigned to this attacker.
+            if blockers.contains(&obj_id) {
+                continue;
+            }
+            let Some(obj) = state.objects.get(&obj_id) else {
+                continue;
+            };
+            if obj.controller != defending
+                || !obj.card_types.core_types.contains(&CoreType::Creature)
+                || obj.tapped
+            {
+                continue;
+            }
+            // CR 702.26b: phased-out can't block.
+            if obj.is_phased_out() {
+                continue;
+            }
+            // CR 702.147a: Decayed can't block.
+            if obj.has_keyword(&Keyword::Decayed) {
+                continue;
+            }
+            // CR 701.35a: Detained can't block.
+            if !obj.detained_by.is_empty() {
+                continue;
+            }
+            // CantBlock static on the potential blocker.
+            if blocker_has_cant_block_static_from_precomputed(state, obj_id, &blocker_restriction) {
+                continue;
+            }
+            // Check if this creature could legally form a block pair.
+            if can_block_pair_with_precomputed(
+                state,
+                obj_id,
+                *attacker_id,
+                &blocker_restriction,
+                &block_restriction,
+                &blocker_allowed,
+                can_block_shadow_exists,
+            ) {
+                return Err(format!(
+                    "{:?} can't be blocked unless all creatures defending player controls block it (CR 509.1b)",
+                    attacker_id
                 ));
             }
         }

@@ -132,6 +132,43 @@ pub fn prune_end_of_combat_effects(state: &mut GameState) {
     }
 }
 
+/// CR 508.1d + CR 511.3: Remove transient continuous effects whose
+/// `Duration::UntilNextStepOf { step: Phase::EndCombat, player: Controller }` expires
+/// when the affected object's controller reaches their end-of-combat step.
+/// Called alongside `prune_end_of_combat_effects` at the EndCombat phase.
+/// This handles "attacks during its controller's next combat phase if able"
+/// (Trench Behemoth cycle) — the MustAttack static expires once that combat ends.
+pub fn prune_controller_end_combat_step_effects(state: &mut GameState, active_player: PlayerId) {
+    let before = state.transient_continuous_effects.len();
+    state.transient_continuous_effects.retain(|e| {
+        if !matches!(
+            e.duration,
+            Duration::UntilNextStepOf {
+                step: Phase::EndCombat,
+                player: PlayerScope::Controller
+            }
+        ) {
+            return true;
+        }
+        // The effect applies to specific objects — check if the affected object
+        // is controlled by the active player (whose combat phase is ending).
+        match &e.affected {
+            TargetFilter::SpecificObject { id } => {
+                let is_active_controlled = state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.controller == active_player);
+                // Keep the effect if NOT controlled by active player (not their combat yet)
+                !is_active_controlled
+            }
+            _ => true,
+        }
+    });
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty.mark_full();
+    }
+}
+
 /// CR 513.1 + CR 611.2a: Remove transient continuous effects whose
 /// `Duration::UntilNextStepOf { step: Phase::End, player: Controller }` expires at the start of
 /// `active_player`'s end step. Called from `turns.rs::auto_advance` at the
@@ -142,13 +179,25 @@ pub fn prune_end_of_combat_effects(state: &mut GameState) {
 pub fn prune_until_next_end_step_effects(state: &mut GameState, active_player: PlayerId) {
     let before = state.transient_continuous_effects.len();
     state.transient_continuous_effects.retain(|e| {
-        !(matches!(
+        // CR 513.1: "your next end step" (Rocco/Street Chef) — CONTROLLER-scoped.
+        let controller_scoped = matches!(
             e.duration,
             Duration::UntilNextStepOf {
                 step: Phase::End,
                 player: PlayerScope::Controller
             }
-        ) && e.controller == active_player)
+        ) && e.controller == active_player;
+        // CR 513.1 + CR 603.7b: "the next end step" (Niko) — turn-AGNOSTIC;
+        // expires at the FIRST end step to occur, ungated by active_player,
+        // co-firing with the return's AtNextPhase{End}.
+        let turn_agnostic = matches!(
+            e.duration,
+            Duration::UntilNextStepOf {
+                step: Phase::End,
+                player: PlayerScope::AnyTurn
+            }
+        );
+        !(controller_scoped || turn_agnostic)
     });
     if state.transient_continuous_effects.len() != before {
         state.layers_dirty.mark_full();
@@ -831,10 +880,17 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsHarnessed
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
+        // CR 401.1: reads the controller's LIBRARY top card, never battlefield
+        // population — a battlefield entry cannot change the library top.
+        | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::EnchantedIsFaceDown
+        // CR 311.2: plane face-up status is command-zone state, never
+        // battlefield-population-dependent and unperturbed by a battlefield
+        // entry — `false` exactly like `SourceIsTapped`.
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
@@ -960,10 +1016,17 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsHarnessed
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
+        // CR 401.1: reads the controller's LIBRARY top card, never battlefield
+        // population — a battlefield entry cannot change the library top.
+        | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::EnchantedIsFaceDown
+        // CR 311.2: plane face-up status is command-zone state, never
+        // battlefield-population-dependent and unperturbed by a battlefield
+        // entry — `false` exactly like `SourceIsTapped`.
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
@@ -1182,6 +1245,14 @@ fn evaluate_condition_with_context(
         // Callous Oppressor dying while tapped) fails this predicate and any
         // `ForAsLongAs { SourceIsTapped }` continuous effect (gain-control, etc.) ends.
         StaticCondition::SourceIsTapped => eval_source_is_tapped_on_battlefield(state, source_id),
+        // CR 311.2 / CR 901.7 / CR 701.31b: the source plane/phenomenon is face up
+        // iff it is the active plane in the command zone. Planeswalking away turns
+        // it face down and removes it from the command zone (CR 701.31b), so this
+        // flips false and any `ForAsLongAs { SourceIsFaceUp }` continuous effect
+        // (the Barn's "can't phase in ... face up" lock) ends.
+        StaticCondition::SourceIsFaceUp => {
+            crate::game::planechase::active_plane(state) == Some(source_id)
+        }
         // CR 110.5b + CR 110.5d: scope-parameterized tap check (the non-source
         // sibling of `SourceIsTapped`). Resolve the scope to a concrete object,
         // then reuse the same zone-guarded battlefield tap predicate. The parser
@@ -1285,6 +1356,25 @@ fn evaluate_condition_with_context(
             filter,
             &FilterContext::from_source(state, source_id),
         ),
+        // CR 401.1 + CR 401.5: True when the top card of the source controller's
+        // library (`library[0]`) matches `filter`. Resolves the specific top-card
+        // object and matches its printed characteristics — the filter is a plain
+        // color/type/subtype `TargetFilter` with no zone constraint, so a card in
+        // the (hidden) library zone matches on characteristics alone. Empty
+        // library → no top card → false.
+        StaticCondition::TopOfLibraryMatches { filter } => state
+            .players
+            .iter()
+            .find(|p| p.id == controller)
+            .and_then(|p| p.library.front())
+            .is_some_and(|&top_id| {
+                matches_target_filter(
+                    state,
+                    top_id,
+                    filter,
+                    &FilterContext::from_source(state, source_id),
+                )
+            }),
         StaticCondition::SourceIsPaired => state
             .objects
             .get(&source_id)
@@ -2092,6 +2182,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::ControlledByEachPlayer { .. }
@@ -2198,6 +2289,54 @@ pub(crate) fn any_active_static_reads_zone_membership(state: &GameState, zone: Z
         }
     });
     found
+}
+
+/// True when `condition` (recursively through the And/Or/Not combinators) reads
+/// the top card of a library — `StaticCondition::TopOfLibraryMatches`.
+fn static_condition_reads_top_of_library(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::TopOfLibraryMatches { .. } => true,
+        StaticCondition::Not { condition } => static_condition_reads_top_of_library(condition),
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            conditions.iter().any(static_condition_reads_top_of_library)
+        }
+        _ => false,
+    }
+}
+
+/// CR 401.5 + CR 611.3a: True when any active continuous static is gated on the
+/// top card of a library (`TopOfLibraryMatches`, Vampire Nocturnus). The
+/// continuous effect isn't locked in (CR 611.3a), so a library-top change must
+/// re-evaluate it — but only when such a static is live, so routine library
+/// churn (draws, mills, shuffles with no top-gated static) stays cheap. Mirrors
+/// `any_active_static_reads_zone_membership`.
+pub(crate) fn any_active_static_reads_top_of_library(state: &GameState) -> bool {
+    let mut found = false;
+    for_each_static_effect_source(state, |_state, obj| {
+        if found {
+            return;
+        }
+        if obj.static_definitions.iter_all().any(|def| {
+            def.mode == StaticMode::Continuous
+                && def
+                    .condition
+                    .as_ref()
+                    .is_some_and(static_condition_reads_top_of_library)
+        }) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// CR 401.5 + CR 611.3a: Force a full layer recompute after a library-top-changing
+/// event (shuffle, mill, put-on-top, draw), but only when a `TopOfLibraryMatches`
+/// static is actually live. Single authority called by every top-changing library
+/// move and shuffle helper so a stale layer cache can't survive the change.
+pub(crate) fn mark_layers_full_if_top_of_library_static_live(state: &mut GameState) {
+    if any_active_static_reads_top_of_library(state) {
+        mark_layers_full(state);
+    }
 }
 
 /// Mark the layer system as requiring a FULL battlefield re-evaluation. The
@@ -3627,10 +3766,18 @@ pub(crate) fn gather_transient_continuous_effects(
             // opponent's face-down creature. Skip it here, mirroring the printed
             // `MayLookAtFaceDown` static (built with empty `modifications`, read
             // by mode in `battlefield_active_statics`).
+            //
+            // CR 118.7 + CR 611.2c: A `ReduceAbilityCost` reduction (The Dining
+            // Car's transient "activated abilities of <X> cost {N} less this
+            // turn") is likewise a cost-hook static read DIRECTLY off the TCE by
+            // `casting::reduce_activated_ability_cost`, not a per-object
+            // characteristic. Grafting it onto each affected object would let
+            // `battlefield_active_statics` see it too and double-apply the
+            // discount, so skip it here for the same reason.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MayLookAtFaceDown,
+                    mode: StaticMode::MayLookAtFaceDown | StaticMode::ReduceAbilityCost { .. },
                 }
             ) {
                 continue;
@@ -12078,6 +12225,259 @@ mod tests {
         ));
     }
 
+    // CR 401.1 + CR 401.5: `TopOfLibraryMatches` gates a continuous static on the
+    // top card of the CONTROLLER's library matching a characteristic filter
+    // (Vampire Nocturnus "is black", Mul Daya Channelers "is a creature card").
+    // The library is hidden and off-battlefield, so the filter matches on the top
+    // card's printed characteristics alone (`library[0]` = the top). Discriminating:
+    // a non-matching top card, a different player's library, and an empty library
+    // all report false; only the matching controller's top card is true.
+    #[test]
+    fn top_of_library_matches_reads_controller_library_top() {
+        let mut state = setup();
+        // Source permanent controlled by player 0. Its identity is irrelevant —
+        // the gate reads player 0's LIBRARY, not the source's characteristics.
+        let source = make_creature(&mut state, "Vampire Nocturnus", 3, 3, PlayerId(0));
+
+        // Top card of player 0's library: a black creature card.
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Top Card".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&top).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.color = vec![ManaColor::Black];
+        }
+        {
+            let p0 = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == PlayerId(0))
+                .unwrap();
+            p0.library.retain(|&id| id != top);
+            p0.library.push_front(top); // CR 401.1: front() == library[0] == top.
+        }
+
+        let black = StaticCondition::TopOfLibraryMatches {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::HasColor {
+                    color: ManaColor::Black,
+                },
+            ])),
+        };
+        let creature = StaticCondition::TopOfLibraryMatches {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+        };
+
+        // Black creature on top → both the color and the type gate hold.
+        assert!(evaluate_condition_for_test(
+            &state,
+            &black,
+            PlayerId(0),
+            source
+        ));
+        assert!(evaluate_condition_for_test(
+            &state,
+            &creature,
+            PlayerId(0),
+            source
+        ));
+
+        // Recolor the top card white → the black gate no longer holds; the
+        // creature gate still does (discriminates the filter, not mere presence).
+        state.objects.get_mut(&top).unwrap().color = vec![ManaColor::White];
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &black,
+            PlayerId(0),
+            source
+        ));
+        assert!(evaluate_condition_for_test(
+            &state,
+            &creature,
+            PlayerId(0),
+            source
+        ));
+
+        // The gate is controller-scoped: player 1 has an empty library, so the
+        // same creature gate evaluated for player 1 is false.
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &creature,
+            PlayerId(1),
+            source
+        ));
+
+        // Empty player 0's library → no top card → false.
+        {
+            let p0 = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == PlayerId(0))
+                .unwrap();
+            p0.library.clear();
+        }
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &creature,
+            PlayerId(0),
+            source
+        ));
+    }
+
+    /// CR 401.5 + CR 611.3a production-path harness: a battlefield permanent whose
+    /// continuous static grants itself Flying as long as the top card of its
+    /// controller's library is black (the Vampire Nocturnus shape). The library
+    /// starts black-on-top (`black`) over `white`. Returns
+    /// (state, permanent, black, white).
+    fn top_gated_flying_scenario() -> (GameState, ObjectId, ObjectId, ObjectId) {
+        let mut state = setup();
+        let permanent = make_creature(&mut state, "Vampire Nocturnus", 2, 2, PlayerId(0));
+        {
+            let def = StaticDefinition::new(StaticMode::Continuous)
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }])
+                .condition(StaticCondition::TopOfLibraryMatches {
+                    filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::HasColor {
+                            color: ManaColor::Black,
+                        },
+                    ])),
+                });
+            state
+                .objects
+                .get_mut(&permanent)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+        let black = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Black Card".to_string(),
+            Zone::Library,
+        );
+        let white = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "White Card".to_string(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&black).unwrap().color = vec![ManaColor::Black];
+        state.objects.get_mut(&white).unwrap().color = vec![ManaColor::White];
+        {
+            let p0 = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == PlayerId(0))
+                .unwrap();
+            p0.library.retain(|&id| id != black && id != white);
+            p0.library.push_back(white); // beneath
+            p0.library.push_front(black); // CR 401.1: front() == top.
+        }
+        (state, permanent, black, white)
+    }
+
+    fn has_flying(state: &GameState, id: ObjectId) -> bool {
+        state
+            .objects
+            .get(&id)
+            .unwrap()
+            .has_keyword(&Keyword::Flying)
+    }
+
+    // CR 401.5 + CR 611.3a: a `Library → Graveyard` mill of the black top card
+    // must re-evaluate the top-gated static through the real `move_to_zone` path,
+    // not leave the granted Flying stale.
+    #[test]
+    fn top_of_library_static_reevaluated_after_mill_to_graveyard() {
+        let (mut state, vampire, black, _white) = top_gated_flying_scenario();
+        flush_layers(&mut state);
+        assert!(has_flying(&state, vampire), "black top → Flying granted");
+
+        let mut events = vec![];
+        crate::game::zones::move_to_zone(&mut state, black, Zone::Graveyard, &mut events);
+        flush_layers(&mut state);
+        assert!(
+            !has_flying(&state, vampire),
+            "after milling the black top away, the white top must strip Flying"
+        );
+    }
+
+    // CR 401.5 + CR 611.3a: placing a white card on top via `move_to_library_at_index`
+    // (the put-on-top path that bypasses `move_to_zone`) must recompute the static.
+    #[test]
+    fn top_of_library_static_reevaluated_after_put_on_top() {
+        let (mut state, vampire, _black, _white) = top_gated_flying_scenario();
+        flush_layers(&mut state);
+        assert!(has_flying(&state, vampire), "black top → Flying granted");
+
+        let white_top = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "New White".to_string(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&white_top).unwrap().color = vec![ManaColor::White];
+        let mut events = vec![];
+        crate::game::zones::move_to_library_at_index(&mut state, white_top, Some(0), &mut events);
+        flush_layers(&mut state);
+        assert!(
+            !has_flying(&state, vampire),
+            "a white card put on top must strip Flying"
+        );
+    }
+
+    // CR 401.5 + CR 611.3a: a real shuffle reorders the library, so the static is
+    // no longer locked in. The shuffle must invalidate layers, and after a flush
+    // the granted Flying must match whatever card is actually on top now.
+    #[test]
+    fn top_of_library_static_reevaluated_after_shuffle() {
+        let (mut state, vampire, _black, _white) = top_gated_flying_scenario();
+        flush_layers(&mut state);
+        assert!(has_flying(&state, vampire), "black top → Flying granted");
+
+        let mut events = vec![];
+        crate::game::effects::change_zone::shuffle_library(&mut state, PlayerId(0), &mut events);
+        // The shuffle alone must force a recompute — a stale clean cache would
+        // otherwise survive the reorder.
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "shuffle must invalidate layers while a top-gated static is live"
+        );
+        flush_layers(&mut state);
+
+        let top_is_black = state
+            .players
+            .iter()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap()
+            .library
+            .front()
+            .is_some_and(|&id| {
+                state
+                    .objects
+                    .get(&id)
+                    .unwrap()
+                    .color
+                    .contains(&ManaColor::Black)
+            });
+        assert_eq!(
+            has_flying(&state, vampire),
+            top_is_black,
+            "after shuffle + flush, Flying must match the recomputed top card, not the stale one"
+        );
+    }
+
     // --- CR 305.7: SetBasicLandType tests ---
 
     fn make_land(state: &mut GameState, name: &str, player: PlayerId) -> ObjectId {
@@ -16450,6 +16850,7 @@ mod tests {
     ) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,

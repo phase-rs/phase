@@ -53,28 +53,33 @@ fn parse_face(card: &AtomicCard) -> CardFace {
     crate::database::synthesis::build_oracle_face(card, None)
 }
 
-/// Find an `Effect::Meld` anywhere in a face's abilities or trigger payloads.
+/// Find an `Effect::Meld` anywhere in a face's abilities or trigger payloads,
+/// descending sub/else/mode branches so a gated meld sub-ability (the optional-cost
+/// Vanille form, where the meld lives under an "If you do" `PayCost`) is found.
 fn find_meld(face: &CardFace) -> Option<(String, String, String)> {
-    for a in &face.abilities {
+    fn in_def(def: &crate::types::ability::AbilityDefinition) -> Option<(String, String, String)> {
         if let Effect::Meld {
             source,
             partner,
             result,
-        } = a.effect.as_ref()
+        } = def.effect.as_ref()
         {
             return Some((source.clone(), partner.clone(), result.clone()));
         }
+        def.sub_ability
+            .as_deref()
+            .and_then(in_def)
+            .or_else(|| def.else_ability.as_deref().and_then(in_def))
+            .or_else(|| def.mode_abilities.iter().find_map(in_def))
+    }
+    for a in &face.abilities {
+        if let Some(m) = in_def(a) {
+            return Some(m);
+        }
     }
     for t in &face.triggers {
-        if let Some(exec) = &t.execute {
-            if let Effect::Meld {
-                source,
-                partner,
-                result,
-            } = exec.effect.as_ref()
-            {
-                return Some((source.clone(), partner.clone(), result.clone()));
-            }
+        if let Some(m) = t.execute.as_deref().and_then(in_def) {
+            return Some(m);
         }
     }
     None
@@ -90,9 +95,10 @@ const HANWEIR_TEXT: &str = "{T}: Add {R}.\n\
     exile them, then meld them into Hanweir, the Writhing Township. Activate only as a sorcery.";
 
 /// The optional-cost triggered meld form (Vanille / Fang): the own/control gate
-/// is followed by a "you may pay {C}. If you do," additional cost before the
-/// meld sentinel. The bare-gate combinator does NOT model this cost, so the card
-/// must DEFER (no `Effect::Meld`) rather than swallow the "you may pay" clause.
+/// is followed by a reflexive "you may pay {C}. If you do," additional cost before
+/// the meld sentinel. The gate models this (CR 118.12): the own/control gate
+/// becomes the trigger's intervening-if, the "you may pay {3}{B}{G}" lowers to an
+/// optional `PayCost`, and the meld lands as a gated sub-ability — fully supported.
 const VANILLE_TEXT: &str = "When Vanille enters, mill two cards, then return a permanent card \
     from your graveyard to your hand.\n\
     At the beginning of your first main phase, if you both own and control Vanille and a \
@@ -137,26 +143,30 @@ fn synthesize_or_parse_derives_self_partner_result() {
     );
 }
 
-/// CR 701.42b: the optional-cost meld form (Vanille / Fang) carries a "you may
-/// pay {C}. If you do," additional cost between the own/control gate and the meld
-/// sentinel. The bare-gate combinator does NOT model that cost, so the gate must
-/// be REJECTED and the card must yield NO `Effect::Meld` — deferring to baseline
-/// parsing rather than silently swallowing the "you may pay" optional clause (a
-/// coverage-honesty regression). On the pre-guard code the gate `take_until`
-/// over-consumed the cost sentence and emitted an `Effect::Meld`, dropping the
-/// optional cost, so this assertion flips with the sentence-boundary guard.
+/// CR 118.12 + CR 701.42a: the optional-cost meld form (Vanille / Fang) carries a
+/// reflexive "you may pay {C}. If you do," additional cost between the own/control
+/// gate and the meld sentinel. The gate models it: the own/control gate hoists to
+/// the trigger's intervening-if, the "you may pay {3}{B}{G}" becomes an optional
+/// `PayCost`, and the meld lands as a gated sub-ability. The card is fully
+/// supported — the `Effect::Meld` carries the real pair names and NO Unimplemented
+/// survives. Reverting the `parse_meld_gate` rewrite (or the reflexive sub-clause
+/// dispatch) drops the meld back to Unimplemented, flipping both assertions.
 #[test]
-fn optional_cost_meld_form_defers() {
+fn optional_cost_meld_form_lowers_to_gated_meld() {
     let vanille = parse_face(&atomic(
         "Vanille, Cheerful l'Cie",
         "Legendary Creature — Human",
         &["Creature"],
         VANILLE_TEXT,
     ));
+    let (source, partner, result) =
+        find_meld(&vanille).expect("the optional-cost meld form lowers to a gated Effect::Meld");
+    assert_eq!(source, "Vanille, Cheerful l'Cie");
+    assert_eq!(partner, "Fang, Fearless l'Cie");
+    assert_eq!(result, "Ragnarok, Divine Deliverance");
     assert!(
-        find_meld(&vanille).is_none(),
-        "the optional-cost meld form must defer (must NOT swallow the 'you may pay' \
-         clause by emitting an Effect::Meld)"
+        !crate::game::coverage::card_face_has_unimplemented_parts(&vanille),
+        "Vanille flips to fully supported — the 'you may pay' clause is modeled, not swallowed"
     );
 }
 

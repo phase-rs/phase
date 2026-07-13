@@ -42,9 +42,28 @@ expression: "&lowered"
     {
       "kind": "CastWithoutManaCost",
       "condition": {
-        "type": "YouControlSubtypeCountAtLeast",
-        "subtype": "commander",
-        "count": 1
+        "type": "QuantityComparison",
+        "lhs": {
+          "type": "Ref",
+          "qty": {
+            "type": "ObjectCount",
+            "filter": {
+              "type": "Typed",
+              "type_filters": [],
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "IsCommander"
+                }
+              ]
+            }
+          }
+        },
+        "comparator": "GE",
+        "rhs": {
+          "type": "Fixed",
+          "value": 1
+        }
       }
     }
   ]

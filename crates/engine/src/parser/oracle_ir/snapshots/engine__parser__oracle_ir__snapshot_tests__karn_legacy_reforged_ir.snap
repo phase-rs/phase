@@ -1,0 +1,165 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 94,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "~'s power and toughness are each equal to the greatest mana value among artifacts you control."
+      },
+      "node": {
+        "PreLoweredStatic": {
+          "mode": "Continuous",
+          "affected": {
+            "type": "SelfRef"
+          },
+          "modifications": [
+            {
+              "type": "SetDynamicPower",
+              "value": {
+                "type": "Ref",
+                "qty": {
+                  "type": "Aggregate",
+                  "function": "Max",
+                  "property": "ManaValue",
+                  "filter": {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Artifact"
+                    ],
+                    "controller": "You",
+                    "properties": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "SetDynamicToughness",
+              "value": {
+                "type": "Ref",
+                "qty": {
+                  "type": "Aggregate",
+                  "function": "Max",
+                  "property": "ManaValue",
+                  "filter": {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Artifact"
+                    ],
+                    "controller": "You",
+                    "properties": []
+                  }
+                }
+              }
+            }
+          ],
+          "condition": null,
+          "affected_zone": null,
+          "effect_zone": null,
+          "active_zones": [],
+          "characteristic_defining": true,
+          "description": "~'s power and toughness are each equal to the greatest mana value among artifacts you control."
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 95,
+          "end_byte": 288,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "At the beginning of your upkeep, add {C} for each artifact you control. This mana can't be spent to cast nonartifact spells. Until end of turn, you don't lose this mana as steps and phases end."
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "Phase",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "Mana",
+              "produced": {
+                "type": "Colorless",
+                "count": {
+                  "type": "Ref",
+                  "qty": {
+                    "type": "ObjectCount",
+                    "filter": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Artifact"
+                      ],
+                      "controller": "You",
+                      "properties": []
+                    }
+                  }
+                }
+              },
+              "restrictions": [
+                {
+                  "SpellTypeOrAbilityActivation": {
+                    "spell_type": "Artifact",
+                    "ability": "Any"
+                  }
+                }
+              ],
+              "expiry": "EndOfTurn"
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false,
+            "is_mana_ability": true
+          },
+          "valid_card": null,
+          "origin": null,
+          "destination": null,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "phase": "Upkeep",
+          "optional": false,
+          "damage_kind": "Any",
+          "secondary": false,
+          "valid_target": null,
+          "valid_source": null,
+          "description": "At the beginning of your upkeep, add {C} for each artifact you control. This mana can't be spent to cast nonartifact spells. Until end of turn, you don't lose this mana as steps and phases end.",
+          "constraint": {
+            "type": "OnlyDuringYourTurn"
+          },
+          "condition": null,
+          "batched": false
+        }
+      }
+    }
+  ],
+  "source_text": "Karn's power and toughness are each equal to the greatest mana value among artifacts you control.\nAt the beginning of your upkeep, add {C} for each artifact you control. This mana can't be spent to cast nonartifact spells. Until end of turn, you don't lose this mana as steps and phases end.",
+  "card_name": "Karn, Legacy Reforged"
+}

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::game::game_object::{AttachTarget, DisplaySource};
 
@@ -24,6 +24,133 @@ pub use super::zones::EtbTapState;
 pub struct ReplacementId {
     pub source: ObjectId,
     pub index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(tag = "type")]
+pub enum AppliedReplacementKey {
+    Object { source: ObjectId, index: usize },
+    Floating { index: usize },
+    StepEndMana { index: usize },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(tag = "type")]
+enum TaggedAppliedReplacementKey {
+    Object { source: ObjectId, index: usize },
+    Floating { index: usize },
+    StepEndMana { index: usize },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(untagged)]
+enum AppliedReplacementKeyCompat {
+    Tagged(TaggedAppliedReplacementKey),
+    Legacy(ReplacementId),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum LegacySentinelCarrier {
+    Floating,
+    StepEndMana,
+}
+
+impl AppliedReplacementKeyCompat {
+    fn into_key(self, sentinel_carrier: LegacySentinelCarrier) -> AppliedReplacementKey {
+        match self {
+            AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::Object {
+                source,
+                index,
+            }) => AppliedReplacementKey::Object { source, index },
+            AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::Floating {
+                index,
+            }) => AppliedReplacementKey::Floating { index },
+            AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::StepEndMana {
+                index,
+            }) => AppliedReplacementKey::StepEndMana { index },
+            AppliedReplacementKeyCompat::Legacy(ReplacementId {
+                source: ObjectId(0),
+                index,
+            }) => match sentinel_carrier {
+                LegacySentinelCarrier::Floating => AppliedReplacementKey::Floating { index },
+                LegacySentinelCarrier::StepEndMana => AppliedReplacementKey::StepEndMana { index },
+            },
+            AppliedReplacementKeyCompat::Legacy(ReplacementId { source, index }) => {
+                AppliedReplacementKey::Object { source, index }
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AppliedReplacementKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        AppliedReplacementKeyCompat::deserialize(deserializer)
+            .map(|key| key.into_key(LegacySentinelCarrier::Floating))
+    }
+}
+
+impl AppliedReplacementKey {
+    pub fn object(source: ObjectId, index: usize) -> Self {
+        Self::Object { source, index }
+    }
+
+    pub fn floating(index: usize) -> Self {
+        Self::Floating { index }
+    }
+
+    pub fn step_end_mana(index: usize) -> Self {
+        Self::StepEndMana { index }
+    }
+
+    pub fn source(self) -> ObjectId {
+        match self {
+            AppliedReplacementKey::Object { source, .. } => source,
+            AppliedReplacementKey::Floating { .. } | AppliedReplacementKey::StepEndMana { .. } => {
+                ObjectId(0)
+            }
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            AppliedReplacementKey::Object { index, .. }
+            | AppliedReplacementKey::Floating { index }
+            | AppliedReplacementKey::StepEndMana { index } => index,
+        }
+    }
+
+    pub fn as_replacement_id(self) -> ReplacementId {
+        ReplacementId {
+            source: self.source(),
+            index: self.index(),
+        }
+    }
+
+    pub fn for_event(event: &ProposedEvent, id: ReplacementId) -> Self {
+        if id.source != ObjectId(0) {
+            return Self::object(id.source, id.index);
+        }
+        match event {
+            ProposedEvent::EmptyManaPool { .. } => Self::step_end_mana(id.index),
+            _ => Self::floating(id.index),
+        }
+    }
+}
+
+pub fn deserialize_applied_keys_step_end_mana<'de, D>(
+    deserializer: D,
+) -> Result<HashSet<AppliedReplacementKey>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let keys = Vec::<AppliedReplacementKeyCompat>::deserialize(deserializer)?;
+    Ok(keys
+        .into_iter()
+        .map(|key| key.into_key(LegacySentinelCarrier::StepEndMana))
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -214,26 +341,26 @@ pub enum ProposedEvent {
         /// `ProposedEvent` (and the `Result<_, ProposedEvent>` pipeline).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<Box<FaceDownProfile>>,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     Damage {
         source_id: ObjectId,
         target: TargetRef,
         amount: u32,
         is_combat: bool,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     Draw {
         player_id: PlayerId,
         count: u32,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.22a + CR 614.1a: A player is about to scry cards. Replacement
     /// effects can modify the count or replace the scry with another action.
     Scry {
         player_id: PlayerId,
         count: u32,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.17a + CR 614.1a: A player is about to mill cards. Count-level
     /// replacement effects such as "mill twice that many cards instead" must
@@ -242,7 +369,7 @@ pub enum ProposedEvent {
         player_id: PlayerId,
         count: u32,
         destination: Zone,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 705.1 + CR 614.1a: A player is about to flip a single coin. Carried
     /// through the replacement pipeline so per-flip "instead flip two and ignore
@@ -251,13 +378,13 @@ pub enum ProposedEvent {
     CoinFlip {
         player_id: PlayerId,
         count: u32,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.37a + CR 614.1a: A creature is about to explore. Replacement
     /// effects can modify the explore action (e.g., add a scry prelude).
     Explore {
         object_id: ObjectId,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.50a + CR 614.1a: A creature is about to connive (draw N, discard N,
     /// +1/+1 per nonland discarded). Carried through the replacement pipeline so
@@ -268,7 +395,7 @@ pub enum ProposedEvent {
     Connive {
         object_id: ObjectId,
         count: u32,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.34a + CR 614.1a: A player is about to proliferate. Replacement
     /// effects can modify how many times the proliferate action is performed
@@ -276,17 +403,17 @@ pub enum ProposedEvent {
     Proliferate {
         player_id: PlayerId,
         count: u32,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     LifeGain {
         player_id: PlayerId,
         amount: u32,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     LifeLoss {
         player_id: PlayerId,
         amount: u32,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     AddCounter {
         /// CR 122.1 + CR 107.14: Counter placement may affect an object or a
@@ -295,13 +422,13 @@ pub enum ProposedEvent {
         #[serde(flatten)]
         placement: CounterPlacement,
         count: u32,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     RemoveCounter {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 122.5: Moving a counter is atomic: remove it from one object and put
     /// it on another. Replacement effects see the remove and add stages, but
@@ -315,7 +442,7 @@ pub enum ProposedEvent {
         remove_count: u32,
         add_count: u32,
         stage: CounterMoveStage,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 111.1 + CR 614.1a: Token creation event carrying the full
     /// self-describing token specification. Replacement effects can modify
@@ -343,7 +470,15 @@ pub enum ProposedEvent {
         enter_tapped: EtbTapState,
         /// CR 614.1a: Number of tokens to create. May be modified by replacement effects.
         count: u32,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
+    },
+    TokenEntry {
+        entry_ref: ObjectId,
+        #[serde(default)]
+        enter_tapped: EtbTapState,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, u32)>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     Discard {
         player_id: PlayerId,
@@ -355,33 +490,33 @@ pub enum ProposedEvent {
         /// actions (cleanup hand-size discard).
         #[serde(default)]
         caused_by_effect: bool,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     Tap {
         object_id: ObjectId,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     Untap {
         object_id: ObjectId,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 614.1e + CR 708.11: a permanent is being turned face up. "As ~ is turned
     /// face up" replacement effects apply here (megamorph/disguise).
     TurnFaceUp {
         object_id: ObjectId,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     Destroy {
         object_id: ObjectId,
         source: Option<ObjectId>,
         /// CR 701.19c: When true, regeneration shields cannot prevent this destruction.
         cant_regenerate: bool,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     Sacrifice {
         object_id: ObjectId,
         player_id: PlayerId,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 500.1 + CR 614.1b + CR 614.10: A turn is about to begin. Carried
     /// through the replacement pipeline so condition-gated skip effects
@@ -392,7 +527,7 @@ pub enum ProposedEvent {
     BeginTurn {
         player_id: PlayerId,
         is_extra_turn: bool,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 500.1 + CR 614.1b: A phase/step is about to begin. Carried through
     /// the replacement pipeline so condition-gated skip effects can prevent
@@ -402,7 +537,7 @@ pub enum ProposedEvent {
     BeginPhase {
         player_id: PlayerId,
         phase: Phase,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 106.3 + CR 614.1a: Mana is about to be produced by a source and added
     /// to a player's mana pool. Carried through the replacement pipeline so
@@ -419,7 +554,7 @@ pub enum ProposedEvent {
         /// ability with the tap symbol in its cost.
         #[serde(default)]
         tapped_for_mana: bool,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 703.4q + CR 614.1a + CR 616.1: A player's step-end "empty unspent
     /// mana" event. Each entry in `units` describes one `ManaUnit` in the
@@ -440,7 +575,8 @@ pub enum ProposedEvent {
     EmptyManaPool {
         player_id: PlayerId,
         units: Vec<UnitDecision>,
-        applied: HashSet<ReplacementId>,
+        #[serde(default, deserialize_with = "deserialize_applied_keys_step_end_mana")]
+        applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.31 + CR 901.9c + CR 614.1a: A player is about to planeswalk as a
     /// result of rolling the Planeswalker symbol on the planar die (the
@@ -451,7 +587,7 @@ pub enum ProposedEvent {
     /// Time) replaces this event.
     Planeswalk {
         player_id: PlayerId,
-        applied: HashSet<ReplacementId>,
+        applied: HashSet<AppliedReplacementKey>,
     },
 }
 
@@ -540,7 +676,8 @@ impl ProposedEvent {
     pub fn battlefield_entry_tap_state(&self) -> Option<EtbTapState> {
         match self {
             ProposedEvent::ZoneChange { enter_tapped, .. }
-            | ProposedEvent::CreateToken { enter_tapped, .. } => Some(*enter_tapped),
+            | ProposedEvent::CreateToken { enter_tapped, .. }
+            | ProposedEvent::TokenEntry { enter_tapped, .. } => Some(*enter_tapped),
             _ => None,
         }
     }
@@ -548,12 +685,13 @@ impl ProposedEvent {
     pub fn battlefield_entry_tap_state_mut(&mut self) -> Option<&mut EtbTapState> {
         match self {
             ProposedEvent::ZoneChange { enter_tapped, .. }
-            | ProposedEvent::CreateToken { enter_tapped, .. } => Some(enter_tapped),
+            | ProposedEvent::CreateToken { enter_tapped, .. }
+            | ProposedEvent::TokenEntry { enter_tapped, .. } => Some(enter_tapped),
             _ => None,
         }
     }
 
-    pub fn applied_set(&self) -> &HashSet<ReplacementId> {
+    pub fn applied_set(&self) -> &HashSet<AppliedReplacementKey> {
         match self {
             ProposedEvent::ZoneChange { applied, .. }
             | ProposedEvent::Damage { applied, .. }
@@ -570,6 +708,7 @@ impl ProposedEvent {
             | ProposedEvent::RemoveCounter { applied, .. }
             | ProposedEvent::MoveCounter { applied, .. }
             | ProposedEvent::CreateToken { applied, .. }
+            | ProposedEvent::TokenEntry { applied, .. }
             | ProposedEvent::Discard { applied, .. }
             | ProposedEvent::Tap { applied, .. }
             | ProposedEvent::Untap { applied, .. }
@@ -584,7 +723,7 @@ impl ProposedEvent {
         }
     }
 
-    pub fn applied_set_mut(&mut self) -> &mut HashSet<ReplacementId> {
+    pub fn applied_set_mut(&mut self) -> &mut HashSet<AppliedReplacementKey> {
         match self {
             ProposedEvent::ZoneChange { applied, .. }
             | ProposedEvent::Damage { applied, .. }
@@ -601,6 +740,7 @@ impl ProposedEvent {
             | ProposedEvent::RemoveCounter { applied, .. }
             | ProposedEvent::MoveCounter { applied, .. }
             | ProposedEvent::CreateToken { applied, .. }
+            | ProposedEvent::TokenEntry { applied, .. }
             | ProposedEvent::Discard { applied, .. }
             | ProposedEvent::Tap { applied, .. }
             | ProposedEvent::Untap { applied, .. }
@@ -616,11 +756,13 @@ impl ProposedEvent {
     }
 
     pub fn already_applied(&self, id: &ReplacementId) -> bool {
-        self.applied_set().contains(id)
+        self.applied_set()
+            .contains(&AppliedReplacementKey::for_event(self, *id))
     }
 
     pub fn mark_applied(&mut self, id: ReplacementId) {
-        self.applied_set_mut().insert(id);
+        let key = AppliedReplacementKey::for_event(self, id);
+        self.applied_set_mut().insert(key);
     }
 
     pub fn affected_player(&self, state: &crate::types::game_state::GameState) -> PlayerId {
@@ -702,6 +844,11 @@ impl ProposedEvent {
             | ProposedEvent::EmptyManaPool { player_id, .. }
             | ProposedEvent::Planeswalk { player_id, .. } => *player_id,
             ProposedEvent::CreateToken { owner, .. } => *owner,
+            ProposedEvent::TokenEntry { entry_ref, .. } => state
+                .liminal_entries
+                .get(entry_ref)
+                .map(|entry| entry.object.controller)
+                .unwrap_or(PlayerId(0)),
         }
     }
 
@@ -720,6 +867,7 @@ impl ProposedEvent {
             // CR 614.1a: the conniving permanent is the affected object the
             // `valid_card` filter ("a creature you control") is matched against.
             | ProposedEvent::Connive { object_id, .. } => Some(*object_id),
+            ProposedEvent::TokenEntry { entry_ref, .. } => Some(*entry_ref),
             ProposedEvent::AddCounter { placement, .. } => placement.object_id(),
             ProposedEvent::MoveCounter {
                 source_id,
@@ -1076,15 +1224,58 @@ mod tests {
             ],
             applied: {
                 let mut s = HashSet::new();
-                s.insert(ReplacementId {
-                    source: ObjectId(42),
-                    index: 3,
-                });
+                s.insert(AppliedReplacementKey::object(ObjectId(42), 3));
                 s
             },
         };
         let json = serde_json::to_string(&event).unwrap();
         let back: ProposedEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(event, back);
+    }
+
+    #[test]
+    fn applied_key_keeps_floating_and_step_end_mana_distinct() {
+        let mut applied = HashSet::new();
+        applied.insert(AppliedReplacementKey::floating(0));
+        applied.insert(AppliedReplacementKey::step_end_mana(0));
+
+        assert_eq!(applied.len(), 2);
+        assert!(applied.contains(&AppliedReplacementKey::floating(0)));
+        assert!(applied.contains(&AppliedReplacementKey::step_end_mana(0)));
+    }
+
+    #[test]
+    fn legacy_empty_mana_pool_sentinel_deserializes_to_step_end_mana() {
+        let json = serde_json::json!({
+            "EmptyManaPool": {
+                "player_id": 0,
+                "units": [],
+                "applied": [{ "source": 0, "index": 2 }]
+            }
+        });
+
+        let event: ProposedEvent = serde_json::from_value(json).unwrap();
+        let ProposedEvent::EmptyManaPool { applied, .. } = event else {
+            panic!("expected EmptyManaPool");
+        };
+        assert!(applied.contains(&AppliedReplacementKey::step_end_mana(2)));
+        assert!(!applied.contains(&AppliedReplacementKey::floating(2)));
+    }
+
+    #[test]
+    fn legacy_token_entry_sentinel_deserializes_to_floating() {
+        let json = serde_json::json!({
+            "TokenEntry": {
+                "entry_ref": 99,
+                "applied": [{ "source": 0, "index": 2 }]
+            }
+        });
+
+        let event: ProposedEvent = serde_json::from_value(json).unwrap();
+        let ProposedEvent::TokenEntry { applied, .. } = event else {
+            panic!("expected TokenEntry");
+        };
+        assert!(applied.contains(&AppliedReplacementKey::floating(2)));
+        assert!(!applied.contains(&AppliedReplacementKey::step_end_mana(2)));
     }
 }

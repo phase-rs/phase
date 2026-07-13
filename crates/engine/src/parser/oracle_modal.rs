@@ -22,7 +22,7 @@ use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
-use super::oracle_static::parse_static_line;
+use super::oracle_static::{parse_pt_mod, parse_static_line};
 use super::oracle_trigger::parse_trigger_lines;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
 use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModeAst, OracleBlockAst};
@@ -31,6 +31,14 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
     let line = strip_reminder_text(lines.get(start)?.trim());
     if line.is_empty() {
         return None;
+    }
+
+    // CR 702.183a: Tiered spell with a shared effect line between the keyword and
+    // the chosen-P/T bullets (Vincent's Limit Break). Detected before the generic
+    // mode collector (which starts at start+1 and finds the effect line, not a
+    // bullet, for this shape).
+    if let Some(block) = parse_tiered_shared_effect_block(lines, start, &line) {
+        return Some(block);
     }
 
     let modes = collect_mode_asts(lines, start + 1);
@@ -149,6 +157,8 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
         return Some((OracleBlockAst::Modal { header, modes }, next));
     }
 
+    // CR 702.183a: Tiered — choose exactly one mode; its mode_cost is an
+    // additional cost to cast (single authority: compute_modal_total_cost).
     if line.eq_ignore_ascii_case("tiered")
         && !modes.is_empty()
         && modes.iter().all(|m| m.mode_cost.is_some())
@@ -414,6 +424,67 @@ fn parse_shared_those_template(header_full_text: &str) -> Option<(String, String
         value((), take_until::<_, _, OracleError<'_>>(" ")).parse(i)
     })?;
     Some((before.original.to_string(), format!("{}.", suffix)))
+}
+
+/// CR 702.183a + CR 613.4b: Split a Tiered shared-effect sentence around the
+/// "the chosen base power and toughness" anaphor so each mode can substitute its
+/// own literal "base power and toughness N/M". Mirrors `parse_shared_those_template`,
+/// but the anaphor's replacement is a P/T value, not a target phrase, and the
+/// suffix is the raw remainder (it already carries the sentence-terminal ".").
+/// Returns (prefix, suffix) with original casing preserved.
+fn parse_shared_chosen_pt_template(effect_line: &str) -> Option<(String, String)> {
+    let lower = effect_line.to_lowercase();
+    let pair = TextPair::new(effect_line, &lower);
+    let (before, after) = pair.split_around("the chosen base power and toughness")?;
+    Some((before.original.to_string(), after.original.to_string()))
+}
+
+/// CR 702.183a + CR 700.2 + CR 601.2f + CR 613.4b: A Tiered spell whose shared
+/// effect sits on its own line between the keyword and the parameter-only bullet
+/// modes (Vincent's Limit Break). Each bullet is `<tier name> — <additional cost>
+/// — <base P/T>`; the shared effect references "the chosen base power and toughness".
+/// Distribute the shared effect per mode with the tier's P/T substituted in, so the
+/// existing modal-additional-cost machinery lowers each mode to a full effect
+/// (grant dies-return trigger + set base P/T at layer 7b).
+fn parse_tiered_shared_effect_block(
+    lines: &[&str],
+    start: usize,
+    header_line: &str,
+) -> Option<(OracleBlockAst, usize)> {
+    if !header_line.eq_ignore_ascii_case("tiered") {
+        return None;
+    }
+    let shared = strip_reminder_text(lines.get(start + 1)?.trim());
+    let (prefix, suffix) = parse_shared_chosen_pt_template(&shared)?;
+    let modes = collect_mode_asts(lines, start + 2);
+    if modes.is_empty() || !modes.iter().all(|m| m.mode_cost.is_some()) {
+        return None;
+    }
+    let modes: Vec<ModeAst> = modes
+        .into_iter()
+        .map(|mode| {
+            let pt = mode.body.trim().trim_end_matches('.').trim();
+            parse_pt_mod(pt)?; // validate literal P/T; fail-closed otherwise
+            let body = format!("{prefix}base power and toughness {pt}{suffix}");
+            Some(ModeAst { body, ..mode })
+        })
+        .collect::<Option<_>>()?;
+    // The shared-effect line (start + 1) is consumed IN ADDITION to the header,
+    // so the mode bullets begin at start + 2 — `next` must skip both.
+    let next = start + 2 + modes.len();
+    // CR 702.183a: Tiered — choose exactly one mode; its mode_cost is an
+    // additional cost to cast (single authority: compute_modal_total_cost).
+    let header = ModalHeaderAst {
+        raw: header_line.to_string(),
+        min_choices: 1,
+        max_choices: 1,
+        allow_repeat_modes: false,
+        constraints: vec![],
+        chooser: PlayerFilter::Controller,
+        selection: TargetSelectionMode::Chosen,
+        dynamic_max_choices: None,
+    };
+    Some((OracleBlockAst::Modal { header, modes }, next))
 }
 
 /// Lowercase only the first word of a phrase, leaving the remainder untouched.
@@ -2897,6 +2968,146 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             modal_sub.mode_abilities.len(),
             3,
             "one AbilityDefinition per mode"
+        );
+    }
+
+    // ---- Vincent's Limit Break (FIN) — Tiered shared-effect chosen-P/T ----
+
+    const VINCENTS_ORACLE: &str = "Tiered (Choose one additional cost.)\n\
+        Until end of turn, target creature you control gains \"When this creature dies, return it to the battlefield tapped under its owner's control\" and has the chosen base power and toughness.\n\
+        \u{2022} Galian Beast \u{2014} {0} \u{2014} 3/2.\n\
+        \u{2022} Death Gigas \u{2014} {1} \u{2014} 5/2.\n\
+        \u{2022} Hellmasker \u{2014} {3} \u{2014} 7/2.";
+
+    /// Each Tiered mode lowers to `GenericEffect { static_abilities: [one
+    /// continuous grant] }`; return that grant's layer-7b modifications.
+    fn mode_modifications(
+        ability: &AbilityDefinition,
+    ) -> &[crate::types::ability::ContinuousModification] {
+        match ability.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                &static_abilities
+                    .first()
+                    .expect("mode has one static grant")
+                    .modifications
+            }
+            other => panic!("mode must lower to a GenericEffect grant, got {other:?}"),
+        }
+    }
+
+    /// A1–A5: the shared-effect Tiered arm distributes the chosen base P/T into
+    /// every mode and lowers each to a full effect (no `Unimplemented`, no
+    /// dropped `SetPower`/`SetToughness`).
+    #[test]
+    fn vincents_limit_break_tiered_shared_pt_distributes_set_pt() {
+        use crate::types::ability::ContinuousModification;
+        use crate::types::mana::ManaCost;
+
+        let parsed = parse_oracle_text(
+            VINCENTS_ORACLE,
+            "Vincent's Limit Break",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+
+        // A1: Tiered modal — choose exactly one of three modes with the per-mode
+        // additional costs {0}/{1}/{3} (CR 702.183a). Revert-red: pre-fix modal==None.
+        let modal = parsed
+            .modal
+            .as_ref()
+            .expect("Tiered shared-effect block must parse as modal");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(
+            modal.mode_costs,
+            vec![ManaCost::zero(), ManaCost::generic(1), ManaCost::generic(3)]
+        );
+        // Tier flavor names survive verbatim as mode descriptions (they are
+        // labels on the bullets, not tokens/effects).
+        assert_eq!(
+            modal.mode_descriptions,
+            vec![
+                "Galian Beast \u{2014} {0} \u{2014} 3/2.",
+                "Death Gigas \u{2014} {1} \u{2014} 5/2.",
+                "Hellmasker \u{2014} {3} \u{2014} 7/2.",
+            ]
+        );
+
+        // A2: one full effect per mode, zero Unimplemented. Revert-red: pre-fix the
+        // 3 bullets fall through to standalone `Effect::Unimplemented`.
+        assert_eq!(parsed.abilities.len(), 3, "one lowered ability per tier");
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .all(|a| !matches!(a.effect.as_ref(), Effect::Unimplemented { .. })),
+            "no mode may be Unimplemented"
+        );
+
+        // A3: CORE silent-drop fix — each mode sets its tier's base P/T at layer 7b
+        // (CR 613.4b). Revert-red: pre-fix the "the chosen base power and toughness"
+        // anaphor produced NO SetPower anywhere. Reach-guard: paired with A2.
+        for (i, (p, t)) in [(3, 2), (5, 2), (7, 2)].iter().enumerate() {
+            let mods = mode_modifications(&parsed.abilities[i]);
+            assert!(
+                mods.contains(&ContinuousModification::SetPower { value: *p }),
+                "mode {i} must set power {p}: {mods:?}"
+            );
+            assert!(
+                mods.contains(&ContinuousModification::SetToughness { value: *t }),
+                "mode {i} must set toughness {t}: {mods:?}"
+            );
+        }
+
+        // A4: wrong-tier hostile — Galian (mode 0) must carry ONLY its own power.
+        let mode0 = mode_modifications(&parsed.abilities[0]);
+        assert!(!mode0.contains(&ContinuousModification::SetPower { value: 5 }));
+        assert!(!mode0.contains(&ContinuousModification::SetPower { value: 7 }));
+
+        // A5: keep-green — the granted "When this creature dies, return it ...
+        // tapped" trigger survives the distribution on every mode.
+        for (i, a) in parsed.abilities.iter().enumerate() {
+            let mods = mode_modifications(a);
+            assert!(
+                mods.iter()
+                    .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+                "mode {i} must retain the dies-return GrantTrigger: {mods:?}"
+            );
+        }
+    }
+
+    /// A6: anaphor gate — a standard Tiered spell (bullets carry their own
+    /// effects, no shared effect line, no "the chosen base power and toughness")
+    /// must NOT be hijacked by the new arm; the generic Tiered path handles it.
+    #[test]
+    fn standard_tiered_not_hijacked_by_shared_pt_arm() {
+        let text = "Tiered (Choose one additional cost.)\n\
+            \u{2022} Cure \u{2014} {0} \u{2014} Target permanent gains hexproof and indestructible until end of turn.\n\
+            \u{2022} Cura \u{2014} {1} \u{2014} Target permanent gains hexproof and indestructible until end of turn. You gain 3 life.\n\
+            \u{2022} Curaga \u{2014} {3}{W} \u{2014} Permanents you control gain hexproof and indestructible until end of turn. You gain 6 life.";
+        let parsed = parse_oracle_text(
+            text,
+            "Restoration Magic",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let modal = parsed
+            .modal
+            .as_ref()
+            .expect("standard Tiered still parses as modal");
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(modal.mode_costs.len(), 3);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .all(|a| !matches!(a.effect.as_ref(), Effect::Unimplemented { .. })),
+            "standard Tiered modes must be unaffected by the shared-effect arm"
         );
     }
 }

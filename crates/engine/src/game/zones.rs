@@ -2,7 +2,9 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 #[cfg(test)]
 use crate::types::game_state::ZoneChangeRecord;
-use crate::types::game_state::{GameState, ZoneChangeCombatStatus};
+use crate::types::game_state::{
+    GameState, ResolutionSourceRelatch, StackEntry, ZoneChangeCombatStatus,
+};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
@@ -477,6 +479,18 @@ pub(crate) fn apply_zone_exit_cleanup(
         // source self-exiles mid-activation and returns with the same ObjectId,
         // so the material links must survive its battlefield exit for the
         // returned permanent to still read what it was crafted with.
+        // CR 607.2a + CR 400.7: `TrackedBySource` links are preserved when the
+        // source leaves the battlefield TO EXILE. A source that self-exiles
+        // (typically as its own activation cost — Mechtitan Core: "Exile this
+        // Vehicle and four other …: … return all cards exiled with this Vehicle
+        // …") keeps a stable ObjectId in exile and remains the linked-ability
+        // referent (CR 607.2a: the second ability refers to the cards put in exile
+        // by the first). Preserve its links so a deferred `ExiledBySource` return
+        // still finds the pile turns later — the blink-identity reset instead
+        // happens if that source RE-ENTERS the battlefield (paired entry prune
+        // below). Narrowed to the exile-exit so ordinary death/bounce (to
+        // graveyard/hand) still prunes.
+        let source_exits_to_exile = to == Zone::Exile;
         state.exile_links.retain(|link| {
             link.source_id != object_id
                 || matches!(
@@ -485,7 +499,31 @@ pub(crate) fn apply_zone_exit_cleanup(
                         | crate::types::game_state::ExileLinkKind::Haunt
                         | crate::types::game_state::ExileLinkKind::CraftMaterial
                 )
+                || (source_exits_to_exile
+                    && matches!(
+                        link.kind,
+                        crate::types::game_state::ExileLinkKind::TrackedBySource
+                    ))
         });
+
+        // PR-7 Phase 4c (B5 defuse): CR 104.4b / CR 110.1 / CR 700.4 — an enabling
+        // permanent leaving the battlefield revokes the revocable-∞ capability it
+        // enabled (every-enabler: `interactive_loop_bridge` Path C). Gated on a
+        // non-empty enabler map so Off/On games (which never populate it — only the
+        // Interactive B5 arm does) pay nothing and stay byte-identical. Whole-
+        // capability clear per controller whose enabler set contains this object
+        // (`clear_unbounded_loop` removes BOTH maps in lockstep).
+        if !state.unbounded_loop_enablers.is_empty() {
+            let revoked: Vec<PlayerId> = state
+                .unbounded_loop_enablers
+                .iter()
+                .filter(|(_, ids)| ids.contains(&object_id))
+                .map(|(c, _)| *c)
+                .collect();
+            for controller in revoked {
+                state.clear_unbounded_loop(controller);
+            }
+        }
     }
 }
 
@@ -543,6 +581,54 @@ pub(crate) fn record_descend_on_graveyard_arrival(
         if let Some(player) = state.players.iter_mut().find(|p| p.id == owner) {
             player.descended_this_turn = true;
         }
+    }
+}
+
+/// CR 400.7j (+ CR 400.7g/h cast hop): if the currently-resolving ability just
+/// moved its OWN source (`object_id == resolving ability's source_id`), record the
+/// from→to incarnation so `source_is_current` can re-find the moved object after
+/// the all-zone bump advanced its epoch. Chains across multiple self-moves in one
+/// resolution: the first self-move sets `original_stamp` (bound to the ability's
+/// captured incarnation); a chained self-move keeps `original_stamp` fixed and only
+/// advances `current_incarnation`. A foreign object, or a move whose pre-move
+/// incarnation matches neither the captured stamp nor the record's current value,
+/// never writes. Call AFTER the bump, passing the pre-bump and post-bump values.
+pub(crate) fn record_resolution_source_relatch(
+    state: &mut GameState,
+    object_id: ObjectId,
+    pre_move_incarnation: u64,
+    new_incarnation: u64,
+) {
+    // A faithful READ of the resolving ability's captured source identity. The
+    // clone is disconnected from the local resolving borrow, so it cannot be the
+    // carrier — the record on `state` is (consumed inside `source_is_current`).
+    let Some((source_id, Some(captured))) = state
+        .resolving_stack_entry
+        .as_ref()
+        .and_then(StackEntry::ability)
+        .map(|a| (a.source_id, a.source_incarnation))
+    else {
+        return;
+    };
+    if object_id != source_id {
+        return;
+    }
+    // First self-move: pre-move value must equal the ability's captured stamp.
+    let matches_first = pre_move_incarnation == captured;
+    // Chained self-move: pre-move value must equal the record's current value.
+    let chained = state
+        .resolution_source_relatch
+        .as_ref()
+        .filter(|r| r.object_id == object_id && r.current_incarnation == pre_move_incarnation);
+    if matches_first || chained.is_some() {
+        // Keep `original_stamp` fixed across chained hops; the CR 400.7j identity
+        // is the FIRST captured stamp, not each intermediate incarnation.
+        let original_stamp = chained.map_or(captured, |r| r.original_stamp);
+        state.resolution_source_relatch = Some(ResolutionSourceRelatch {
+            object_id,
+            original_stamp,
+            current_incarnation: new_incarnation,
+        });
     }
 }
 
@@ -705,6 +791,10 @@ pub fn move_to_zone(
     let entry_timestamp = (to == Zone::Battlefield).then(|| state.next_timestamp());
 
     let obj_mut = state.objects.get_mut(&object_id).unwrap();
+    // CR 400.7j: capture the pre-bump incarnation BEFORE any bump (the battlefield
+    // arm bumps inside `reset_for_battlefield_entry`, which has no state access) so
+    // the resolution re-latch can chain the source across a self-move.
+    let pre_bump_incarnation = obj_mut.incarnation;
     obj_mut.zone = to;
 
     if to == Zone::Battlefield {
@@ -717,11 +807,40 @@ pub fn move_to_zone(
         // distinguishable from the original entrant when an ETB intervening-if is
         // rechecked at resolution (CR 603.4 + CR 608.2h).
         zone_change_record.entered_incarnation = Some(obj_mut.incarnation);
+    } else if from != to {
+        // CR 400.7: a move FROM one zone TO another makes a new object. The
+        // `from != to` guard generalizes the BF→BF no-op guard (upstream) to every
+        // same-zone case (Exile→Exile, GY→GY) that can reach this else-arm.
+        obj_mut.bump_incarnation();
+    }
+    let new_incarnation = obj_mut.incarnation;
+    if new_incarnation != pre_bump_incarnation {
+        record_resolution_source_relatch(state, object_id, pre_bump_incarnation, new_incarnation);
     }
 
     // CR 700.11: a permanent card was put into its owner's graveyard.
     if to == Zone::Graveyard {
         record_descend_on_graveyard_arrival(state, object_id, owner);
+    }
+
+    // CR 400.7: A permanent that re-enters the battlefield is a new object with no
+    // relation to its previous existence, so it sheds the "exiled with it"
+    // associations of its prior incarnation. The battlefield-EXIT cleanup above
+    // now preserves a source's `TrackedBySource` links when it leaves TO EXILE
+    // (so a self-exiled source's pending linked return still finds its pile —
+    // Mechtitan Core); this paired entry prune is the blink-back reset that drops
+    // those stale links if that same source is later returned to the battlefield,
+    // preventing `ExiledBySource` from reading a prior incarnation's pile. Scoped
+    // to `TrackedBySource`: `CraftMaterial` links must survive re-entry (the craft
+    // source returns transformed and must still read its materials).
+    if to == Zone::Battlefield {
+        state.exile_links.retain(|link| {
+            link.source_id != object_id
+                || !matches!(
+                    link.kind,
+                    crate::types::game_state::ExileLinkKind::TrackedBySource
+                )
+        });
     }
 
     // CR 611.3a + CR 400.3: Hand size affects continuous effects gated on the
@@ -744,6 +863,17 @@ pub fn move_to_zone(
         && crate::game::layers::any_active_static_reads_zone_membership(state, Zone::Graveyard)
     {
         crate::game::layers::mark_layers_full(state);
+    }
+
+    // CR 401.5 + CR 611.3a: A move into or out of a library can change that
+    // library's top card, flipping a continuous static gated on it (Vampire
+    // Nocturnus: "as long as the top card of your library is black, ..."). The
+    // hand/battlefield and graveyard marks above don't cover library moves (a
+    // draw off the top, a mill into the graveyard, a put-on-top), so re-evaluate
+    // — self-gated so routine library churn stays cheap when no such static is
+    // live.
+    if to == Zone::Library || from == Zone::Library {
+        crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
     }
 
     // CR 702.145c + CR 702.145f: Daybound/Nightbound permanents entering under
@@ -1048,8 +1178,20 @@ pub fn move_to_library_at_index(
         None => player.library.push_back(object_id),
     }
 
+    let mut bump: Option<(u64, u64)> = None;
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
+        let pre_bump_incarnation = obj_mut.incarnation;
         obj_mut.zone = Zone::Library;
+        // CR 400.7: a move INTO the library from any other zone makes a new object.
+        // A within-Library reposition (reveal / scry bottom placement / look-at-top-N,
+        // CR 701.20b) is zero moves — `from == Library` here — and must NOT bump.
+        if from != Zone::Library {
+            obj_mut.bump_incarnation();
+            bump = Some((pre_bump_incarnation, obj_mut.incarnation));
+        }
+    }
+    if let Some((pre, new)) = bump {
+        record_resolution_source_relatch(state, object_id, pre, new);
     }
 
     let turn_zone_change_index =
@@ -1069,6 +1211,11 @@ pub fn move_to_library_at_index(
         to: Zone::Library,
         record: Box::new(zone_change_record),
     });
+
+    // CR 401.5 + CR 611.3a: placing a card at library index 0 changes the top
+    // card, so a `TopOfLibraryMatches` static must be re-evaluated. This path
+    // bypasses `move_to_zone`, so it invalidates directly (self-gated).
+    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
 }
 
 /// Remove an ObjectId from the appropriate zone collection (CR 400.1).
@@ -2653,6 +2800,95 @@ mod tests {
                 .iter()
                 .all(|link| link.source_id != source),
             "TrackedBySource links should still be pruned immediately after LTB"
+        );
+    }
+
+    /// CR 607.2a + CR 400.7: A source that leaves the battlefield TO EXILE
+    /// (self-exile as an activation cost — Mechtitan Core) keeps a stable
+    /// ObjectId in exile and stays the linked-ability referent for its
+    /// "exiled with ~" pile, so its `TrackedBySource` links must survive the
+    /// exit. The sibling above (exit to graveyard) proves the survival is
+    /// exile-scoped, not a blanket "never prune".
+    #[test]
+    fn tracked_by_source_links_survive_source_exit_to_exile() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(60),
+            PlayerId(0),
+            "Mechtitan Core".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(1),
+            "Exiled With Source".to_string(),
+            Zone::Exile,
+        );
+        state.exile_links.push(crate::types::game_state::ExileLink {
+            source_id: source,
+            exiled_id: exiled,
+            kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, source, Zone::Exile, &mut events);
+
+        assert!(
+            state
+                .exile_links
+                .iter()
+                .any(|link| link.source_id == source && link.exiled_id == exiled),
+            "TrackedBySource link must survive the source's self-exile"
+        );
+        // Reach-guard: the deferred `ExiledBySource` lookup keyed to the now-exiled
+        // source still resolves the pile (the property the Mechtitan return relies on).
+        assert!(
+            crate::game::players::linked_exile_cards_for_source(&state, source)
+                .iter()
+                .any(|snap| snap.exiled_id == exiled),
+            "linked_exile_cards_for_source must return the pile after the source self-exiles"
+        );
+    }
+
+    /// CR 400.7: A source that self-exiled (keeping its `TrackedBySource` links)
+    /// and is then returned to the battlefield is a new object and sheds those
+    /// stale links, so a later "cards exiled with ~" reference cannot read a
+    /// prior incarnation's pile. This is the blink-back reset paired with the
+    /// exit-to-exile preservation above.
+    #[test]
+    fn tracked_by_source_links_reset_on_battlefield_reentry() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(62),
+            PlayerId(0),
+            "Blinked Source".to_string(),
+            Zone::Exile,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(63),
+            PlayerId(1),
+            "Old Pile Card".to_string(),
+            Zone::Exile,
+        );
+        state.exile_links.push(crate::types::game_state::ExileLink {
+            source_id: source,
+            exiled_id: exiled,
+            kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+
+        assert!(
+            state
+                .exile_links
+                .iter()
+                .all(|link| link.source_id != source),
+            "TrackedBySource links keyed to a re-entering source must be dropped (CR 400.7)"
         );
     }
 

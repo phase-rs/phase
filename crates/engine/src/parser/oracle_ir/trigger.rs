@@ -50,7 +50,8 @@ pub(crate) enum TriggerBody {
 /// `TriggerDefinition` or compose with the body ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct TriggerModifiers {
-    /// CR 609.3: "You may" optional effect.
+    /// CR 603.5: Some triggered abilities' effects are optional (they contain
+    /// "may"). They go on the stack regardless; the choice is made on resolution.
     pub(crate) optional: bool,
     /// CR 118.12: "unless [player] pays {cost}" tax modifier.
     pub(crate) unless_pay: Option<UnlessPayModifier>,

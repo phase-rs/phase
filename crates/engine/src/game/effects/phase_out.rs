@@ -67,6 +67,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::PhaseOut,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -114,6 +115,7 @@ pub fn resolve_phase_in(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::PhaseIn,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }

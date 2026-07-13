@@ -23,23 +23,40 @@
 //! (`TriggeringSource`) as a `Duration::UntilHostLeavesPlay` continuous effect.
 //! Parser round-trip and runtime binding tests below.
 //!
+//! Now supported (S25 P2e — Moonlit Meditation): "The first time you would create
+//! one or more tokens each turn, you may instead create that many tokens that are
+//! copies of enchanted permanent." lowers to an Optional `CreateToken` replacement
+//! gated by `ReplacementCondition::FirstTokenCreationEachTurn`, whose
+//! `CopyTokenOf { target: AttachedTo, count: EventContextAmount }` execute makes
+//! host-copies. Per-PLAYER once-per-turn window (the Oracle's "you"), tracked via
+//! the shared `GameState::players_who_created_token_this_turn` primitive (consumed
+//! by the first token the controller creates this turn — so a source entering
+//! mid-turn after an earlier creation does NOT fire, per the official ruling),
+//! "that many" count, decline-consumes, turn-reset, per-player (not per-source)
+//! window, and Doubling-Season non-recursion tests below.
+//!
 //! Deferred (honest `Effect::unimplemented` / SwallowedClause retained, NOT
-//! asserted 0-unimpl): Moonlit Meditation (first-time-each-turn optional
-//! CreateToken replacement that overrides the spec to copies of the enchanted
-//! permanent — needs a per-turn token-creation gate, an Optional CreateToken
-//! pipeline, and a dynamic host-copy spec; out of scope for the multiplier
-//! parameterization), Zimone (prime-number intervening-if
+//! asserted 0-unimpl): Zimone (prime-number intervening-if
 //! condition — heavy primality predicate; the token+counter parse is fixed, the
 //! card stays honestly condition-unsupported via a SwallowedClause warning).
 
+use std::sync::Arc;
+
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::game_object::{AttachTarget, GameObject};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::TargetFilter;
 use engine::types::ability::TargetRef;
+use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 
 fn parse(
     oracle: &str,
@@ -679,5 +696,802 @@ fn brilliance_otherwise_animates_returned_artifact_as_robot() {
     assert!(
         obj.card_types.subtypes.iter().any(|s| s == "Robot"),
         "returned object is a Robot"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Moonlit Meditation — first-time-each-turn copy-of-host token replacement
+// ---------------------------------------------------------------------------
+
+const MOONLIT_ORACLE: &str = "Enchant artifact or creature you control\n\
+The first time you would create one or more tokens each turn, you may instead \
+create that many tokens that are copies of enchanted permanent.";
+
+/// The parsed CreateToken replacement carried by Moonlit Meditation.
+fn moonlit_replacement() -> engine::types::ability::ReplacementDefinition {
+    let parsed = parse(
+        MOONLIT_ORACLE,
+        "Moonlit Meditation",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    parsed
+        .replacements
+        .into_iter()
+        .find(|r| r.event == ReplacementEvent::CreateToken)
+        .expect("Moonlit must parse to a CreateToken replacement")
+}
+
+/// Put a Moonlit Meditation Aura on the battlefield under `controller`, attached
+/// to `host`, carrying its parsed first-time copy-of-host replacement.
+fn install_moonlit(state: &mut GameState, host: ObjectId, controller: PlayerId) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(950),
+        controller,
+        "Moonlit Meditation".to_string(),
+        Zone::Battlefield,
+    );
+    let reps = vec![moonlit_replacement()];
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types = vec![CoreType::Enchantment];
+    obj.card_types.subtypes = vec!["Aura".to_string()];
+    obj.attached_to = Some(AttachTarget::Object(host));
+    obj.replacement_definitions = reps.clone().into();
+    obj.base_replacement_definitions = Arc::new(reps);
+    id
+}
+
+/// Put a Doubling Season (token-doubling half only) on the battlefield under
+/// `controller` — a mandatory `CreateToken` doubler used to exercise the
+/// #1511 interaction (a *different* source's replacement still doubles the
+/// substitute copies).
+fn install_doubling_season(state: &mut GameState, controller: PlayerId) -> ObjectId {
+    let parsed = parse_oracle_text(
+        "If one or more tokens would be created under your control, twice that \
+         many tokens are created instead.",
+        "Doubling Season",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert!(
+        !parsed.replacements.is_empty(),
+        "Doubling Season token doubler must parse"
+    );
+    let id = create_object(
+        state,
+        CardId(960),
+        controller,
+        "Doubling Season".to_string(),
+        Zone::Battlefield,
+    );
+    let reps = parsed.replacements.clone();
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types = vec![CoreType::Enchantment];
+    obj.replacement_definitions = reps.clone().into();
+    obj.base_replacement_definitions = Arc::new(reps);
+    id
+}
+
+/// Resolve a token-creating sorcery controlled by `controller`, driving the real
+/// token pipeline (propose → `replace_event`). If an optional replacement
+/// (Moonlit) applies, the pipeline parks on `WaitingFor::ReplacementChoice`.
+fn resolve_token_source(runner: &mut GameRunner, controller: PlayerId, oracle: &str) {
+    let parsed = parse_oracle_text(oracle, "Token Source", &[], &["Sorcery".to_string()], &[]);
+    let def = parsed
+        .abilities
+        .first()
+        .expect("token source should parse to an ability");
+    let src = create_object(
+        runner.state_mut(),
+        CardId(951),
+        controller,
+        "Token Source".to_string(),
+        Zone::Stack,
+    );
+    let ability = build_resolved_from_def(def, src, controller);
+    let mut events = Vec::<GameEvent>::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("token effect should resolve");
+}
+
+fn host_copy_tokens<'a>(
+    runner: &'a GameRunner,
+    host_name: &str,
+    controller: PlayerId,
+) -> Vec<&'a GameObject> {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|o| o.is_token && o.controller == controller && o.name == host_name)
+        .collect()
+}
+
+fn at_replacement_choice(runner: &GameRunner) -> bool {
+    matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    )
+}
+
+/// Give a host a distinctive subtype on BOTH the live and base card types —
+/// `CopyTokenOf` reads copiable values from `base_card_types`
+/// (`intrinsic_copiable_values`), so a copy inherits the subtype only if the
+/// base carries it.
+fn set_copiable_subtype(state: &mut GameState, id: ObjectId, subtype: &str) {
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.subtypes = vec![subtype.to_string()];
+    obj.base_card_types.subtypes = vec![subtype.to_string()];
+}
+
+/// A1 — accept: a your-owned token creation is replaced by copies of the
+/// enchanted host (name/P/T/subtypes match the host, not the original token
+/// spec). Revert the parser to `.valid_card(SelfRef)` and the replacement never
+/// matches (CreateToken has no affected object) → no prompt, plain Soldier:
+/// both `at_replacement_choice` and `copies.len() == 1` flip.
+#[test]
+fn moonlit_accept_creates_copies_of_enchanted_host() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    set_copiable_subtype(runner.state_mut(), host, "Ox");
+    install_moonlit(runner.state_mut(), host, P0);
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+
+    assert!(
+        at_replacement_choice(&runner),
+        "your token creation must surface Moonlit's optional replacement, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept Moonlit");
+    runner.advance_until_stack_empty();
+
+    let copies = host_copy_tokens(&runner, "Host Ox", P0);
+    assert_eq!(copies.len(), 1, "accept → exactly one host-copy token");
+    let copy = copies[0];
+    assert_eq!(
+        (copy.power, copy.toughness),
+        (Some(5), Some(4)),
+        "the copy has the host's P/T (5/4), not the 1/1 Soldier spec"
+    );
+    assert!(
+        copy.card_types
+            .subtypes
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case("Ox")),
+        "the copy is the enchanted host (Ox), got {:?}",
+        copy.card_types.subtypes
+    );
+    assert!(
+        !copy
+            .card_types
+            .subtypes
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case("Soldier")),
+        "the original Soldier spec was replaced by a host-copy"
+    );
+    assert!(
+        runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "accept records the copy token → the per-player window is consumed"
+    );
+}
+
+/// A2 — owner scope: a P1-owned creation on P0's turn is NOT replaced by P0's
+/// Moonlit (`token_owner_scope(You)`). Paired positive reach-guard in the same
+/// test: a P0-owned creation with the same Moonlit installed DOES prompt — so
+/// the non-prompt is owner-scope rejection, not a dead Moonlit.
+#[test]
+fn moonlit_ignores_opponent_owned_token_creation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    install_moonlit(runner.state_mut(), host, P0);
+
+    resolve_token_source(
+        &mut runner,
+        P1,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "P0's Moonlit must not replace a P1-owned token creation, got {:?}",
+        runner.state().waiting_for
+    );
+    let p1_tokens: Vec<_> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|o| o.is_token && o.controller == P1)
+        .collect();
+    assert_eq!(p1_tokens.len(), 1, "the opponent's plain token is created");
+    assert!(
+        p1_tokens[0]
+            .card_types
+            .subtypes
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case("Soldier")),
+        "the opponent's token stays a Soldier, not a host-copy"
+    );
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        at_replacement_choice(&runner),
+        "reach-guard: a your-owned creation with the same Moonlit must prompt"
+    );
+}
+
+/// B1 (official ruling) — per-player window, pre-consumed by an earlier token: a
+/// P0-owned token is created BEFORE Moonlit exists (recording P0 in
+/// `players_who_created_token_this_turn`), then Moonlit enters, then a second
+/// creation the SAME turn does NOT prompt — P0's per-player window is already
+/// spent. This is the exact official ruling: "If you create one or more tokens,
+/// and then Moonlit Meditation comes under your control that same turn, the
+/// replacement effect won't apply to any tokens you create for the rest of the
+/// turn." SWITCH DISCRIMINATOR: revert the eval to the per-source latch (empty for
+/// a source that just entered and never applied) → Moonlit would wrongly prompt
+/// and the `!at_replacement_choice` assertion below fails.
+#[test]
+fn moonlit_source_entering_after_earlier_token_does_not_fire() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+
+    // First creation, BEFORE Moonlit exists → records P0 in the per-player set.
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "no replacement before Moonlit exists"
+    );
+    assert!(
+        runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "the pre-Moonlit creation consumed P0's per-player window"
+    );
+
+    install_moonlit(runner.state_mut(), host, P0);
+
+    // Second creation, same turn, AFTER Moonlit enters → window already spent.
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "Moonlit entering after an earlier same-turn creation does NOT fire \
+         (per-player window pre-consumed; official ruling), got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        host_copy_tokens(&runner, "Host Ox", P0).is_empty(),
+        "no host-copy — Moonlit did not fire"
+    );
+}
+
+/// B2 — "that many" count: an N=3 token creation, accepted, yields exactly 3
+/// host-copies. Revert the `quantity.rs` `EventContextAmount` scoped arm → the
+/// count reads `None` → 0 copies. Hostile cascade shadow: a *different*
+/// `current_trigger_match_count` (7) must not win — the Moonlit-scoped count is
+/// read first, un-shadowable.
+#[test]
+fn moonlit_copies_that_many_for_multi_token_events() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    install_moonlit(runner.state_mut(), host, P0);
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create three 1/1 white Soldier creature tokens.",
+    );
+    assert!(
+        at_replacement_choice(&runner),
+        "an N-token creation must prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    // Hostile shadow: the highest-priority cascade entry after the Moonlit field.
+    runner.state_mut().current_trigger_match_count = Some(7);
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept");
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        host_copy_tokens(&runner, "Host Ox", P0).len(),
+        3,
+        "'that many' == the replaced event count (3), not 0 (revert quantity arm) nor 7 (cascade shadow)"
+    );
+}
+
+/// B3 — decline consumes the window: declining still creates the original token,
+/// which `record_token_created` records in the per-player
+/// `players_who_created_token_this_turn` set, so a second creation the same turn
+/// does not prompt. Decline falls through to the original event → a plain Soldier,
+/// no host-copy. If the original creation did not record the player, the window
+/// would stay open and the second creation would prompt.
+#[test]
+fn moonlit_decline_consumes_the_turn_allowance() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    install_moonlit(runner.state_mut(), host, P0);
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        at_replacement_choice(&runner),
+        "reach-guard: the first creation prompts"
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline");
+    runner.advance_until_stack_empty();
+
+    let soldiers: Vec<_> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|o| {
+            o.is_token
+                && o.controller == P0
+                && o.card_types
+                    .subtypes
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case("Soldier"))
+        })
+        .collect();
+    assert_eq!(
+        soldiers.len(),
+        1,
+        "decline creates the original plain Soldier"
+    );
+    assert!(
+        host_copy_tokens(&runner, "Host Ox", P0).is_empty(),
+        "no host-copy is created on decline"
+    );
+    assert!(
+        runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "decline creates the original token → the per-player window is consumed"
+    );
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "allowance consumed by the decline → the second creation is not replaced"
+    );
+}
+
+/// B4 — turn reset: consuming the window on turn N (here by DECLINING — which
+/// still creates the original token and records the player, proven in B3, and —
+/// unlike accept — leaves no mid-resolution copy-continuation seed to interfere
+/// with this off-stack harness) and then crossing a turn boundary
+/// (`start_next_turn`) clears `players_who_created_token_this_turn`, so Moonlit
+/// fires again. Without the turn-start clear (`turns.rs`), the second turn's
+/// creation would not prompt.
+#[test]
+fn moonlit_resets_at_turn_start() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    install_moonlit(runner.state_mut(), host, P0);
+
+    // Turn N: fire, then DECLINE to consume the window without seeding a copy
+    // continuation.
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        at_replacement_choice(&runner),
+        "turn N: first creation prompts"
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline");
+    runner.advance_until_stack_empty();
+    assert!(
+        runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "turn N: the window is consumed"
+    );
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "turn N: window consumed → second creation not replaced"
+    );
+
+    // Cross a turn boundary through the real reset path.
+    let mut events = Vec::<GameEvent>::new();
+    engine::game::turns::start_next_turn(runner.state_mut(), &mut events);
+    assert!(
+        !runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "turn start clears the per-player token-creation record"
+    );
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        at_replacement_choice(&runner),
+        "next turn: the per-player record reset → Moonlit fires again, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// B6 — turn-start clears the transient copy-count seed (fix #1,
+/// `turns.rs::start_next_turn`). Directly discriminating: the on-stack accept
+/// flow can never observe a *stale* seed at a turn boundary — the intervening
+/// return-to-priority full-drain (`effects/mod.rs`) already nulls
+/// `post_replacement_token_substitution_count` one action after the owning
+/// resolution, so in a natural cast it is already `None` before
+/// `start_next_turn` runs and removing the turn-start clear would not change
+/// that flow. To make the turn-start clear *itself* revert-detectable we seed
+/// both transients to their live "mid-substitution" values (as the accept path
+/// would leave them if a priority pass had NOT intervened) and prove the turn
+/// boundary alone scrubs them. Revert either `= None` line in `start_next_turn`
+/// → the matching post-boundary assertion below stays `Some`/non-empty and
+/// fails. The decline-based B4 keeps covering the
+/// `players_who_created_token_this_turn` turn-reset; this closes the
+/// copy-count/applied-seed clean-state gap.
+#[test]
+fn moonlit_turn_start_scrubs_transient_substitution_seeds() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    let moonlit = install_moonlit(runner.state_mut(), host, P0);
+
+    // Mid-substitution snapshot: the accept path seeds the "that many" copy
+    // count and the self-suppression applied set keyed by the Moonlit source.
+    runner.state_mut().post_replacement_token_substitution_count = Some(4);
+    runner.state_mut().post_replacement_token_choice_applied =
+        Some(std::collections::HashSet::from([
+            engine::types::proposed_event::AppliedReplacementKey::object(moonlit, 0),
+        ]));
+
+    // Reach-guard (non-vacuity): the seeds are actually set when the boundary
+    // is crossed — `start_next_turn` is not operating on an already-clean state.
+    assert_eq!(
+        runner.state().post_replacement_token_substitution_count,
+        Some(4),
+        "reach-guard: copy-count seed is Some before the turn boundary"
+    );
+    assert!(
+        runner
+            .state()
+            .post_replacement_token_choice_applied
+            .as_ref()
+            .is_some_and(|s| s.len() == 1),
+        "reach-guard: applied seed is populated before the turn boundary"
+    );
+
+    let mut events = Vec::<GameEvent>::new();
+    engine::game::turns::start_next_turn(runner.state_mut(), &mut events);
+
+    // Fix #1: revert `state.post_replacement_token_substitution_count = None;`
+    // in start_next_turn → this stays Some(4) and fails.
+    assert_eq!(
+        runner.state().post_replacement_token_substitution_count,
+        None,
+        "turn start scrubs the transient copy-count seed"
+    );
+    // Fix #1 (applied-seed line): revert
+    // `state.post_replacement_token_choice_applied = None;` → this stays
+    // Some(..) and fails.
+    assert!(
+        runner
+            .state()
+            .post_replacement_token_choice_applied
+            .is_none(),
+        "turn start scrubs the transient self-suppression applied seed"
+    );
+}
+
+/// B5 — per-PLAYER window (not per-source): Moonlit A firing (and creating a copy,
+/// which records P0 in `players_who_created_token_this_turn`) consumes P0's window
+/// for the whole turn. A distinct Moonlit B installed afterward the SAME turn does
+/// NOT fire — "the first time you would create … each turn" is per-player, not
+/// keyed by source `ObjectId`. SWITCH DISCRIMINATOR: revert the eval to the
+/// per-source latch → B (a different, unlatched `ObjectId`) would wrongly prompt
+/// and produce an Elk copy, failing both assertions below.
+#[test]
+fn moonlit_window_is_per_player_not_per_source() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host_a = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let host_b = scenario.add_creature(P0, "Host Elk", 3, 3).id();
+    let mut runner = scenario.build();
+    set_copiable_subtype(runner.state_mut(), host_b, "Elk");
+    install_moonlit(runner.state_mut(), host_a, P0);
+
+    // Moonlit A fires on the first creation and makes a copy → records P0.
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(at_replacement_choice(&runner), "Moonlit A prompts");
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept A");
+    runner.advance_until_stack_empty();
+    assert!(
+        runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "A's copy consumed P0's per-player window"
+    );
+
+    // Moonlit B enters the same turn AFTER the window was spent → does NOT fire.
+    install_moonlit(runner.state_mut(), host_b, P0);
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "Moonlit B does NOT fire — P0's per-player window is already spent, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        host_copy_tokens(&runner, "Host Elk", P0).is_empty(),
+        "no Elk copy — B did not fire (per-player window, not per-source)"
+    );
+}
+
+/// Accept-path window recording (guards the removal of the per-source note fn): a
+/// single Moonlit present from the start, the first creation is accepted → a copy
+/// is created, which `record_token_created` records in the per-player set. A second
+/// creation the SAME turn then does NOT prompt. This is NOT a per-source→per-player
+/// switch discriminator (with one ever-present source both models agree); its job
+/// is to prove the ACCEPT path still closes the window through
+/// `record_token_created` now that `note_first_token_replacement_applied` is gone —
+/// were the copy path to stop recording the player, the second creation would
+/// wrongly prompt.
+#[test]
+fn moonlit_second_creation_same_turn_after_accept_does_not_fire() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    set_copiable_subtype(runner.state_mut(), host, "Ox");
+    install_moonlit(runner.state_mut(), host, P0);
+
+    // First creation: accept → a host-copy is created and records P0.
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(at_replacement_choice(&runner), "first creation prompts");
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept");
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        host_copy_tokens(&runner, "Host Ox", P0).len(),
+        1,
+        "accept produced one host-copy"
+    );
+    assert!(
+        runner
+            .state()
+            .players_who_created_token_this_turn
+            .contains(&P0),
+        "the copy recorded P0 in the per-player set"
+    );
+
+    // Second creation, same turn: window already spent → no prompt, no new copy.
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    assert!(
+        !at_replacement_choice(&runner),
+        "second same-turn creation does NOT prompt — accept consumed the window, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        host_copy_tokens(&runner, "Host Ox", P0).len(),
+        1,
+        "still exactly one host-copy — the second creation was not replaced"
+    );
+}
+
+/// B3-doubler (#1511 interaction): Moonlit + Doubling Season, create 1 token,
+/// accept → exactly 2 host-copies with no re-prompt/recursion. Doubling Season
+/// (a different source's rid, absent from the inherited applied set) still
+/// doubles the substitute copies; Moonlit does NOT re-fire on its own copies
+/// (inherited applied set, CR 614.5). Revert Step 5 (`HashSet::new()`)
+/// → the copies inherit no applied set → Doubling Season re-applies to the
+/// count-2 copy batch → >2 copies (and/or a re-prompt).
+#[test]
+fn moonlit_with_doubling_season_yields_two_host_copies_no_recursion() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Ox", 5, 4).id();
+    let mut runner = scenario.build();
+    set_copiable_subtype(runner.state_mut(), host, "Ox");
+    install_moonlit(runner.state_mut(), host, P0);
+    install_doubling_season(runner.state_mut(), P0);
+
+    resolve_token_source(
+        &mut runner,
+        P0,
+        "Create a 1/1 white Soldier creature token.",
+    );
+    // Drive every replacement prompt (apply candidate 0) to completion.
+    for _ in 0..8 {
+        if at_replacement_choice(&runner) {
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .expect("apply replacement");
+            runner.advance_until_stack_empty();
+        } else {
+            break;
+        }
+    }
+    assert!(
+        !at_replacement_choice(&runner),
+        "must not re-prompt/recurse on the substitute copies, got {:?}",
+        runner.state().waiting_for
+    );
+    let copies = host_copy_tokens(&runner, "Host Ox", P0);
+    assert_eq!(
+        copies.len(),
+        2,
+        "Moonlit (copies of host) doubled by Doubling Season → exactly 2 host-copies, \
+         not >2 (recursion) nor plain Soldiers"
+    );
+    for c in &copies {
+        assert_eq!(
+            (c.power, c.toughness),
+            (Some(5), Some(4)),
+            "each is a host-copy (5/4 Ox), not a copy-of-copy or a 1/1 Soldier"
+        );
+    }
+}
+
+/// P1 — parse round-trip: Moonlit lowers to the expected Optional CreateToken
+/// replacement with zero `Effect::Unimplemented`. Sibling reach-guard: Jinnie
+/// Fay's "if you would create one or more tokens…" still parses to a
+/// `ChooseOneOf` substitution, unaffected by Moonlit's specific antecedent arm.
+#[test]
+fn moonlit_parses_to_copy_of_host_replacement() {
+    use engine::types::ability::{
+        ControllerRef, Effect, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementMode,
+    };
+
+    let parsed = parse(
+        MOONLIT_ORACLE,
+        "Moonlit Meditation",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    assert_zero_unimplemented(&parsed, "Moonlit Meditation");
+
+    let rep = parsed
+        .replacements
+        .iter()
+        .find(|r| r.event == ReplacementEvent::CreateToken)
+        .expect("Moonlit CreateToken replacement");
+    assert_eq!(
+        rep.token_owner_scope,
+        Some(ControllerRef::You),
+        "'you would create' → You owner scope"
+    );
+    assert_eq!(
+        rep.condition,
+        Some(ReplacementCondition::FirstTokenCreationEachTurn {
+            player: ControllerRef::You,
+        }),
+        "first-time-each-turn gate"
+    );
+    assert!(
+        matches!(rep.mode, ReplacementMode::Optional { decline: None }),
+        "'you may instead' → Optional, got {:?}",
+        rep.mode
+    );
+    assert_eq!(
+        rep.valid_card, None,
+        "no valid_card gate — CreateToken has no affected object id"
+    );
+    let exec = rep.execute.as_deref().expect("execute payload");
+    match &*exec.effect {
+        Effect::CopyTokenOf { target, count, .. } => {
+            assert_eq!(
+                *target,
+                TargetFilter::AttachedTo,
+                "copies of the enchanted host"
+            );
+            assert_eq!(
+                *count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                "'that many' → EventContextAmount"
+            );
+        }
+        other => panic!("expected CopyTokenOf, got {other:?}"),
+    }
+
+    let jinnie = parse(
+        "If you would create one or more tokens, you may instead create that many \
+         1/1 green and white Rabbit creature tokens or that many 3/3 green and white \
+         Elk creature tokens.",
+        "Jinnie Fay, Jetmir's Second",
+        &[],
+        &["Legendary", "Creature"],
+        &["Cat", "Elf", "Druid"],
+    );
+    let jinnie_rep = jinnie
+        .replacements
+        .iter()
+        .find(|r| r.event == ReplacementEvent::CreateToken)
+        .expect("Jinnie CreateToken replacement still parses");
+    assert!(
+        matches!(
+            &*jinnie_rep.execute.as_deref().unwrap().effect,
+            Effect::ChooseOneOf { .. }
+        ),
+        "Jinnie remains a ChooseOneOf substitution, not stolen by Moonlit's arm"
     );
 }

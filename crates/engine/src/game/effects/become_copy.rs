@@ -1,3 +1,4 @@
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::layers::compute_current_copiable_values;
 use crate::types::ability::{
     ContinuousModification, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
@@ -12,12 +13,14 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (duration, additional_modifications) = match &ability.effect {
+    let (recipient, duration, additional_modifications) = match &ability.effect {
         Effect::BecomeCopy {
+            recipient,
             duration,
             additional_modifications,
             ..
         } => (
+            recipient.clone(),
             duration
                 .clone()
                 .or(ability.duration.clone())
@@ -25,6 +28,7 @@ pub fn resolve(
             additional_modifications.clone(),
         ),
         _ => (
+            TargetFilter::SelfRef,
             ability.duration.clone().unwrap_or(Duration::Permanent),
             Vec::new(),
         ),
@@ -108,24 +112,72 @@ pub fn resolve(
     }];
     modifications.extend(layered_mods);
 
-    // CR 611.2b + CR 110.5d: the copy modification applies to the SOURCE
-    // (`affected = SpecificObject { source_id }`), but a "for as long as that
-    // creature remains tapped" duration (Zygon Infiltrator) tracks the copy
-    // *target*'s tap state — a third object distinct from both source and
-    // affected. The parser cannot know the target's runtime `ObjectId`; capture
-    // it here and bind it as the duration subject so the target-relative
-    // `IsTapped { scope: Target }` condition resolves against the copy target.
-    let tce_id = state.add_transient_continuous_effect(
-        ability.source_id,
-        ability.controller,
-        duration,
-        TargetFilter::SpecificObject {
-            id: ability.source_id,
-        },
-        modifications,
-        None,
-    );
-    state.set_transient_duration_subject(tce_id, target_id);
+    // CR 611.2c: resolve the locked recipient set at resolution time. `SelfRef`
+    // (every existing single-subject card) is the source `~`; a typed group
+    // filter ("Shards you control", Niko) or `ParentTarget` selects a mass set,
+    // snapshotted to concrete ids now — later-entering members never join.
+    match &recipient {
+        // Existing single-subject cards — EXACT prior behavior, byte-identical.
+        TargetFilter::SelfRef => {
+            let tce_id = state.add_transient_continuous_effect(
+                ability.source_id,
+                ability.controller,
+                duration,
+                TargetFilter::SpecificObject {
+                    id: ability.source_id,
+                },
+                modifications,
+                None,
+            );
+            // CR 611.2b + CR 110.5d: the copy modification applies to the SOURCE
+            // (`affected = SpecificObject { source_id }`), but a "for as long as
+            // that creature remains tapped" duration (Zygon Infiltrator) tracks
+            // the copy *target*'s tap state — a third object distinct from both
+            // source and affected. Bind the donor as the duration subject so the
+            // target-relative `IsTapped { scope: Target }` condition resolves
+            // against the copy target.
+            state.set_transient_duration_subject(tce_id, target_id);
+        }
+        // CR 611.2c: mass recipient set. `ParentTarget` reads the inherited
+        // object target(s); a typed group filter resolves against the
+        // battlefield at resolution (Niko: "Shards you control").
+        _ => {
+            let recipient_ids: Vec<crate::types::identifiers::ObjectId> = match &recipient {
+                TargetFilter::ParentTarget => ability
+                    .targets
+                    .iter()
+                    .filter_map(|t| match t {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect(),
+                _ => {
+                    let ctx = FilterContext::from_ability(ability);
+                    state
+                        .battlefield
+                        .iter()
+                        .copied()
+                        .filter(|id| matches_target_filter(state, *id, &recipient, &ctx))
+                        .collect()
+                }
+            };
+            for id in recipient_ids {
+                let tce_id = state.add_transient_continuous_effect(
+                    ability.source_id,
+                    ability.controller,
+                    duration.clone(),
+                    TargetFilter::SpecificObject { id },
+                    modifications.clone(),
+                    None,
+                );
+                state.set_transient_duration_subject(tce_id, id);
+            }
+            // ponytail: `resolution_mods` (enter-as-copy counter / mana-cost
+            // exceptions, applied below on `source_id`) apply only on the SelfRef
+            // path — no mass become-copy card class carries those exceptions
+            // (Niko has none), so they stay a no-op here.
+        }
+    }
 
     // CR 707.9f: "Some exceptions to the copying process apply only if the
     // copy is or has certain characteristics" — flush the layer re-evaluation
@@ -210,6 +262,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -270,6 +323,7 @@ mod tests {
     ) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration,
                 mana_value_limit: None,
@@ -326,6 +380,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -392,6 +447,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: Some(Duration::UntilEndOfTurn),
                 mana_value_limit: None,
@@ -581,6 +637,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -648,6 +705,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -710,6 +768,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1106,6 +1165,7 @@ mod tests {
         // Resolve BecomeCopy with exactly the modifications the parser would emit.
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1171,6 +1231,7 @@ mod tests {
         // Spider-Man copies Elesh Norn with SetName override.
         let spidey_ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1241,6 +1302,7 @@ mod tests {
         // current_trigger_index = 0.
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1333,6 +1395,7 @@ mod tests {
         // exactly what the parser emits for "and she has this ability").
         let irma_to_bear = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1422,6 +1485,7 @@ mod tests {
 
         let assassin_to_bear = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1472,6 +1536,7 @@ mod tests {
         // Source has zero printed triggers — index 0 is out of bounds.
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1515,6 +1580,7 @@ mod tests {
         let copy_ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1527,6 +1593,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1601,6 +1668,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,

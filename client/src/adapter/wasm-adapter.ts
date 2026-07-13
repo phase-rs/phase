@@ -1,6 +1,7 @@
 import type {
   BatchResolveResult,
   EngineAdapter,
+  EngineSnapshot,
   FormatConfig,
   GameAction,
   GameState,
@@ -11,7 +12,7 @@ import type {
   ViewerSnapshot,
   WaitingFor,
 } from "./types";
-import { AdapterError, AdapterErrorCode, isStaleActionMessage, isStateLostMessage } from "./types";
+import { AdapterError, AdapterErrorCode, isStaleActionMessage, isStateLostMessage, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { isBracketEstimate } from "../types/bracketEstimate";
 import { EngineWorkerClient } from "./engine-worker-client";
@@ -295,6 +296,32 @@ export class WasmAdapter implements EngineAdapter {
     try {
       if (this.engine) return await this.engine.getLegalActionsForViewer(viewerId);
       return await this.fallback!.getLegalActionsForViewer(viewerId);
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  /**
+   * Atomic state + legal-actions pair, stamped when the response ARRIVES.
+   *
+   * Worker responses post in worker-processing order and awaiting callers
+   * resume in resolution order, so stamping here reproduces engine order even
+   * with concurrent callers. The `state` half gets the same
+   * `unwrapClientGameState` envelope flatten `getState` applies — without it a
+   * raw `{ state, derived }` envelope would reach the store and silently break
+   * every `derived` consumer.
+   */
+  async getSnapshot(): Promise<EngineSnapshot> {
+    this.assertInitialized();
+    try {
+      const raw = this.engine
+        ? await this.engine.getSnapshot()
+        : await this.fallback!.getSnapshot();
+      return {
+        state: unwrapClientGameState(raw.state),
+        legalResult: raw.legalResult,
+        seq: nextSnapshotSeq(),
+      };
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -637,6 +664,7 @@ interface MainThreadFallback {
   getState(): Promise<GameState>;
   getFilteredState(viewerId: number): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
+  getSnapshot(): Promise<{ state: GameState; legalResult: LegalActionsResult }>;
   getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult>;
   getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot>;
   getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null>;
@@ -708,6 +736,20 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         const r = wasm.get_legal_actions_js();
         if (r === null) throw new Error("NOT_INITIALIZED: get_legal_actions_js returned null");
         return r as LegalActionsResult;
+      }),
+
+    // Same atomicity guarantee as the worker's `getSnapshot` case: both WASM
+    // exports are synchronous and run back-to-back inside ONE `enqueue`
+    // callback, so no other queued operation (notably `submit_action`) can
+    // interleave between them.
+    getSnapshot: () =>
+      enqueue(() => {
+        const s = wasm.get_game_state();
+        const r = wasm.get_legal_actions_js();
+        if (s === null || r === null) {
+          throw new Error("NOT_INITIALIZED: get_game_state/get_legal_actions_js returned null");
+        }
+        return { state: s as GameState, legalResult: r as LegalActionsResult };
       }),
 
     getLegalActionsForViewer: (viewerId: number) =>

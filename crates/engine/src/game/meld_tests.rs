@@ -615,3 +615,286 @@ fn meld_entry_consults_enters_with_replacement() {
         "the meld still produced the merged permanent through the pipeline entry"
     );
 }
+
+/// CR 201.2a + CR 201.5c: end-to-end proof that the FIX-3 self-ref mask makes a
+/// shared-token meld RESULT resolvable at runtime. Drives the real parser
+/// (`parse_oracle_text`) → resolver (`perform_meld`) seam for Titania, whose
+/// result "Titania, Gaea Incarnate" shares its pre-comma legendary token with the
+/// instigator. The registry is seeded under the TRUE result key; the ResolvedAbility
+/// carries the string the parser actually emitted. Reverting the mask makes the
+/// parser emit "~, Gaea Incarnate", which (a) trips the string assertion and (b)
+/// misses the seeded face so `perform_meld` is a silent no-op — the merge
+/// assertions then fail. This is the "green-but-dead" guard the mask exists for.
+#[test]
+fn parsed_meld_result_name_resolves_through_registry() {
+    const TITANIA: &str = "Reach\nWhenever one or more land cards are put into your graveyard \
+         from anywhere, you gain 2 life.\nAt the beginning of your upkeep, if there are four or \
+         more land cards in your graveyard and you both own and control Titania, Voice of Gaea \
+         and a land named Argoth, Sanctum of Nature, exile them, then meld them into Titania, \
+         Gaea Incarnate.";
+    const RESULT: &str = "Titania, Gaea Incarnate";
+
+    // Extract the meld RESULT string the production parser emits.
+    fn find_meld(
+        def: &crate::types::ability::AbilityDefinition,
+    ) -> Option<(String, String, String)> {
+        if let Effect::Meld {
+            source,
+            partner,
+            result,
+        } = def.effect.as_ref()
+        {
+            return Some((source.clone(), partner.clone(), result.clone()));
+        }
+        def.sub_ability
+            .as_deref()
+            .and_then(find_meld)
+            .or_else(|| def.else_ability.as_deref().and_then(find_meld))
+            .or_else(|| def.mode_abilities.iter().find_map(find_meld))
+    }
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        TITANIA,
+        "Titania, Voice of Gaea",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let (src_name, partner_name, result_name) = parsed
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .find_map(find_meld)
+        .expect("Titania lowers to an Effect::Meld");
+    assert_eq!(
+        result_name, RESULT,
+        "mask keeps the shared-token result verbatim"
+    );
+
+    // Battlefield: both co-owned/controlled halves under P0.
+    let mut sc = GameScenario::new();
+    let source = sc.add_creature(P0, &src_name, 3, 4).id();
+    let partner = sc.add_creature(P0, &partner_name, 1, 1).id();
+    // Seed the registry under the TRUE result-card key (what card-data registers),
+    // NOT under the parsed string — so a corrupted "~, …" cannot coincidentally hit.
+    let mut face = CardFace {
+        name: RESULT.to_string(),
+        power: Some(PtValue::Fixed(0)),
+        toughness: Some(PtValue::Fixed(0)),
+        ..CardFace::default()
+    };
+    face.card_type.core_types.push(CoreType::Creature);
+    Arc::make_mut(&mut sc.state.card_face_registry).insert(RESULT.to_lowercase(), face);
+    let mut state = sc.state;
+
+    let ability = ResolvedAbility::new(
+        Effect::Meld {
+            source: src_name,
+            partner: partner_name,
+            result: result_name,
+        },
+        Vec::new(),
+        source,
+        P0,
+    );
+    let mut events = Vec::new();
+    perform_meld(&mut state, &ability, &mut events).unwrap();
+
+    let survivor = state.objects.get(&source).expect("survivor persists");
+    assert_eq!(
+        survivor.merged_components,
+        vec![source, partner],
+        "the parser's result string resolved into a melded permanent"
+    );
+    assert_eq!(
+        survivor.name, RESULT,
+        "survivor presents Titania, Gaea Incarnate"
+    );
+}
+
+/// CR 118.12 + CR 608.2c (end-to-end): Vanille's meld trigger lowers to an
+/// OPTIONAL `PayCost {3}{B}{G}` whose `Effect::Meld` sub-ability is gated on
+/// `OptionalEffectPerformed`. Drives the FULL production seam — parse the real
+/// Oracle text, build the trigger's execute, resolve it through
+/// `resolve_ability_chain` (depth 0, exactly as the engine resolves a stack
+/// trigger), then submit the real `GameAction::DecideOptionalEffect` through
+/// `GameRunner::act` — for BOTH branches:
+///
+///   * accept  ⇒ the {3}{B}{G} pay is performed, so the gated meld fires: Vanille
+///     + Fang meld into Ragnarok, and the pool is drained.
+///   * decline ⇒ the pay is NOT performed, so `OptionalEffectPerformed` is false
+///     and the meld does NOT fire (CR 118.12: declining a resolution cost must not
+///     perform the gated effect). Both halves remain; no mana is spent.
+///
+/// Revert discriminators: reverting the `parse_meld_gate` / per-clause dispatch
+/// (Meld → Unimplemented) makes the ACCEPT branch fail to meld; reverting the
+/// `OptionalEffectPerformed` sub-gate makes the DECLINE branch meld anyway,
+/// failing the decline assertions. Non-vacuity: each branch first asserts the
+/// `OptionalEffectChoice` pay prompt is actually reached before the decision.
+#[test]
+fn vanille_optional_pay_gates_meld_accept_vs_decline() {
+    use crate::game::ability_utils::build_resolved_from_def;
+    use crate::game::effects::resolve_ability_chain;
+    use crate::game::scenario::GameRunner;
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::AbilityDefinition;
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
+    use crate::types::mana::{ManaType, ManaUnit};
+
+    // Verbatim Scryfall Oracle text (checked 2026-07 via api.scryfall.com).
+    const VANILLE: &str = "When Vanille enters, mill two cards, then return a permanent card \
+         from your graveyard to your hand.\nAt the beginning of your first main phase, if you \
+         both own and control Vanille and a creature named Fang, Fearless l'Cie, you may pay \
+         {3}{B}{G}. If you do, exile them, then meld them into Ragnarok, Divine Deliverance.";
+    const RESULT: &str = "Ragnarok, Divine Deliverance";
+
+    // The meld-bearing trigger's execute: a `PayCost` with a `Meld` sub-ability.
+    fn vanille_meld_execute() -> AbilityDefinition {
+        let parsed = parse_oracle_text(
+            VANILLE,
+            "Vanille, Cheerful l'Cie",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &[],
+        );
+        parsed
+            .triggers
+            .into_iter()
+            .find_map(|t| {
+                let execute = t.execute?;
+                let is_meld_pay = matches!(execute.effect.as_ref(), Effect::PayCost { .. })
+                    && execute
+                        .sub_ability
+                        .as_ref()
+                        .is_some_and(|s| matches!(s.effect.as_ref(), Effect::Meld { .. }));
+                is_meld_pay.then_some(*execute)
+            })
+            .expect("Vanille has a PayCost→Meld trigger")
+    }
+
+    // Both halves co-owned/controlled by P0, Ragnarok result face seeded, and
+    // exactly {3}{B}{G} (one Black, one Green, three generic) in P0's pool.
+    fn setup() -> (GameRunner, ObjectId, ObjectId) {
+        let mut sc = GameScenario::new();
+        let vanille = sc.add_creature(P0, "Vanille, Cheerful l'Cie", 3, 3).id();
+        let fang = sc.add_creature(P0, "Fang, Fearless l'Cie", 4, 4).id();
+        // Non-zero P/T: `GameRunner::act` runs SBAs after the meld resolves, so a
+        // 0/0 result face would be destroyed (CR 704.5f) and split back before the
+        // assertions. Ragnarok is 8/8; any positive P/T keeps the melded permanent
+        // alive so the accept-branch merge is observable.
+        let mut face = CardFace {
+            name: RESULT.to_string(),
+            power: Some(PtValue::Fixed(8)),
+            toughness: Some(PtValue::Fixed(8)),
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        Arc::make_mut(&mut sc.state.card_face_registry).insert(RESULT.to_lowercase(), face);
+        sc.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Black, ObjectId(9001), false, vec![]),
+                ManaUnit::new(ManaType::Green, ObjectId(9002), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(9003), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(9004), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(9005), false, vec![]),
+            ],
+        );
+        (sc.build(), vanille, fang)
+    }
+
+    fn pool_total(runner: &GameRunner) -> usize {
+        runner
+            .state()
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .map(|p| p.mana_pool.total())
+            .unwrap_or(0)
+    }
+
+    let execute = vanille_meld_execute();
+
+    // ── ACCEPT: pay {3}{B}{G} → the gated meld fires. ───────────────────────
+    {
+        let (mut runner, vanille, fang) = setup();
+        let resolved = build_resolved_from_def(&execute, vanille, P0);
+        let mut events = Vec::new();
+        resolve_ability_chain(runner.state_mut(), &resolved, &mut events, 0)
+            .expect("Vanille meld execute resolves to the optional pay prompt");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "reach-guard: the you-may-pay {{3}}{{B}}{{G}} prompt must be surfaced, got {:?}",
+            runner.state().waiting_for
+        );
+
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("accepting the optional pay is handled");
+
+        let survivor = runner
+            .state()
+            .objects
+            .get(&vanille)
+            .expect("Vanille persists");
+        assert_eq!(
+            survivor.merged_components,
+            vec![vanille, fang],
+            "accept: the {{3}}{{B}}{{G}} pay was performed → Vanille + Fang melded"
+        );
+        assert_eq!(survivor.name, RESULT, "accept: survivor presents Ragnarok");
+        assert!(
+            !runner.state().battlefield.iter().any(|&id| id == fang),
+            "accept: Fang is absorbed into the melded permanent"
+        );
+        assert_eq!(
+            pool_total(&runner),
+            0,
+            "accept: the {{3}}{{B}}{{G}} was spent from the pool"
+        );
+    }
+
+    // ── DECLINE (CR 118.12 discriminator): no pay → NO meld. ────────────────
+    {
+        let (mut runner, vanille, fang) = setup();
+        let resolved = build_resolved_from_def(&execute, vanille, P0);
+        let mut events = Vec::new();
+        resolve_ability_chain(runner.state_mut(), &resolved, &mut events, 0)
+            .expect("Vanille meld execute resolves to the optional pay prompt");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "reach-guard: the pay prompt must be surfaced before declining, got {:?}",
+            runner.state().waiting_for
+        );
+
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .expect("declining the optional pay is handled");
+
+        let vanille_obj = runner
+            .state()
+            .objects
+            .get(&vanille)
+            .expect("Vanille persists");
+        assert!(
+            vanille_obj.merged_components.is_empty(),
+            "decline: NO meld — reverting the OptionalEffectPerformed sub-gate would meld here"
+        );
+        assert!(
+            runner.state().battlefield.iter().any(|&id| id == vanille)
+                && runner.state().battlefield.iter().any(|&id| id == fang),
+            "decline: both halves remain independent on the battlefield"
+        );
+        assert_eq!(
+            pool_total(&runner),
+            5,
+            "decline: no mana was spent (CR 118.12: the cost is not paid)"
+        );
+    }
+}

@@ -25,6 +25,15 @@ use super::oracle_util::strip_reminder_text;
 /// Flying, trample
 /// ```
 ///
+/// Return shape of [`parse_level_blocks`]: level-gated statics with their
+/// `(first_line, last_line)` spans, consumed line indices, and body ability
+/// lines paired with the level condition that gates them.
+type LevelBlocksParse = (
+    Vec<(StaticDefinition, usize, usize)>,
+    Vec<usize>,
+    Vec<(String, StaticCondition, usize)>,
+);
+
 /// Each LEVEL block defines static abilities gated on level counter count.
 /// P/T lines use SetPower/SetToughness (Layer 7b), keyword lines use AddKeyword (Layer 6).
 /// Both are conditioned on `StaticCondition::HasCounters` with min/max.
@@ -35,15 +44,17 @@ use super::oracle_util::strip_reminder_text;
 /// - `Vec<(String, StaticCondition)>`: Ability text lines found within level blocks,
 ///   paired with the level condition they should be gated by. These need re-parsing
 ///   by the main Oracle dispatcher as triggers, activated abilities, or statics.
-pub(crate) fn parse_level_blocks(
-    lines: &[&str],
-    card_name: &str,
-) -> (
-    Vec<StaticDefinition>,
-    Vec<usize>,
-    Vec<(String, StaticCondition)>,
-) {
-    let mut statics = Vec::new();
+pub(crate) fn parse_level_blocks(lines: &[&str], card_name: &str) -> LevelBlocksParse {
+    // Each static carries its source span `(first_line, last_line)` so
+    // `parse_oracle_ir` emits it in printed order (unit-4 c2). Body statics AND the
+    // block-SUMMARY static are all emitted as SINGLE-LINE spans: body statics at
+    // their own line, the summary at the LEVEL header line. The document builder
+    // keys on `(first_line, start_byte, ordinal)` (span END not in the key), so a
+    // header-only summary span sorts identically to a header..=last-mod-line span
+    // yet cannot byte-overlap a body static printed between the header and a later
+    // P/T/keyword line (which would trip `OverlappingSiblingSpans`).
+    // `ability_lines` likewise carry their line.
+    let mut statics: Vec<(StaticDefinition, usize, usize)> = Vec::new();
     let mut consumed_indices = Vec::new();
     let mut ability_lines = Vec::new();
 
@@ -54,6 +65,7 @@ pub(crate) fn parse_level_blocks(
 
         // Detect "LEVEL N-M" or "LEVEL N+"
         if let Some(range) = parse_level_header(&lower) {
+            let header = i;
             consumed_indices.push(i);
             i += 1;
 
@@ -130,7 +142,8 @@ pub(crate) fn parse_level_blocks(
                     consumed_indices.push(i);
                     for mut sd in multi {
                         sd.condition = Some(condition.clone());
-                        statics.push(sd);
+                        // Body static: emitted at its OWN line (single-line span).
+                        statics.push((sd, i, i));
                     }
                     i += 1;
                     continue;
@@ -138,7 +151,7 @@ pub(crate) fn parse_level_blocks(
                 if let Some(mut sd) = parse_static_line(&static_text) {
                     consumed_indices.push(i);
                     sd.condition = Some(condition.clone());
-                    statics.push(sd);
+                    statics.push((sd, i, i));
                     i += 1;
                     continue;
                 }
@@ -158,7 +171,7 @@ pub(crate) fn parse_level_blocks(
                         .is_ok();
                 if is_activated || is_trigger {
                     consumed_indices.push(i);
-                    ability_lines.push((next.to_string(), condition.clone()));
+                    ability_lines.push((next.to_string(), condition.clone(), i));
                     i += 1;
                     continue;
                 }
@@ -168,13 +181,25 @@ pub(crate) fn parse_level_blocks(
             }
 
             if !modifications.is_empty() {
-                statics.push(
+                // CR 711: the block-summary static is emitted as a SINGLE-LINE
+                // header span. The document builder keys items on
+                // `(first_line, start_byte, ordinal_within_span)` — the span END is
+                // NOT in the key — so anchoring at the header alone gives the summary
+                // the same sort position (and byte-identical lowered output) as a
+                // header..=last-mod-line span would, while its byte range can no
+                // longer overlap a body static printed BETWEEN the header and a later
+                // P/T/keyword line (which would trip `OverlappingSiblingSpans` and
+                // panic `emit`). Body statics carry their own single line; the
+                // summary sorts first within the block by its header line.
+                statics.push((
                     StaticDefinition::continuous()
                         .affected(TargetFilter::SelfRef)
                         .condition(condition)
                         .modifications(modifications)
                         .description(description_parts.join(" / ")),
-                );
+                    header,
+                    header,
+                ));
             }
         } else {
             i += 1;
@@ -222,6 +247,28 @@ fn parse_pt_line(text: &str) -> Option<(i32, i32)> {
 mod tests {
     use super::*;
 
+    /// u4-c2 test shim: map the source-span-tagged preprocessor return back to the
+    /// bare-def shape the existing assertions read.
+    #[allow(clippy::type_complexity)]
+    fn level_test_blocks(
+        lines: &[&str],
+        name: &str,
+    ) -> (
+        Vec<StaticDefinition>,
+        Vec<usize>,
+        Vec<(String, StaticCondition)>,
+    ) {
+        let (statics, consumed, ability_lines) = parse_level_blocks(lines, name);
+        (
+            statics.into_iter().map(|(s, _, _)| s).collect(),
+            consumed,
+            ability_lines
+                .into_iter()
+                .map(|(text, cond, _)| (text, cond))
+                .collect(),
+        )
+    }
+
     #[test]
     fn parse_level_bounded_header() {
         assert!(matches!(
@@ -248,7 +295,7 @@ mod tests {
             "LEVEL 8+",
             "8/8",
         ];
-        let (statics, consumed, _ability_lines) = parse_level_blocks(&lines, "Test Card");
+        let (statics, consumed, _ability_lines) = level_test_blocks(&lines, "Test Card");
 
         // Should consume indices 1-5 (not index 0 which is "Level up {R}")
         assert!(!consumed.contains(&0));
@@ -284,7 +331,7 @@ mod tests {
             "6/6",
             "Whenever this creature attacks, it deals 6 damage to each creature defending player controls.",
         ];
-        let (statics, consumed, ability_lines) = parse_level_blocks(&lines, "Test Card");
+        let (statics, consumed, ability_lines) = level_test_blocks(&lines, "Test Card");
 
         // P/T modifications parsed as static
         assert_eq!(statics.len(), 1);
@@ -319,7 +366,7 @@ mod tests {
             "2/4",
             "{T}: This creature deals 3 damage to any target.",
         ];
-        let (statics, consumed, ability_lines) = parse_level_blocks(&lines, "Test Card");
+        let (statics, consumed, ability_lines) = level_test_blocks(&lines, "Test Card");
 
         // Two P/T statics
         assert_eq!(statics.len(), 2);
@@ -368,7 +415,7 @@ mod tests {
             "Flying",
             "Other Merfolk creatures you control get +1/+1.",
         ];
-        let (statics, consumed, ability_lines) = parse_level_blocks(&lines, "Coralhelm Commander");
+        let (statics, consumed, ability_lines) = level_test_blocks(&lines, "Coralhelm Commander");
 
         // Lord pump parsed directly as statics[0] (encountered first in inner loop),
         // P/T + keyword block pushed as statics[1] (after inner loop completes).

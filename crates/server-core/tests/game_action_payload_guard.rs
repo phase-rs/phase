@@ -1,9 +1,14 @@
 //! Wire-payload bounds for in-game `GameAction` bodies (see
 //! `server_core::game_action_payload_guard`).
 
+use engine::analysis::decision_template::{
+    DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate, IterationCount,
+    MayChoiceOption, PinnedDecision, ReplayMode,
+};
 use engine::types::actions::{DebugAction, DebugTokenRequest};
 use engine::types::counter::CounterType;
-use engine::types::game_state::{ManaChoice, ShardChoice};
+use engine::types::game_state::{ManaChoice, ShardChoice, YieldTarget};
+use engine::types::identifiers::CardId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaType;
 use engine::types::match_config::DeckCardCount;
@@ -187,4 +192,61 @@ fn rejects_oversized_debug_token_keyword_ast_payload() {
 
     let err = guard_game_action_payload(&action).unwrap_err();
     assert!(err.contains("Debug.CreateToken.request.characteristics.keywords[0]"));
+}
+
+// PR-7 Phase 3: CR 732.2a loop-shortcut declaration payload bounds.
+
+fn shortcut_template(decision_count: usize) -> DecisionTemplate {
+    let slot = DecisionSlot {
+        source: YieldTarget::AllCopies {
+            card_id: CardId(1),
+            trigger_description: None,
+        },
+        index: 0,
+    };
+    DecisionTemplate {
+        owner: PlayerId(0),
+        decisions: vec![
+            PinnedDecision::MayChoice {
+                slot,
+                take: MayChoiceOption::Take
+            };
+            decision_count
+        ],
+        replay: ReplayMode::Static,
+        key: DecisionGroupKey {
+            sources: vec![],
+            kind: DecisionKind::LoopChoice,
+        },
+    }
+}
+
+#[test]
+fn rejects_oversized_declare_shortcut_template() {
+    let action = GameAction::DeclareShortcut {
+        count: IterationCount::UntilLethal,
+        template: Some(shortcut_template(MAX_ACTION_LIST_LEN + 1)),
+    };
+    assert!(
+        guard_game_action_payload(&action).is_err(),
+        "a DeclareShortcut template pin list exceeding MAX_ACTION_LIST_LEN must be rejected"
+    );
+}
+
+#[test]
+fn accepts_within_bound_declare_shortcut_template() {
+    let action = GameAction::DeclareShortcut {
+        count: IterationCount::UntilLethal,
+        template: Some(shortcut_template(4)),
+    };
+    assert!(
+        guard_game_action_payload(&action).is_ok(),
+        "a realistically sized DeclareShortcut template must be accepted — proves the bound is real, not vacuous"
+    );
+    // The Phase-3 default (no pinned template) is trivially accepted.
+    assert!(guard_game_action_payload(&GameAction::DeclareShortcut {
+        count: IterationCount::UntilLethal,
+        template: None,
+    })
+    .is_ok());
 }

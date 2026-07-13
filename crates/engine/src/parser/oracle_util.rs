@@ -456,9 +456,10 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
 
-    // CR 609.3: "that many" / "that much" — chained-effect amount referring
-    // to the previous effect's count. Resolves to `EventContextAmount` (which
-    // falls back to `state.last_effect_count` for chained sub-ability
+    // CR 608.2c: "that many" / "that much" — an anaphoric back-reference to the
+    // previous effect's count (read the whole text and apply the rules of
+    // English). Resolves to `EventContextAmount` (which falls back to
+    // `state.last_effect_count` for chained sub-ability
     // continuations). Composes with the "twice"/"three times" multipliers
     // above so "twice that many cards" parses as Multiply{2, EventContextAmount}.
     if let Some(((), rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
@@ -1389,6 +1390,24 @@ pub fn has_unconsumed_conditional(text: &str) -> bool {
         .any(|kw| lower.contains(kw))
 }
 
+/// CR 201.5c: Some cards refer to themselves by a shortened printed name.
+///
+/// For comma-form names, the short self-reference is the span before the comma
+/// after removing MTGJSON's structural Alchemy `A-` prefix.
+pub(crate) fn comma_short_self_name(card_name: &str) -> Option<&str> {
+    let effective_name = if card_name.as_bytes().get(0..2) == Some(b"A-") {
+        &card_name[2..]
+    } else {
+        card_name
+    };
+    let (_, (short_name, _)) = nom_primitives::split_once_on(effective_name, ", ").ok()?;
+    if short_name.len() >= 2 {
+        Some(short_name)
+    } else {
+        None
+    }
+}
+
 /// Replace all occurrences of `needle` in `haystack` with `replacement`,
 /// case-sensitively, only at word boundaries.
 fn replace_all_words_case_sensitive(haystack: &str, needle: &str, replacement: &str) -> String {
@@ -1655,6 +1674,19 @@ fn unmask_card_name_keyword_action(text: String, originals: &[String]) -> String
 
 fn parse_card_named_literal_prefix(input: &str) -> OracleResult<'_, usize> {
     alt((
+        // CR 201.2a + CR 201.5c: a meld RESULT name ("meld them into Titania,
+        // Gaea Incarnate") is a distinct object's literal name, not a self-ref to
+        // the instigator. Mask it during `~` normalization so a legend whose
+        // result shares its pre-comma short name (Titania, Voice of Gaea →
+        // "Titania, Gaea Incarnate"; Urza, Lord Protector → "Urza, Planeswalker")
+        // is not folded to "~, …" — a corrupted result string that later misses
+        // the runtime meld-result registry lookup (green-but-dead). The name span
+        // terminates at "." (`parse_card_named_clause_boundary`), so the whole
+        // comma-bearing result masks as one unit. Results that share no token with
+        // the instigator (Gisela → Brisela) are already clean; the mask is a no-op
+        // for them. Improvement-only for the activated melds' result string
+        // (Urza, Lord Protector) — their activated-meld runtime path is unchanged.
+        value("meld them into ".len(), tag("meld them into ")),
         value("permanents named ".len(), tag("permanents named ")),
         value("permanent named ".len(), tag("permanent named ")),
         value("creatures named ".len(), tag("creatures named ")),
@@ -2122,11 +2154,8 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     // Part-Time Mutant" (full form, inside an except clause). The earlier
     // `replace_all_words` is word-boundary-aware, so re-running on the
     // residue cannot re-touch a `~` produced by the prior pass.
-    if let Some(comma_pos) = effective_name.find(", ") {
-        let short_name = &effective_name[..comma_pos];
-        if short_name.len() >= 2 {
-            result = replace_all_words(&result, short_name, "~");
-        }
+    if let Some(short_name) = comma_short_self_name(card_name) {
+        result = replace_all_words(&result, short_name, "~");
     }
 
     // "Of"-based short name: "Rosie Cotton of South Lane" → "Rosie Cotton"
@@ -2406,6 +2435,41 @@ mod tests {
     }
 
     #[test]
+    fn normalize_masks_shared_token_meld_result_name() {
+        // CR 201.2a + CR 201.5c: a meld RESULT whose name shares its instigator's
+        // pre-comma short token must not be folded to `~`. Titania, Voice of Gaea →
+        // "Titania, Gaea Incarnate" and Urza, Lord Protector → "Urza, Planeswalker"
+        // both share the leading legendary token; the "meld them into " mask arm
+        // protects the whole comma-bearing result span so the result string stays
+        // verbatim (a corrupted "~, …" would later miss the runtime meld registry).
+        assert_eq!(
+            normalize_card_name_refs(
+                "you both own and control Titania, Voice of Gaea and a land named Argoth, \
+                 Sanctum of Nature, exile them, then meld them into Titania, Gaea Incarnate.",
+                "Titania, Voice of Gaea"
+            ),
+            "you both own and control ~ and a land named Argoth, Sanctum of Nature, exile \
+             them, then meld them into Titania, Gaea Incarnate."
+        );
+        assert_eq!(
+            normalize_card_name_refs(
+                "exile them, then meld them into Urza, Planeswalker.",
+                "Urza, Lord Protector"
+            ),
+            "exile them, then meld them into Urza, Planeswalker."
+        );
+        // Control: a result sharing no token with its instigator was already clean
+        // and stays clean (the mask is a no-op).
+        assert_eq!(
+            normalize_card_name_refs(
+                "exile them, then meld them into Brisela, Voice of Nightmares.",
+                "Gisela, the Broken Blade"
+            ),
+            "exile them, then meld them into Brisela, Voice of Nightmares."
+        );
+    }
+
+    #[test]
     fn normalize_preserves_keyword_action_card_name_regenerate() {
         // CR 701.19a: the card Regenerate's own name IS the keyword-action verb.
         // `mask_card_name_keyword_action` must protect the leading verb from `~`
@@ -2636,6 +2700,20 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("When Sprouting Goblin enters", "A-Sprouting Goblin"),
             "When ~ enters"
+        );
+    }
+
+    #[test]
+    fn comma_short_self_name_extracts_comma_prefix() {
+        assert_eq!(comma_short_self_name("Mishra, Eminent One"), Some("Mishra"));
+        assert_eq!(comma_short_self_name("Gilded Lotus"), None);
+    }
+
+    #[test]
+    fn comma_short_self_name_strips_alchemy_prefix() {
+        assert_eq!(
+            comma_short_self_name("A-Mishra, Eminent One"),
+            Some("Mishra")
         );
     }
 

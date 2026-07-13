@@ -100,6 +100,8 @@ fn park_search_observer_triggers(
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
     {
         state.resolving_stack_entry = None;
+        // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
+        state.resolution_source_relatch = None;
     }
     ResolutionChoiceOutcome::WaitingForWithParkedObservers(state.waiting_for.clone())
 }
@@ -582,6 +584,10 @@ pub(super) fn handle_resolution_choice(
             for &card_id in &bottom_cards {
                 player_state.library.push_back(card_id);
             }
+            // CR 401.5 + CR 611.3a: Scry reorders the library top directly (not
+            // through the zone-move seam), so a continuous `TopOfLibraryMatches`
+            // static must be re-evaluated — self-gated so it's a no-op otherwise.
+            crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
@@ -1286,6 +1292,7 @@ pub(super) fn handle_resolution_choice(
                         events.push(GameEvent::EffectResolved {
                             kind: EffectKind::Learn,
                             source_id: ObjectId(0),
+                            subject: None,
                         });
                         state.waiting_for = super::replacement::replacement_choice_waiting_for(
                             choice_player,
@@ -1310,6 +1317,7 @@ pub(super) fn handle_resolution_choice(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Learn,
                 source_id: ObjectId(0),
+                subject: None,
             });
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
@@ -1679,6 +1687,7 @@ pub(super) fn handle_resolution_choice(
                 chosen_pile_effect,
                 unchosen_pile_effect,
                 source_id,
+                pile_source,
             },
             GameAction::ChoosePileOpponent { opponent },
         ) => {
@@ -1696,6 +1705,7 @@ pub(super) fn handle_resolution_choice(
                 chosen_pile_effect,
                 unchosen_pile_effect,
                 source_id,
+                pile_source,
             };
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -1716,6 +1726,7 @@ pub(super) fn handle_resolution_choice(
                 chosen_pile_effect,
                 unchosen_pile_effect,
                 source_id,
+                pile_source,
             },
             GameAction::SubmitPilePartition { pile_a },
         ) => {
@@ -1758,6 +1769,7 @@ pub(super) fn handle_resolution_choice(
                     chosen_pile_effect,
                     unchosen_pile_effect: unchosen_pile_effect.clone(),
                     source_id,
+                    pile_source,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {
@@ -1770,6 +1782,7 @@ pub(super) fn handle_resolution_choice(
                     chosen_pile_effect,
                     unchosen_pile_effect,
                     source_id,
+                    pile_source,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
@@ -1788,6 +1801,7 @@ pub(super) fn handle_resolution_choice(
                 chosen_pile_effect,
                 unchosen_pile_effect,
                 source_id,
+                pile_source,
             },
             GameAction::ChoosePile { pile },
         ) => {
@@ -1825,6 +1839,7 @@ pub(super) fn handle_resolution_choice(
                     chosen_pile_effect,
                     unchosen_pile_effect,
                     source_id,
+                    pile_source,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {
@@ -1897,6 +1912,10 @@ pub(super) fn handle_resolution_choice(
                         None => Some(Zone::Graveyard),
                     }
                 };
+                // CR 401.5 + CR 611.3a: Dig kept cards on top by editing the
+                // library directly, so a `TopOfLibraryMatches` static must be
+                // re-evaluated (self-gated on liveness).
+                crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
                 if let Some(zone) = move_unkept_to {
                     // CR 614.6 + CR 603.10a: route the unkept pile through the
                     // zone-change pipeline so a per-card `Moved` graveyard→exile
@@ -2864,6 +2883,7 @@ pub(super) fn handle_resolution_choice(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Connive,
                 source_id: conniver_id,
+                subject: None,
             });
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
@@ -2946,7 +2966,7 @@ pub(super) fn handle_resolution_choice(
             }
             let events_after_move = events.len();
 
-            // CR 608.2e + CR 609.3: APNAP discard steps accumulate into one
+            // CR 608.2e + CR 608.2c: APNAP discard steps accumulate into one
             // tracked set. The discard handler is the single authority for
             // recording the cards it moved — `discard_as_cost_with_source`
             // runs outside `resolve_effect`, so its non-interactive sibling's
@@ -3023,6 +3043,7 @@ pub(super) fn handle_resolution_choice(
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
                 source_id,
+                subject: None,
             });
 
             // CR 614.12a: this `DiscardChoice` was the interactive payment of an
@@ -3190,6 +3211,48 @@ pub(super) fn handle_resolution_choice(
                 let _ = state.devour_eligible_snapshot.take();
             }
 
+            if matches!(effect_kind, EffectKind::Sacrifice)
+                && state.pending_player_scope_sacrifice_choice.is_some()
+            {
+                // CR 101.4: If multiple players make choices for one
+                // instruction, collect those choices before the simultaneous
+                // sacrifice action happens.
+                let outcome = effects::advance_pending_player_scope_sacrifice_choice(
+                    state, player, &chosen, events,
+                )
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                match outcome {
+                    effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                    effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                    effects::PendingPlayerScopeSacrificeOutcome::Completed {
+                        events_before_sacrifice,
+                        events_after_sacrifice,
+                    } => {
+                        set_priority(state, player);
+                        resume_with_error_propagation(state, events)?;
+                        if let Some(outcome) = batch_or_drain_observer_triggers(
+                            state,
+                            events,
+                            events_before_sacrifice,
+                            events_after_sacrifice,
+                        ) {
+                            return Ok(outcome);
+                        }
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                }
+            }
+
             if chosen.is_empty() && matches!(effect_kind, EffectKind::CastFromZone) {
                 // CR 609.1 / CR 601.2a: Declining an optional
                 // Electrodominance-style hand cast consumes the stashed
@@ -3201,6 +3264,7 @@ pub(super) fn handle_resolution_choice(
                 events.push(GameEvent::EffectResolved {
                     kind: effect_kind,
                     source_id,
+                    subject: None,
                 });
                 set_priority(state, player);
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3226,6 +3290,7 @@ pub(super) fn handle_resolution_choice(
                 events.push(GameEvent::EffectResolved {
                     kind: effect_kind,
                     source_id,
+                    subject: None,
                 });
                 set_priority(state, player);
                 resume_with_error_propagation(state, events)?;
@@ -3763,6 +3828,7 @@ pub(super) fn handle_resolution_choice(
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
                 source_id,
+                subject: None,
             });
             // Mark the end of the battlefield-exit events produced by this
             // handler (Sacrifice / ChangeZone / BounceAll) — the slice
@@ -3925,18 +3991,33 @@ pub(super) fn handle_resolution_choice(
                         events,
                     )?;
                 } else {
-                    state.waiting_for = casting_costs::finalize_cast(
-                        state,
-                        player,
-                        pending.object_id,
-                        pending.card_id,
-                        pending.ability,
-                        &pending.cost,
-                        pending.casting_variant,
-                        pending.cast_timing_permission,
-                        pending.origin_zone,
-                        events,
-                    )?;
+                    // CR 601.2c + CR 601.2f (mirrors the identical fix for
+                    // GameAction::DistributeAmong in engine.rs): a NamedChoice
+                    // pause can occur after targets are already known, so the
+                    // total cost — including any target-dependent surcharge
+                    // (Strive, CR 207.2c) — must be re-derived through the
+                    // single cost-determination authority
+                    // (`finish_pending_cast_cost_or_pay`) rather than paying
+                    // the cost that was locked in earlier in the casting
+                    // sequence, before this resumption point. The
+                    // clone-and-restore-on-Err mirrors
+                    // `finalize_mana_payment`'s `pending_for_restore` pattern
+                    // (CR 601.2h, "unpayable costs can't be paid") since
+                    // `state.pending_cast` is already taken (`None`) here and
+                    // `finish_pending_cast_cost_or_pay`'s downstream chain has
+                    // no restore-on-error wrapper of its own.
+                    let pending_for_restore = pending.clone();
+                    let ability = pending.ability.clone();
+                    let cost = pending.cost.clone();
+                    state.waiting_for = match casting_costs::finish_pending_cast_cost_or_pay(
+                        state, player, *pending, ability, cost, events,
+                    ) {
+                        Ok(waiting_for) => waiting_for,
+                        Err(err) => {
+                            state.pending_cast = Some(pending_for_restore);
+                            return Err(err);
+                        }
+                    };
                 }
             } else if let Some(source) =
                 source_id.filter(|_| !state.deferred_entry_events.is_empty())
@@ -4904,6 +4985,7 @@ pub(crate) fn run_batch_completion(
                 events.push(crate::types::events::GameEvent::EffectResolved {
                     kind: crate::types::ability::EffectKind::RevealUntil,
                     source_id,
+                    subject: None,
                 });
             }
             finish_with_continuation(state, player, events);
@@ -4999,6 +5081,10 @@ fn surveil_keep_on_top(
     for (index, &card_id) in top_cards.iter().enumerate() {
         player_state.library.insert(index, card_id);
     }
+    // CR 401.5 + CR 611.3a: Surveil keeps cards on top by editing the library
+    // directly (this shared helper backs every Surveil caller), so a
+    // `TopOfLibraryMatches` static must be re-evaluated — self-gated on liveness.
+    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
 }
 
 fn resume_with_error_propagation(
@@ -5027,6 +5113,162 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
+
+    /// CR 401.5 + CR 611.3a production-path harness: a battlefield permanent whose
+    /// continuous static grants itself Flying as long as the top card of player
+    /// 0's library is black (Vampire Nocturnus). Library starts black-on-top over
+    /// white. Returns (state, permanent, black, white).
+    fn top_gated_flying_library_scenario() -> (GameState, ObjectId, ObjectId, ObjectId) {
+        use crate::types::ability::{
+            ContinuousModification, FilterProp, StaticCondition, StaticDefinition, TargetFilter,
+            TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::ManaColor;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let vampire = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Vampire Nocturnus".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let def = StaticDefinition::new(StaticMode::Continuous)
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }])
+                .condition(StaticCondition::TopOfLibraryMatches {
+                    filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::HasColor {
+                            color: ManaColor::Black,
+                        },
+                    ])),
+                });
+            let obj = state.objects.get_mut(&vampire).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(def);
+        }
+        let black = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Black Card".to_string(),
+            Zone::Library,
+        );
+        let white = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "White Card".to_string(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&black).unwrap().color = vec![ManaColor::Black];
+        state.objects.get_mut(&white).unwrap().color = vec![ManaColor::White];
+        {
+            let p0 = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == PlayerId(0))
+                .unwrap();
+            p0.library.retain(|&id| id != black && id != white);
+            p0.library.push_back(white);
+            p0.library.push_front(black); // CR 401.1: front() == top.
+        }
+        (state, vampire, black, white)
+    }
+
+    fn has_flying(state: &GameState, id: ObjectId) -> bool {
+        use crate::types::keywords::Keyword;
+        state
+            .objects
+            .get(&id)
+            .unwrap()
+            .has_keyword(&Keyword::Flying)
+    }
+
+    // CR 401.5 + CR 611.3a: Scry reorders the library top by editing the library
+    // directly (outside the zone-move seam); the top-gated static must recompute.
+    #[test]
+    fn scry_reorders_top_and_reevaluates_top_gated_static() {
+        let (mut state, vampire, black, white) = top_gated_flying_library_scenario();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(has_flying(&state, vampire), "black top → Flying granted");
+
+        // Scry 2: keep white on top, black to the bottom.
+        let mut events = vec![];
+        handle_resolution_choice(
+            &mut state,
+            WaitingFor::ScryChoice {
+                player: PlayerId(0),
+                cards: vec![black, white],
+            },
+            GameAction::SelectCards { cards: vec![white] },
+            &mut events,
+        )
+        .expect("scry resolves");
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            !has_flying(&state, vampire),
+            "white scryed to top → Flying must be recomputed away"
+        );
+    }
+
+    // CR 401.5 + CR 611.3a: the shared Surveil keep-on-top helper reorders the
+    // library top directly; the top-gated static must recompute.
+    #[test]
+    fn surveil_keep_on_top_reevaluates_top_gated_static() {
+        let (mut state, vampire, _black, white) = top_gated_flying_library_scenario();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(has_flying(&state, vampire), "black top → Flying granted");
+
+        surveil_keep_on_top(&mut state, PlayerId(0), &[white]);
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            !has_flying(&state, vampire),
+            "surveil kept white on top → Flying must be recomputed away"
+        );
+    }
+
+    // CR 401.5 + CR 611.3a: a Dig that keeps a card on top of the library edits the
+    // library directly (kept_destination == Library); the static must recompute.
+    #[test]
+    fn dig_kept_to_library_top_reevaluates_top_gated_static() {
+        let (mut state, vampire, black, white) = top_gated_flying_library_scenario();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(has_flying(&state, vampire), "black top → Flying granted");
+
+        // Dig looks at [black, white]; keep white on top, rest to bottom.
+        let mut events = vec![];
+        handle_resolution_choice(
+            &mut state,
+            WaitingFor::DigChoice {
+                player: PlayerId(0),
+                library_owner: PlayerId(0),
+                cards: vec![black, white],
+                keep_count: 1,
+                up_to: false,
+                selectable_cards: vec![black, white],
+                kept_destination: Some(Zone::Library),
+                rest_destination: Some(Zone::Library),
+                source_id: None,
+                enter_tapped: false,
+            },
+            GameAction::SelectCards { cards: vec![white] },
+            &mut events,
+        )
+        .expect("dig resolves");
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            !has_flying(&state, vampire),
+            "dig kept white on top → Flying must be recomputed away"
+        );
+    }
 
     #[test]
     fn land_nonland_guess_logs_without_persisting_a_source_label() {

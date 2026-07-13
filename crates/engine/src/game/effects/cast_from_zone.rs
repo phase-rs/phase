@@ -37,6 +37,7 @@ fn open_private_zone_cast_selection(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -214,6 +215,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -324,6 +326,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,
             source_id: ability.source_id,
+            subject: None,
         });
         state.waiting_for = WaitingFor::CastOffer {
             player: ability.controller,
@@ -361,6 +364,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CastFromZone,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -424,6 +428,7 @@ pub(crate) fn complete_hand_pick_cast_from_zone(
                     events.push(GameEvent::EffectResolved {
                         kind: EffectKind::CastFromZone,
                         source_id: ability.source_id,
+                        subject: None,
                     });
                     return Ok(false);
                 };
@@ -490,6 +495,7 @@ fn cast_stack_spell_copy_during_resolution(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CastFromZone,
         source_id: ability.source_id,
+        subject: None,
     });
 
     let Some(obj) = state.objects.get(&copy_id).cloned() else {
@@ -558,6 +564,7 @@ fn cast_single_target_during_resolution(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CastFromZone,
         source_id: ability.source_id,
+        subject: None,
     });
     // CR 702.62a's "if you don't, it remains exiled" disposition is `RemainExiled`
     // (only reached if a future free-cast adds an MV gate; these carry none).
@@ -1332,12 +1339,33 @@ mod tests {
         );
         ability.set_source_incarnation_recursive(Some(captured_incarnation));
 
+        // CR 400.7j: mirror `resolve_top` — during resolution the resolving entry is
+        // stashed in `state.resolving_stack_entry`, and the self-move re-latch reads
+        // it to record that the resolving ability moved its OWN source. Without this
+        // (as in production) the relatch cannot fire.
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: siege_id,
+            source_id: siege_id,
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: siege_id,
+                ability: ability.clone(),
+            },
+        });
+
         let mut events = Vec::new();
         zones::move_to_zone(&mut state, siege_id, Zone::Exile, &mut events);
-        assert_eq!(
-            state.objects[&siege_id].incarnation, captured_incarnation,
-            "the engine's self-reference epoch guard is bumped on battlefield entry, so the \
-             Siege defeat zone exit must not make its same-resolution self-cast stale"
+        // CR 400.7: under all-zone incarnation semantics the BF→Exile self-move now
+        // bumps the epoch (it no longer stays stable). CR 400.7j: the re-latch record
+        // captures the from→to incarnation so the same-resolution self-cast still
+        // finds the moved source instead of going stale.
+        assert!(
+            state.objects[&siege_id].incarnation > captured_incarnation,
+            "CR 400.7: the BF→Exile self-move bumps the Siege's incarnation"
+        );
+        assert!(
+            ability.source_is_current(&state),
+            "CR 400.7j: the re-latch keeps the self-cast source current after the move"
         );
         events.clear();
 

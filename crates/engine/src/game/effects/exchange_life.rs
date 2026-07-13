@@ -52,6 +52,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: resolved_kind,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -69,6 +70,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: resolved_kind,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -92,6 +94,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: resolved_kind,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -136,6 +139,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: resolved_kind,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }

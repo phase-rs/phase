@@ -1,0 +1,216 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 779
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 139,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "As an additional cost to cast this spell, you may collect evidence 8. (Exile cards with total mana value 8 or greater from your graveyard.)"
+      },
+      "node": {
+        "AdditionalCost": {
+          "type": "Optional",
+          "data": {
+            "cost": {
+              "type": "CollectEvidence",
+              "amount": 8
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 140,
+          "end_byte": 321,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Search your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle."
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "SearchLibrary",
+            "filter": {
+              "type": "Typed",
+              "type_filters": [
+                "Land"
+              ],
+              "controller": null,
+              "properties": [
+                {
+                  "type": "HasSupertype",
+                  "value": "Basic"
+                }
+              ]
+            },
+            "count": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "reveal": true
+          },
+          "cost": null,
+          "sub_ability": {
+            "kind": "Spell",
+            "effect": {
+              "type": "SearchLibrary",
+              "filter": {
+                "type": "Or",
+                "filters": [
+                  {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Creature"
+                    ],
+                    "controller": null,
+                    "properties": []
+                  },
+                  {
+                    "type": "Typed",
+                    "type_filters": [
+                      "Land"
+                    ],
+                    "controller": null,
+                    "properties": []
+                  }
+                ]
+              },
+              "count": {
+                "type": "Fixed",
+                "value": 1
+              },
+              "reveal": true
+            },
+            "cost": null,
+            "sub_ability": {
+              "kind": "Spell",
+              "effect": {
+                "type": "ChangeZone",
+                "origin": "Library",
+                "destination": "Hand",
+                "target": {
+                  "type": "Any"
+                },
+                "owner_library": false,
+                "enter_transformed": false,
+                "enter_tapped": false,
+                "enters_attacking": false
+              },
+              "cost": null,
+              "sub_ability": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "Shuffle",
+                  "target": {
+                    "type": "Controller"
+                  }
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
+            },
+            "else_ability": {
+              "kind": "Spell",
+              "effect": {
+                "type": "ChangeZone",
+                "origin": "Library",
+                "destination": "Hand",
+                "target": {
+                  "type": "Any"
+                },
+                "owner_library": false,
+                "enter_transformed": false,
+                "enter_tapped": false,
+                "enters_attacking": false
+              },
+              "cost": null,
+              "sub_ability": {
+                "kind": "Spell",
+                "effect": {
+                  "type": "Shuffle",
+                  "target": {
+                    "type": "Controller"
+                  }
+                },
+                "cost": null,
+                "sub_ability": null,
+                "duration": null,
+                "description": null,
+                "target_prompt": null,
+                "condition": null,
+                "optional_targeting": false,
+                "optional": false,
+                "forward_result": false
+              },
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
+            },
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": {
+              "type": "AdditionalCostPaidInstead"
+            },
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "duration": null,
+          "description": "Search your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    }
+  ],
+  "source_text": "As an additional cost to cast this spell, you may collect evidence 8. (Exile cards with total mana value 8 or greater from your graveyard.)\nSearch your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle.",
+  "card_name": "Analyze the Pollen"
+}

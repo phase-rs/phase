@@ -1,0 +1,185 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 194,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Equipped creature has \"Whenever ~ attacks, tap target creature defending player controls. If that creature has greater power than ~, put a number of +1/+1 counters on ~ equal to the difference.\""
+      },
+      "node": {
+        "PreLoweredStatic": {
+          "mode": "Continuous",
+          "affected": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": null,
+            "properties": [
+              {
+                "type": "EquippedBy"
+              }
+            ]
+          },
+          "modifications": [
+            {
+              "type": "GrantTrigger",
+              "trigger": {
+                "mode": "Attacks",
+                "execute": {
+                  "kind": "Spell",
+                  "effect": {
+                    "type": "SetTapState",
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Creature"
+                      ],
+                      "controller": "DefendingPlayer",
+                      "properties": []
+                    },
+                    "scope": {
+                      "type": "Single"
+                    },
+                    "state": {
+                      "type": "Tap"
+                    }
+                  },
+                  "cost": null,
+                  "sub_ability": {
+                    "kind": "Spell",
+                    "effect": {
+                      "type": "Unimplemented",
+                      "name": "put",
+                      "description": "counters equal to the difference"
+                    },
+                    "cost": null,
+                    "sub_ability": null,
+                    "duration": null,
+                    "description": null,
+                    "target_prompt": null,
+                    "condition": {
+                      "type": "TargetHasKeywordInstead",
+                      "keyword": {
+                        "Unknown": "greater power than ~"
+                      }
+                    },
+                    "optional_targeting": false,
+                    "optional": false,
+                    "forward_result": false
+                  },
+                  "duration": null,
+                  "description": null,
+                  "target_prompt": null,
+                  "condition": null,
+                  "optional_targeting": false,
+                  "optional": false,
+                  "forward_result": false
+                },
+                "valid_card": {
+                  "type": "SelfRef"
+                },
+                "origin": null,
+                "destination": null,
+                "trigger_zones": [
+                  "Battlefield"
+                ],
+                "phase": null,
+                "optional": false,
+                "damage_kind": "Any",
+                "secondary": false,
+                "valid_target": null,
+                "valid_source": null,
+                "description": "Whenever ~ attacks, tap target creature defending player controls. If that creature has greater power than ~, put a number of +1/+1 counters on ~ equal to the difference.",
+                "constraint": null,
+                "condition": null,
+                "batched": false
+              }
+            }
+          ],
+          "condition": null,
+          "affected_zone": null,
+          "effect_zone": null,
+          "active_zones": [],
+          "characteristic_defining": false,
+          "description": "Equipped creature has \"Whenever ~ attacks, tap target creature defending player controls. If that creature has greater power than ~, put a number of +1/+1 counters on ~ equal to the difference.\""
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 195,
+          "end_byte": 204,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Equip {2}"
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Activated",
+          "effect": {
+            "type": "Attach",
+            "target": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": "You",
+              "properties": []
+            }
+          },
+          "cost": {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [],
+              "generic": 2
+            }
+          },
+          "sub_ability": null,
+          "duration": null,
+          "description": "Equip {2}",
+          "target_prompt": null,
+          "activation_restrictions": [
+            {
+              "type": "AsSorcery"
+            }
+          ],
+          "ability_tag": {
+            "type": "Equip"
+          },
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    }
+  ],
+  "source_text": "Equipped creature has \"Whenever this creature attacks, tap target creature defending player controls. If that creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.\"\nEquip {2}",
+  "card_name": "Conformer Shuriken"
+}

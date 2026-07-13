@@ -10,7 +10,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import type { ObjectId, PlayerId } from "../../adapter/types.ts";
-import { getOpponentIds, resolveFocusedOpponent } from "../../viewmodel/gameStateView.ts";
+import { getOpponentIds, isPrivatelyLookedAtByViewer, resolveFocusedOpponent } from "../../viewmodel/gameStateView.ts";
 
 interface OpponentHandProps {
   playerId?: PlayerId;
@@ -60,7 +60,10 @@ export function OpponentHand({ playerId, showCards = false, layout = "default" }
         {opponent.hand.map((id, i) => {
           const obj = objects ? objects[id] : null;
           const isRevealed = (revealedCards?.includes(id) ?? false)
-            || (publicRevealedCards?.includes(id) ?? false);
+            || (publicRevealedCards?.includes(id) ?? false)
+            // CR 701.20e: Glasses of Urza / Gitaxian Probe "look at target
+            // player's hand" surfaces the card's identity only to the looker.
+            || isPrivatelyLookedAtByViewer(gameState ?? null, id, myId);
           const showFace = showCards || isRevealed;
           // Negate rotation so fan opens toward opponent (top of screen)
           const rotation = -((i - center) * rotationStep);

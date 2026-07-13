@@ -223,6 +223,12 @@ pub(crate) fn parse_typed_you_control(
                     parse_token_you_control_descriptor(&TextPair::new(descriptor, &desc_lower))
                 {
                     filter
+                // CR 205.2a + CR 110.1: "Permanents you control" (and the bare
+                // "Creature" card-type word) name a type, not a subtype — resolve
+                // to the all-permanents base before the capitalized-subtype
+                // fallback fabricates a zero-match `Subtype("Permanent")`.
+                } else if let Some(base) = bulk_type_subject_base(descriptor) {
+                    TargetFilter::Typed(base.controller(ControllerRef::You))
                 } else if is_capitalized_words(descriptor) {
                     // CR 205.3m: Normalize plural subtypes to canonical singular form
                     let subtype_name = parse_subtype(descriptor)
@@ -234,6 +240,11 @@ pub(crate) fn parse_typed_you_control(
                 } else {
                     return None;
                 }
+            } else if let Some(base) = bulk_type_subject_base(desc_remaining) {
+                // CR 205.2a + CR 110.1: bulk permanent/creature noun after a
+                // combat-status prefix ("Untapped permanents you control") — base
+                // type, not a subtype.
+                TargetFilter::Typed(base.controller(ControllerRef::You).properties(extra_props))
             } else if is_capitalized_words(desc_remaining) {
                 // CR 205.3m: Normalize plural subtypes to canonical singular form
                 let subtype_name = parse_subtype(desc_remaining)
@@ -266,9 +277,58 @@ pub(crate) fn parse_typed_you_control(
     None
 }
 
+/// CR 611.3a + CR 109.5 + CR 301.5a: Peel a leading "During your turn, as long
+/// as &lt;condition&gt;, " prefix and attach it — as an intrinsic conditional
+/// gate (CR 611.3a, re-evaluated each layer recompute) — to the
+/// recursively-parsed remainder static. Cloud, Planet's Champion:
+/// "During your turn, as long as ~ is equipped, it has double strike and
+/// indestructible" → the double-strike/indestructible static gains
+/// `condition: And { [DuringYourTurn, SourceIsEquipped] }`.
+///
+/// Both prefixes are REQUIRED. Bare "As long as X, Y" statics are already owned
+/// by `parse_conditional_static` (later in dispatch), and plain "During your
+/// turn, Y" statics by the dedicated during-your-turn handler; requiring the
+/// full compound keeps both untouched (no shadowing of either class). When the
+/// remainder does not parse to a clean subject static (the counter-animation
+/// "…, it's a P/T and has …" form), returns `None` so the dispatcher's
+/// `parse_compound_turn_counter_animation` still claims it.
+fn parse_leading_condition_peel(tp: &TextPair) -> Option<StaticDefinition> {
+    let after_turn = nom_tag_tp(tp, "during your turn, ")?;
+    let after_gate = nom_tag_tp(&after_turn, "as long as ")?;
+    // First-comma split: "<condition>, <remainder>".
+    let (body_tp, remainder_tp) = after_gate.split_around(", ")?;
+    // CR 109.5: "during your turn" binds to the source object's controller.
+    let condition = parse_static_condition(body_tp.original.trim())?;
+    let leading = StaticCondition::And {
+        conditions: vec![StaticCondition::DuringYourTurn, condition],
+    };
+
+    // Recurse on the remainder; on failure return None so specialized parsers run.
+    let mut def = parse_subject_continuous_static(remainder_tp.original.trim())?;
+    // CR 611.3a: compose with any condition the remainder itself carried rather
+    // than dropping one (mirrors `parse_conditional_static`).
+    def.condition = Some(match def.condition.take() {
+        Some(existing) => StaticCondition::And {
+            conditions: vec![leading, existing],
+        },
+        None => leading,
+    });
+    def.description = Some(tp.original.to_string());
+    Some(def)
+}
+
 pub(crate) fn parse_subject_continuous_static(text: &str) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
+
+    // CR 611.3a + CR 109.5 + CR 301.5a: peel a leading "During your turn, as long
+    // as <cond>, " condition prefix onto the recursively-parsed remainder static
+    // (Cloud, Planet's Champion). Runs first so the intrinsic conditional gate is
+    // attached; the counter-animation remainder form returns None and falls
+    // through to `parse_compound_turn_counter_animation`.
+    if let Some(def) = parse_leading_condition_peel(&tp) {
+        return Some(def);
+    }
 
     // Additive-type clauses do not use any of the get/has/have/lose verbs that
     // `find_continuous_predicate_start` scans for. They split on "are"/"is"
@@ -296,9 +356,14 @@ pub(crate) fn parse_subject_continuous_static(text: &str) -> Option<StaticDefini
         return parse_continuous_gets_has(predicate, affected, text);
     }
 
-    // CR 604.1: Strip suffix turn conditions from predicate —
-    // "has first strike during your turn" → "has first strike" + DuringYourTurn
-    let (effective_predicate, suffix_condition) = strip_suffix_turn_condition(&pred_lower);
+    // CR 604.1: Strip suffix turn conditions from the ORIGINAL-case predicate
+    // (not `pred_lower`) — "has first strike during your turn" → "has first
+    // strike" + DuringYourTurn. The condition phrase is lowercase in the original
+    // too, so `strip_suffix_turn_condition` still matches, and the retained
+    // predicate keeps its printed case: a granted ability's serialized,
+    // user-visible `description` must read "{T}: Add {G}.", not "{t}: add {g}."
+    // (issue #5599, Brightcap Badger).
+    let (effective_predicate, suffix_condition) = strip_suffix_turn_condition(predicate);
 
     let modifications = parse_continuous_modifications(&effective_predicate);
     if !modifications.is_empty() {
@@ -659,20 +724,45 @@ pub(crate) fn parse_soulbond_paired_static(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
-    let parser = preceded(
-        tag("as long as "),
-        preceded(
-            terminated(parse_soulbond_paired_condition_nom, tag(", ")),
-            preceded(
-                alt((tag("each of those creatures "), tag("both creatures "))),
-                alt((terminated(take_until("."), tag(".")), rest)),
-            ),
-        ),
-    );
-    let (_, predicate) = all_consuming(parser).parse(tp.lower).ok()?;
-    let mut def = parse_continuous_gets_has(predicate, TargetFilter::SourceOrPaired, description)?;
+    // CR 702.95: Soulbond. The paired reminder-text grant — "As long as ~ is
+    // paired with another creature, each of those creatures <predicate>." — is a
+    // CR 613.1f layer-6 ability-adding effect applied to BOTH paired creatures
+    // (SourceOrPaired). Split the pairing frame off the granted predicate with
+    // TextPair so the predicate keeps its ORIGINAL case: a quoted granted
+    // ability's mana symbols (`{1}{U}`) must reach the cost parser un-lowercased.
+    // allow-noncombinator: TextPair dual-string structural strip preserving original case
+    let after = tp.strip_prefix("as long as ")?;
+    let (condition, predicate) = after
+        .split_around(", each of those creatures ")
+        .or_else(|| after.split_around(", both creatures "))?;
+    if !matches_soulbond_paired_condition(condition.lower) {
+        return None;
+    }
+    let predicate = strip_granted_predicate_period(&predicate);
+    let mut def = parse_continuous_gets_has(
+        predicate.original,
+        TargetFilter::SourceOrPaired,
+        description,
+    )?;
     def.condition = Some(StaticCondition::SourceIsPaired);
     Some(def)
+}
+
+/// Trim a granted predicate's sentence-ending period, but leave a quoted ability
+/// intact. A quoted activated (CR 602.1) or triggered (CR 603.1) granted ability
+/// terminates with its period INSIDE the closing quote (`has "{1}{U}: ... your
+/// control."`), so a predicate ending in `"` has no outside period to strip —
+/// only the bare keyword/P-T forms (`has flying.`, `gets +1/+1.`) carry an outer
+/// period. A period-terminated `take_until(".")` would instead sever the quote
+/// at that inner period and drop the whole granted ability.
+fn strip_granted_predicate_period<'a>(predicate: &TextPair<'a>) -> TextPair<'a> {
+    let predicate = predicate.trim_end();
+    // allow-noncombinator: punctuation inspection on a pre-tokenized chunk, not parse dispatch
+    if predicate.ends_with("\"") {
+        predicate
+    } else {
+        predicate.trim_end_matches('.')
+    }
 }
 
 pub(crate) fn bind_where_x_in_quantity_expr(
@@ -915,6 +1005,16 @@ pub(crate) fn parse_continuous_gets_has(
                             );
                         }
                     }
+                    // CR 205.1b + CR 604.1: also recover a trailing type-addition
+                    // ("and is an Assassin in addition to its other types",
+                    // Reaper's Scythe) or a trailing quoted-ability grant ("and has
+                    // \"{T}, Sacrifice a creature: ...\"", Rakdos Riteknife) after the
+                    // dynamic pump — the keyword path above only recovers trailing
+                    // keywords. Both scanners no-op when their pattern is absent.
+                    if let Some(type_mods) = parse_additive_type_clause_modifications(description) {
+                        modifications.extend(type_mods);
+                    }
+                    modifications.extend(parse_quoted_ability_modifications(description));
                     return Some(
                         StaticDefinition::continuous()
                             .affected(affected)
@@ -1063,8 +1163,11 @@ pub(crate) fn parse_dynamic_pt_in_text(
     let after_verb = nom_tag_lower(after_gets, after_gets, "gets ")
         .or_else(|| nom_tag_lower(after_gets, after_gets, "get "))?;
 
-    // CR 613.4c: Parse variable P/T pattern via nom combinator
-    let (_, (p_sign, p_is_x, t_sign, t_is_x)) = parse_variable_pt_pattern(after_verb).ok()?;
+    // CR 613.4c: Parse variable P/T pattern via nom combinator. Each axis is
+    // either the variable X (`None`) or a fixed magnitude (`Some(n)`).
+    let (_, (p_sign, p_mag, t_sign, t_mag)) = parse_variable_pt_pattern(after_verb).ok()?;
+    let p_is_x = p_mag.is_none();
+    let t_is_x = t_mag.is_none();
 
     if !p_is_x && !t_is_x {
         return None; // No X variable — not a dynamic P/T pattern
@@ -1086,6 +1189,9 @@ pub(crate) fn parse_dynamic_pt_in_text(
     // Run whose effect text has no binding clause — the X is bound to the
     // cost, not to a derived quantity.
     let quantity = match where_x_expression {
+        // Intensity now lives in the shared `parse_quantity_ref` combinator
+        // (oracle_nom/quantity.rs), which `parse_cda_quantity` delegates to — so
+        // the local duplicate this arm used to carry is gone.
         Some(wx) => parse_cda_quantity(wx).or_else(|| parse_event_context_quantity(wx))?,
         None => QuantityExpr::Ref {
             qty: QuantityRef::CostXPaid,
@@ -1093,27 +1199,38 @@ pub(crate) fn parse_dynamic_pt_in_text(
     };
 
     let mut mods = Vec::new();
-    if p_is_x {
-        let qty = if p_sign < 0 {
-            QuantityExpr::Multiply {
-                factor: -1,
-                inner: Box::new(quantity.clone()),
-            }
-        } else {
-            quantity.clone()
-        };
-        mods.push(ContinuousModification::AddDynamicPower { value: qty });
+    // CR 613.4c layer 7c: the dynamic axis grants an X-valued modification; a
+    // fixed nonzero axis grants a constant modification alongside it (the mixed
+    // "+X/+1" case). A fixed `0` axis contributes nothing.
+    match p_mag {
+        None => {
+            let qty = if p_sign < 0 {
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(quantity.clone()),
+                }
+            } else {
+                quantity.clone()
+            };
+            mods.push(ContinuousModification::AddDynamicPower { value: qty });
+        }
+        Some(n) if n != 0 => mods.push(ContinuousModification::AddPower { value: p_sign * n }),
+        Some(_) => {}
     }
-    if t_is_x {
-        let qty = if t_sign < 0 {
-            QuantityExpr::Multiply {
-                factor: -1,
-                inner: Box::new(quantity),
-            }
-        } else {
-            quantity
-        };
-        mods.push(ContinuousModification::AddDynamicToughness { value: qty });
+    match t_mag {
+        None => {
+            let qty = if t_sign < 0 {
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(quantity),
+                }
+            } else {
+                quantity
+            };
+            mods.push(ContinuousModification::AddDynamicToughness { value: qty });
+        }
+        Some(n) if n != 0 => mods.push(ContinuousModification::AddToughness { value: t_sign * n }),
+        Some(_) => {}
     }
 
     Some(mods)
@@ -1220,5 +1337,134 @@ pub(crate) fn parse_base_pt_dynamic(
                 base_pt_side_to_expr(t_side, &x_ref),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod l02_bb5_leading_condition_peel_tests {
+    use super::*;
+
+    /// Positive: Cloud, Planet's Champion — the "During your turn, as long as ~
+    /// is equipped, ..." compound peels into an intrinsic conditional static
+    /// gated on `And { [DuringYourTurn, SourceIsEquipped] }` (was fully
+    /// swallowed pre-fix: `statics: null`). REVERT-PROBE: dropping the peel
+    /// leaves `condition == None` / the whole static unparsed.
+    #[test]
+    fn cloud_leading_condition_peel_attaches_compound_condition() {
+        let def = parse_subject_continuous_static(
+            "During your turn, as long as ~ is equipped, it has double strike and indestructible",
+        )
+        .expect("Cloud's double-strike/indestructible static must parse");
+        assert_eq!(
+            def.condition,
+            Some(StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::DuringYourTurn,
+                    StaticCondition::SourceIsEquipped,
+                ],
+            }),
+            "peel must attach And{{DuringYourTurn, SourceIsEquipped}}"
+        );
+        assert!(
+            !def.modifications.is_empty(),
+            "the recursed remainder must still grant the keywords"
+        );
+        assert_eq!(
+            def.description.as_deref(),
+            Some("During your turn, as long as ~ is equipped, it has double strike and indestructible"),
+            "full description must be restored after the peel"
+        );
+    }
+
+    /// F1 non-vacuity (team-lead mandate, `parser-coverage-regression-ci-only`):
+    /// every live static whose Oracle text starts "During your turn," and
+    /// contains get/has/gain but has NO "as long as" must NOT be claimed by the
+    /// leading-condition peel — those belong to the dedicated during-your-turn
+    /// dispatch handler downstream, unchanged (byte-identical shape). `as long
+    /// as ` is MANDATORY in the peel; these lines lack it, so the peel returns
+    /// None.
+    ///
+    /// REVERT-PROBE (this is the F1 discriminator): making `as long as `
+    /// OPTIONAL — the reviewed-out bug where a bare "during your turn, " alone
+    /// fires the peel — makes the peel recurse on the anthem remainder and
+    /// return `Some` for the anthem-shaped lines (e.g. "creatures you control
+    /// get +2/+0"), so these per-card asserts flip to fail. Aggregate
+    /// REGRESSED=0 would not catch a lose-N-here / gain-N-elsewhere swap; the
+    /// per-card `is_none()` does. Enumerated via jq over `data/card-data.json`
+    /// (50 cards at impl time).
+    #[test]
+    fn during_your_turn_without_as_long_as_is_not_peeled() {
+        const SHADOWED: &[&str] = &[
+            "During your turn, this creature has first strike.",
+            "During your turn, commanders you control have indestructible.",
+            "During your turn, outlaws you control have first strike.",
+            "During your turn, Avatar Kyoshi has hexproof.",
+            "During your turn, each creature assigns combat damage equal to its toughness rather than its power.",
+            "During your turn, creatures you control have hexproof.",
+            "During your turn, each non-Equipment artifact and non-Aura enchantment you control with mana value 4 or greater is a 4/4 Elemental creature in addition to its other types and has indestructible, haste, and \"Whenever this creature deals combat damage to a player, draw a card.\"",
+            "During your turn, equipped creature has hexproof and can't be blocked.",
+            "During your turn, this creature has lifelink.",
+            "During your turn, Cait has indestructible.",
+            "During your turn, Colossus has indestructible.",
+            "During your turn, this creature has flying.",
+            "During your turn, Gideon Blackblade is a 4/4 Human Soldier creature with indestructible that's still a planeswalker.",
+            "During your turn, creatures you control get +2/+0.",
+            "During your turn, this creature gets +0/+2.",
+            "During your turn, Kefka has indestructible.",
+            "During your turn, equipped creature gets +1/+0 and has first strike.",
+            "During your turn, this creature has lifelink.",
+            "During your turn, other creatures you control get +1/+0.",
+            "During your turn, Mounts and Vehicles you control have hexproof.",
+            "During your turn, creatures you control have first strike and equip abilities you activate cost {1} less to activate.",
+            "During your turn, this creature has hexproof.",
+            "During your turn, creature tokens you control get +1/+4.",
+            "During your turn, this creature gets +2/+0 and has first strike.",
+            "During your turn, equipped creature gets +2/+0 and has first strike.",
+            "During your turn, Radha has first strike.",
+            "During your turn, attacking creatures get +1/+0.",
+            "During your turn, each instant and sorcery card in your graveyard has flashback. Its flashback cost is equal to its mana cost.",
+            "During your turn, Shocker has first strike.",
+            "During your turn, this creature gets +2/+0.",
+            "During your turn, Allies you control have double strike and lifelink.",
+            "During your turn, creatures and planeswalkers you control have lifelink.",
+            "During your turn, Spider-Girl has flying.",
+            "During your turn, this creature gets +0/+2.",
+            "During your turn, creatures you control get +1/+0 and have trample.",
+            "During your turn, Sun-Spider has flying.",
+            "During your turn, The River Warlock has flying, lifelink, and indestructible.",
+            "During your turn, this creature gets +2/+2.",
+            "During your turn, Yuna and enchantment creatures you control have trample, lifelink, and ward {2}.",
+        ];
+        for line in SHADOWED {
+            let lower = line.to_lowercase();
+            let tp = TextPair::new(line, &lower);
+            assert!(
+                parse_leading_condition_peel(&tp).is_none(),
+                "leading-condition peel must NOT claim a plain during-your-turn static (no 'as long as'): {line:?}"
+            );
+        }
+    }
+
+    /// Regression (plan Risk #1 / test #7): the counter-animation form
+    /// ("During your turn, as long as ~ has … counters …, it's a P/T … and has
+    /// …") must NOT be claimed by `parse_subject_continuous_static` — its "'s a"
+    /// remainder has no clean subject, so the peel recurses to None and returns
+    /// None, letting `parse_compound_turn_counter_animation` (later in dispatch)
+    /// claim it. Kaito, Bane of Nightmares is the live case
+    /// (`parse_compound_static_kaito_animation` in `tests.rs` guards the
+    /// downstream animation shape). REVERT-PROBE: if the peel wrongly claimed
+    /// the remainder, this returns `Some` and the assert flips.
+    #[test]
+    fn counter_animation_falls_through_the_peel() {
+        let kaito = "During your turn, as long as ~ has one or more loyalty counters on him, he's a 3/4 Ninja creature and has hexproof.";
+        assert!(
+            parse_subject_continuous_static(kaito).is_none(),
+            "counter-animation must fall through to parse_compound_turn_counter_animation"
+        );
+        // The specialized parser still claims it (guards the fallthrough target).
+        assert!(
+            parse_compound_turn_counter_animation(&kaito.to_lowercase(), kaito).is_some(),
+            "parse_compound_turn_counter_animation must still handle Kaito's animation"
+        );
     }
 }

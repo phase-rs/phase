@@ -34,6 +34,7 @@ mod contraptions_tests;
 pub mod cost_payability;
 pub(crate) mod costs;
 pub mod coverage;
+pub mod crew_payment;
 pub mod dash;
 #[cfg(test)]
 #[path = "dash_tests.rs"]
@@ -124,6 +125,7 @@ pub mod planechase;
 mod planechase_tests;
 pub mod planeswalker;
 pub mod players;
+pub mod preview;
 pub mod printed_cards;
 pub mod priority;
 pub mod public_state;

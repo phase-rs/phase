@@ -90,6 +90,28 @@ pub(crate) fn is_speed_unlock_sentence(lower: &str) -> bool {
     .is_ok()
 }
 
+/// CR 609.4b: Match a board-wide "[you|players] may spend mana as though it were
+/// mana of any color" static (Chromatic Orrery / Mycosynth Lattice / Mycosynthwave),
+/// with no activation-source or spell-class qualifier tail. Both subject prefixes
+/// map to the same all-players concession — the runtime scopes
+/// `TargetFilter::Player` to every player — so they share one recognizer. Replaces
+/// a verbatim-string `==` match; the tailed forms ("... to activate abilities of
+/// X", "... to cast it") are consumed by earlier arms and never reach here.
+fn parse_board_wide_spend_any_color(lower: &str) -> bool {
+    all_consuming(terminated(
+        preceded(
+            alt((
+                tag::<_, _, OracleError<'_>>("you may "),
+                tag("players may "),
+            )),
+            tag("spend mana as though it were mana of any color"),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(lower)
+    .is_ok()
+}
+
 /// CR 305.2: static land-play permissions with an explicit additional-drop
 /// count greater than the ordinary +1 grant. `u8::MAX` represents "any
 /// number"; runtime summing saturates so it stays effectively unbounded when
@@ -1049,8 +1071,14 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // CR 609.4b: "You may spend mana as though it were mana of any color."
-    if tp.lower.trim_end_matches('.') == "you may spend mana as though it were mana of any color" {
+    // CR 609.4b: "[You|Players] may spend mana as though it were mana of any
+    // color." The controller form (Chromatic Orrery, "You may ...") and the
+    // all-players form (Mycosynth Lattice / Mycosynthwave, "Players may ...")
+    // both grant the board-wide any-color concession with no activation-source
+    // or spell-class qualifier tail. The runtime scopes
+    // `affected: TargetFilter::Player` to every player (`check_static_ability`),
+    // so the two phrasings share one static shape.
+    if parse_board_wide_spend_any_color(tp.lower) {
         return Some(
             StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
                 spell_filter: None,
@@ -1901,12 +1929,12 @@ pub(crate) fn parse_static_line_inner(
         {
             let after = &tp.original[pos + verb_len..];
             let predicate = format!("{}{}", verb_prefix, after);
-            let predicate_lower = predicate.to_lowercase();
 
-            // CR 604.1: Strip suffix turn conditions —
-            // "has first strike during your turn" → condition + "has first strike"
-            let (effective_predicate, suffix_condition) =
-                strip_suffix_turn_condition(&predicate_lower);
+            // CR 604.1: Strip suffix turn conditions from the ORIGINAL-case
+            // predicate so a granted ability's serialized `description` keeps its
+            // printed case (issue #5599) — "has first strike during your turn" →
+            // condition + "has first strike".
+            let (effective_predicate, suffix_condition) = strip_suffix_turn_condition(&predicate);
 
             if let Some(mut def) =
                 parse_continuous_gets_has(&effective_predicate, TargetFilter::SelfRef, tp.original)
@@ -1995,6 +2023,18 @@ pub(crate) fn parse_static_line_inner(
     // token is artifact or enchantment; the dynamic-P/T tail is delegated
     // to the existing helper.
     if let Some(def) = parse_each_noncreature_subject_is_creature_with_pt_mv(&tp, &text) {
+        return Some(def);
+    }
+
+    // CR 611.3 + CR 613.4b + CR 205.1b: compound-subject animation whose
+    // subject is a heterogeneous union of negated-type legs ("each non-X Y
+    // and non-Z W ... is a [P/T] [type] creature in addition to its other
+    // types and has [keywords/granted ability]" — Bello, Bard of the
+    // Brambles). Delegates the subject to the general target-phrase grammar
+    // (see the function doc comment), so it does not need to precede any
+    // sibling here — a single-subject line simply fails its 2+-leg `Or` guard
+    // and falls through unchanged.
+    if let Some(def) = parse_each_compound_subject_type_change(&tp, &text) {
         return Some(def);
     }
 
@@ -2262,8 +2302,9 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "Spells and abilities <scope> can't cause their controller to search their library" ---
-    // CR 701.23 + CR 609.3: Ashiok, Dream Render's first static. Subject-scoped
-    // prohibition where `cause` identifies whose spells/abilities are muzzled.
+    // CR 701.23 + CR 101.2: Ashiok, Dream Render's first static. Subject-scoped
+    // prohibition — the "can't" effect takes precedence over any effect directing
+    // a search — where `cause` identifies whose spells/abilities are muzzled.
     if let Some(def) = parse_cant_search_library(&tp, &text) {
         return Some(def);
     }
@@ -2278,9 +2319,10 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "Triggered abilities <scope> can't cause you to sacrifice or exile <affected>" ---
-    // CR 603.2 + CR 609.3: The Master, Multiplied class. Subject-scoped prohibition
-    // where `cause` identifies whose triggered abilities are muzzled and `affected`
-    // identifies the protected objects.
+    // CR 603.2 + CR 101.2: The Master, Multiplied class. Subject-scoped prohibition
+    // — the "can't" effect takes precedence over the triggered ability directing the
+    // action — where `cause` identifies whose triggered abilities are muzzled and
+    // `affected` identifies the protected objects.
     if let Some(def) = parse_cant_cause_sacrifice_or_exile(&tp, &text) {
         return Some(def);
     }
@@ -2626,6 +2668,12 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 122.1d + CR 101.2: "<Counter> counters can't be removed from <subject>."
+    // (Fear of Sleep Paralysis) — counter-removal prohibition.
+    if let Some(def) = parse_counters_cant_be_removed_static(&tp, &text) {
+        return Some(def);
+    }
+
     // NOTE: "enters with N counters" patterns are now handled by oracle_replacement.rs
     // as proper Moved replacement effects (paralleling the "enters tapped" pattern).
 
@@ -2872,31 +2920,12 @@ pub(crate) fn parse_static_line_inner(
     // either the chosen-name source phrase (→ HasChosenName) or a type phrase.
     if let Some(((amount_n, is_x, mode, subject_filter, dynamic_count, keyword), _)) =
         nom_on_lower(tp.original, tp.lower, |i| {
-            let (i, keyword) = alt((
-                value("activated", tag("activated abilities of ")),
-                value("loyalty", tag("loyalty abilities of ")),
-            ))
-            .parse(i)?;
-            let (i, subject) = take_until(" cost ").parse(i)?;
-            let (i, _) = tag(" cost ").parse(i)?;
-            // CR 107.3 + CR 601.2f: the amount is a fixed `{N}` (Training Grounds)
-            // or the variable `{X}` (Agatha), whose value is supplied by the
-            // trailing "where X is …" referent parsed below.
-            let (i, (amount_n, is_x)) = nom::sequence::delimited(
-                tag("{"),
-                alt((
-                    map(nom_primitives::parse_number, |n| (n, false)),
-                    value((0u32, true), tag("x")),
-                )),
-                tag("}"),
-            )
-            .parse(i)?;
-            let (i, _) = tag(" ").parse(i)?;
-            let (i, mode) = alt((
-                value(CostModifyMode::Reduce, tag("less to activate")),
-                value(CostModifyMode::Raise, tag("more to activate")),
-            ))
-            .parse(i)?;
+            // CR 601.2f + CR 606.1: shared grammar head (also used by the transient
+            // this-turn form, which lowers to a `GenericEffect` carrying this same
+            // `ReduceAbilityCost` static) — "<activated|loyalty> abilities of
+            // <subject> cost {N|X} <less|more> to activate".
+            let (i, (keyword, subject, amount_n, is_x, mode)) =
+                super::cost_mod::parse_activated_ability_cost_head(i)?;
             // CR 208.1 + CR 113.7: optional dynamic referent for `{X}`
             // ("where X is ~'s power", Agatha).
             let (i, dynamic_count) = opt(parse_where_x_is_self_stat).parse(i)?;
@@ -3288,6 +3317,8 @@ pub(crate) fn parse_static_line_inner(
             TriggerCause::CreatureAttacking
         } else if nom_primitives::scan_contains(tp.lower, "dying causes") {
             TriggerCause::CreatureDying
+        } else if let Some(cause) = parse_battlefield_transition_cause(tp.lower) {
+            cause
         } else if nom_primitives::scan_contains(tp.lower, "entering")
             || nom_primitives::scan_contains(tp.lower, "enters the battlefield")
         {
@@ -3330,6 +3361,55 @@ pub(crate) fn parse_static_line_inner(
     }
 
     None
+}
+
+/// CR 603.6a + CR 603.6c: Extract disjunctive qualifiers on the permanent whose
+/// zone change caused a trigger doubler (Gandalf the White-class).
+fn parse_zone_change_qualifiers(lower: &str) -> Vec<ZoneChangeQualifier> {
+    let mut qualifiers = Vec::new();
+    if nom_primitives::scan_contains(lower, "legendary") {
+        qualifiers.push(ZoneChangeQualifier::Supertype(Supertype::Legendary));
+    }
+    if nom_primitives::scan_contains(lower, "artifact") {
+        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Artifact));
+    }
+    if nom_primitives::scan_contains(lower, "creature") {
+        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Creature));
+    }
+    if nom_primitives::scan_contains(lower, "enchantment") {
+        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Enchantment));
+    }
+    if nom_primitives::scan_contains(lower, "land") {
+        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Land));
+    }
+    if nom_primitives::scan_contains(lower, "planeswalker") {
+        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Planeswalker));
+    }
+    qualifiers
+}
+
+/// CR 603.6a + CR 603.6c: Parse Gandalf-class battlefield transition causes.
+/// Returns `None` for Panharmonicon-style enter-only lines without a legendary
+/// supertype so the legacy `EntersBattlefield` path stays stable.
+fn parse_battlefield_transition_cause(lower: &str) -> Option<TriggerCause> {
+    let enter = nom_primitives::scan_contains(lower, "entering")
+        || nom_primitives::scan_contains(lower, "enters the battlefield");
+    let leave = nom_primitives::scan_contains(lower, "leaving")
+        || nom_primitives::scan_contains(lower, "leaves the battlefield");
+    if !enter && !leave {
+        return None;
+    }
+
+    let has_legendary = nom_primitives::scan_contains(lower, "legendary");
+    if enter && !leave && !has_legendary {
+        return None;
+    }
+
+    Some(TriggerCause::BattlefieldTransition {
+        enter,
+        leave,
+        qualifiers: parse_zone_change_qualifiers(lower),
+    })
 }
 
 /// CR 309.4c: "Room abilities of dungeons you own trigger(s) an additional time."
@@ -3416,5 +3496,101 @@ fn parse_enters_with_additional_counters(
         })
         .affected(affected)
         .description(text.to_string()),
+    )
+}
+
+/// Parses the Odyssey Burst-cycle graveyard name-aliasing static:
+/// "If ~ is in a graveyard, effects from spells named X count it as
+/// a card named X." — Odyssey Burst cycle (Diligent Farmhand, Pardic Firecat,
+/// Nantuko Blightcutter, etc.).
+///
+/// Accepts both `"if ~ is in a graveyard, ..."` (test fixtures) and
+/// `"if this card is in a graveyard, ..."` (production pipeline — `"this card"`
+/// is in `SELF_REF_PARSE_ONLY_PHRASES` and is NOT normalized to `~`).
+///
+/// No general CR governs this Odyssey-specific templating; the name-matching
+/// semantics rely on CR 201.2a ("two or more objects have the same name if
+/// they have at least one name in common").
+///
+/// Returns a `StaticDefinition` with `StaticMode::CountsAsNamed { name }` and
+/// `active_zones = [Graveyard]`.
+pub(crate) fn try_parse_counts_as_named_static(text: &str) -> Option<StaticDefinition> {
+    use super::prelude::*;
+    // allow-noncombinator: punctuation cleanup on pre-tokenized input (char arg)
+    let stripped = text.trim_end_matches('.').trim();
+    let lower = stripped.to_lowercase();
+    // Parse the self-reference prefix — accept both "~" (test fixtures) and
+    // "this card" (production pipeline, not normalized by `normalize_card_name_refs`).
+    let (prefix_rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("if ~ is in a graveyard, "),
+        tag::<_, _, OracleError<'_>>("if this card is in a graveyard, "),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let prefix_consumed = lower.len() - prefix_rest.len();
+    let (rest_lower, _) = tag::<_, _, OracleError<'_>>("effects from spells named ")
+        .parse(prefix_rest)
+        .ok()?;
+    let effects_consumed = prefix_rest.len() - rest_lower.len();
+    // Split on " count it as a card named " to extract the spell name and alias.
+    let (alias_lower, spell_lower) = terminated(
+        take_until::<_, _, OracleError<'_>>(" count it as a card named "),
+        tag(" count it as a card named "),
+    )
+    .parse(rest_lower)
+    .ok()?;
+    // Both names should match (the card counts as the spell that references it).
+    if !spell_lower.eq_ignore_ascii_case(alias_lower) {
+        return None;
+    }
+    // Slice the name from the original-case input to preserve correct casing
+    // (avoids title-case reconstruction issues with hyphens, articles, accents).
+    let name_start = prefix_consumed + effects_consumed;
+    let name_end = name_start + spell_lower.len();
+    let name = stripped[name_start..name_end].to_string();
+    Some(
+        StaticDefinition::new(StaticMode::CountsAsNamed { name })
+            .active_zones(vec![Zone::Graveyard])
+            .description(text.to_string()),
+    )
+}
+
+/// CR 122.1d + CR 101.2: "<Counter> counters can't be removed from <subject>."
+/// (Fear of Sleep Paralysis) — counter-removal prohibition. Parses the Oracle
+/// text pattern and builds a `StaticMode::CountersCantBeRemoved` static whose
+/// `affected` filter scopes the protected permanents.
+fn parse_counters_cant_be_removed_static(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    // Composed grammar (CR 122.1d + CR 101.2):
+    //   <counter_type> " counters can't be removed from " <subject> [.] EOF
+    // Uses nom combinators for the counter-type prefix and the fixed anchor,
+    // then parse_type_phrase for the subject (same pattern as
+    // parse_damage_not_removed_during_cleanup).
+
+    // Step 1: Parse the counter type from the start of the lowercase text.
+    let (after_counter, counter_type) = nom_primitives::parse_strict_counter_type(tp.lower).ok()?;
+
+    // Step 2: Consume the fixed anchor via nom_tag_lower.
+    let body = nom_tag_lower(
+        after_counter,
+        after_counter,
+        " counters can't be removed from ",
+    )?;
+
+    // Step 3: Parse the subject from the original-case text at the same byte
+    // offset as `body` within `tp.lower`.
+    let consumed = tp.lower.len() - body.len();
+    let subject_original = tp.original[consumed..].trim_end_matches('.').trim();
+    let (filter, remainder) = parse_type_phrase(subject_original);
+    if matches!(&filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::CountersCantBeRemoved { counter_type })
+            .affected(filter)
+            .description(text.to_string()),
     )
 }

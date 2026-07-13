@@ -24,11 +24,12 @@ mod prelude {
     };
     pub(super) use super::super::oracle_ir::context::ParseContext;
     pub(super) use super::super::oracle_ir::static_ir::StaticIr;
-    pub(super) use super::super::oracle_nom::bridge::nom_on_lower;
+    pub(super) use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
     pub(super) use super::super::oracle_nom::condition as nom_condition;
     pub(super) use super::super::oracle_nom::error::OracleResult;
     pub(super) use super::super::oracle_nom::filter as nom_filter;
     pub(super) use super::super::oracle_nom::primitives as nom_primitives;
+    pub(super) use super::super::oracle_nom::quantity as nom_quantity;
     pub(super) use super::super::oracle_nom::target as nom_target;
     pub(super) use super::super::oracle_quantity::{
         parse_cda_quantity, parse_event_context_quantity, parse_for_each_clause, parse_quantity_ref,
@@ -44,11 +45,11 @@ mod prelude {
     };
     pub(super) use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction,
-        AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator,
-        ContinuousModification, ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope,
-        ParsedCondition, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
-        TypeFilter, TypedFilter,
+        AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, CombatRelation,
+        CombatRelationSubject, Comparator, ContinuousModification, ControllerRef, CostCategory,
+        CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PtStat, PtValueScope,
+        QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, StaticCondition,
+        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     pub(super) use crate::types::card_type::{
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
@@ -63,6 +64,7 @@ mod prelude {
         CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
         CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost, ExileCastTiming,
         HandSizeModification, ProhibitionScope, StaticMode, SuppressedTriggerEvent, TriggerCause,
+        ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;
 }
@@ -90,6 +92,7 @@ pub(crate) use shared::parse_commander_subject_filter_prefix;
 
 pub(crate) use dispatch::is_speed_unlock_sentence;
 pub(crate) use dispatch::parse_may_look_at_face_down_filter;
+pub(crate) use dispatch::try_parse_counts_as_named_static;
 use dispatch::{parse_static_line_inner, InvertedAsLongAs};
 use prelude::StaticIr;
 
@@ -136,14 +139,16 @@ mod support {
 }
 
 pub(crate) use cost_mod::{
-    parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
-    parse_collect_evidence_alt_cost, parse_spells_alternative_cost,
+    parse_activated_ability_cost_head, parse_alternative_keyword_cost,
+    parse_cast_spells_alternative_cost_multi, parse_collect_evidence_alt_cost,
+    parse_spells_alternative_cost,
 };
 pub(crate) use evasion::{
     classify_block_exception, is_extra_blockers_static_candidate, is_forced_block_static_candidate,
     parse_forced_block_blocker_slot,
 };
 pub(crate) use grammar::map_keyword;
+pub(crate) use grammar::parse_pt_mod;
 pub(crate) use keyword_grant::{
     classify_quoted_inner, parse_chosen_qualifier_subject, parse_continuous_modifications,
     parse_graveyard_granted_keyword_kind, parse_quoted_ability_modifications, split_keyword_list,

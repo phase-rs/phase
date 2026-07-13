@@ -849,7 +849,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *new_controller),
         ],
 
-        GameEvent::EffectResolved { kind, source_id } => vec![
+        GameEvent::EffectResolved {
+            kind, source_id, ..
+        } => vec![
             card_seg(state, *source_id),
             text(": "),
             text(&format!("{kind:?}")),

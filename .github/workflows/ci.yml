@@ -13,6 +13,7 @@ on:
       - 'Dockerfile'
       - '.dockerignore'
       - 'docker/**'
+      - '.github/actions/**'
       - '.github/workflows/ci.yml'
       - '.github/workflows/deploy.yml'
       - '.github/workflows/release.yml'
@@ -66,8 +67,12 @@ jobs:
         run: ./scripts/check-skill-doc.sh
 
       - name: Engine authority gate
-        # Diff-based gate: new engine code must use single-authority helpers
-        # (keyword queries via game/keywords.rs) instead of raw state pokes.
+        # (A) Diff-based: new engine code must use single-authority helpers
+        #     (keyword queries via game/keywords.rs) instead of raw state pokes.
+        # (B) Full-tree: gameplay zone changes must go through zone_pipeline,
+        #     not the raw movers / zone containers / `GameObject::zone =`.
+        #     Ratchets against scripts/zone-authority-baseline.txt, which may
+        #     only shrink as the Plan 03 tranches migrate each site.
         run: |
           BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
@@ -143,6 +148,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Parse-diff reads both parents of GitHub's synthetic PR merge commit.
+          fetch-depth: 2
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -190,13 +198,53 @@ jobs:
         # Exact-match only (no restore-keys) — a stale hit would feed wrong
         # card-data into the validate/coverage gates downstream. Cargo.lock is
         # included so dep bumps that affect parsing (e.g. nom) invalidate.
+        #
+        # `crates/engine/data/**` and `build.rs` are hashed because the engine
+        # lib compiles those files IN: oracle-subtypes.json via `include_str!`,
+        # known-tokens.toml via build.rs → OUT_DIR embed. A PR touching only
+        # those changes parser behaviour, so omitting them would serve stale
+        # card-data from this cache and (via gates-cache below) skip the
+        # validate/coverage gates that would have caught it. hashFiles evaluates
+        # at step start against the clean checkout, so oracle-gen's later
+        # write-if-changed rewrite of oracle-subtypes.json cannot feed back in.
+        #
+        # The AI gate's shared card-data-cache action intentionally uses the
+        # same `cardgen-` key expression, so main pushes can seed generated
+        # entries that AI PR gates reuse. Both paths download AtomicCards.json
+        # before evaluating the key so the gitignored MTGJSON input participates
+        # in `hashFiles`.
         id: cardgen-cache
         uses: actions/cache@v4
         with:
           path: |
             data/card-data.json
             data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+
+      - name: Cache card-data gate results
+        # Proof-of-passage cache for the two expensive steps that are pure
+        # functions of the same hashed inputs: `card-data-validate` and
+        # `coverage-report`. `actions/cache` writes its entry only when the job
+        # succeeds (`post-if: success()` on the action's post step), so an entry
+        # under this key is evidence that validate AND coverage passed for this
+        # exact input set — which is what licenses skipping them on a hit.
+        # Key expression must stay identical to `cardgen-cache`'s above.
+        #
+        # Deliberately a SEPARATE key from `cardgen-cache`, not a reuse of it.
+        # A cardgen entry proves only that generation succeeded; it is not
+        # evidence that anything validated it. ai-gate.yml intentionally shares
+        # `cardgen-` entries but never validates them. If this gate skipped
+        # validate/coverage on a shared cardgen hit, an engine change whose
+        # generated output fails `card-data-validate` could still seed a false
+        # green for the next push. This cache is written by card-data-gate alone,
+        # so a hit cannot lie about a gate.
+        id: gates-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/coverage-data.json
+            data/coverage-summary.json
+          key: cardgen-gates-v1-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
 
       - name: Generate card data
         # All engine-backed tools in this job use the SAME (profile, features)
@@ -212,11 +260,46 @@ jobs:
         # PR-time gate — the same parse the WASM does at runtime, run against
         # the freshly produced card-data. If a parser/schema change makes the
         # engine unable to read its own output, fail the build before merge.
-        # Same [tool, cli] fingerprint as card-gen above → engine cache hit.
+        # Skipped on a gates-cache hit (NOT a cardgen hit — see that step): a
+        # gates entry for this input hash is proof this exact check already
+        # passed. card-data.json is byte-identical either way, restored from
+        # cardgen or regenerated above.
+        # Same [tool, cli] fingerprint as card-gen above → engine cache hit. That
+        # hit is only real because `oracle-gen` rewrites
+        # crates/engine/data/oracle-subtypes.json solely when its bytes change:
+        # the engine lib pulls that file in via `include_str!`, so an
+        # unconditional write would bump its mtime, dirty the crate's dep-info
+        # fingerprint, and force a full engine recompile right here.
+        if: steps.gates-cache.outputs.cache-hit != 'true'
         run: cargo run --profile tool --features cli --bin card-data-validate -- data/card-data.json
 
+      - name: Draw replacement corpus freeze (Plan 03 / CR 121.2)
+        # Every `ReplacementEvent::Draw` definition must declare whether it
+        # modifies the draw *instruction* count (CR 121.2a) or replaces one
+        # *individual* draw (CR 121.2). Scope is assigned at construction and is
+        # not recoverable afterwards, so the corpus that carries one — and the
+        # scope each row must get — is frozen against a committed baseline.
+        #
+        # This lives in the card-data job, not the Rust lint job, because it
+        # reads the generated (gitignored) export. It runs UNCONDITIONALLY, with
+        # no gates-cache guard: that cache is keyed on MTGJSON + engine sources
+        # and does NOT hash scripts/**, so a PR that edited only the baseline
+        # would hit the cache, skip the check, and report a false green. The
+        # export is present either way (generated above or restored by cardgen).
+        run: python3 scripts/draw_replacement_census.py --corpus --check
+
       - name: Card support coverage report
-        # Same [tool, cli] fingerprint as card-gen above → engine cache hit.
+        # Skipped on a gates-cache hit — coverage-data.json and
+        # coverage-summary.json are restored from it, and both are deterministic
+        # in the same hashed inputs. Nothing downstream mutates either file, so
+        # the cached bytes are exactly this step's output regardless of which ref
+        # populated the entry (the main-only stamp writes a separate .stamped.json
+        # copy). The regression/parse-diff steps below still run unconditionally
+        # and consume the restored files (their R2 baselines move independently
+        # of this cache).
+        # Same [tool, cli] fingerprint as card-gen above → engine cache hit (see
+        # the oracle-subtypes note on the validate step).
+        if: steps.gates-cache.outputs.cache-hit != 'true'
         run: |
           cargo run --profile tool --features cli --bin coverage-report -- data/ --all > data/coverage-data.json
           jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' data/coverage-data.json > data/coverage-summary.json
@@ -260,10 +343,10 @@ jobs:
         continue-on-error: true
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PAYLOAD_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          echo "$PR_NUMBER" > pr-number.txt
           # Derive the baseline from the ACTUAL main commit this CI merge commit
           # was built on — its non-head parent — NOT the webhook payload's
           # base.sha. The payload value freezes at event-creation time, but the
@@ -275,16 +358,13 @@ jobs:
           # #4303: a one-card autotap fix whose comment listed 25 unrelated
           # cards). Reading the base off the merge commit's parent keeps both
           # sides in lockstep no matter how stale (or main-merged) the PR is.
-          if git rev-parse --verify HEAD^2 >/dev/null 2>&1; then
-            P1="$(git rev-parse HEAD^1)"
-            P2="$(git rev-parse HEAD^2)"
-            # Parent order is not contractual across GitHub's merge-ref build, so
-            # pick whichever parent is NOT the PR head as the base (main) side.
-            if [ "$P1" = "$HEAD_SHA" ]; then BASE_SHA="$P2"; else BASE_SHA="$P1"; fi
-          else
-            # Unmergeable PR (no synthetic merge commit) — nothing to pin to;
-            # fall back to the payload base.sha.
-            BASE_SHA="$PAYLOAD_BASE_SHA"
+          if ! BASE_SHA="$(./scripts/parse-diff-base.sh "$HEAD_SHA")"; then
+            # An unmergeable PR has no synthetic merge parent. A shallow or
+            # missing parent is never licensed to use the frozen webhook base:
+            # that would bill intervening main changes to this PR.
+            printf '<!-- coverage-parse-diff -->\n### Parse changes introduced by this PR\n\n_Baseline pending — no synthetic merge parent is available for PR head `%s`._\n' "$HEAD_SHA" > parse-diff.md
+            echo "produced=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           BASE_HASH="$(./scripts/engine-source-hash.sh "$BASE_SHA")"
@@ -294,7 +374,6 @@ jobs:
             echo "produced=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "$PR_NUMBER" > pr-number.txt
           URL="https://data.phase-rs.dev/parse-baselines/coverage-data-${BASE_HASH}.json"
           if curl -fsSL --retry 3 --retry-delay 2 "$URL" -o coverage-base.json; then
             cargo run --profile tool --features cli --bin coverage-parse-diff -- \
@@ -340,13 +419,21 @@ jobs:
         # Embed the same card-data hash in both files so downstream consumers
         # can verify they're reading a consistent R2 snapshot. Gated to main
         # because the only consumer is the R2 upload below.
+        #
+        # coverage-data.json is stamped into a SEPARATE .stamped.json copy, not
+        # rewritten in place: it is a `gates-cache` path, and this step runs
+        # before that cache's post-save. Stamping in place would make the cached
+        # bytes depend on github.ref (main-push entries jq-reserialized and
+        # stamped, PR entries raw), coupling a content-addressed cache to the ref
+        # that happened to populate it. semantic-audit.json is not cached, so it
+        # is still stamped in place. The uploads below publish the stamped copy,
+        # so R2 artifacts keep exactly their current shape.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           HASH=$(sha256sum data/card-data.json | awk '{print substr($1, 1, 16)}')
           jq --arg h "$HASH" '. + {card_data_hash: $h}' data/semantic-audit.json > data/semantic-audit.json.tmp
           mv data/semantic-audit.json.tmp data/semantic-audit.json
-          jq --arg h "$HASH" '. + {card_data_hash: $h}' data/coverage-data.json > data/coverage-data.json.tmp
-          mv data/coverage-data.json.tmp data/coverage-data.json
+          jq --arg h "$HASH" '. + {card_data_hash: $h}' data/coverage-data.json > data/coverage-data.stamped.json
 
       - name: Upload data to R2 (preview)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -356,7 +443,7 @@ jobs:
         run: |
           npx wrangler r2 object put phase-rs-data/preview/card-data.json --file data/card-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/card-names.json --file data/card-names.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/preview/coverage-data.json --file data/coverage-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/preview/coverage-data.json --file data/coverage-data.stamped.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/coverage-summary.json --file data/coverage-summary.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/semantic-audit.json --file data/semantic-audit.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           # changelog{,-meta}.json are committed to client/public/ (not generated
@@ -386,7 +473,7 @@ jobs:
           set -euo pipefail
           HASH="$(./scripts/engine-source-hash.sh HEAD)"
           npx wrangler r2 object put "phase-rs-data/parse-baselines/coverage-data-${HASH}.json" \
-            --file data/coverage-data.json --remote --content-type application/json \
+            --file data/coverage-data.stamped.json --remote --content-type application/json \
             --cache-control "public, max-age=31536000, immutable"
 
   draft-pools:

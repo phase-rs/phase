@@ -563,6 +563,42 @@ impl GameScenario {
         builder
     }
 
+    /// Add a nonbasic land to the battlefield with abilities parsed from Oracle
+    /// text. Mirrors `add_creature_from_oracle`; no existing helper places a
+    /// land on the battlefield with parsed Oracle text (`add_basic_land` wires a
+    /// hard-coded mana ability; `add_land_to_hand` places in `Zone::Hand`).
+    pub fn add_land_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = self.state.next_timestamp();
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        // CR 302.6 note: summoning sickness only gates creatures, but the
+        // builder models a pre-existing permanent (entered on a prior turn),
+        // matching `add_creature`'s override.
+        obj.summoning_sick = false;
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
     /// Add a creature to hand with abilities parsed from Oracle text.
     pub fn add_creature_to_hand_from_oracle(
         &mut self,
@@ -1017,6 +1053,15 @@ impl<'a> CardBuilder<'a> {
     /// Set an additional cost on this card (kicker, blight, "or pay").
     pub fn with_additional_cost(&mut self, cost: AdditionalCost) -> &mut Self {
         self.obj().additional_cost = Some(cost);
+        self
+    }
+
+    /// Pin a Strive-style per-target cost surcharge (CR 207.2c + CR 601.2f) on
+    /// this card directly, bypassing Oracle-text parsing. Use when the parser's
+    /// recognition of the surcharge clause is out of scope for the test (e.g. a
+    /// card whose printed text predates the "Strive —" ability-word template).
+    pub fn with_strive_cost(&mut self, cost: crate::types::mana::ManaCost) -> &mut Self {
+        self.obj().strive_cost = Some(cost);
         self
     }
 
@@ -1588,6 +1633,8 @@ impl GameRunner {
             WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",
             WaitingFor::PairChoice { .. } => "PairChoice",
             WaitingFor::OpponentMayChoice { .. } => "OpponentMayChoice",
+            WaitingFor::LoopShortcut { .. } => "LoopShortcut",
+            WaitingFor::RespondToShortcut { .. } => "RespondToShortcut",
             WaitingFor::TributeChoice { .. } => "TributeChoice",
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
@@ -1744,6 +1791,7 @@ pub struct SpellCast<'a> {
     cost_objects: Vec<ObjectId>,
     distribution: Option<Vec<(TargetRef, u32)>>,
     convoke_with: Vec<ObjectId>,
+    delve_with: Vec<ObjectId>,
     optional: OptionalPolicy,
     search_pick: SearchPolicy,
     modal_back_face: Option<bool>,
@@ -1770,6 +1818,7 @@ impl<'a> SpellCast<'a> {
             cost_objects: Vec::new(),
             distribution: None,
             convoke_with: Vec::new(),
+            delve_with: Vec::new(),
             optional: OptionalPolicy::default(),
             search_pick: SearchPolicy::default(),
             modal_back_face: None,
@@ -1797,7 +1846,7 @@ impl<'a> SpellCast<'a> {
     }
 
     /// Accept optional ("you may") effects/costs during resolution
-    /// (CR 609.3 / CR 601.2f). Mirrors [`AbilityActivation::accept_optional`].
+    /// (CR 608.2d / CR 601.2f). Mirrors [`AbilityActivation::accept_optional`].
     pub fn accept_optional(mut self) -> Self {
         self.optional = OptionalPolicy::Accept;
         self
@@ -1949,6 +1998,13 @@ impl<'a> SpellCast<'a> {
         self
     }
 
+    /// Exile these cards from the caster's graveyard to pay generic mana via
+    /// Delve (CR 702.66a).
+    pub fn delve_with(mut self, cards: &[ObjectId]) -> Self {
+        self.delve_with.extend_from_slice(cards);
+        self
+    }
+
     /// Drive the cast pipeline until the spell is committed to the stack and a
     /// priority window opens (CR 601.2i). Use this when a test must inspect the
     /// live stack object before resolution.
@@ -1971,6 +2027,7 @@ impl<'a> SpellCast<'a> {
             cost_objects,
             distribution,
             convoke_with,
+            delve_with,
             optional,
             search_pick,
             modal_back_face,
@@ -2142,36 +2199,49 @@ impl<'a> SpellCast<'a> {
                         &mut events,
                     )?;
                 }
-                // CR 702.51a / CR 601.2g–h: mana payment, possibly via convoke.
+                // CR 702.51a / CR 702.66a / CR 601.2g–h: mana payment, possibly
+                // via convoke or delve.
                 //
                 // Most pool-funded casts auto-pay and never surface this window.
-                // But a Convoke (CR 702.51) spell always opens a `ManaPayment
-                // { convoke_mode }` window to offer tapping creatures — even when
-                // the controller intends to pay entirely from their pool. With no
-                // convoke creatures declared, the convoke loop is a no-op and the
-                // trailing `PassPriority` finalizes the remaining cost from the
-                // pool (the engine auto-allocates pool mana, incl. the generic
-                // portion). If the pool can't cover it, `PassPriority` errors and
-                // the `.expect` below fails loudly — fund the pool in the scenario.
-                WaitingFor::ManaPayment { .. } => {
-                    for &creature in &convoke_with {
-                        // CR 702.51b: pay one mana of the creature's color, or
-                        // colorless toward the generic portion of the cost.
-                        let mana_type = runner
-                            .state
-                            .objects
-                            .get(&creature)
-                            .and_then(|obj| obj.color.first().copied())
-                            .map(ManaType::from)
-                            .unwrap_or(ManaType::Colorless);
-                        act_collect(
-                            runner,
-                            GameAction::TapForConvoke {
-                                object_id: creature,
-                                mana_type,
-                            },
-                            &mut events,
-                        )?;
+                // Convoke (CR 702.51) and Delve (CR 702.66a) each open a
+                // `ManaPayment { convoke_mode }` window even when the controller
+                // intends to pay entirely from their pool. With no declared
+                // contributors, their loops are no-ops and the trailing
+                // `PassPriority` finalizes the remaining cost from the pool. If
+                // the pool can't cover it, `PassPriority` errors and the `.expect`
+                // below fails loudly — fund the pool in the scenario.
+                WaitingFor::ManaPayment { convoke_mode, .. } => {
+                    if matches!(convoke_mode, Some(ConvokeMode::Delve)) {
+                        for &card in &delve_with {
+                            act_collect(
+                                runner,
+                                GameAction::TapForConvoke {
+                                    object_id: card,
+                                    mana_type: ManaType::Colorless,
+                                },
+                                &mut events,
+                            )?;
+                        }
+                    } else {
+                        for &creature in &convoke_with {
+                            // CR 702.51b: pay one mana of the creature's color, or
+                            // colorless toward the generic portion of the cost.
+                            let mana_type = runner
+                                .state
+                                .objects
+                                .get(&creature)
+                                .and_then(|obj| obj.color.first().copied())
+                                .map(ManaType::from)
+                                .unwrap_or(ManaType::Colorless);
+                            act_collect(
+                                runner,
+                                GameAction::TapForConvoke {
+                                    object_id: creature,
+                                    mana_type,
+                                },
+                                &mut events,
+                            )?;
+                        }
                     }
                     // CR 601.2h: finalize the (now fully convoke-paid) cost.
                     act_collect(runner, GameAction::PassPriority, &mut events)?;
@@ -2588,7 +2658,7 @@ impl<'a> AbilityActivation<'a> {
     }
 
     /// Decline optional ("you may") effects/costs during resolution
-    /// (CR 609.3 / CR 601.2f). This is already the default; provided for
+    /// (CR 608.2d / CR 601.2f). This is already the default; provided for
     /// explicitness at call sites.
     pub fn decline_optional(mut self) -> Self {
         self.optional = OptionalPolicy::Decline;
@@ -2596,7 +2666,7 @@ impl<'a> AbilityActivation<'a> {
     }
 
     /// Accept optional ("you may") effects/costs during resolution
-    /// (CR 609.3 / CR 601.2f). Mirrors [`SpellCast`]'s decline default with an
+    /// (CR 608.2d / CR 601.2f). Mirrors [`SpellCast`]'s decline default with an
     /// opt-in accept, for abilities whose payoff is gated behind a "you may".
     pub fn accept_optional(mut self) -> Self {
         self.optional = OptionalPolicy::Accept;
@@ -2802,7 +2872,7 @@ pub enum SearchPolicy {
 }
 
 /// What the resolution driver does at an optional "you may" decision
-/// (`OptionalEffectChoice` per CR 609.3, `OptionalCostChoice` per CR 601.2f).
+/// (`OptionalEffectChoice` per CR 608.2d, `OptionalCostChoice` per CR 601.2f).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptionalPolicy {
     /// Accept the optional effect / pay the optional cost.
@@ -2998,7 +3068,7 @@ fn drive_resolution(
                     )?;
                 }
             },
-            // CR 609.3: accept or decline an optional ("you may") effect.
+            // CR 608.2d: accept or decline an optional ("you may") effect.
             WaitingFor::OptionalEffectChoice { .. } => {
                 let accept = matches!(policy.optional, OptionalPolicy::Accept);
                 act_collect(

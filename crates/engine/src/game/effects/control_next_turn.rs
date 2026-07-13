@@ -44,6 +44,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ControlNextTurn,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())

@@ -710,6 +710,27 @@ export type MayTriggerAutoChoiceOp =
   | { type: "Remove"; data: { key: MayTriggerAutoChoiceKey } }
   | { type: "ClearAll" };
 
+// CR 603.3b: The mutation a `SetTriggerOrderTemplate` action performs on the
+// acting player's saved trigger-ordering templates. `Save` echoes the prompted
+// group's source object ids + the submitted permutation; `Remove` echoes a
+// stored key; `ClearAll` drops every saved template belonging to the acting
+// player. Mirrors engine `TriggerOrderTemplateOp` (types/actions.rs).
+export type TriggerOrderTemplateOp =
+  | { type: "Save"; data: { sources: ObjectId[]; order: number[] } }
+  | { type: "Remove"; data: { key: DecisionGroupKey } }
+  | { type: "ClearAll" };
+
+// CR 603.3b: Order-insensitive identity of a recurring decision group — the
+// canonical sorted (identity, multiplicity) source multiset plus its kind.
+// Mirrors engine `DecisionGroupKey` / `DecisionKind`
+// (analysis/decision_template.rs).
+export type DecisionKind = "TriggerOrdering" | "LoopChoice";
+
+export interface DecisionGroupKey {
+  sources: [DecisionSource, number][];
+  kind: DecisionKind;
+}
+
 // ── Casting Permission ───────────────────────────────────────────────────
 
 export type CastingPermission =
@@ -1135,6 +1156,11 @@ export interface StackEntryDisplay {
 
 // ── Pending Cast (for target selection) ──────────────────────────────────
 
+export interface DeferredSacrificeSelection {
+  object_id: ObjectId;
+  filter: TargetFilter;
+}
+
 export interface PendingCast {
   object_id: ObjectId;
   card_id: CardId;
@@ -1143,6 +1169,7 @@ export interface PendingCast {
   activation_cost?: SerializedAbilityCost;
   activation_ability_index?: number;
   target_constraints?: Array<{ type: string }>;
+  deferred_sacrificed_permanents?: DeferredSacrificeSelection[];
   // CR 118.3a: pip ids the caster pinned to direct payment. `#[serde(default,
   // skip_serializing_if = "Vec::is_empty")]` — absent when no pin is recorded.
   pinned_pool_units?: number[];
@@ -1407,6 +1434,8 @@ export type WaitingFor =
   | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey } }
   | { type: "PairChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[] } }
   | { type: "OpponentMayChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
+  | { type: "LoopShortcut"; data: { proposer: PlayerId; predicted_winner: PlayerId | null; certificate: LoopCertificate; schema: ShortcutDecisionSchema } }
+  | { type: "RespondToShortcut"; data: { player: PlayerId; remaining_players?: PlayerId[]; proposal: ShortcutProposal } }
   | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; trigger_event?: unknown; effect_description?: string; remaining?: PlayerId[] } }
   // CR 118.12a: Disjunctive unless-cost — player picks **which** sub-cost
   // to pay (or declines all). Drives Tergrid's Lantern and the broader
@@ -1892,6 +1921,8 @@ export type GameAction =
   | { type: "SetPhaseStops"; data: { stops: PhaseStop[] } }
   | { type: "SetPriorityYield"; data: { op: PriorityYieldOp } }
   | { type: "SetMayTriggerAutoChoice"; data: { op: MayTriggerAutoChoiceOp } }
+  // CR 603.3b: mirror engine GameAction::SetTriggerOrderTemplate (PR-7 phase-2 boundary sync).
+  | { type: "SetTriggerOrderTemplate"; data: { op: TriggerOrderTemplateOp } }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
   // CR 510.1d + CR 702.22k: blocker's combat-damage division among the attackers it blocks.
   | { type: "AssignBlockerDamage"; data: { assignments: [ObjectId, number][] } }
@@ -1922,6 +1953,9 @@ export type GameAction =
   | { type: "Debug"; data: DebugAction }
   | { type: "GrantDebugPermission"; data: { player_id: PlayerId } }
   | { type: "RevokeDebugPermission"; data: { player_id: PlayerId } }
+  | { type: "DeclareShortcut"; data: { count: IterationCount; template?: DecisionTemplate | null } }
+  | { type: "RespondToShortcut"; data: { response: ShortcutResponse } }
+  | { type: "DeclineShortcut" }
   | { type: "Concede"; data: { player_id: PlayerId } };
 
 // CR 605.3b + CR 106.1a: Shape of the prompt surfaced by WaitingFor::ChooseManaColor.
@@ -2146,7 +2180,9 @@ export type ResourceAxis =
   | "DeathTriggers"
   | "EtbTriggers"
   | "LtbTriggers"
-  | "SacTriggers";
+  | "SacTriggers"
+  // CR 704.5c: poison counters on a player (10 ⇒ that player loses).
+  | { Poison: PlayerId };
 
 /** The externally-tagged discriminant of a `ResourceAxis` (its variant name).
  *  Exhaustive over `ResourceAxis` so a new engine axis forces a TS update. */
@@ -2166,7 +2202,8 @@ export type ResourceAxisTag =
   | "DeathTriggers"
   | "EtbTriggers"
   | "LtbTriggers"
-  | "SacTriggers";
+  | "SacTriggers"
+  | "Poison";
 
 /**
  * One `∞` HUD row. Mirrors `engine::game::derived_views::UnboundedResourceView`.
@@ -2177,6 +2214,114 @@ export interface UnboundedResourceView {
   player: PlayerId;
   axis: ResourceAxis;
 }
+
+/** Mirrors `engine::analysis::loop_check::WinKind` (unit variants → bare strings). */
+export type WinKind =
+  | "LethalDamage"
+  | "PoisonLoss"
+  | "Decking"
+  | "ImmediateWin"
+  | "ExtraTurns"
+  | "Advantage";
+
+/** Mirrors `engine::analysis::resource::ResidualPermanent`. */
+export interface ResidualPermanent {
+  oracle_id: string;
+  controller: PlayerId;
+  tapped: boolean;
+}
+
+/** Mirrors `engine::analysis::resource::BoardDelta`. */
+export interface BoardDelta {
+  added: ResidualPermanent[];
+  removed: ResidualPermanent[];
+}
+
+/** Mirrors `engine::analysis::loop_check::LoopCertificate`. */
+export interface LoopCertificate {
+  unbounded: ResourceAxis[];
+  win_kind: WinKind;
+  mandatory: boolean;
+  residual_board_delta: BoardDelta;
+}
+
+/**
+ * Mirrors `engine::analysis::decision_template::IterationCount` (serde externally
+ * tagged: unit variant → bare string, data variant → single-key object).
+ */
+export type IterationCount = "UntilLethal" | { Fixed: number };
+
+/**
+ * Mirrors `engine::analysis::decision_template::ShortcutDecisionSchema`
+ * (decision_template.rs). The READ-side offer the frontend renders to declare a
+ * loop shortcut. `points` is EMPTY for a choice-free drain — the only reachable
+ * shape today. Display-only: the modal reads these fields, never constructs them
+ * (constructing pins is deferred pin-capture).
+ */
+export interface ShortcutDecisionSchema {
+  iteration_count: IterationCount;
+  points: DecisionPoint[];
+  /**
+   * CR 702.51a: engine-computed total of untapped creatures the controller may tap for
+   * convoke across every ConvokeTaps point. Rendered directly by the modal (display-layer
+   * purity) instead of re-derived from `points`. `#[serde(default)]` ⇒ 0 when absent.
+   */
+  convoke_tappable_count: number;
+}
+
+/** Mirrors `engine::analysis::decision_template::DecisionPoint`. */
+export interface DecisionPoint {
+  slot: DecisionSlot;
+  kind: DecisionPointKind;
+}
+
+/**
+ * Mirrors `engine::analysis::decision_template::DecisionPointKind` (serde
+ * externally tagged; mixed unit/struct variants).
+ */
+export type DecisionPointKind =
+  | { Targets: { legal_targets: TargetRef[] } }
+  | { ConvokeTaps: { tappable: ObjectId[] } }
+  | { Mode: { available_modes: number[] } }
+  | "MayChoice"
+  | "UnlessBreak";
+
+/** Mirrors `engine::analysis::decision_template::DecisionSlot` (`index` is Rust `u8`). */
+export interface DecisionSlot {
+  source: DecisionSource;
+  index: number;
+}
+
+/**
+ * Mirrors `engine::analysis::decision_template::DecisionSource` (= `YieldTarget`,
+ * game_state.rs; serde externally tagged). `trigger_description` is
+ * `skip_serializing_if none` on the wire; `incarnation` always serializes.
+ */
+export type DecisionSource =
+  | { ThisObject: { source_id: ObjectId; incarnation: number | null; trigger_description?: string } }
+  | { AllCopies: { card_id: CardId; trigger_description?: string } };
+
+/**
+ * Opaque mirror of `engine::analysis::decision_template::DecisionTemplate`. Phase 3
+ * requires `DeclareShortcut.template === null`; the frontend never introspects the
+ * pin structure. The full field shape lands with the Phase-5 loop-shortcut modal.
+ */
+export type DecisionTemplate = Record<string, unknown>;
+
+/** Mirrors `engine::analysis::loop_check::ShortcutProposal`. */
+export interface ShortcutProposal {
+  proposer: PlayerId;
+  predicted_winner: PlayerId | null;
+  count: IterationCount;
+  unbounded: ResourceAxis[];
+  win_kind: WinKind;
+}
+
+/**
+ * Mirrors `engine::analysis::loop_check::ShortcutResponse` (serde externally tagged:
+ * `Accept` → bare string; `Shorten` → single-key object).
+ */
+export type ShortcutResponse = "Accept" | { Shorten: { at_iteration: number } };
 
 /** Mirrors `engine::game::derived_views::TurnOrderSlotView`. */
 export interface TurnOrderSlotView {
@@ -2466,7 +2611,10 @@ export type AutoPassMode =
  * detector. `Off` (default) restores pre-detector behavior; `On` enables it.
  * Mirrors `engine::types::game_state::LoopDetectionMode`.
  */
-export type LoopDetectionMode = { type: "Off" } | { type: "On" };
+export type LoopDetectionMode =
+  | { type: "Off" }
+  | { type: "On" }
+  | { type: "Interactive" };
 
 // ── Source attribution (CR 613 layers) ───────────────────────────────────
 
@@ -2715,6 +2863,60 @@ export interface BatchResolveResult {
 }
 
 /**
+ * A `GameState` and the `LegalActionsResult` derived from that exact engine
+ * version, captured with no interleaving window between them.
+ *
+ * The two halves MUST be produced together (one worker round-trip, or one
+ * inbound wire message) and travel together thereafter. Fetching them as two
+ * separate adapter calls lets an engine advance land between them, producing a
+ * pair like `waiting_for = Priority` + `[DecideOptionalEffect]` legal actions —
+ * the UI then renders affordances the engine rejects, and the game softlocks.
+ */
+export interface EngineSnapshot {
+  state: GameState;
+  legalResult: LegalActionsResult;
+  /**
+   * Globally monotonic ordering stamp. Larger = derived from a newer engine
+   * version. Compared only within one store (never across clients); the store's
+   * commit authority drops pairs stamped older than the last one it committed.
+   */
+  seq: number;
+}
+
+/**
+ * Monotonic counter behind `EngineSnapshot.seq`, shared by EVERY adapter
+ * instance in the tab.
+ *
+ * Module-global (not per-adapter) on purpose: adapters are recreated per match
+ * (a Bo3 draft builds a fresh `P2PHostAdapter`/`P2PGuestAdapter`/`WasmAdapter`
+ * per game), while `dispatch.ts`'s queue and in-flight animation are module-level
+ * and outlive an adapter teardown. With per-adapter counters restarting at 1, a
+ * leftover game-1 commit could carry a *higher* stamp than game-2's fresh reads
+ * and latch the store's gate above every subsequent commit — a permanent
+ * softlock. One global counter stamps a leftover game-1 commit *below* anything
+ * fetched after the new match installs, so the gate drops it, which is exactly
+ * the desired behavior. No epoch or reset machinery is needed.
+ */
+let snapshotSeq = 0;
+
+/** Consume the next globally monotonic snapshot stamp. */
+export function nextSnapshotSeq(): number {
+  snapshotSeq += 1;
+  return snapshotSeq;
+}
+
+/**
+ * Legal actions for a transport adapter with no cached engine snapshot yet —
+ * before the first state-bearing message arrives, and after dispose. Shared by
+ * every snapshot-caching adapter (P2P guest, ws, server-draft) so the empty
+ * shape is defined once.
+ */
+export const EMPTY_LEGAL_ACTIONS: LegalActionsResult = {
+  actions: [],
+  autoPassRecommended: false,
+};
+
+/**
  * Engine-built game-scoped AI card-DB subset descriptor (the `build_ai_card_subset`
  * WASM export, serialized as a tagged union). `full` means the game's card
  * universe is not statically bounded (today: Momir) and AI workers must load the
@@ -2743,6 +2945,15 @@ export interface EngineAdapter {
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
+  /**
+   * Fetch the state and its legal actions as one atomic, seq-stamped pair.
+   *
+   * This is the ONLY correct way to read the engine pair for a store commit —
+   * `getState()` followed by `getLegalActions()` can straddle an engine advance
+   * and yield a mismatched pair. Those two methods remain for callers that
+   * genuinely need one half in isolation.
+   */
+  getSnapshot(): Promise<EngineSnapshot>;
   getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null> | GameAction | null;
   resolveAll?(
     requester: number,

@@ -314,7 +314,7 @@ pub(crate) fn parse_quantity_ref_with_context(
     ))
     .parse(trimmed)
     {
-        // CR 608.2c + CR 609.3 + CR 107.3e: "the total <property> of those exiled
+        // CR 608.2c + CR 107.3e: "the total <property> of those exiled
         // cards" is an aggregate over the most recent chain tracked set, not over live
         // battlefield objects — the anaphor "those exiled cards" refers to the set
         // the preceding effect published (e.g. Ensnared by the Mara's `ExileTop`).
@@ -474,6 +474,9 @@ pub(crate) fn parse_quantity_ref_with_context(
                 filter: PlayerFilter::OpponentDealtDamage {
                     kind,
                     source: source.map(Box::new),
+                    // Count context ("for each opponent dealt …") has no
+                    // "N or more distinct sources" restriction — default 1.
+                    min_sources: 1,
                 },
             });
         }
@@ -1829,46 +1832,52 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
 ///   effect reading the triggering spell's cost; Wildgrowth Archaic,
 ///   Expressive Firedancer rider, Mana Sculpt rider).
 fn parse_mana_spent_to_cast_amount(input: &str) -> Option<QuantityRef> {
-    // Consume optional leading "the ".
+    // Consume optional leading "the ", then the shared "amount of " head.
     let rest = tag::<_, _, OracleError<'_>>("the ")
         .parse(input)
         .map_or(input, |(r, _)| r);
-    // Consume the core phrase. Accept both "mana you spent" and "mana spent".
-    let rest = alt((
-        value(
-            (),
-            tag::<_, _, OracleError<'_>>("amount of mana you spent to cast "),
-        ),
-        value((), tag("amount of mana spent to cast ")),
+    let rest = tag::<_, _, OracleError<'_>>("amount of ")
+        .parse(rest)
+        .ok()?
+        .0;
+
+    // CR 107.4h: "{S} spent to cast <subject>" — the snow mana symbol refers to
+    // mana produced by a snow source. `FromSource` counts exactly the spent-mana
+    // snapshots whose PRODUCING source matches the filter (game/quantity.rs).
+    // Graven Lore, Blessing of Frost, Blood on the Snow.
+    if let Ok((subject, _)) = nom_quantity::parse_snow_mana_symbol(rest) {
+        let subject = tag::<_, _, OracleError<'_>>(" spent to cast ")
+            .parse(subject)
+            .ok()?
+            .0;
+        let (_, scope) = nom_quantity::parse_mana_spent_self_subject(subject).ok()?;
+        return Some(QuantityRef::ManaSpentToCast {
+            scope,
+            metric: crate::types::ability::CastManaSpentMetric::FromSource {
+                source_filter: nom_quantity::snow_source_filter(),
+            },
+        });
+    }
+
+    // "mana [you] spent to cast <subject>" — total mana paid.
+    let subject = alt((
+        value((), tag::<_, _, OracleError<'_>>("mana you spent to cast ")),
+        value((), tag("mana spent to cast ")),
     ))
     .parse(rest)
     .ok()?
     .0;
-    // Dispatch on subject: self-referential vs triggering-spell anaphora.
-    alt((
-        value(
-            QuantityRef::ManaSpentToCast {
-                scope: crate::types::ability::CastManaObjectScope::SelfObject,
-                metric: crate::types::ability::CastManaSpentMetric::Total,
-            },
-            alt((
-                tag::<_, _, OracleError<'_>>("this spell"),
-                tag("this creature"),
-                tag("it"),
-                tag("~"),
-            )),
-        ),
-        value(
-            QuantityRef::ManaSpentToCast {
-                scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
-                metric: crate::types::ability::CastManaSpentMetric::Total,
-            },
-            alt((tag("that spell"), tag("that creature"))),
-        ),
-    ))
-    .parse(rest)
-    .ok()
-    .map(|(_, qty)| qty)
+
+    // The subject anaphora IS the scope signal (CR 400.7d). Delegate to the
+    // shared `parse_mana_spent_self_subject` combinator — the single authority —
+    // instead of re-listing the pronouns here. That duplicate list is why Toph,
+    // Greatest Earthbender ("...spent to cast her") fell through to a raw-text
+    // `QuantityRef::Variable` and resolved to 0.
+    let (_, scope) = nom_quantity::parse_mana_spent_self_subject(subject).ok()?;
+    Some(QuantityRef::ManaSpentToCast {
+        scope,
+        metric: crate::types::ability::CastManaSpentMetric::Total,
+    })
 }
 
 /// CR 603.7c: Classify the prefix of a `"<referent>'s <property>"` possessive
@@ -2846,6 +2855,8 @@ fn parse_for_each_clause_with_they_controller(
             filter: PlayerFilter::OpponentDealtDamage {
                 kind,
                 source: source.map(Box::new),
+                // Count context has no "N or more distinct sources" restriction — default 1.
+                min_sources: 1,
             },
         });
     }
@@ -3675,7 +3686,8 @@ mod tests {
                 Some(QuantityRef::PlayerCount {
                     filter: PlayerFilter::OpponentDealtDamage {
                         kind: DamageKindFilter::CombatOnly,
-                        source: None
+                        source: None,
+                        min_sources: 1,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{CombatOnly}}"
@@ -3699,7 +3711,8 @@ mod tests {
                 Some(QuantityRef::PlayerCount {
                     filter: PlayerFilter::OpponentDealtDamage {
                         kind: DamageKindFilter::Any,
-                        source: None
+                        source: None,
+                        min_sources: 1,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{Any}}"
@@ -3719,7 +3732,8 @@ mod tests {
                 Some(QuantityRef::PlayerCount {
                     filter: PlayerFilter::OpponentDealtDamage {
                         kind: DamageKindFilter::NoncombatOnly,
-                        source: None
+                        source: None,
+                        min_sources: 1,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{NoncombatOnly}}"
@@ -4524,7 +4538,8 @@ mod tests {
                 qty: QuantityRef::PlayerCount {
                     filter: PlayerFilter::OpponentDealtDamage {
                         kind: DamageKindFilter::CombatOnly,
-                        source: None
+                        source: None,
+                        min_sources: 1,
                     },
                 }
             }
@@ -4544,7 +4559,8 @@ mod tests {
                 qty: QuantityRef::PlayerCount {
                     filter: PlayerFilter::OpponentDealtDamage {
                         kind: DamageKindFilter::CombatOnly,
-                        source: None
+                        source: None,
+                        min_sources: 1,
                     },
                 }
             }
@@ -4576,7 +4592,8 @@ mod tests {
                     qty: QuantityRef::PlayerCount {
                         filter: PlayerFilter::OpponentDealtDamage {
                             kind: DamageKindFilter::CombatOnly,
-                            source: None
+                            source: None,
+                            min_sources: 1,
                         },
                     }
                 },
@@ -4611,6 +4628,8 @@ mod tests {
                             ),
                         ],
                     })),
+
+                    min_sources: 1,
                 },
             }
         );
@@ -4630,6 +4649,8 @@ mod tests {
                 filter: PlayerFilter::OpponentDealtDamage {
                     kind: DamageKindFilter::CombatOnly,
                     source: Some(Box::new(TargetFilter::SelfRef)),
+
+                    min_sources: 1,
                 },
             }
         );
@@ -4650,7 +4671,8 @@ mod tests {
                 Some(QuantityRef::PlayerCount {
                     filter: PlayerFilter::OpponentDealtDamage {
                         kind: DamageKindFilter::CombatOnly,
-                        source: None
+                        source: None,
+                        min_sources: 1,
                     },
                 }),
                 "phrase {phrase:?} must parse to unfiltered OpponentDealtDamage"
@@ -4826,7 +4848,7 @@ mod tests {
 
     #[test]
     fn cda_quantity_total_mana_value_of_those_exiled_cards_is_tracked_set_aggregate() {
-        // CR 609.3 + CR 202.3: the plural anaphor "those exiled cards" aggregates
+        // CR 608.2c + CR 202.3: the plural anaphor "those exiled cards" aggregates
         // over the most recent chain tracked set (the set the preceding effect
         // published), NOT over live battlefield/exile objects via a type filter.
         // Drives Ensnared by the Mara's "deals damage equal to the total mana
@@ -5829,6 +5851,31 @@ mod tests {
         }
     }
 
+    /// CR 701.27g: "for each transformed permanent you control" counts
+    /// transformed permanents through the shared typed-filter grammar. Reverting
+    /// the `FilterProp::Transformed` adjective support drops the property and
+    /// collapses Mutagen Connoisseur's static to a flat modifier.
+    #[test]
+    fn for_each_transformed_permanent_you_control() {
+        let qty = parse_for_each_clause("transformed permanent you control").unwrap();
+        match qty {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(typed),
+            } => {
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert!(
+                    typed
+                        .properties
+                        .iter()
+                        .any(|property| matches!(property, FilterProp::Transformed)),
+                    "expected Transformed property, got {:?}",
+                    typed.properties
+                );
+            }
+            other => panic!("Expected ObjectCount over Typed filter, got {other:?}"),
+        }
+    }
+
     /// CR 608.2c + CR 109.5: Tempt with Discovery's
     /// bonus-tutor-per-accepting-opponent step parses as a player-action count.
     /// Verb tense (searches/searched) and article (a/their) variants produce
@@ -5922,8 +5969,9 @@ mod tests {
         );
     }
 
-    /// CR 604.3 + CR 609.3: Wernog's full repeat count "one plus the number of
-    /// opponents who investigated this way" composes the "N plus" Offset arm
+    /// CR 604.3 + CR 608.2c: Wernog's full repeat count "one plus the number of
+    /// opponents who investigated this way" — the "this way" anaphor reads back to
+    /// the same effect — composes the "N plus" Offset arm
     /// over the inner player-action count. Before the inner resolved, the whole
     /// phrase collapsed to an opaque `Variable`.
     #[test]
@@ -6845,7 +6893,7 @@ mod tests {
         }
     }
 
-    /// CR 608.2c + CR 609.3: Read the Runes — "for each card drawn this way"
+    /// CR 608.2c: Read the Runes — "for each card drawn this way"
     /// binds repeat count to the parent draw via `EventContextAmount`.
     #[test]
     fn card_drawn_this_way_uses_event_context_amount() {

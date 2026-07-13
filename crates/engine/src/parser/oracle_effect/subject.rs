@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, map, opt, rest, value, verify};
+use nom::combinator::{all_consuming, map, opt, peek, rest, value, verify};
 use nom::multi::separated_list1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -12,7 +12,7 @@ use super::animation::{
     has_in_addition_to_other_types, parse_animation_spec,
 };
 use super::imperative;
-use super::lower::BOUNDED_TARGET_PHRASES;
+use super::lower::BOUNDED_TARGET_CARDINALITIES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
@@ -128,6 +128,14 @@ pub(super) fn try_parse_subject_predicate_ast(
             },
             ctx,
         ));
+    }
+
+    // CR 611.2 + CR 201.2a: "target <T> and all other <T>s with the same name as
+    // that <T> get -N/-M" (Bile Blight, Echoing Decay/Courage). Must run before
+    // the generic continuous clause, which resolves only the first conjunct and
+    // drops the same-name mass debuff (issue #4727).
+    if let Some(clause) = try_parse_target_and_same_name_pump_clause(text, ctx) {
+        return Some(clause);
     }
 
     if let Some(clause) = try_parse_subject_additive_type_clause(text, ctx) {
@@ -582,6 +590,17 @@ fn build_additive_type_continuous_clause(
     application: &SubjectApplication,
     predicate: &str,
 ) -> Option<ParsedEffectClause> {
+    // CR 707.9: A copy's `, except <body>` clause (Sarkhan, Soul Aflame — "become
+    // a copy of it until end of turn, except its name is ~ and it's legendary in
+    // addition to its other types") owns any "in addition to its other types"
+    // tail. That supertype belongs in the `BecomeCopy` additional_modifications
+    // produced by `become_copy_except`, not a standalone additive-type static —
+    // so decline here (letting the copy parser win) rather than let the scanned
+    // `is` inside "its name is ~" be read as this clause's copula verb.
+    let predicate_lower = predicate.to_lowercase();
+    if nom_primitives::split_once_on(&predicate_lower, ", except").is_ok() {
+        return None;
+    }
     let modifications = parse_additive_type_clause_modifications(predicate)?;
     let affected = static_affected_for_application(application);
 
@@ -1288,6 +1307,152 @@ fn try_parse_source_and_other_restriction_clause(
     })
 }
 
+/// CR 611.2 + CR 201.2a + CR 115.1: "target &lt;T&gt; and all other &lt;T&gt;s with the same
+/// name as that &lt;T&gt; get -N/-M [until end of turn]" (Bile Blight, Echoing Decay,
+/// Echoing Courage's +2/+2). A compound subject sharing one pump predicate: the
+/// announced creature is a single `Pump` and the same-name others are a mass
+/// `PumpAll`. CR 611.2a — each object receives the continuous P/T change exactly
+/// once, so the `PumpAll` must EXCLUDE the announced target (which the primary
+/// `Pump` already covers); the `Not{ParentTarget}` conjunct is concretized
+/// against the inherited target at resolution (`pump::resolve_all`), mirroring
+/// Maelstrom Pulse's `Destroy`+`DestroyAll`. Runs before the generic continuous
+/// clause, which resolves only the first conjunct and silently drops the mass
+/// debuff (issue #4727).
+fn try_parse_target_and_same_name_pump_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ClauseAst> {
+    let lower = text.to_lowercase();
+
+    // Locate the pump predicate boundary (" gets " / " get ") with nom take_until
+    // (nom-combinator dispatch, not string methods).
+    let ((), predicate_with_space) = nom_on_lower(text, &lower, |input| {
+        alt((
+            value((), take_until::<_, _, OracleError<'_>>(" gets ")),
+            value((), take_until::<_, _, OracleError<'_>>(" get ")),
+        ))
+        .parse(input)
+    })?;
+    let subject = text[..text.len() - predicate_with_space.len()].trim();
+    let predicate = predicate_with_space.trim_start();
+
+    // Class gate: the predicate must be a P/T pump ("get -3/-3 until end of turn").
+    // Non-pump predicates fall through to the generic subject grammar.
+    let (power, toughness, duration) =
+        super::lower::parse_pump_clause_with_context(predicate, ctx)?;
+
+    // The subject must be a two-part conjunction "&lt;target&gt; and &lt;same-name mass&gt;".
+    let subject_lower = subject.to_lowercase();
+    let subject_pair = TextPair::new(subject, &subject_lower);
+    let (primary_tp, secondary_tp) = subject_pair.split_around(" and ")?;
+
+    // Primary conjunct must announce a target ("target creature") — this is what
+    // carries the CR 115.1 target slot the mass sub-ability inherits.
+    let primary = parse_subject_application(primary_tp.original.trim(), ctx)?;
+    primary.target.as_ref()?;
+
+    // Secondary conjunct must be the same-name mass ("all other creatures with
+    // the same name as that creature") — a class filter, not a target slot. The
+    // `SameNameAsParentTarget` gate is the load-bearing discriminator: a plain
+    // "target creature and each creature you control get +1/+1" secondary lacks
+    // it and returns `None`, leaving the generic path untouched.
+    let (secondary_filter, rest) = parse_target(secondary_tp.original.trim());
+    if !rest.trim().is_empty() || !filter_carries_same_name_as_parent_target(&secondary_filter) {
+        return None;
+    }
+
+    // Primary: single-target Pump on the announced creature.
+    let primary_effect = build_pump_effect(&primary, power.clone(), toughness.clone());
+
+    // Mass: PumpAll over the same-name others, EXCLUDING the announced target.
+    let mass_target = TargetFilter::And {
+        filters: vec![
+            secondary_filter,
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::ParentTarget),
+            },
+        ],
+    };
+    let mass_clause = ParsedEffectClause {
+        effect: Effect::PumpAll {
+            power,
+            toughness,
+            target: mass_target,
+        },
+        duration: duration.clone().or(Some(Duration::UntilEndOfTurn)),
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    };
+    let mass_def = super::ability_definition_from_clause(AbilityKind::Spell, mass_clause);
+
+    Some(ClauseAst::SubjectPredicate {
+        subject: Box::new(SubjectPhraseAst {
+            affected: primary.affected,
+            target: primary.target,
+            multi_target: None,
+            inherits_parent: primary.inherits_parent,
+            is_optional: primary.is_optional,
+        }),
+        predicate: Box::new(PredicateAst::Continuous {
+            effect: primary_effect,
+            duration: duration.or(Some(Duration::UntilEndOfTurn)),
+            sub_ability: Some(Box::new(mass_def)),
+        }),
+    })
+}
+
+/// Walks a `TargetFilter` for `FilterProp::SameNameAsParentTarget` (parser-side
+/// mirror of the runtime `filter_refs_same_name_as_parent_target`).
+fn filter_carries_same_name_as_parent_target(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::SameNameAsParentTarget)),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(filter_carries_same_name_as_parent_target),
+        TargetFilter::Not { filter } => filter_carries_same_name_as_parent_target(filter),
+        _ => false,
+    }
+}
+
+/// CR 611.2b + CR 110.5: Recognize a trailing "for as long as &lt;target
+/// anaphor&gt; remains tapped" duration on a `CantBeActivated` grant (Braided
+/// Net: "Its activated abilities can't be activated for as long as it remains
+/// tapped."). The anaphoric subject ("it" / "that creature" / …) co-refers with
+/// the grant's target, which the arm binds to `ParentTarget`, so the tapped
+/// gate is `IsTapped { scope: Target }` — NOT the standalone duration
+/// combinator's source-scoped `SourceIsTapped`
+/// (`oracle_nom::duration::parse_remains_tapped`), which has no clause subject
+/// to disambiguate and defaults to the source. Returns the tapped-bound
+/// `Duration` when the clause is present, `None` otherwise (caller keeps the
+/// default `UntilEndOfTurn`, so suffix-free prohibitions are unchanged).
+fn tapped_bound_prohibition_duration(lower: &str) -> Option<Duration> {
+    nom_primitives::scan_at_word_boundaries(lower, |input: &str| {
+        let (input, _) = tag::<_, _, OracleError<'_>>("for as long as ").parse(input)?;
+        let (input, _) = alt((
+            tag("it"),
+            tag("that creature"),
+            tag("that permanent"),
+            tag("that artifact"),
+            tag("~"),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" remains tapped").parse(input)?;
+        Ok((input, ()))
+    })
+    .map(|()| Duration::ForAsLongAs {
+        condition: StaticCondition::IsTapped {
+            scope: crate::types::ability::ObjectScope::Target,
+        },
+    })
+}
+
 fn try_parse_subject_restriction_clause(
     text: &str,
     ctx: &mut ParseContext,
@@ -1480,6 +1645,10 @@ fn try_parse_subject_restriction_clause(
         let affected = static_affected_for_application(&application);
         // CR 605.1a: "unless they're mana abilities" exemption rides on the mode.
         let exemption = parse_cant_be_activated_exemption_in_text(&lower);
+        // CR 611.2b + CR 110.5: "for as long as it remains tapped" (Braided Net)
+        // ties the prohibition to the target's tap state; without the suffix
+        // (Dovin Baan, Xathrid Gorgon) it keeps the default end-of-turn duration.
+        let duration = tapped_bound_prohibition_duration(&lower).or(Some(Duration::UntilEndOfTurn));
         let mode = StaticMode::CantBeActivated {
             who: ProhibitionScope::AllPlayers,
             source_filter: TargetFilter::SelfRef,
@@ -1490,12 +1659,12 @@ fn try_parse_subject_restriction_clause(
                 static_abilities: vec![StaticDefinition::new(mode.clone())
                     .affected(affected)
                     .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
-                duration: Some(Duration::UntilEndOfTurn),
+                duration: duration.clone(),
                 target: application.target,
             },
             distribute: None,
             multi_target: None,
-            duration: Some(Duration::UntilEndOfTurn),
+            duration,
             sub_ability: None,
             condition: None,
             optional: false,
@@ -2047,8 +2216,8 @@ pub(super) fn parse_subject_application(
         }
         // CR 115.1d: "each of one or two targets" — bounded multi-target selection
         // where the effect applies to each chosen target (Prismari Charm).
-        for &(phrase, min, max) in BOUNDED_TARGET_PHRASES {
-            if tag::<_, _, OracleError<'_>>(phrase)
+        for &(stem, min, max) in BOUNDED_TARGET_CARDINALITIES {
+            if (tag::<_, _, OracleError<'_>>(stem), tag(" targets"))
                 .parse(remainder)
                 .is_ok()
             {
@@ -3005,7 +3174,7 @@ fn try_split_pump_compound(
     let remainder = remainder_tp.original.trim();
 
     // Parse the pump clause first to check whether it carries its own duration.
-    let (power, toughness, duration) =
+    let (power, toughness, mut duration) =
         super::lower::parse_pump_clause_with_context(pump_part, ctx)?;
 
     // Guard: when the pump part has NO duration (e.g., "get +2/+2 and gain flying
@@ -3024,9 +3193,24 @@ fn try_split_pump_compound(
 
     let effect = build_pump_effect(application, power, toughness);
 
-    // Parse the remainder as an independent effect chain (sub_ability).
+    // CR 608.2d: a pump compounded with a modal keyword grant --
+    // "gets +1/+1 and gains your choice of deathtouch or lifelink" (Alchemist's
+    // Gift) -- has a grant half that is a two-branch player choice, so it cannot
+    // collapse into a single `ContinuousModification` the way a fixed "and gains
+    // trample" does (which the guard above routes to `build_continuous_clause`'s
+    // coalescing path). Route the choice through the same
+    // `parse_keyword_choice_grant` / `keyword_choice_branch` builders the
+    // standalone modal grant uses (`build_keyword_choice_clause`), riding the
+    // pump as a `ChooseOneOf` sub_ability keyed to the pumped creature
+    // (`ParentTarget`). Non-modal remainders ("you gain 1 life") fall back to
+    // the general effect-chain parse.
     let sub_ability = if remainder.is_empty() {
         None
+    } else if let Some((choice, choice_duration)) =
+        build_keyword_choice_sub_ability(application, remainder)
+    {
+        duration = duration.or(choice_duration);
+        Some(Box::new(choice))
     } else {
         Some(Box::new(super::parse_effect_chain(
             remainder,
@@ -3043,6 +3227,42 @@ fn try_split_pump_compound(
         optional: false,
         unless_pay: None,
     })
+}
+
+/// CR 608.2d: build the modal keyword-grant half of a pump
+/// compound ("gets +1/+1 AND gains your choice of X or Y") as a `ChooseOneOf`
+/// sub_ability. Reuses the same `parse_keyword_choice_grant` /
+/// `keyword_choice_branch` builders as the standalone `build_keyword_choice_clause`,
+/// keyed to the pumped creature via `static_affected_for_application`
+/// (`ParentTarget` for a targeted application). Returns `None` for a non-modal
+/// remainder so the caller falls back to the general effect-chain parse.
+fn build_keyword_choice_sub_ability(
+    application: &SubjectApplication,
+    remainder: &str,
+) -> Option<(AbilityDefinition, Option<Duration>)> {
+    // The split remainder keeps its conjugated verb ("gains ..."):
+    // `deconjugate_verb` in `build_continuous_clause` only normalizes the
+    // compound's leading verb ("gets"), so the second clause arrives as
+    // "gains your choice of ...". `parse_keyword_choice_grant` anchors on the
+    // bare "gain ..." form, so deconjugate the remainder here first.
+    let normalized = deconjugate_verb(remainder);
+    let (first, second, duration) = parse_keyword_choice_grant(&normalized)?;
+    let affected = static_affected_for_application(application);
+    let choice_duration = duration.clone();
+    let branches = vec![
+        keyword_choice_branch(first, affected.clone(), None, duration.clone()),
+        keyword_choice_branch(second, affected, None, duration),
+    ];
+    Some((
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches,
+            },
+        ),
+        choice_duration,
+    ))
 }
 
 fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Option<Duration>)> {
@@ -3784,6 +4004,43 @@ fn build_become_clause(
         return Some(ParsedEffectClause {
             effect: Effect::BecomeCopy {
                 target,
+                recipient: TargetFilter::SelfRef,
+                duration: duration.clone(),
+                mana_value_limit: None,
+                additional_modifications,
+            },
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
+
+    // CR 707.2 + CR 611.2c: "become copies of [donor]" — a MASS become-copy
+    // (Niko, Light of Hope: "Shards you control become copies of it"). Every
+    // member of the subject's recipient set becomes a copy of the single donor,
+    // locked to the members present at resolution. Mirrors the singular "a copy
+    // of" arm; the recipient set is the subject filter
+    // (`static_affected_for_application`) and the donor is the single "of" object.
+    // Additive: "copies of it" fell through to Unimplemented before this arm.
+    if let Ok((after_copies, _)) =
+        tag::<_, _, OracleError<'_>>("copies of ").parse(become_lower.as_str())
+    {
+        let (after_copies_owned, mid_sentence_duration) = strip_pre_except_duration(after_copies);
+        let duration = mid_sentence_duration.map(Some).unwrap_or(duration);
+        let (target, remainder) = parse_target(&after_copies_owned);
+        let card_name = ctx.card_name.as_deref().unwrap_or("");
+        let additional_modifications =
+            super::become_copy_except::parse_except_clause(remainder, card_name, ctx)
+                .map(|(_, mods)| mods)
+                .unwrap_or_default();
+        return Some(ParsedEffectClause {
+            effect: Effect::BecomeCopy {
+                target,
+                recipient: static_affected_for_application(&application),
                 duration: duration.clone(),
                 mana_value_limit: None,
                 additional_modifications,
@@ -5158,11 +5415,20 @@ pub(super) fn try_parse_each_deals_damage_equal_to_power(text: &str) -> Option<P
         return None;
     }
 
+    // CR 115.4 + CR 601.2c: optional group B — "and up to one other target
+    // creature you control" (Graceful Takedown). Parsed BEFORE the verb tag; a
+    // single-group card's remainder starts "each …", so `tag("and ")` fails and
+    // `extra_source` stays None (byte-identical to the pre-group-B behavior).
+    let after_sources_trimmed = after_sources.trim_start();
+    let (extra_source, after_group_b) = match parse_extra_other_source(after_sources_trimmed) {
+        Some((f, rest)) => (Some(f), rest.trim_start()),
+        None => (None, after_sources_trimmed),
+    };
+
     // CR 120.1: the verb phrase. Each chosen source deals damage equal to its own
     // power. `parse()` returns `(remaining, output)` — bind the remaining text.
-    let after_sources_trimmed = after_sources.trim_start();
     let after_verb = match tag::<_, _, OracleError<'_>>("each deal damage equal to their power to ")
-        .parse(after_sources_trimmed)
+        .parse(after_group_b)
     {
         Ok((rest, _)) => rest,
         // CR 810: the team-up shape carrying an unmodelable "your team controls"
@@ -5192,10 +5458,43 @@ pub(super) fn try_parse_each_deals_damage_equal_to_power(text: &str) -> Option<P
         return None;
     }
 
+    // SINGLE-CONSTRUCTION-SITE INVARIANT: this is the sole place
+    // `EachDealsDamageEqualToPower` is built. `extra_source` is a parse-time
+    // filter carried by `#[derive(Clone)]`, never a resolved target, so no
+    // copy/retarget/control-change arm can drop it (retarget's `target_filter()`
+    // returns None for this effect → no-op) and the resolver reads only the flat
+    // `ability.targets` vector, never `extra_source`.
     Some(ParsedEffectClause {
         multi_target: Some(multi_target),
-        ..super::parsed_clause(Effect::EachDealsDamageEqualToPower { sources, recipient })
+        ..super::parsed_clause(Effect::EachDealsDamageEqualToPower {
+            sources,
+            recipient,
+            extra_source,
+        })
     })
+}
+
+/// CR 115.4 + CR 601.2c: optional second source group of a compound each-deals
+/// line — "and up to one OTHER target creature you control". The "other" marker
+/// (`FilterProp::Another`) is REQUIRED: "and up to one target ..." (no "other")
+/// returns None → the caller's verb tag then misses → the whole line falls
+/// through (no false green). Returns the group-B `TargetFilter` and the
+/// remaining text after it.
+///
+// ponytail: "up to one" is the only attested cardinality; a future "up to N
+// other" extends here via `parse_number`, not proliferation.
+fn parse_extra_other_source(input: &str) -> Option<(TargetFilter, &str)> {
+    let (after_and, _) = tag::<_, _, OracleError<'_>>("and ").parse(input).ok()?;
+    let (after_qty, _) = tag::<_, _, OracleError<'_>>("up to one ")
+        .parse(after_and)
+        .ok()?;
+    let (filter, rest) = parse_target(after_qty);
+    let has_other = matches!(&filter, TargetFilter::Typed(tf)
+        if tf.properties.iter().any(|p| matches!(p, FilterProp::Another)));
+    if !target_filter_is_targeted_creature(&filter) || !has_other {
+        return None;
+    }
+    Some((filter, rest))
 }
 
 /// CR 120.1 + CR 608.2c: "each <object-class filter> [you control] deals N damage
@@ -5357,7 +5656,8 @@ fn is_object_class_source(filter: &TargetFilter) -> bool {
 
 /// CR 115.1d: Parse the leading source-count quantifier of the team-up damage
 /// line and return the remaining text plus the `MultiTargetSpec` it encodes.
-/// "up to two" → 0..=2, "one or two" → 1..=2, "two" → exactly 2.
+/// "up to two" → 0..=2, "one or two" → 1..=2, "two" → exactly 2, "any number
+/// of" → 0..unbounded. A bare singular "target …" (no quantifier) → exactly 1.
 fn parse_each_deals_source_count(lower: &str) -> Option<(&str, MultiTargetSpec)> {
     alt((
         map(tag::<_, _, OracleError<'_>>("up to two "), |_| {
@@ -5365,6 +5665,17 @@ fn parse_each_deals_source_count(lower: &str) -> Option<(&str, MultiTargetSpec)>
         }),
         map(tag("one or two "), |_| MultiTargetSpec::fixed(1, 2)),
         map(tag("two "), |_| MultiTargetSpec::fixed(2, 2)),
+        // CR 115.1d: unbounded group-A quantifier ("any number of target
+        // enchanted creatures you control", Graceful Takedown) → 0..unbounded.
+        map(tag("any number of "), |_| MultiTargetSpec::unlimited(0)),
+        // CR 115.1: singular group A with NO quantifier ("Target creature you
+        // control and up to one other target legendary creature …", Friendly
+        // Rivalry) → exactly one. `peek` leaves "target " unconsumed so
+        // `parse_target` reads the keyword exactly as the quantified arms do.
+        // Must be LAST — the quantified prefixes above never start with "target".
+        map(peek(tag::<_, _, OracleError<'_>>("target ")), |_| {
+            MultiTargetSpec::fixed(1, 1)
+        }),
     ))
     .parse(lower)
     .ok()

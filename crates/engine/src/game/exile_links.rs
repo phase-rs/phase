@@ -10,6 +10,9 @@ const LINKED_EXILE_CONSUMER_TAGS: &[&str] = &[
     "OwnersOfCardsExiledBySource",
     "ChoiceAmongExiledColors",
     "TargetSharesNameWithOtherExiledThisWay",
+    // CR 700.3: PileSource::ExiledThisWay — the pile-separation effect
+    // consumes cards exiled earlier in the same resolution chain.
+    "ExiledThisWay",
     // CR 601.2a + CR 113.6b: A source carrying `StaticMode::ExileCastPermission`
     // (Maralen, Fae Ascendant) consumes its own linked-exile pool to grant
     // casting permission. Detection by externally-tagged serde key ensures the
@@ -250,14 +253,21 @@ mod tests {
     /// CR 702.167a/c: a `CraftMaterial` link must survive the craft source's
     /// battlefield exit (it self-exiles mid-activation and returns with the same
     /// ObjectId), so the returned permanent can still read what it was crafted
-    /// with. A plain `TrackedBySource` link from the same source is pruned on
-    /// that exit — the contrast that motivates the dedicated kind.
+    /// with. The contrast that motivates the dedicated kind is now a NON-exile
+    /// exit: on a death (battlefield -> graveyard) `CraftMaterial` survives but a
+    /// plain `TrackedBySource` link from the same source is pruned.
+    ///
+    /// CR 607.2a + CR 400.7: `TrackedBySource` links are NOT pruned on an exit TO
+    /// EXILE — a self-exiled source stays the linked-ability referent for its
+    /// pile (Mechtitan Core). The exile-exit arm below asserts that survival so a
+    /// regression that reinstates the old blanket prune fails here.
     #[test]
     fn craft_material_link_survives_source_battlefield_exit() {
         use crate::game::zones::{create_object, move_to_zone};
         use crate::types::game_state::{ExileLinkKind, GameState};
         use crate::types::identifiers::CardId;
 
+        // --- Non-exile exit (death): CraftMaterial survives, TrackedBySource pruned.
         let mut state = GameState::new_two_player(1);
         let source = create_object(
             &mut state,
@@ -283,9 +293,8 @@ mod tests {
         );
         push_with_kind(&mut state, tracked, source, ExileLinkKind::TrackedBySource);
 
-        // The craft source self-exiles mid-activation (battlefield -> exile).
         let mut events = Vec::new();
-        move_to_zone(&mut state, source, Zone::Exile, &mut events);
+        move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
 
         assert!(
             state.exile_links.iter().any(|l| l.exiled_id == material
@@ -298,7 +307,36 @@ mod tests {
                 .exile_links
                 .iter()
                 .any(|l| l.exiled_id == tracked && l.source_id == source),
-            "TrackedBySource link must be pruned on the source's battlefield exit"
+            "TrackedBySource link must be pruned on a non-exile battlefield exit (death)"
+        );
+
+        // --- Exit TO EXILE (self-exile cost): TrackedBySource survives (CR 607.2a).
+        let mut state = GameState::new_two_player(1);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mechtitan Core".to_string(),
+            Zone::Battlefield,
+        );
+        let tracked = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Exiled With Source".to_string(),
+            Zone::Exile,
+        );
+        push_with_kind(&mut state, tracked, source, ExileLinkKind::TrackedBySource);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, source, Zone::Exile, &mut events);
+
+        assert!(
+            state
+                .exile_links
+                .iter()
+                .any(|l| l.exiled_id == tracked && l.source_id == source),
+            "TrackedBySource link must survive the source's self-exile (CR 607.2a)"
         );
     }
 

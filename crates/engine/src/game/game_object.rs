@@ -529,13 +529,14 @@ pub struct GameObject {
     // Timestamp for layer ordering
     pub timestamp: u64,
 
-    /// CR 400.7: Monotonic per-object incarnation, bumped on every battlefield
-    /// entry (`reset_for_battlefield_entry`). A permanent that leaves and
-    /// re-enters the battlefield becomes a new object even though the engine
-    /// reuses its `ObjectId` as storage identity. Pairing the id with this
-    /// counter distinguishes the new object from the old one at the same id, so
-    /// a pending ability that captured the previous incarnation no longer
-    /// resolves its self-reference against the re-entered permanent (blink/flicker).
+    /// CR 400.7: Monotonic per-object incarnation, bumped on every real zone
+    /// change (`bump_incarnation`) — battlefield entry via
+    /// `reset_for_battlefield_entry`, plus every non-battlefield move in the zone
+    /// movers. An object that leaves and re-enters any zone becomes a new object
+    /// even though the engine reuses its `ObjectId` as storage identity. Pairing
+    /// the id with this counter distinguishes the new object from the old one at
+    /// the same id, so a pending ability that captured the previous incarnation no
+    /// longer resolves its self-reference against the moved object (blink/flicker).
     #[serde(default)]
     pub incarnation: u64,
 
@@ -1024,6 +1025,155 @@ pub struct GameObject {
     /// all rules queries. Defaults to `PhasedIn` for replay compatibility.
     #[serde(default)]
     pub phase_status: PhaseStatus,
+}
+
+/// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
+/// (types/game_state.rs) — the §5.2c 136-field partition. `GameObject` deliberately
+/// does NOT derive `PartialEq` (constant-depth loop detection must omit `timestamp`
+/// / `incarnation`), so the row comparator is hand-rolled and needs this no-`..`
+/// destructure: adding a field breaks the build until it is classified into a
+/// bucket (compared / omitted-safe-by-write-site / immutable / projected). Fail-
+/// closed — a new per-object accumulator cannot silently escape the partition.
+#[cfg(test)]
+fn _gameobject_partition_is_total(o: &GameObject) {
+    let GameObject {
+        id: _,
+        card_id: _,
+        owner: _,
+        base_controller: _,
+        controller: _,
+        zone: _,
+        tapped: _,
+        face_down: _,
+        flipped: _,
+        transformed: _,
+        modal_back_face: _,
+        damage_marked: _,
+        dealt_deathtouch_damage: _,
+        attached_to: _,
+        attachments: _,
+        paired_with: _,
+        pair_controller: _,
+        counters: _,
+        intensity: _,
+        perpetual_mods: _,
+        name: _,
+        power: _,
+        toughness: _,
+        loyalty: _,
+        defense: _,
+        token_rules_text: _,
+        card_types: _,
+        attraction_lights: _,
+        in_attraction_deck: _,
+        in_contraption_deck: _,
+        contraption_sprocket: _,
+        stickers: _,
+        mana_cost: _,
+        keywords: _,
+        abilities: _,
+        trigger_definitions: _,
+        replacement_definitions: _,
+        static_definitions: _,
+        cleave_variant: _,
+        color: _,
+        printed_ref: _,
+        token_image_ref: _,
+        source_related_token_ids: _,
+        spellbook: _,
+        back_face: _,
+        specialize_faces: _,
+        specialized_color: _,
+        base_power: _,
+        base_toughness: _,
+        base_name: _,
+        base_loyalty: _,
+        base_defense: _,
+        base_card_types: _,
+        base_mana_cost: _,
+        base_keywords: _,
+        base_abilities: _,
+        base_trigger_definitions: _,
+        base_replacement_definitions: _,
+        base_static_definitions: _,
+        base_color: _,
+        base_printed_ref: _,
+        base_characteristics_initialized: _,
+        timestamp: _,
+        incarnation: _,
+        entered_battlefield_turn: _,
+        discarded_turn: _,
+        summoning_sick: _,
+        echo_due: _,
+        cast_variant_paid: _,
+        cast_cost_paid_object: _,
+        entered_via_ability_source: _,
+        cast_timing_permission: _,
+        cost_x_paid: _,
+        fused_split_spell: _,
+        kickers_paid: _,
+        additional_cost_payment_count: _,
+        additional_cost_payments: _,
+        convoked_creatures: _,
+        bestow_form: _,
+        prototype_form: _,
+        mutate_form: _,
+        merged_components: _,
+        merge_kind: _,
+        merge_layer_effect_id: _,
+        pre_merge_is_token: _,
+        split_from_merge_survivor: _,
+        cleave_form: _,
+        unimplemented_mechanics: _,
+        has_summoning_sickness: _,
+        devotion: _,
+        has_mana_ability: _,
+        mana_ability_index: _,
+        available_mana_pips: _,
+        loyalty_activations_this_turn: _,
+        is_commander: _,
+        signature_spell: _,
+        commander_tax: _,
+        is_renowned: _,
+        is_emblem: _,
+        emblem_source: _,
+        is_token: _,
+        is_copy: _,
+        display_source: _,
+        modal: _,
+        additional_cost: _,
+        strive_cost: _,
+        casting_restrictions: _,
+        casting_options: _,
+        casting_permissions: _,
+        foretold: _,
+        chosen_attributes: _,
+        goaded_by: _,
+        detained_by: _,
+        is_suspected: _,
+        monstrous: _,
+        harnessed: _,
+        prepared: _,
+        is_saddled: _,
+        saddled_by: _,
+        assigns_damage_from_toughness: _,
+        assigns_damage_as_though_unblocked: _,
+        assigns_no_combat_damage: _,
+        case_state: _,
+        room_unlocks: _,
+        class_level: _,
+        cast_from_zone: _,
+        cast_controller: _,
+        cast_spell_keywords: _,
+        exile_from_stack_linked_source: _,
+        played_from_zone: _,
+        mana_spent_to_cast: _,
+        colors_spent_to_cast: _,
+        mana_spent_to_cast_amount: _,
+        phyrexian_life_paid: _,
+        mana_spent_source_snapshots: _,
+        phase_status: _,
+    } = o;
 }
 
 /// CR 205.2 + CR 205.2a: Resolve a stored card-type choice from a chosen-attribute
@@ -1644,6 +1794,15 @@ impl GameObject {
         }
     }
 
+    /// CR 400.7: Advance this object's incarnation epoch by one. The single bump
+    /// primitive — every real zone change (battlefield entry via
+    /// `reset_for_battlefield_entry`, and every non-battlefield move in the zone
+    /// movers) routes through here so a self-reference captured for the previous
+    /// incarnation no longer matches the new object.
+    pub fn bump_incarnation(&mut self) {
+        self.incarnation += 1;
+    }
+
     /// CR 400.7: Reset transient battlefield state when a permanent enters the battlefield.
     /// A permanent entering the battlefield is a new object with no memory of its previous
     /// existence. Callers that need enter_tapped=true override `tapped` after this call.
@@ -1651,7 +1810,7 @@ impl GameObject {
         // CR 400.7: This (re-)entry creates a new object at the same storage id.
         // Bump the incarnation so self-references captured by abilities created
         // for the previous incarnation no longer match this permanent.
-        self.incarnation += 1;
+        self.bump_incarnation();
         // CR 613.7d: an object receives a timestamp when it enters a zone. Stage 2
         // stamps battlefield entries only; all-zone entry stamping (graveyard/exile-
         // functioning statics) is a deferred hook (see scope boundary).
@@ -2021,6 +2180,11 @@ impl GameObject {
     /// card" (Cipher's encode-on-resolution, CR 702.99a) gate on this.
     pub fn is_represented_by_a_card(&self) -> bool {
         !self.is_token && !self.is_copy
+    }
+
+    /// CR 702.66a: Delve may exile only a card from its owner's graveyard.
+    pub fn is_delve_eligible(&self, player: PlayerId) -> bool {
+        self.owner == player && self.zone == Zone::Graveyard && self.is_represented_by_a_card()
     }
 
     /// CR 714.1: Returns the final chapter number for a Saga, or None if not a Saga.

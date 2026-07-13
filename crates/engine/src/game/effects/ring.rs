@@ -51,6 +51,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::RingTemptsYou,
         source_id: ability.source_id,
+        subject: None,
     });
 
     if candidates.is_empty() {

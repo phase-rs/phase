@@ -70,7 +70,7 @@ const THIS_IS_HOW_IT_ENDS_ORACLE: &str = "Target creature's owner shuffles it \
 /// (`NamedChoice` / `ChooseOneOfBranch`) or a terminal state. Passes priority
 /// through empty windows, declares no attackers/blockers so the turn rolls, and
 /// accepts any optional ("you may exile it") effect along the way so the
-/// dependent `Choose(Opponent)` / villainous chain proceeds (CR 609.3).
+/// dependent `Choose(Opponent)` / villainous chain proceeds (CR 608.2d).
 fn advance_to_choice(runner: &mut GameRunner) {
     for _ in 0..240 {
         match &runner.state().waiting_for {

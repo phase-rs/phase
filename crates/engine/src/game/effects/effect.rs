@@ -94,6 +94,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -152,6 +153,38 @@ fn register_transient_effect(
             m,
             ContinuousModification::AddStaticMode {
                 mode: crate::types::statics::StaticMode::MayLookAtFaceDown,
+            }
+        )
+    }) {
+        if let Some(affected) = static_def.affected.clone() {
+            state.add_transient_continuous_effect(
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                affected,
+                modifications,
+                static_def.condition.clone(),
+            );
+            return;
+        }
+    }
+
+    // CR 118.7 + CR 611.2c: A transient "activated abilities of <X> cost {N} less
+    // this turn" reduction (The Dining Car's chaos ability) rides as an
+    // `AddStaticMode { ReduceAbilityCost }` whose `affected` names the SOURCE
+    // permanents whose activated abilities are cheaper. Like `MayLookAtFaceDown`,
+    // it is read DIRECTLY off the TCE by the single cost authority
+    // (`casting::reduce_activated_ability_cost`) and never grafted onto individual
+    // objects (`layers.rs` skips it). A cost modification is a rules-modifying
+    // continuous effect, so per CR 611.2c its affected set stays dynamic — the
+    // filter must ride on the TCE intact rather than be frozen to a
+    // `SpecificObject` set by the broadcast branch below (a token created later
+    // this turn must still be discounted).
+    if modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: crate::types::statics::StaticMode::ReduceAbilityCost { .. },
             }
         )
     }) {
@@ -568,6 +601,30 @@ fn snapshot_transient_modifications(
             {
                 ContinuousModification::SetToughness {
                     value: resolve_quantity_with_targets(state, value, ability),
+                }
+            }
+            // CR 613.1f + CR 608.2c: the reanimator-Aura's granted Enchant restriction
+            // ("enchant creature put onto the battlefield with this Aura") is a layer-6
+            // ability grant (CR 613.1f) whose anaphoric ParentTarget must bind to the
+            // SPECIFIC creature just reanimated (CR 608.2c: read the whole sentence and
+            // bind each anaphor to its referent), not stay a live/unresolved
+            // ParentTarget reference — concretize it once, here, the same way dynamic
+            // P/T values are concretized above.
+            ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Enchant(filter),
+            } if matches!(
+                filter,
+                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+            ) =>
+            {
+                let ids =
+                    crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
+                ContinuousModification::AddKeyword {
+                    keyword: crate::types::keywords::Keyword::Enchant(
+                        ids.first()
+                            .map(|id| TargetFilter::SpecificObject { id: *id })
+                            .unwrap_or_else(|| filter.clone()),
+                    ),
                 }
             }
             _ => modification.clone(),
@@ -2786,6 +2843,7 @@ mod tests {
             GameEvent::EffectResolved {
                 kind: EffectKind::RollDie,
                 source_id: ObjectId(1),
+                subject: None,
             },
         ];
         let expr = QuantityExpr::Ref {

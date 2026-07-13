@@ -189,6 +189,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // spell has left the stack) — so it is cleared here at the start of the
     // *next* resolution rather than at the end of this one.
     state.resolving_stack_entry = None;
+    // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
+    // `resolving_stack_entry` so it never leaks into the next resolution.
+    state.resolution_source_relatch = None;
 
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
     let entry = match state.stack.pop_back() {
@@ -1055,8 +1058,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // Sets `state.waiting_for` to the resulting prompt, if any — the
                     // caller's post-stack resolution checks waiting_for before returning
                     // priority. Without this drain the choice would be silently dropped.
-                    if state.post_replacement_continuation.is_some() {
-                        state.post_replacement_source = None;
+                    if state.has_post_replacement_drain() {
+                        state.clear_post_replacement_source();
                         let _ = super::engine_replacement::apply_pending_post_replacement_effect(
                             state,
                             Some(entry.id),
@@ -1268,7 +1271,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
         }
 
-        // CR 303.4f: Aura resolving to battlefield attaches to its target.
+        // CR 608.3c: An Aura spell resolving becomes a permanent put onto the
+        // battlefield attached to the player or object it was targeting.
+        // (NOT CR 303.4f, which explicitly governs Auras entering "by any means
+        // other than by resolving as an Aura spell.")
         if spell_in_zone(state, entry.id, Zone::Battlefield) {
             let is_aura = state
                 .objects
@@ -1277,19 +1283,26 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .unwrap_or(false);
             if is_aura {
                 match spell_targets.first() {
-                    // CR 303.4f + CR 608.2b: Object Aura — verify the target is
-                    // still on the battlefield (last-known-information check); a
-                    // gone target leaves the Aura unattached and SBA
-                    // (CR 704.5m) cleans it up at the next checkpoint.
+                    // CR 608.3c + CR 608.2b: Object Aura — verify the target is
+                    // still a legal host per the Aura's own zone-scoped enchant
+                    // ability (`is_valid_attachment_target`, the single legality
+                    // authority shared with `attach::resolve` and the SBA
+                    // re-check). A battlefield-only Enchant filter still requires
+                    // battlefield presence; a graveyard-scoped filter (Animate
+                    // Dead) legally accepts a graveyard host. A now-illegal target
+                    // leaves the Aura unattached and SBA (CR 704.5m) cleans it up
+                    // at the next checkpoint.
                     Some(crate::types::ability::TargetRef::Object(target_id))
-                        if state.battlefield.contains(target_id) =>
+                        if crate::game::sba::is_valid_attachment_target(
+                            state, entry.id, *target_id,
+                        ) =>
                     {
                         effects::attach::attach_to(state, entry.id, *target_id);
                     }
                     Some(crate::types::ability::TargetRef::Object(_)) => {
-                        // Target left the battlefield — SBA cleanup follows.
+                        // Target is no longer a legal host — SBA cleanup follows.
                     }
-                    // CR 303.4f + CR 702.5d: Player Aura (Curse cycle, Faith's
+                    // CR 608.3c + CR 702.5d: Player Aura (Curse cycle, Faith's
                     // Fetters-class). Validity check is "player still in game"
                     // — `attach_to_player` makes no liveness check itself, but
                     // `check_unattached_auras` (CR 303.4c) will detach + grave
@@ -1597,6 +1610,7 @@ fn resolve_keyword_action(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Equip,
                 source_id: equipment_id,
+                subject: None,
             });
         }
         // CR 702.122a: This permanent becomes an artifact creature UEOT.
@@ -1626,6 +1640,7 @@ fn resolve_keyword_action(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Crew,
                 source_id: vehicle_id,
+                subject: None,
             });
         }
         // CR 702.171a: This permanent becomes saddled UEOT.
@@ -1642,6 +1657,7 @@ fn resolve_keyword_action(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Saddle,
                 source_id: mount_id,
+                subject: None,
             });
         }
         // CR 702.184a: Put charge counters equal to the tapped creature's power.
@@ -1688,6 +1704,7 @@ fn resolve_keyword_action(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Station,
                 source_id: spacecraft_id,
+                subject: None,
             });
         }
     }
@@ -2120,6 +2137,8 @@ fn resolve_batched(
     let consumed = plan.consumed();
     crate::game::perf_counters::record_stack_batched_entries(consumed);
     state.resolving_stack_entry = None;
+    // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
+    state.resolution_source_relatch = None;
 
     // Pop the run's entries (resolution order is back-to-front), cleaning the
     // per-entry side tables exactly as `resolve_top` does for a single entry.
@@ -2315,7 +2334,16 @@ fn ability_has_no_legal_resolution_targets(
     let context_snapshot =
         super::triggers::push_trigger_event_context(state, trigger_event, &trigger_events, None);
     let empty = build_target_slots(state, ability).is_ok_and(|slots| {
-        (ability.effect.target_filter().is_some() && slots.is_empty())
+        // CR 115.1: only effects that DECLARE a target surface a chooseable slot.
+        // `extract_target_filter_from_effect` is the single authority the slot
+        // builder itself uses — it returns `None` not only for context-refs
+        // ("you may draw a card") but for every resolution-time selection
+        // (Sacrifice, at-resolution Bounce, put-from-hand ChangeZone/CastFromZone,
+        // etc.), all of which are ALWAYS resolvable. Testing raw `target_filter()`
+        // here would fork from that authority and silently drop an auto-accepted
+        // "you may put a creature from your hand …" trigger (Kaalia et al.).
+        (super::triggers::extract_target_filter_from_effect(&ability.effect).is_some()
+            && slots.is_empty())
             || (!slots.is_empty() && slots.iter().all(|slot| slot.legal_targets.is_empty()))
     });
     super::triggers::restore_trigger_event_context(state, context_snapshot);
@@ -2437,6 +2465,8 @@ fn resolve_inert_noop_batch(
     events: &mut Vec<GameEvent>,
 ) -> u32 {
     state.resolving_stack_entry = None;
+    // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
+    state.resolution_source_relatch = None;
     for _ in 0..consumed {
         let Some(entry) = state.stack.pop_back() else {
             break;
@@ -2945,7 +2975,9 @@ mod tests {
         ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::{MayTriggerOrigin, WaitingFor};
+    use crate::types::game_state::{
+        AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, WaitingFor,
+    };
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
@@ -2954,6 +2986,50 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// CR 115.1 + CR 603.3d — regression twin for the "don't ask again → Yes
+    /// silently answers No" bug, covering the stack.rs consumer
+    /// (`optional_ability_is_inert_under_auto_choice` →
+    /// `ability_has_no_legal_resolution_targets`, reached by the on-stack
+    /// inert-noop fast-forward). An auto-ACCEPTED optional ability that surfaces
+    /// no stack-time target slot must NOT be classified inert. The `Sacrifice`
+    /// arm (a non-context-ref filter that `extract_target_filter_from_effect`
+    /// still declines) is the discriminator a context-ref-only guard would drop.
+    #[test]
+    fn auto_accepted_no_target_slot_ability_is_not_inert() {
+        let source_id = ObjectId(100);
+        let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+        for effect in [
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        ] {
+            let mut state = setup();
+            let mut ability = ResolvedAbility::new(effect, vec![], source_id, PlayerId(0));
+            ability.optional = true;
+            ability.may_trigger_origin = Some(origin);
+            state.set_may_trigger_auto_choice(
+                MayTriggerAutoChoiceKey {
+                    player: PlayerId(0),
+                    source_id,
+                    origin,
+                },
+                AutoMayChoice::Accept,
+            );
+
+            assert!(
+                !optional_ability_is_inert_under_auto_choice(&mut state, &ability, None),
+                "an auto-accepted ability with no stack-time target slot is always \
+                 resolvable and must not be suppressed as an inert no-op"
+            );
+        }
     }
 
     fn back_face_data(

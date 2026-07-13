@@ -2,11 +2,10 @@
 //! their power to a single target" (`DamageSource::EachTarget`).
 //!
 //! Three Standard-legal cards are genuinely supported by this clause — Allies at
-//! Last, Coordinated Clobbering, Terrific Team-Up. (A fourth, Graceful Takedown,
+//! Last, Coordinated Clobbering, Terrific Team-Up. A fourth, Graceful Takedown,
 //! has a HETEROGENEOUS compound source set — "<group A> and up to one other
-//! target <group B>" — that the single-filter source picker cannot represent; it
-//! is deferred to an honest `Effect::Unimplemented` at the parser. See the parser
-//! unit test `graceful_takedown_compound_source_is_honest_unimplemented`.) The
+//! target <group B>" — now supported via `EachDealsDamageEqualToPower`'s optional
+//! `extra_source` group (see the `graceful_takedown_*` tests below). The
 //! single-source form ("target creature you control deals damage equal to its
 //! power to target creature") was already supported; this exercises the
 //! MULTI-source generalization where EACH chosen source deals its OWN power to
@@ -26,16 +25,48 @@
 
 use engine::game::effects::deal_damage;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::zones::create_object;
 use engine::types::ability::{
     DamageSource, Effect, ObjectScope, PreventionAmount, QuantityExpr, QuantityRef,
     ReplacementDefinition, ReplacementMode, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::card_type::CoreType;
+use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
+
+/// Verbatim Oracle text (Scryfall) — Graceful Takedown, {1}{G} Sorcery.
+const GRACEFUL_TAKEDOWN: &str = "Any number of target enchanted creatures you control and up to \
+     one other target creature you control each deal damage equal to their power to target \
+     creature you don't control.";
+
+/// Verbatim Oracle text (Scryfall) — Friendly Rivalry, {R}{G} Instant. Same
+/// compound class, singular group A ("Target creature you control", count 1),
+/// but a LEGENDARY-restricted group B.
+const FRIENDLY_RIVALRY: &str = "Target creature you control and up to one other target legendary \
+     creature you control each deal damage equal to their power to target creature you don't \
+     control.";
+
+/// Genuinely attach a fresh Aura permanent to `host` so `host` matches the
+/// `EnchantedBy` group-A filter (CR 303.4). Returns the Aura's id.
+fn attach_aura(state: &mut GameState, host: ObjectId, owner: PlayerId, name: &str) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let aura = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+    {
+        let obj = state.objects.get_mut(&aura).unwrap();
+        obj.card_types.core_types = vec![CoreType::Enchantment];
+        obj.card_types.subtypes = vec!["Aura".to_string()];
+        obj.base_card_types = obj.card_types.clone();
+        obj.attached_to = Some(host.into());
+    }
+    state.objects.get_mut(&host).unwrap().attachments.push(aura);
+    aura
+}
 
 const COORDINATED_CLOBBERING: &str = "Tap one or two target untapped creatures you control. \
      They each deal damage equal to their power to target creature an opponent controls.";
@@ -421,5 +452,275 @@ fn each_target_replacement_pause_preserves_other_sources_identity_on_resume() {
         "after the mid-batch pause, source_b's deathtouch must persist on resume and kill the \
          0/10 (4 marked < toughness, so only deathtouch is lethal); flattening the resumed \
          chain to source_a's id loses the deathtouch and leaves the recipient alive"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Graceful Takedown ({1}{G} Sorcery) — the HETEROGENEOUS compound source set:
+// group A ("any number of target enchanted creatures you control") + optional
+// group B ("up to one other target creature you control") each deal their OWN
+// power to a "target creature you don't control". Threaded through the shared
+// `EachDealsDamageEqualToPower` resolver via the new `extra_source` group.
+// CR 115.4 (other target) + CR 601.2c (announce) + CR 120.1 (own-source damage)
+// + CR 303.4 (Aura-attached ⇒ EnchantedBy) + CR 109.5 (you = controller).
+// ---------------------------------------------------------------------------
+
+/// Σ-of-powers discriminator. Two ENCHANTED sources (power 3 + 2) and one other
+/// un-enchanted source (power 4) each deal their own power to a 0/12 recipient:
+/// 3 + 2 + 4 = 9 marked. Reverting the group-B slot drops the un-enchanted
+/// source → 5 marked; reverting the parser leaves `Unimplemented` → 0 marked.
+/// The exact `== 9` assertion flips under either revert.
+#[test]
+fn graceful_takedown_group_b_source_adds_its_own_power() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let ench_a = scenario.add_vanilla(P0, 3, 3);
+    let ench_b = scenario.add_vanilla(P0, 2, 2);
+    let un_ench = scenario.add_vanilla(P0, 4, 4);
+    // 0/12 survives 9 so the exact marked total is observable (not reset by death).
+    let recipient = scenario.add_vanilla(P1, 0, 12);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Graceful Takedown", false, GRACEFUL_TAKEDOWN)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    attach_aura(runner.state_mut(), ench_a, P0, "Aura A");
+    attach_aura(runner.state_mut(), ench_b, P0, "Aura B");
+
+    // Slot order: [group-A sources.., group-B source, recipient]. The driver
+    // consumes objects in declaration order per slot.
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[ench_a, ench_b, un_ench, recipient])
+        .resolve();
+
+    let state = outcome.state();
+    // CR 120.1 + CR 208.1 + CR 608.2: 3 + 2 (group A) + 4 (group B) = 9.
+    assert_eq!(
+        state.objects[&recipient].damage_marked, 9,
+        "recipient must take Σ of all three sources' own powers (3+2+4=9); dropping the \
+         group-B slot would leave 5, reverting the parser would leave 0"
+    );
+}
+
+/// Group A is `unlimited(0)` — its lower bound is 0, so a board with ZERO
+/// enchanted creatures still resolves: the sole group-B source deals its power.
+/// One un-enchanted source (power 5) → 5 marked on the 0/12 recipient. Proves
+/// the group-B path is not gated on a non-empty group A.
+#[test]
+fn graceful_takedown_group_b_only_when_no_enchanted_sources() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let un_ench = scenario.add_vanilla(P0, 5, 5);
+    let recipient = scenario.add_vanilla(P1, 0, 12);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Graceful Takedown", false, GRACEFUL_TAKEDOWN)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    // No auras attached — zero enchanted creatures, so group A contributes nothing.
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[un_ench, recipient])
+        .resolve();
+
+    assert_eq!(
+        outcome.state().objects[&recipient].damage_marked,
+        5,
+        "with no enchanted sources the group-B source alone deals its power (5)"
+    );
+}
+
+/// Slot legality + group-B distinctness (CR 115.3 / CR 115.4), driven through
+/// the real incremental target-selection pipeline (`WaitingFor::TargetSelection`
+/// → `GameAction::ChooseTarget`), inspecting the engine-computed offered set
+/// (`selection.current_legal_targets`) at each slot. Every negative assertion is
+/// paired with a positive reach-guard so none is vacuous.
+#[test]
+fn graceful_takedown_slot_legality_and_group_b_distinctness() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let ench_a = scenario.add_vanilla(P0, 3, 3);
+    let ench_b = scenario.add_vanilla(P0, 2, 2);
+    let un_ench = scenario.add_vanilla(P0, 4, 4);
+    let recipient = scenario.add_vanilla(P1, 0, 12);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Graceful Takedown", false, GRACEFUL_TAKEDOWN)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    attach_aura(runner.state_mut(), ench_a, P0, "Aura A");
+    attach_aura(runner.state_mut(), ench_b, P0, "Aura B");
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Graceful Takedown (zero cost) must be accepted");
+
+    let mut chose_group_a: Vec<ObjectId> = Vec::new();
+    let mut saw_group_b = false;
+    let mut saw_recipient = false;
+
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { selection, .. } => {
+                let legal = &selection.current_legal_targets;
+                let obj = |id: ObjectId| TargetRef::Object(id);
+                let choice = if legal.contains(&obj(recipient)) {
+                    // Recipient slot: opponent creature only; NONE of my creatures.
+                    saw_recipient = true;
+                    assert!(
+                        !legal.contains(&obj(ench_a))
+                            && !legal.contains(&obj(ench_b))
+                            && !legal.contains(&obj(un_ench)),
+                        "recipient (you don't control) must NOT offer your own creatures, \
+                         legal = {legal:?}"
+                    );
+                    obj(recipient)
+                } else if legal.contains(&obj(un_ench)) {
+                    // Group B: group A never offers the un-enchanted creature, so
+                    // its presence identifies the group-B slot. The two already-
+                    // chosen group-A sources must be excluded (CR 115.4 "other").
+                    saw_group_b = true;
+                    assert!(
+                        !legal.contains(&obj(ench_a)) && !legal.contains(&obj(ench_b)),
+                        "group B must exclude the already-chosen group-A sources \
+                         (CR 115.4 distinctness), legal = {legal:?}"
+                    );
+                    obj(un_ench)
+                } else {
+                    // Group A: enchanted creatures only. Reach-guard below asserts
+                    // BOTH enchanted creatures are offered (via chose_group_a==2).
+                    assert!(
+                        !legal.contains(&obj(un_ench)),
+                        "group A (enchanted creatures) must NOT offer the un-enchanted \
+                         creature, legal = {legal:?}"
+                    );
+                    let pick = [ench_a, ench_b]
+                        .into_iter()
+                        .find(|c| legal.contains(&obj(*c)) && !chose_group_a.contains(c))
+                        .expect("an enchanted creature must be offered in a group-A slot");
+                    chose_group_a.push(pick);
+                    obj(pick)
+                };
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(choice),
+                    })
+                    .expect("declaring the slot target must succeed");
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected waiting state during Graceful targeting: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        chose_group_a.len(),
+        2,
+        "reach-guard: BOTH enchanted creatures must be offered+chosen across the group-A slots"
+    );
+    assert!(saw_group_b, "reach-guard: the group-B slot must surface");
+    assert!(
+        saw_recipient,
+        "reach-guard: the recipient slot must surface"
+    );
+}
+
+/// Friendly Rivalry — the SAME compound class with a SINGULAR (count-1) group A.
+/// The deleted honest-deferral gate also covered this card; without the count-1
+/// arm it regresses to a wrong-but-green single-group parse that drops group B.
+/// A group-A creature (power 3) and the group-B legendary creature (power 2) each
+/// deal their own power to a 0/12 recipient: 3 + 2 = 5. Dropping group B (or
+/// reverting the count-1 arm) leaves 3; both flip the exact `== 5` assertion.
+#[test]
+fn friendly_rivalry_singular_group_a_plus_legendary_group_b() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let group_a = scenario.add_vanilla(P0, 3, 3);
+    // Group B must be a LEGENDARY creature you control (the filter restriction).
+    let legend_b = scenario
+        .add_creature(P0, "Legend 2/2", 2, 2)
+        .as_legendary()
+        .id();
+    let recipient = scenario.add_vanilla(P1, 0, 12);
+
+    let spell = scenario
+        // CR 601.2: Friendly Rivalry is an {R}{G} Instant (is_instant = true).
+        .add_spell_to_hand_from_oracle(P0, "Friendly Rivalry", true, FRIENDLY_RIVALRY)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[group_a, legend_b, recipient])
+        .resolve();
+
+    assert_eq!(
+        outcome.state().objects[&recipient].damage_marked,
+        5,
+        "singular group A (3) + legendary group B (2) = 5; dropping group B (or reverting the \
+         count-1 arm) would leave 3"
+    );
+}
+
+/// Friendly Rivalry group-B LEGENDARY filter, discriminated at runtime through
+/// the real cast pipeline. Group B is restricted to LEGENDARY creatures you
+/// control (CR 205.4a `HasSupertype`), so a non-legendary creature you control
+/// is NOT a legal group-B source. The board offers, as the "other" source, BOTH
+/// a non-legendary creature (power 4, listed FIRST) and a legendary one (power
+/// 2). The greedy target driver would grab the power-4 non-legendary for group B
+/// if the supertype filter were absent (Σ = 1 + 4 = 5); because the filter holds
+/// it is rejected and group B takes the legendary (Σ = 1 + 2 = 3). The exact
+/// `== 3` assertion flips to 5 if the `HasSupertype{Legendary}` filter is dropped.
+/// The legendary one being consumed as a source (its 2 lands) is the positive
+/// reach-guard that the negative (non-legendary rejected) is not vacuous.
+#[test]
+fn friendly_rivalry_group_b_requires_legendary() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let mand_a = scenario.add_vanilla(P0, 1, 1);
+    let non_legend_other = scenario.add_vanilla(P0, 4, 4);
+    let legend_other = scenario
+        .add_creature(P0, "Legend 2/2", 2, 2)
+        .as_legendary()
+        .id();
+    let recipient = scenario.add_vanilla(P1, 0, 12);
+
+    let spell = scenario
+        // CR 601.2: Friendly Rivalry is an {R}{G} Instant (is_instant = true).
+        .add_spell_to_hand_from_oracle(P0, "Friendly Rivalry", true, FRIENDLY_RIVALRY)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    // Group A = mand_a (1). Group B: the non-legendary power-4 creature is offered
+    // FIRST but must be rejected (not legendary); group B takes the legendary (2).
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[mand_a, non_legend_other, legend_other, recipient])
+        .resolve();
+
+    assert_eq!(
+        outcome.state().objects[&recipient].damage_marked,
+        3,
+        "group B rejects the non-legendary power-4 creature and takes the legendary power-2 one: \
+         Σ = 1 + 2 = 3. A dropped HasSupertype{{Legendary}} filter would take the power-4 → 5"
     );
 }

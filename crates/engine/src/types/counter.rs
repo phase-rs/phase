@@ -56,6 +56,11 @@ pub enum CounterType {
     /// counter from it"). One or more shield counters share this single pair of
     /// effects. See `game::replacement::consume_shield_counter`.
     Shield,
+    /// CR 122.1h: One or more finality counters create a single replacement
+    /// effect "If this permanent would be put into a graveyard from the
+    /// battlefield, exile it instead." Persistent (no counter removed, unlike
+    /// shield CR 122.1c). See `game::replacement::apply_finality_counter_replacement`.
+    Finality,
     /// CR 122.1b: A keyword counter grants its keyword to the permanent (flying,
     /// first strike, deathtouch, lifelink, ...). Uses the parameterless
     /// `KeywordKind` discriminant — keyword counters never carry parameters
@@ -102,6 +107,7 @@ impl CounterType {
             CounterType::Fade => Cow::Borrowed("fade"),
             CounterType::Age => Cow::Borrowed("age"),
             CounterType::Shield => Cow::Borrowed("shield"),
+            CounterType::Finality => Cow::Borrowed("finality"),
             CounterType::Keyword(kind) => KEYWORD_COUNTERS
                 .iter()
                 .find(|(_, k)| k == kind)
@@ -140,6 +146,7 @@ impl CounterType {
             | CounterType::Fade
             | CounterType::Age
             | CounterType::Shield
+            | CounterType::Finality
             | CounterType::Keyword(_)
             | CounterType::Generic(_) => None,
         }
@@ -165,6 +172,8 @@ impl CounterType {
     /// - CR 702.32a: `Fade` (Fading duration).
     /// - CR 702.24a: `Age` (Cumulative upkeep).
     /// - CR 714.3 + CR 714.4: `Lore` (Saga chapter progression / sacrifice SBA).
+    /// - CR 122.1h: `Finality` (death→exile redirect — a state-gating
+    ///   replacement, not a monotone pump).
     /// - CR 122.1b: `Keyword(_)` (grants a keyword).
     /// - CR 122.1: `Generic(_)` (arbitrary tracked markers).
     pub fn is_monotone_loop_resource(&self) -> bool {
@@ -180,6 +189,7 @@ impl CounterType {
             | CounterType::Fade
             | CounterType::Age
             | CounterType::Shield
+            | CounterType::Finality
             | CounterType::Keyword(_)
             | CounterType::Generic(_) => false,
         }
@@ -321,6 +331,7 @@ pub fn try_parse_counter_type(text: &str) -> Option<CounterType> {
         "fade" | "FADE" => return Some(CounterType::Fade),
         "age" => return Some(CounterType::Age),
         "shield" => return Some(CounterType::Shield),
+        "finality" => return Some(CounterType::Finality),
         _ => {}
     }
     if let Some((power, toughness)) = parse_power_toughness_counter(trimmed) {
@@ -517,6 +528,29 @@ mod tests {
     }
 
     #[test]
+    fn finality_counter_parses_serializes_and_has_no_pt_delta() {
+        // CR 122.1h: "finality" is a first-class counter type, not a Generic.
+        // Serialized key is byte-identical to the legacy Generic("finality").
+        assert_eq!(parse_counter_type("finality"), CounterType::Finality);
+        assert_eq!(
+            parse_counter_type("finality counter"),
+            CounterType::Finality
+        );
+        assert_eq!(
+            try_parse_counter_type("finality"),
+            Some(CounterType::Finality)
+        );
+        assert_eq!(CounterType::Finality.as_str().as_ref(), "finality");
+        assert_eq!(
+            serde_json::to_string(&CounterType::Finality).unwrap(),
+            "\"finality\""
+        );
+        let back: CounterType = serde_json::from_str("\"finality\"").unwrap();
+        assert_eq!(back, CounterType::Finality);
+        assert_eq!(CounterType::Finality.power_toughness_delta(), None);
+    }
+
+    #[test]
     fn monotone_loop_resource_partition_is_exhaustive_and_correct() {
         use crate::types::keywords::KeywordKind;
         // CR 122.1a/613.4c, 306.5b, 310.4c: monotone => projected out.
@@ -540,6 +574,7 @@ mod tests {
             CounterType::Fade,
             CounterType::Age,
             CounterType::Shield,
+            CounterType::Finality,
             CounterType::Keyword(KeywordKind::Flying),
             CounterType::Generic("quest".to_string()),
         ] {

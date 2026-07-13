@@ -96,10 +96,7 @@ export function AttachmentFan() {
 
   const host = hostId != null ? objects?.[hostId] : undefined;
 
-  const cardIds = useMemo<ObjectId[]>(
-    () => (host ? [host.id, ...host.attachments] : []),
-    [host],
-  );
+  const cardIds = host ? [host.id, ...host.attachments] : [];
 
   const boardChoice = useMemo(() => {
     const choice = getBoardChoiceView(waitingFor, objects);

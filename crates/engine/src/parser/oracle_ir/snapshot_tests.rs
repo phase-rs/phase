@@ -5,6 +5,7 @@
 //! both layers so structural drift and assembly bugs are independently caught.
 
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::OracleDocIr;
 
 /// Parse Oracle text through both IR and lowering layers.
@@ -27,9 +28,58 @@ fn parse_two_layer_with_keywords(
     let keywords: Vec<String> = keywords.iter().map(|s| s.to_string()).collect();
     let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
     let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
-    let ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
-    let lowered = lower_oracle_ir(&ir);
+    let mut ir = parse_oracle_ir(oracle_text, card_name, &keywords, &types, &subtypes);
+    let lowered = lower_oracle_ir(&mut ir);
     (ir, lowered)
+}
+
+/// ISSUES #17: the swallow audit's findings must live in the doc IR's diagnostics
+/// channel, not be direct-appended to `ParsedAbilities::parse_warnings` behind the
+/// doc's back.
+///
+/// The audit's *input* is the assembled result, so it necessarily runs after the
+/// fold — but that is a reason to hand it the doc channel as its sink, not a reason
+/// to give it a private one. `OracleDocIr.diagnostics` is the single warning
+/// channel; `parse_warnings` is a copy of it.
+///
+/// Fixture is pool-verified, not synthetic: Intermediate Chirography's Oracle text
+/// is verbatim MTGJSON, and it carries a live `Duration_ThisTurn` swallowed-clause
+/// warning in shipped `card-data.json` (M1 defect ledger → issue #5638) — the
+/// "this turn" in its level-3 trigger is not represented in the parse. A synthetic
+/// fixture could go vacuously green if the detector stopped firing; this one cannot
+/// without that separately-tracked defect being fixed.
+#[test]
+fn swallow_diagnostics_are_homed_in_the_doc_ir_channel() {
+    let (ir, lowered) = parse_two_layer(
+        "(Gain the next level as a sorcery to add its ability.)\n\
+         When this Class enters, create a 2/1 white and black Inkling creature token with flying.\n\
+         {1}{B}: Level 2\n\
+         Whenever you lose life for the first time each turn, put a +1/+1 counter on target creature you control.\n\
+         {2}{B}: Level 3\n\
+         At the beginning of each end step, if a modified creature died under your control this turn, create a 2/1 white and black Inkling creature token with flying. (Equipment, Auras you control, and counters are modifications.)",
+        "Intermediate Chirography",
+        &["Enchantment"],
+        &["Class"],
+    );
+
+    // (a) The re-homing itself. Before this change the audit wrote to a private vec
+    //     that was appended straight onto `parse_warnings`, so the doc channel never
+    //     saw a swallowed clause and this assertion was unsatisfiable.
+    assert!(
+        ir.diagnostics
+            .iter()
+            .any(|d| matches!(d, OracleDiagnostic::SwallowedClause { .. })),
+        "swallow audit must emit into OracleDocIr.diagnostics; got {:?}",
+        ir.diagnostics
+    );
+
+    // (b) One channel, one order. `parse_warnings` is assigned FROM the doc channel,
+    //     so any future direct-append to `parse_warnings` re-opens the bypass and
+    //     fails here.
+    assert_eq!(
+        lowered.parse_warnings, ir.diagnostics,
+        "parse_warnings must be a copy of OracleDocIr.diagnostics, not a separate sink"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +463,18 @@ fn luminarch_aspirant() {
     insta::assert_json_snapshot!("luminarch_aspirant_lowered", &lowered);
 }
 
+#[test]
+fn mishra_eminent_one() {
+    let (ir, lowered) = parse_two_layer(
+        "At the beginning of combat on your turn, create a token that's a copy of target noncreature artifact you control, except its name is Mishra's Warform and it's a 4/4 Construct artifact creature in addition to its other types. It gains haste until end of turn. Sacrifice it at the beginning of the next end step.",
+        "Mishra, Eminent One",
+        &["Legendary", "Artifact", "Creature"],
+        &["Human", "Artificer"],
+    );
+    insta::assert_json_snapshot!("mishra_eminent_one_ir", &ir);
+    insta::assert_json_snapshot!("mishra_eminent_one_lowered", &lowered);
+}
+
 // ---------------------------------------------------------------------------
 // Ability words (Landfall, Prowess, Evolve)
 // ---------------------------------------------------------------------------
@@ -491,6 +553,302 @@ fn snapcaster_mage() {
     );
     insta::assert_json_snapshot!("snapcaster_mage_ir", &ir);
     insta::assert_json_snapshot!("snapcaster_mage_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Damage sub_ability riders (U5-M2 Absorb parity: die-exile / can't-regenerate)
+// ---------------------------------------------------------------------------
+
+// CR 608.2c + CR 701.19c: unconditional "can't be regenerated" rider on a
+// separate sentence after a damage clause
+// (ClauseDisposition::Absorb { kind: CantBeRegenerated }). Verified verbatim
+// against Scryfall.
+#[test]
+fn incinerate() {
+    let (ir, lowered) = parse_two_layer(
+        "Incinerate deals 3 damage to any target. A creature dealt damage this way can't be regenerated this turn.",
+        "Incinerate",
+        &["Instant"],
+        &[],
+    );
+    insta::assert_json_snapshot!("incinerate_ir", &ir);
+    insta::assert_json_snapshot!("incinerate_lowered", &lowered);
+}
+
+// CR 614.1a + CR 514.2: standalone "if [it] would die this turn, exile it
+// instead" die-exile rider on a separate sentence after a damage clause
+// (ClauseDisposition::Absorb { kind: DieExile }).
+// Verified verbatim against Scryfall (includes the printed Devoid keyword line).
+#[test]
+fn touch_of_the_void() {
+    let (ir, lowered) = parse_two_layer(
+        "Devoid (This card has no color.)\nTouch of the Void deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
+        "Touch of the Void",
+        &["Sorcery"],
+        &[],
+    );
+    insta::assert_json_snapshot!("touch_of_the_void_ir", &ir);
+    insta::assert_json_snapshot!("touch_of_the_void_lowered", &lowered);
+}
+
+// CR 109.2 + CR 608.2c: the conditional two-rider form ("If it's a creature, it
+// can't be regenerated this turn, and if it would die this turn, exile it
+// instead.") emits BOTH Absorb kinds from the conditional-regen block —
+// CantBeRegenerated then DieExile, each stamped with the creature-gate
+// condition. Verified verbatim against Scryfall.
+#[test]
+fn carbonize() {
+    let (ir, lowered) = parse_two_layer(
+        "Carbonize deals 3 damage to any target. If it's a creature, it can't be regenerated this turn, and if it would die this turn, exile it instead.",
+        "Carbonize",
+        &["Instant"],
+        &[],
+    );
+    insta::assert_json_snapshot!("carbonize_ir", &ir);
+    insta::assert_json_snapshot!("carbonize_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// "Otherwise" else-branches (U5-M2 BranchOtherwise parity)
+// ---------------------------------------------------------------------------
+// All three exercise the Bound kind (prior conditional / opponent-may head
+// present at parse time); Fallback has no real corpus card (0/568 fixture
+// cards). Oracle text verified verbatim against Scryfall.
+
+// CR 608.2c + CR 205.3a: Bound → attach-to-conditional + self-ref rebind
+// (`definition_targets_self_source` → `rewrite_else_parent_target_to_self_ref`,
+// so the else "it" binds to the source rather than an empty target list).
+#[test]
+fn repeat_offender() {
+    let (ir, lowered) = parse_two_layer(
+        "{2}{B}: If this creature is suspected, put a +1/+1 counter on it. Otherwise, suspect it. (A suspected creature has menace and can't block.)",
+        "Repeat Offender",
+        &["Creature"],
+        &["Human", "Assassin"],
+    );
+    insta::assert_json_snapshot!("repeat_offender_ir", &ir);
+    insta::assert_json_snapshot!("repeat_offender_lowered", &lowered);
+}
+
+// CR 608.2c: Bound → attach-to-conditional + event-context "that much" rebind
+// (`rewrite_else_event_context_to_stable`, so the else's "that much" reads the
+// if-branch's stable magnitude instead of a per-instruction 0).
+#[test]
+fn caustic_bronco() {
+    let (ir, lowered) = parse_two_layer(
+        "Whenever this creature attacks, reveal the top card of your library and put it into your hand. You lose life equal to that card's mana value if this creature isn't saddled. Otherwise, each opponent loses that much life.\nSaddle 3 (Tap any number of other creatures you control with total power 3 or more: This Mount becomes saddled until end of turn. Saddle only as a sorcery.)",
+        "Caustic Bronco",
+        &["Creature"],
+        &["Snake", "Horse", "Mount"],
+    );
+    insta::assert_json_snapshot!("caustic_bronco_ir", &ir);
+    insta::assert_json_snapshot!("caustic_bronco_lowered", &lowered);
+}
+
+// CR 608.2d + CR 101.4: Bound → opponent-may reward branch (no explicit
+// condition, but the "any player may" head sets `opponent_may_scope`, so
+// `has_optional_may_head` routes it Bound; the handler's `!attached` fallback
+// synthesizes the `Not(OptionalEffectPerformed)`-gated reward on the may-head).
+// The "If no one does, …" connector is one of the recognized otherwise forms.
+#[test]
+fn browbeat() {
+    let (ir, lowered) = parse_two_layer(
+        "Any player may have Browbeat deal 5 damage to them. If no one does, target player draws three cards.",
+        "Browbeat",
+        &["Sorcery"],
+        &[],
+    );
+    insta::assert_json_snapshot!("browbeat_ir", &ir);
+    insta::assert_json_snapshot!("browbeat_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Per-keyword replication (U5-M2 ReplicatePerKeyword parity)
+// ---------------------------------------------------------------------------
+// Oracle text verified verbatim against Scryfall.
+
+// CR 702: StaticGrant — "The same is true for <keywords>." replicates the
+// antecedent static keyword-grant clause once per listed keyword, swapping the
+// keyword in both the grant and its gating condition (Odric, Lunarch Marshal).
+#[test]
+fn odric_lunarch_marshal() {
+    let (ir, lowered) = parse_two_layer(
+        "At the beginning of each combat, creatures you control gain first strike until end of turn if a creature you control has first strike. The same is true for flying, deathtouch, double strike, haste, hexproof, indestructible, lifelink, menace, reach, skulk, trample, and vigilance.",
+        "Odric, Lunarch Marshal",
+        &["Creature"],
+        &["Human", "Soldier"],
+    );
+    insta::assert_json_snapshot!("odric_lunarch_marshal_ir", &ir);
+    insta::assert_json_snapshot!("odric_lunarch_marshal_lowered", &lowered);
+}
+
+// CR 608.2c: CounterPlacement — "Repeat this process for <keywords>." replicates
+// the antecedent conditional keyword-counter clause once per listed keyword,
+// swapping the keyword in both the placed counter and the graveyard-keyword gate
+// (Kathril, Aspect Warper).
+#[test]
+fn kathril_aspect_warper() {
+    let (ir, lowered) = parse_two_layer(
+        "When Kathril enters, put a flying counter on any creature you control if a creature card in your graveyard has flying. Repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 counter on Kathril for each counter put on a creature this way.",
+        "Kathril, Aspect Warper",
+        &["Creature"],
+        &["Nightmare", "Insect"],
+    );
+    insta::assert_json_snapshot!("kathril_aspect_warper_ir", &ir);
+    insta::assert_json_snapshot!("kathril_aspect_warper_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Prior-def modifiers (U5-M2 ModifyPrior parity)
+// ---------------------------------------------------------------------------
+// Oracle text verified verbatim against Scryfall. AltCost + ManaRetention have
+// real cards below; the third ModifyPrior kind (EntersTappedAttacking) has no
+// card in the 568-card fixture and a complex pop+patch body — it is covered by a
+// direct handler unit test in oracle_trigger_tests.rs instead.
+
+// CR 118.9 + CR 119.4: AltCost — "pay <cost> rather than paying its mana cost."
+// folds an `alt_ability_cost` onto the prior CastFromZone play grant (Nashi,
+// Moon Sage's Scion).
+#[test]
+fn nashi_moon_sages_scion() {
+    let (ir, lowered) = parse_two_layer(
+        "Ninjutsu {3}{B} ({3}{B}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever Nashi deals combat damage to a player, exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.",
+        "Nashi, Moon Sage's Scion",
+        &["Creature"],
+        &["Rat", "Ninja"],
+    );
+    insta::assert_json_snapshot!("nashi_moon_sages_scion_ir", &ir);
+    insta::assert_json_snapshot!("nashi_moon_sages_scion_lowered", &lowered);
+}
+
+// CR 106.4: ManaRetention — "you don't lose this mana as steps and phases end."
+// folds a mana-retention expiry onto the prior mana-production effect (Karn,
+// Legacy Reforged).
+#[test]
+fn karn_legacy_reforged() {
+    let (ir, lowered) = parse_two_layer(
+        "Karn's power and toughness are each equal to the greatest mana value among artifacts you control.\nAt the beginning of your upkeep, add {C} for each artifact you control. This mana can't be spent to cast nonartifact spells. Until end of turn, you don't lose this mana as steps and phases end.",
+        "Karn, Legacy Reforged",
+        &["Artifact", "Creature"],
+        &["Golem"],
+    );
+    insta::assert_json_snapshot!("karn_legacy_reforged_ir", &ir);
+    insta::assert_json_snapshot!("karn_legacy_reforged_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Meaning-replacement overrides (U5-M2 ReplaceMeaning parity)
+// ---------------------------------------------------------------------------
+// All three kinds have real cards in the 568-card fixture (DigAlt 2, Instead 24,
+// KeywordOverride 1). Oracle text verified verbatim against Scryfall.
+
+// CR 608.2c: DigAlt — "you may instead <alternative dig disposition>" pops the
+// prior dig def and wraps the alternative with the prior as its `else_ability`
+// (Follow the Lumarets). "Infusion —" is an ability word (stripped like Landfall).
+#[test]
+fn follow_the_lumarets() {
+    let (ir, lowered) = parse_two_layer(
+        "Infusion — Look at the top four cards of your library. You may reveal a creature or land card from among them and put it into your hand. If you gained life this turn, you may instead reveal two creature and/or land cards from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
+        "Follow the Lumarets",
+        &["Sorcery"],
+        &[],
+    );
+    insta::assert_json_snapshot!("follow_the_lumarets_ir", &ir);
+    insta::assert_json_snapshot!("follow_the_lumarets_lowered", &lowered);
+}
+
+// CR 614.1a + CR 608.2c: Instead — the multi-clause Cow-swap. Clause 1 ("gain
+// control … until end of turn") is the root/swap target; the "… instead" override
+// carries the `ConditionInstead`, and the TAIL clauses ("Untap that creature. It
+// gains haste …") are stashed in the override's `else_ability` (Evil's Thrall).
+#[test]
+fn evils_thrall() {
+    let (ir, lowered) = parse_two_layer(
+        "Gain control of target creature until end of turn. If you control a Villain with greater mana value than that creature, gain control of that creature until the end of your next turn instead. Untap that creature. It gains haste until end of turn.",
+        "Evil's Thrall",
+        &["Sorcery"],
+        &[],
+    );
+    insta::assert_json_snapshot!("evils_thrall_ir", &ir);
+    insta::assert_json_snapshot!("evils_thrall_lowered", &lowered);
+}
+
+// CR 608.2c: KeywordOverride — a "TargetHasKeywordInstead"-conditioned clause
+// builds its def from the parsed effect + condition and attaches as the prior
+// def's `sub_ability` (Conformer Shuriken's granted attack trigger).
+#[test]
+fn conformer_shuriken() {
+    let (ir, lowered) = parse_two_layer(
+        "Equipped creature has \"Whenever this creature attacks, tap target creature defending player controls. If that creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.\"\nEquip {2}",
+        "Conformer Shuriken",
+        &["Artifact"],
+        &["Equipment"],
+    );
+    insta::assert_json_snapshot!("conformer_shuriken_ir", &ir);
+    insta::assert_json_snapshot!("conformer_shuriken_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Search-fold + drawn-this-turn follow-up (U5-M2 capstone parity)
+// ---------------------------------------------------------------------------
+// The last two special-clause markers, now typed dispositions. Oracle text
+// verified verbatim against Scryfall. Reach-guards asserting these texts really
+// land on the new dispositions live in `oracle_effect::tests`
+// (`*_reaches_fold_search_into_else`, `sylvan_library_reaches_drawn_this_turn_followup`) —
+// `ClauseDisposition` is never serialized, so a snapshot alone cannot show which
+// arm ran.
+
+// CR 608.2c + CR 601.2b: FoldSearchIntoElse — an "instead, search your library …"
+// clause whose additional cost was paid (CR 601.2b) is later text modifying the
+// meaning of the earlier search (CR 608.2c). It builds its own def and folds the
+// PRIOR search's trailing search-destination `ChangeZone` into its `else_ability`,
+// then applies its OWN intrinsic `SearchDestination` continuation. Kicker variant.
+#[test]
+fn aangs_journey() {
+    let (ir, lowered) = parse_two_layer(
+        "Kicker {2} (You may pay an additional {2} as you cast this spell.)\nSearch your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card. Reveal those cards, put them into your hand, then shuffle.\nYou gain 2 life.",
+        "Aang's Journey",
+        &["Sorcery"],
+        &["Lesson"],
+    );
+    insta::assert_json_snapshot!("aangs_journey_ir", &ir);
+    insta::assert_json_snapshot!("aangs_journey_lowered", &lowered);
+}
+
+// CR 608.2c + CR 601.2b: FoldSearchIntoElse, second card of the class — the cost
+// is `collect evidence` rather than kicker, and the search reveals (the intrinsic
+// carries `reveal: true`). Same disposition, different cost + intrinsic payload:
+// this is the class, not the card.
+#[test]
+fn analyze_the_pollen() {
+    let (ir, lowered) = parse_two_layer(
+        "As an additional cost to cast this spell, you may collect evidence 8. (Exile cards with total mana value 8 or greater from your graveyard.)\nSearch your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle.",
+        "Analyze the Pollen",
+        &["Sorcery"],
+        &[],
+    );
+    insta::assert_json_snapshot!("analyze_the_pollen_ir", &ir);
+    insta::assert_json_snapshot!("analyze_the_pollen_lowered", &lowered);
+}
+
+// DrawnThisTurnFollowup — "For each of those cards, pay N life or put the card on
+// top of your library" sets the life payment on the prior
+// `ChooseDrawnThisTurnPayOrTopdeck` and emits no def of its own (Sylvan Library).
+// NOTE: this is the only card of its class and it is NOT in the 568-card fixture
+// corpus, so the payment write is additionally pinned by a direct handler test
+// (`drawn_this_turn_followup_overwrites_prior_life_payment`) using a NON-default
+// payment — Sylvan Library's parsed default is already 4, so asserting 4 here
+// would be vacuous.
+#[test]
+fn sylvan_library() {
+    let (ir, lowered) = parse_two_layer(
+        "At the beginning of your draw step, you may draw two additional cards. If you do, choose two cards in your hand drawn this turn. For each of those cards, pay 4 life or put the card on top of your library.",
+        "Sylvan Library",
+        &["Enchantment"],
+        &[],
+    );
+    insta::assert_json_snapshot!("sylvan_library_ir", &ir);
+    insta::assert_json_snapshot!("sylvan_library_lowered", &lowered);
 }
 
 // ---------------------------------------------------------------------------
@@ -805,6 +1163,55 @@ fn bomat_courier() {
     );
     insta::assert_json_snapshot!("bomat_courier_ir", &ir);
     insta::assert_json_snapshot!("bomat_courier_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Parity-oracle coverage for otherwise-unsnapshotted document item variants
+// (Plan 01, assertion 6).
+//
+// `CastingRestriction`, `SolveCondition`, and `StriveCost` are producible
+// `OracleItemIr` variants that no lowered snapshot in this crate populated:
+// across every `*_lowered.snap` here and every `ParsedAbilities` snapshot in
+// `parser/snapshots/`, `casting_restrictions` was always empty and
+// `solve_condition`/`strive_cost` were always null. The source-order builder
+// and the assembly traversal both rewrite the item -> `ParsedAbilities` fold,
+// so without these three the fold could drop any of them silently.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn champions_victory() {
+    let (ir, lowered) = parse_two_layer(
+        "Cast this spell only during the declare attackers step and only if you've been attacked this step.\nReturn target attacking creature to its owner's hand.",
+        "Champion's Victory",
+        &["Instant"],
+        &[],
+    );
+    insta::assert_json_snapshot!("champions_victory_ir", &ir);
+    insta::assert_json_snapshot!("champions_victory_lowered", &lowered);
+}
+
+#[test]
+fn case_of_the_crimson_pulse() {
+    let (ir, lowered) = parse_two_layer(
+        "When this Case enters, discard a card, then draw two cards.\nTo solve — You have no cards in hand. (If unsolved, solve at the beginning of your end step.)\nSolved — At the beginning of your upkeep, discard your hand, then draw two cards.",
+        "Case of the Crimson Pulse",
+        &["Enchantment"],
+        &["Case"],
+    );
+    insta::assert_json_snapshot!("case_of_the_crimson_pulse_ir", &ir);
+    insta::assert_json_snapshot!("case_of_the_crimson_pulse_lowered", &lowered);
+}
+
+#[test]
+fn aerial_formation() {
+    let (ir, lowered) = parse_two_layer(
+        "Strive — This spell costs {2}{U} more to cast for each target beyond the first.\nAny number of target creatures each get +1/+1 and gain flying until end of turn.",
+        "Aerial Formation",
+        &["Instant"],
+        &[],
+    );
+    insta::assert_json_snapshot!("aerial_formation_ir", &ir);
+    insta::assert_json_snapshot!("aerial_formation_lowered", &lowered);
 }
 
 // ---------------------------------------------------------------------------

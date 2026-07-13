@@ -1764,6 +1764,11 @@ pub(crate) fn cant_be_blocked_mode(clause: &str) -> Option<(StaticMode, Option<S
     // "as long as …" condition fallthrough so the "unless" form is classified
     // explicitly rather than mis-handled by the generic condition parser.
     if let Some(after) = nom_tag_lower(rest, rest, " unless ") {
+        // CR 509.1b (Tromokratis): "can't be blocked unless all creatures defending
+        // player controls block it" — aggregate blocking restriction.
+        if parse_block_unless_all_block_nom(after) {
+            return Some((StaticMode::CantBeBlockedUnlessAllBlock, None));
+        }
         if let Some(target) = parse_block_unless_attacking_owner_nom(after) {
             return Some((
                 StaticMode::CantBeBlocked,
@@ -1811,6 +1816,18 @@ fn parse_block_unless_attacking_owner_nom(
     .parse(input)
     .ok()?;
     rest.trim().is_empty().then_some(target)
+}
+
+/// CR 509.1b (Tromokratis): recognize "all creatures defending player controls
+/// block it" (or "block ~") as the aggregate blocking restriction tail. Uses
+/// nom `tag_no_case` combinators to avoid verbatim string equality.
+fn parse_block_unless_all_block_nom(input: &str) -> bool {
+    let result: Result<(&str, &str), nom::Err<OracleError<'_>>> = alt((
+        tag_no_case("all creatures defending player controls block it"),
+        tag_no_case("all creatures defending player controls block ~"),
+    ))
+    .parse(input);
+    result.is_ok_and(|(rest, _)| rest.trim().is_empty())
 }
 
 /// CR 509.1b: Attach a trailing "as long as …" condition to the evasion
@@ -1972,39 +1989,10 @@ pub(crate) fn try_parse_compound_subtypes(
     extra_props: &[FilterProp],
     is_other: bool,
 ) -> Option<TargetFilter> {
-    let (left, right) = descriptor
-        .split_once(" and ") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .or_else(|| descriptor.split_once(" or "))?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-    let left_trimmed = left.trim();
-    let right_trimmed = right.trim();
-    if !is_capitalized_words(left_trimmed) || !is_capitalized_words(right_trimmed) {
-        return None;
-    }
-    let left_sub = parse_subtype(left_trimmed)
-        .map(|(c, _)| c)
-        .unwrap_or_else(|| left_trimmed.to_string());
-    let right_sub = parse_subtype(right_trimmed)
-        .map(|(c, _)| c)
-        .unwrap_or_else(|| right_trimmed.to_string());
-    // Inject extra_props and Another into each inner filter at construction time,
-    // because add_property does not recurse into TargetFilter::Or.
-    let mut all_props = extra_props.to_vec();
-    if is_other {
-        all_props.push(FilterProp::Another);
-    }
-    let filters = vec![
-        TargetFilter::Typed(
-            typed_filter_for_subtype(&left_sub)
-                .controller(ControllerRef::You)
-                .properties(all_props.clone()),
-        ),
-        TargetFilter::Typed(
-            typed_filter_for_subtype(&right_sub)
-                .controller(ControllerRef::You)
-                .properties(all_props),
-        ),
-    ];
-    Some(TargetFilter::Or { filters })
+    // CR 611.3a: Delegate to the generalized Oxford-comma subtype-list authority
+    // in `shared`, which handles any arity ("Demons, Devils, Imps, and
+    // Tieflings") rather than only the two-member "<A> and <B>" split.
+    parse_subtype_list_filter(descriptor, extra_props, is_other)
 }
 
 /// CR 510.1a + CR 613.11: The "assign[s] combat damage equal to <poss> toughness

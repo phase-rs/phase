@@ -32,7 +32,8 @@
     "label": "Detector de combos",
     "title": "Detectar loops infinitos: encerrar loops obrigatórios automaticamente e mostrar recursos ∞ (desativado por padrão)",
     "on": "Ligado",
-    "off": "Desligado"
+    "off": "Desligado",
+    "interactive": "Interativo"
   },
   "gameMenu": {
     "sections": {

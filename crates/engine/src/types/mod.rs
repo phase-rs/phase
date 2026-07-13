@@ -45,7 +45,10 @@ pub use game_state::{
     PendingSpellCostReduction, PlayerDeckPool, ScheduledTurnControl, SpellCastRecord, StackEntry,
     StackEntryKind, TransientContinuousEffect, WaitingFor, ZoneChangeRecord,
 };
-pub use identifiers::{CardId, ObjectId};
+pub use identifiers::{
+    CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, ObjectProvenance,
+    LEGACY_INCARNATION,
+};
 pub use keywords::{Keyword, PartnerType, ProtectionTarget};
 pub use layers::{ActiveContinuousEffect, Layer};
 pub use log::{GameLogEntry, LogCategory, LogSegment};
@@ -57,7 +60,7 @@ pub use match_config::{
 };
 pub use phase::Phase;
 pub use player::{Player, PlayerId};
-pub use proposed_event::{ProposedEvent, ReplacementId};
+pub use proposed_event::{AppliedReplacementKey, ProposedEvent, ReplacementId};
 pub use replacements::ReplacementEvent;
 pub use replay::{RecordedAction, ReplayHeader, ReplayLog};
 pub use statics::StaticMode;

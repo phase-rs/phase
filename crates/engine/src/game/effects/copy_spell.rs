@@ -34,6 +34,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -150,6 +151,25 @@ pub fn resolve(
     state.stack.push_back(copy_entry);
     events.push(GameEvent::StackPushed { object_id: copy_id });
 
+    // CR 707.10d: Zada — each copy is put on the stack targeting the current
+    // iteration member; no controller choice to change targets.
+    if matches!(
+        ability.effect,
+        Effect::CopySpell {
+            retarget: CopyRetargetPermission::RetargetEachCopyToIterationMember,
+            ..
+        }
+    ) {
+        if let Some(member) = ability.targets.iter().find_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        }) {
+            if let Some(copy_ability) = state.stack.back_mut().and_then(|e| e.ability_mut()) {
+                rewrite_copy_spell_object_targets(copy_ability, member);
+            }
+        }
+    }
+
     // CR 707.10: A copy of a spell is itself a spell on the stack, but it
     // isn't cast. Emit a distinct `SpellCopied` event so copy-sensitive
     // triggers (Magecraft) fire without wrongly firing cast-only triggers.
@@ -196,6 +216,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
+                subject: None,
             });
             drain_spell_copied_observer_triggers(state, events, copied_spell_card_id.is_some())?;
             return Ok(());
@@ -216,6 +237,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     drain_spell_copied_observer_triggers(state, events, copied_spell_card_id.is_some())?;
@@ -498,6 +520,38 @@ pub(crate) fn copy_count_with_replacements(
 }
 
 fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<StackEntry> {
+    if let Effect::CopySpell {
+        target, retarget, ..
+    } = &ability.effect
+    {
+        if matches!(target, TargetFilter::TriggeringSource)
+            || matches!(
+                retarget,
+                CopyRetargetPermission::RetargetEachCopyToIterationMember
+            )
+        {
+            if let Some(entry) = triggering_spell_stack_entry(state) {
+                return Some(entry);
+            }
+        }
+    }
+    // CR 707.10 + CR 607.2a (#5576 Saruman of Many Colors): an exile-linked copy
+    // ("Copy the exiled card" → `ExiledBySource`; Isochron Scepter imprint →
+    // `TrackedSet`) binds its source from the durable exile link / tracked set,
+    // NOT from `ability.targets`. This MUST precede the generic
+    // Object-target-on-stack lookup below: `resolve_ability_chain` propagates a
+    // parent exile clause's chosen target ("exile target … card") onto this
+    // CopySpell sub-ability, but that object is now in exile — not on the stack —
+    // so the stack lookup would find nothing and (before this reordering) the
+    // exile-linked branch was never reached, so the copy silently no-op'd.
+    if let Effect::CopySpell { target, .. } = &ability.effect {
+        if target.references_exiled_by_source() {
+            return copy_source_from_exiled_by_source(state, ability, target);
+        }
+        if references_tracked_set(target) {
+            return copy_source_from_tracked_set(state, ability, target);
+        }
+    }
     let target_id = ability.targets.iter().find_map(|target| match target {
         TargetRef::Object(id) => Some(*id),
         TargetRef::Player(_) => None,
@@ -519,11 +573,6 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
                     )
             })
             .cloned();
-    }
-    if let Effect::CopySpell { target, .. } = &ability.effect {
-        if references_tracked_set(target) {
-            return copy_source_from_tracked_set(state, ability, target);
-        }
     }
     if matches!(
         &ability.effect,
@@ -580,6 +629,39 @@ fn tracked_set_id_from_filter(filter: &TargetFilter) -> Option<TrackedSetId> {
         TargetFilter::Not { filter } => tracked_set_id_from_filter(filter),
         _ => None,
     }
+}
+
+/// CR 707.10 + CR 406.6 + CR 607.2a (Isochron Scepter class / Hideaway
+/// family): `CopySpell { ExiledBySource }` copies a card that was exiled by
+/// an EARLIER, separately-resolved ability on this same source (an ETB
+/// Imprint or a synthesized Hideaway ETB) — not by an earlier clause in this
+/// same resolution chain (that case stays on the `TrackedSet` path via
+/// `copy_source_from_tracked_set`). Resolved via the source's durable
+/// `exile_links`, the same linked-ability lookup `cast_from_zone.rs` uses for
+/// `CastFromZone { ExiledBySource }`. At most one card is ever linked to a
+/// given source under this binding (a single Imprint / Hideaway exile per
+/// source), so `.find` on the first match is sufficient — no ordering
+/// ambiguity to resolve.
+fn copy_source_from_exiled_by_source(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Option<StackEntry> {
+    let ctx = FilterContext::from_ability(ability);
+    // CR 607.2a: the lookup is scoped by `ability.source_id` but kind-agnostic
+    // (it matches ANY `ExileLinkKind` linked to this source), mirroring the
+    // pre-existing `cast_from_zone.rs` linked-exile pattern. Accepted
+    // limitation: no card links two different exile kinds to one source, so a
+    // first-match `.find` cannot pick the wrong pile.
+    let source_id = crate::game::players::linked_exile_cards_for_source(state, ability.source_id)
+        .iter()
+        .map(|link| link.exiled_id)
+        .find(|id| {
+            state.objects.get(id).is_some_and(|obj| {
+                obj.zone == Zone::Exile && matches_target_filter(state, *id, target, &ctx)
+            })
+        })?;
+    stack_entry_from_exiled_spell_object(state, source_id, ability.controller)
 }
 
 /// CR 707.10 + CR 702.153a (Isochron Scepter): `CopySpell { TrackedSet }` copies
@@ -740,6 +822,21 @@ pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, sourc
 fn preserve_ability_copy_source_recursive(ability: &mut ResolvedAbility) {
     let source_id = ability.source_id;
     set_resolved_source_recursive(ability, source_id);
+}
+
+/// CR 707.10d: Replace every object target on a copied spell with `new_target`.
+fn rewrite_copy_spell_object_targets(ability: &mut ResolvedAbility, new_target: ObjectId) {
+    for target in &mut ability.targets {
+        if matches!(target, TargetRef::Object(_)) {
+            *target = TargetRef::Object(new_target);
+        }
+    }
+    if let Some(sub) = ability.sub_ability.as_mut() {
+        rewrite_copy_spell_object_targets(sub, new_target);
+    }
+    if let Some(else_ab) = ability.else_ability.as_mut() {
+        rewrite_copy_spell_object_targets(else_ab, new_target);
+    }
 }
 
 fn stack_entry_source_id_for_copy(kind: &StackEntryKind, copy_id: ObjectId) -> ObjectId {
@@ -3202,6 +3299,90 @@ mod tests {
             copy.counters.get(&CounterType::Loyalty).copied(),
             Some(4),
             "ETB must seed loyalty counters from the stamped entering face"
+        );
+    }
+
+    /// CR 707.10 + CR 607.2a (#5576 Saruman of Many Colors): a same-chain
+    /// plain-targeted `ChangeZone{Exile}` feeding "Copy the exiled card" now
+    /// binds the copy to `ExiledBySource`. End-to-end, the exile step publishes
+    /// an `ExileLink` (`should_track_exiled_by_source` sees the `ExiledBySource`
+    /// consumer) and the copy replicates the just-exiled card. Before the parser
+    /// fix the copy bound `TrackedSet(0)`, which a plain-targeted exile never
+    /// publishes — `copy_source_from_tracked_set` fell back to a global scan and,
+    /// with none present, copied nothing. Driven through the real parser so a
+    /// revert of the routing flips the copy target back and this fails.
+    #[test]
+    fn copy_the_exiled_card_after_targeted_graveyard_exile_copies_that_card() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{AbilityDefinition, AbilityKind};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(5);
+        state.objects.insert(
+            source_id,
+            GameObject::new(
+                source_id,
+                CardId(99),
+                PlayerId(0),
+                "Saruman of Many Colors".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+
+        // An instant card in the OPPONENT's graveyard — the exile+copy target.
+        let target_card = ObjectId(10);
+        let mut gy = GameObject::new(
+            target_card,
+            CardId(1),
+            PlayerId(1),
+            "Shock".to_string(),
+            Zone::Graveyard,
+        );
+        gy.card_types.core_types.push(CoreType::Instant);
+        gy.abilities = std::sync::Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+        )]);
+        state.objects.insert(target_card, gy);
+
+        // Real parser output for the same-chain "exile target … Copy the exiled
+        // card" class: ChangeZone{Graveyard→Exile} → CopySpell{ExiledBySource}.
+        let def = parse_effect_chain(
+            "Exile target instant card from an opponent's graveyard. Copy the exiled card.",
+            AbilityKind::Activated,
+        );
+        let resolved = build_resolved_from_def_with_targets(
+            &def,
+            source_id,
+            PlayerId(0),
+            vec![TargetRef::Object(target_card)],
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.objects[&target_card].zone,
+            Zone::Exile,
+            "the targeted graveyard card must be exiled"
+        );
+        // A copy of THAT card (its DealDamage spell) is on the stack — a distinct
+        // object from the exiled original.
+        let copy = state.stack.iter().find_map(|e| {
+            let a = e.ability()?;
+            (e.id != target_card && matches!(a.effect, Effect::DealDamage { .. })).then_some(e.id)
+        });
+        assert!(
+            copy.is_some(),
+            "a copy of the exiled instant must be on the stack (ExiledBySource read), \
+             got stack of {} entries",
+            state.stack.len()
         );
     }
 }

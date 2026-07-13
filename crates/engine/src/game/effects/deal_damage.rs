@@ -392,7 +392,7 @@ pub(crate) fn apply_damage_to_target(
             // prevention riders fire once post-batch in `combat_damage.rs`
             // against the aggregate prevented amount. Firing inline here would
             // re-fire the rider once per attacker against a fragmented count.
-            if !is_combat && state.post_replacement_continuation.is_some() {
+            if !is_combat && state.has_post_replacement_drain() {
                 // CR 615.5 + CR 609.7: leave `post_replacement_event_source`
                 // populated for the call so `TargetFilter::PostReplacementSourceController`
                 // can resolve against the prevented event's damage source. Clear
@@ -652,7 +652,9 @@ pub(crate) fn apply_damage_after_replacement(
         && matches!(
             (ctx.excess_recipient, &t),
             (
-                Some(ExcessRecipient::TargetController),
+                Some(ExcessRecipient::TargetController {
+                    source_keyword: None
+                }),
                 TargetRef::Object(_)
             )
         ) {
@@ -778,8 +780,12 @@ pub(crate) fn apply_damage_after_replacement(
     // the snapshot / PendingReplacement). `redirected` records that the excess and
     // this leg's lifelink were handed off, so the creature leg gains nothing here.
     let mut redirected = false;
-    if let (Some(ExcessRecipient::TargetController), TargetRef::Object(obj_id)) =
-        (ctx.excess_recipient, t)
+    if let (
+        Some(ExcessRecipient::TargetController {
+            source_keyword: None,
+        }),
+        TargetRef::Object(obj_id),
+    ) = (ctx.excess_recipient, t)
     {
         if redirect_excess > 0 {
             if let Some(controller) = state.objects.get(obj_id).map(|o| o.controller) {
@@ -1061,6 +1067,31 @@ fn stash_remaining_each_source_damage(
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
 
+/// CR 120.4a + CR 608.2c + CR 702: Resolve an excess-redirect rider against
+/// the actual damage source. Unconditional riders apply directly; keyword-gated
+/// riders apply only while the source has the named effective keyword.
+fn active_excess_recipient(
+    state: &GameState,
+    ctx: &DamageContext,
+    excess: Option<ExcessRecipient>,
+) -> Option<ExcessRecipient> {
+    match excess {
+        Some(ExcessRecipient::TargetController {
+            source_keyword: None,
+        }) => Some(ExcessRecipient::TargetController {
+            source_keyword: None,
+        }),
+        Some(ExcessRecipient::TargetController {
+            source_keyword: Some(keyword),
+        }) if keywords::object_has_effective_keyword_kind(state, ctx.source_id, keyword) => {
+            Some(ExcessRecipient::TargetController {
+                source_keyword: None,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// CR 120.1: Deal N damage — reduces life for players, marks damage on creatures.
 /// Reads amount from `Effect::DealDamage { amount }`.
 pub fn resolve(
@@ -1126,11 +1157,12 @@ pub fn resolve(
         }
     };
 
-    // CR 120.4a: attach the excess-redirect rider parsed onto this DealDamage so
-    // `apply_damage_after_replacement` can redirect excess to the target's
-    // controller. Inert for combat damage (that path builds its own contexts).
+    // CR 120.4a + CR 608.2c: attach the active excess-redirect rider parsed onto
+    // this DealDamage so `apply_damage_after_replacement` can redirect excess to
+    // the target's controller. Keyword-gated riders read the resolved damage
+    // source (for DamageSource::Target, the first object target), not the spell.
     if let Effect::DealDamage { excess, .. } = &ability.effect {
-        ctx.excess_recipient = *excess;
+        ctx.excess_recipient = active_excess_recipient(state, &ctx, *excess);
     }
 
     // CR 120.1 + CR 608.2c: Resolve effective damage targets.
@@ -1198,6 +1230,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -1242,6 +1275,7 @@ pub fn resolve_post_replacement(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -1318,6 +1352,7 @@ fn resolve_each_target_power_damage(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         };
@@ -1372,7 +1407,7 @@ fn resolve_each_target_power_damage(
             ReplacementResult::Prevented => {
                 // CR 615.5: A prevention rider (e.g. "for each 1 damage prevented
                 // this way") resolves immediately afterward for non-combat damage.
-                if state.post_replacement_continuation.is_some() {
+                if state.has_post_replacement_drain() {
                     let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                         state, None, None, None, events,
                     );
@@ -1409,6 +1444,7 @@ fn resolve_each_target_power_damage(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -1604,6 +1640,7 @@ pub fn resolve_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -1667,16 +1704,19 @@ fn collect_matching_players(
                     // CR 120.2a/120.2b: Each opponent who was dealt damage of the
                     // given kind this turn, optionally restricted to a matching
                     // source.
-                    PlayerFilter::OpponentDealtDamage { kind, ref source } => {
-                        crate::game::quantity::opponent_dealt_damage_matches(
-                            state,
-                            p.id,
-                            source_controller,
-                            kind,
-                            source,
-                            source_id,
-                        )
-                    }
+                    PlayerFilter::OpponentDealtDamage {
+                        kind,
+                        ref source,
+                        min_sources,
+                    } => crate::game::quantity::opponent_dealt_damage_matches(
+                        state,
+                        p.id,
+                        source_controller,
+                        kind,
+                        source,
+                        min_sources,
+                        source_id,
+                    ),
                     // CR 508.6: opponent the subject attacked within scope.
                     PlayerFilter::OpponentAttacked { subject, scope } => {
                         p.id != source_controller
@@ -1902,16 +1942,19 @@ pub fn resolve_each_player(
                     // CR 120.2a/120.2b: Each opponent who was dealt damage of the
                     // given kind this turn, optionally restricted to a matching
                     // source.
-                    PlayerFilter::OpponentDealtDamage { kind, source } => {
-                        crate::game::quantity::opponent_dealt_damage_matches(
-                            state,
-                            p.id,
-                            ability.controller,
-                            *kind,
-                            source,
-                            ability.source_id,
-                        )
-                    }
+                    PlayerFilter::OpponentDealtDamage {
+                        kind,
+                        source,
+                        min_sources,
+                    } => crate::game::quantity::opponent_dealt_damage_matches(
+                        state,
+                        p.id,
+                        ability.controller,
+                        *kind,
+                        source,
+                        *min_sources,
+                        ability.source_id,
+                    ),
                     // CR 508.6 + CR 102.2: opponent of the controller attacking
                     // the enchanted/defending player this combat.
                     PlayerFilter::OpponentAttackingEnchantedPlayer => {
@@ -2114,6 +2157,7 @@ pub fn resolve_each_player(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -2164,6 +2208,7 @@ pub fn resolve_each_deals_equal_to_power(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -2208,6 +2253,7 @@ pub fn resolve_each_deals_equal_to_power(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -2325,7 +2371,7 @@ pub fn resolve_each_source_deals_damage(
                 // CR 615.5: fire any prevention rider (e.g. Phyrexian Hydra
                 // "-1/-1 counter for each 1 damage prevented") inline so it
                 // resolves "immediately afterward" as the rule requires.
-                if state.post_replacement_continuation.is_some() {
+                if state.has_post_replacement_drain() {
                     let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                         state, None, None, None, events,
                     );
@@ -2387,6 +2433,7 @@ pub fn resolve_each_source_deals_damage(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -2531,6 +2578,66 @@ mod tests {
         // CR 120.1: the sources are not damaged (one-directional, unlike fight).
         assert_eq!(outcome.damage_marked(src_a), 0);
         assert_eq!(outcome.damage_marked(src_b), 0);
+    }
+
+    /// Issue #5244 — Radiance color fan-out (Cleansing Beam): "deals 2 damage to
+    /// target creature and each other creature that shares a color with it." The
+    /// chosen target and every OTHER creature sharing a color with it take 2; a
+    /// creature sharing no color takes 0. Proves the parser fan-out
+    /// (DealDamage{target} + DamageAll{SharesQuality Color, ParentTarget +
+    /// DistinctFrom ParentTarget}) resolves end-to-end and does NOT double-damage
+    /// the target (CR 120.3).
+    #[test]
+    fn radiance_cleansing_beam_color_fanout() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::{ManaColor, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        const CLEANSING_BEAM: &str = "Cleansing Beam deals 2 damage to target creature and each other creature that shares a color with it.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // Big toughness so 2 marked damage is observable without dying.
+        let red_target = scenario.add_creature(P1, "Red Target", 0, 9).id();
+        let red_other = scenario.add_creature(P1, "Red Other", 0, 9).id();
+        let blue_other = scenario.add_creature(P1, "Blue Other", 0, 9).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Cleansing Beam", true, CLEANSING_BEAM)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 4],
+        );
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P0;
+            state.priority_player = P0;
+            state.objects.get_mut(&red_target).unwrap().color = vec![ManaColor::Red];
+            state.objects.get_mut(&red_other).unwrap().color = vec![ManaColor::Red];
+            state.objects.get_mut(&blue_other).unwrap().color = vec![ManaColor::Blue];
+        }
+
+        let outcome = runner.cast(spell).target_objects(&[red_target]).resolve();
+
+        // Target takes 2 exactly ONCE (not doubled by the fan-out).
+        assert_eq!(
+            outcome.damage_marked(red_target),
+            2,
+            "chosen target takes 2 once (not doubled by the color fan-out)"
+        );
+        // Other red creature shares a color → takes 2.
+        assert_eq!(
+            outcome.damage_marked(red_other),
+            2,
+            "the other red creature shares a color with the target and takes 2"
+        );
+        // Blue creature shares no color → takes 0.
+        assert_eq!(
+            outcome.damage_marked(blue_other),
+            0,
+            "the blue creature shares no color with the (red) target and takes 0"
+        );
     }
 
     /// CR 120.1 + CR 120.6: `EachSourceDealsDamage` with a `Shared` recipient — two
@@ -4857,6 +4964,85 @@ mod tests {
         } else {
             panic!("expected DamageDealt event");
         }
+    }
+
+    /// CR 120.4a + CR 608.2c + CR 702: A source-keyword-gated excess rider
+    /// redirects only when the resolved damage source target has the keyword.
+    #[test]
+    fn source_keyword_gated_excess_redirect_requires_source_keyword() {
+        fn run(source_has_trample: bool) -> (GameState, Vec<GameEvent>, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_object(
+                &mut state,
+                CardId(10),
+                PlayerId(0),
+                "Source Creature".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&source_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                if source_has_trample {
+                    obj.keywords.push(crate::types::keywords::Keyword::Trample);
+                }
+            }
+            let target_id = create_object(
+                &mut state,
+                CardId(20),
+                PlayerId(1),
+                "Target Creature".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&target_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.toughness = Some(2);
+            }
+            let ability = ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    target: TargetFilter::Any,
+                    damage_source: Some(DamageSource::Target),
+                    excess: Some(ExcessRecipient::TargetController {
+                        source_keyword: Some(crate::types::keywords::KeywordKind::Trample),
+                    }),
+                },
+                vec![TargetRef::Object(source_id), TargetRef::Object(target_id)],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+
+            resolve(&mut state, &ability, &mut events).unwrap();
+            (state, events, target_id)
+        }
+
+        let (trample_state, trample_events, trample_target) = run(true);
+        assert_eq!(trample_state.objects[&trample_target].damage_marked, 2);
+        assert_eq!(trample_state.players[1].life, 17);
+        assert_eq!(
+            trample_events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::DamageDealt { .. }))
+                .count(),
+            2,
+            "lethal creature leg plus redirected controller leg"
+        );
+
+        let (no_trample_state, no_trample_events, no_trample_target) = run(false);
+        assert_eq!(
+            no_trample_state.objects[&no_trample_target].damage_marked,
+            5
+        );
+        assert_eq!(no_trample_state.players[1].life, 20);
+        assert_eq!(
+            no_trample_events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::DamageDealt { .. }))
+                .count(),
+            1,
+            "without trample the excess stays on the creature event"
+        );
     }
 
     /// CR 120.10 + CR 120.6: the Torch the Witness / Orbital Plunge class —

@@ -1,0 +1,91 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 96,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "~ deals 3 damage to any target. A creature dealt damage this way can't be regenerated this turn."
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 3
+            },
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": {
+            "kind": "Spell",
+            "effect": {
+              "type": "GenericEffect",
+              "static_abilities": [
+                {
+                  "mode": "CantBeRegenerated",
+                  "affected": {
+                    "type": "ParentTarget"
+                  },
+                  "modifications": [
+                    {
+                      "type": "AddStaticMode",
+                      "mode": "CantBeRegenerated"
+                    }
+                  ],
+                  "condition": null,
+                  "affected_zone": null,
+                  "effect_zone": null,
+                  "active_zones": [],
+                  "characteristic_defining": false,
+                  "description": null
+                }
+              ],
+              "duration": "UntilEndOfTurn",
+              "target": {
+                "type": "TrackedSet",
+                "id": 0
+              }
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": "UntilEndOfTurn",
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "duration": null,
+          "description": "~ deals 3 damage to any target. A creature dealt damage this way can't be regenerated this turn.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    }
+  ],
+  "source_text": "Incinerate deals 3 damage to any target. A creature dealt damage this way can't be regenerated this turn.",
+  "card_name": "Incinerate"
+}

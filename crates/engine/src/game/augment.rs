@@ -21,6 +21,7 @@ use crate::types::zones::Zone;
 
 use super::game_object::{DisplaySource, MergeKind};
 use super::printed_cards;
+use super::sba::move_to_graveyard_via_pipeline;
 use super::zones;
 
 pub fn resolve_combine_host(
@@ -41,6 +42,7 @@ pub fn resolve_combine_host(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CombineHost,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -59,6 +61,7 @@ pub fn resolve_combine_host(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::CombineHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -67,6 +70,7 @@ pub fn resolve_combine_host(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::CombineHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -89,6 +93,7 @@ pub fn resolve_combine_host(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::CombineHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -122,6 +127,7 @@ pub fn resolve_choose_augment_and_combine(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ChooseAugmentAndCombineWithHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -152,6 +158,7 @@ pub fn resolve_choose_augment_and_combine(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ChooseAugmentAndCombineWithHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -188,7 +195,13 @@ pub(crate) fn check_standalone_augment_permanents(
         {
             continue;
         }
-        zones::move_to_zone(state, object_id, Zone::Graveyard, events);
+        // CR 614.6: This SBA departure is a battlefield-to-
+        // graveyard zone change, so it must use the same replacement-aware
+        // authority as the other SBA moves. A parked CR 616 choice is resumed
+        // by the SBA fixpoint after the player chooses.
+        if move_to_graveyard_via_pipeline(state, object_id, events) {
+            return;
+        }
         *any_performed = true;
     }
 }

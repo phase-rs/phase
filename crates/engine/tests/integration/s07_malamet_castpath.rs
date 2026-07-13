@@ -279,12 +279,15 @@ const TAIL_SWIPE: &str =
 If you cast this spell during your main phase, the creature you control gets +1/+1 until end of \
 turn. Then those creatures fight each other.";
 
-/// Tail Swipe stays RED — the class-shape guards (c)/(d) must NOT touch it. Its
-/// non-counter `Pump` node is not rekeyed to `ParentTargetSlot`, gets no
-/// `subject_slot`, and it keeps an `Unimplemented` node (its unparsed main-phase
-/// pump gate keeps gap>0). Parse-level only — casting is out of scope.
+/// #4751 / #5583: Tail Swipe is now GREEN. The two-target fight fix keeps BOTH
+/// target slots (sentence-bounding stops the coincidental split at "and") and
+/// rekeys the `Pump` buff to `ParentTargetSlot { index: 0 }` — the first-declared
+/// you-control creature — via the fight-gated class rewrite (`>= 2` typed slots
+/// AND an `Effect::Fight` in the chain). No `Unimplemented` node remains. This
+/// card was previously pinned RED as a known gap; #5583 closes it. Parse-level
+/// only — casting is out of scope.
 #[test]
-fn tail_swipe_class_guards_do_not_touch_it_and_stays_red() {
+fn tail_swipe_class_keeps_both_targets_and_buffs_slot_zero() {
     use engine::parser::oracle::parse_oracle_text;
     use engine::types::ability::{AbilityDefinition, Effect, TargetFilter};
 
@@ -304,8 +307,8 @@ fn tail_swipe_class_guards_do_not_touch_it_and_stays_red() {
         walk(ab, &mut nodes);
     }
 
-    // Exclusion witness: only 1 TargetOnly slot (+ an Unimplemented for the second
-    // target), so the >=2-TargetOnly rewrite guard never fires.
+    // Both target slots survive: the two-target declaration is no longer split at
+    // its "and", so the (>= 2 typed slots AND Fight) rewrite fires.
     let target_only = nodes
         .iter()
         .filter(|n| {
@@ -318,42 +321,32 @@ fn tail_swipe_class_guards_do_not_touch_it_and_stays_red() {
         })
         .count();
     assert!(
-        target_only < 2,
-        "Tail Swipe has <2 Typed TargetOnly slots (guard excludes it)"
+        target_only >= 2,
+        "Tail Swipe must keep both Typed TargetOnly slots (got {target_only})"
     );
 
-    // The Pump is untouched: no ParentTargetSlot target, no subject_slot condition.
+    // The Pump buff is rekeyed to slot 0 (the first-declared you-control creature),
+    // not left as an unscoped whole-board target.
     let has_pump = nodes
         .iter()
         .any(|n| matches!(&*n.effect, Effect::Pump { .. }));
     assert!(has_pump, "Tail Swipe still carries its Pump node");
     assert!(
-        !nodes.iter().any(|n| matches!(
+        nodes.iter().any(|n| matches!(
             &*n.effect,
             Effect::Pump {
-                target: TargetFilter::ParentTargetSlot { .. },
+                target: TargetFilter::ParentTargetSlot { index: 0 },
                 ..
             }
         )),
-        "Pump must NOT be rekeyed to ParentTargetSlot (PutCounter-only guard)"
+        "the Pump must be rekeyed to ParentTargetSlot {{ index: 0 }}"
     );
+
+    // Green: the second target no longer escapes to an Unimplemented node.
     assert!(
-        !nodes.iter().any(|n| matches!(
-            &n.condition,
-            Some(
-                engine::types::ability::AbilityCondition::TargetMatchesFilter {
-                    subject_slot: Some(_),
-                    ..
-                }
-            )
-        )),
-        "no node gets a subject_slot (class-shape guard excludes Tail Swipe)"
-    );
-    // Stays unsupported: an Unimplemented node remains (gap > 0).
-    assert!(
-        nodes
+        !nodes
             .iter()
             .any(|n| matches!(&*n.effect, Effect::Unimplemented { .. })),
-        "Tail Swipe keeps an Unimplemented node — stays RED"
+        "Tail Swipe must fully parse — no Unimplemented node remains"
     );
 }
