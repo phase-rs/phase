@@ -59,6 +59,7 @@ mod combat_damage_order_triggers_no_hang;
 mod consuming_vapors_rebound;
 mod copy_retarget_past_rider;
 mod copy_token_except_keyword_and_quoted_ability;
+mod cost_x_carrier_runtime;
 mod council_of_four_nth_per_turn;
 mod counter_anaphor_created_token_binding;
 mod counter_double_redirect_choice;

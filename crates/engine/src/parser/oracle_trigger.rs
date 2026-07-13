@@ -466,10 +466,71 @@ fn rewrite_cost_x_in_effect(effect: &mut crate::types::ability::Effect) {
     }
 }
 
+/// CR 107.3i: "Normally, all instances of X on an object have the same value at
+/// any given time." An ETB trigger's X therefore lives in every quantity slot of
+/// the ability, not only in `effect` — the counter count to distribute
+/// (`multi_target`), the number of repetitions (`repeat_for`), a target-set cap
+/// (`target_constraints`), and an intervening-if operand (`condition`) are all X
+/// sites.
+///
+/// Rewrite an `AbilityCondition`'s quantity operands. Mirrors
+/// `apply_where_x_ability_condition` (`oracle_effect/lower.rs`).
+fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityCondition) {
+    use super::oracle_replacement::rewrite_variable_x_to_cost_x_paid;
+    use crate::types::ability::AbilityCondition;
+    match cond {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            rewrite_variable_x_to_cost_x_paid(lhs);
+            rewrite_variable_x_to_cost_x_paid(rhs);
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            for c in conditions.iter_mut() {
+                rewrite_cost_x_in_condition(c);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Walk an `AbilityDefinition` tree and rewrite Variable("X") → CostXPaid.
-/// Mirrors `apply_where_x_ability_expression` (`oracle_effect/mod.rs`) so
-/// sub-abilities, else branches, and modal alternatives all inherit the rewrite.
+///
+/// Mirrors the SIBLING-FIELD SET of `apply_where_x_ability_expression`
+/// (`oracle_effect/lower.rs`) — `condition`, `repeat_for`, `multi_target`,
+/// `target_constraints`, `effect` — so sub-abilities, else branches, and modal
+/// alternatives all inherit the rewrite.
+///
+/// **Why the sibling fields matter more than `effect` here.** A bare
+/// `QuantityRef::Variable{"X"}` left in an `effect` slot is still bound at
+/// runtime: `resolve_ref` falls back to the trigger event's source object and
+/// reads its `cost_x_paid` (CR 107.3m). But `multi_target`, `repeat_for` and
+/// `target_constraints` are consumed during TARGET SELECTION, before the trigger
+/// resolves and before `current_trigger_event` is set — so that fallback is dead
+/// for them and an unrewritten X there silently resolves to **0**: zero counters
+/// distributed (Broodlord), zero repetitions (Jadelight Spelunker), an
+/// unbounded cap. Rewriting to `CostXPaid` reads
+/// `objects[source].cost_x_paid` directly, with no dependence on the event, so
+/// it is correct at both selection time and resolution time.
 fn rewrite_cost_x_in_ability(def: &mut crate::types::ability::AbilityDefinition) {
+    use super::oracle_replacement::rewrite_variable_x_to_cost_x_paid;
+    use crate::types::game_state::TargetSelectionConstraint;
+
+    if let Some(cond) = def.condition.as_mut() {
+        rewrite_cost_x_in_condition(cond);
+    }
+    if let Some(repeat_for) = def.repeat_for.as_mut() {
+        rewrite_variable_x_to_cost_x_paid(repeat_for);
+    }
+    if let Some(spec) = def.multi_target.as_mut() {
+        spec.map_quantities(|mut expr| {
+            rewrite_variable_x_to_cost_x_paid(&mut expr);
+            expr
+        });
+    }
+    for constraint in def.target_constraints.iter_mut() {
+        if let TargetSelectionConstraint::TotalManaValue { value, .. } = constraint {
+            rewrite_variable_x_to_cost_x_paid(value);
+        }
+    }
     rewrite_cost_x_in_effect(def.effect.as_mut());
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_cost_x_in_ability(sub);
