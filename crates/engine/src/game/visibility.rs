@@ -1149,10 +1149,10 @@ fn viewer_has_private_access_to_player(
 /// filtered `GameState`. Unlike the state snapshot, this array was broadcast
 /// verbatim to every seat and spectator — leaking hidden library information
 /// through `GameEvent::CardDrawn` (specific `object_id`) and
-/// `GameEvent::ZoneChanged` records emitted on library → hand moves (the
-/// `ZoneChangeRecord` embeds the full card name and type line). The structured
-/// game log already excludes these events; this closes the same hole on the
-/// raw event channel clients also consume.
+/// `GameEvent::ZoneChanged` records emitted on library → hand or hand → library
+/// moves (the `ZoneChangeRecord` embeds the full card name and type line).
+/// The structured game log already excludes these events; this closes the same
+/// hole on the raw event channel clients also consume.
 pub fn filter_events_for_viewer(
     events: &[GameEvent],
     state: &GameState,
@@ -1187,6 +1187,15 @@ fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerI
             record,
             &can_view_private_for_player,
         ),
+        // CR 400.2: A mulligan moves cards from one hidden zone to another.
+        // The record contains the original hand identity, so only the owner
+        // or a viewer with private-zone authority may receive it.
+        GameEvent::ZoneChanged {
+            from: Some(Zone::Hand),
+            to: Zone::Library,
+            record,
+            ..
+        } => can_view_private_for_player(record.owner),
         _ => true,
     }
 }
@@ -1716,6 +1725,59 @@ mod tests {
         let controller =
             filter_events_for_viewer(std::slice::from_ref(&event), &state, PlayerId(0));
         assert_eq!(controller, vec![event]);
+    }
+
+    #[test]
+    fn filters_opponent_mulligan_hand_to_library_events() {
+        let state = GameState::new_two_player(42);
+        let owner = PlayerId(1);
+        let opponent = PlayerId(0);
+
+        let mut mulligan = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(98),
+            Some(Zone::Hand),
+            Zone::Library,
+        );
+        mulligan.name = "Secret Mulligan Card".to_string();
+        mulligan.owner = owner;
+        let mut discard = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(99),
+            Some(Zone::Hand),
+            Zone::Graveyard,
+        );
+        discard.name = "Public Discard".to_string();
+        discard.owner = owner;
+        let events = vec![
+            GameEvent::ZoneChanged {
+                object_id: ObjectId(98),
+                from: Some(Zone::Hand),
+                to: Zone::Library,
+                record: Box::new(mulligan),
+            },
+            GameEvent::ZoneChanged {
+                object_id: ObjectId(99),
+                from: Some(Zone::Hand),
+                to: Zone::Graveyard,
+                record: Box::new(discard),
+            },
+        ];
+
+        assert_eq!(filter_events_for_viewer(&events, &state, owner), events);
+        let visible = filter_events_for_viewer(&events, &state, opponent);
+        assert_eq!(visible.len(), 1);
+        assert!(matches!(
+            &visible[0],
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Hand),
+                to: Zone::Graveyard,
+                record,
+                ..
+            } if record.name == "Public Discard"
+        ));
+        assert_eq!(
+            filter_events_for_viewer(&events, &state, PlayerId(u8::MAX)),
+            visible
+        );
     }
 
     #[test]
