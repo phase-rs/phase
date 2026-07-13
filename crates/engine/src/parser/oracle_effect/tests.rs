@@ -10453,6 +10453,37 @@ fn effect_copy_retarget_binds_through_if_you_do_gate_spider_verse() {
     );
 }
 
+/// CR 603.7 + CR 707.10c: Twinferno — the next-cast delayed trigger printed in the
+/// POSSESSIVE word order ("when you CAST YOUR NEXT instant or sorcery spell this
+/// turn") rather than the adverbial one ("when you NEXT CAST an instant or sorcery
+/// spell this turn", Galvanic Iteration).
+///
+/// The two are the same clause wearing different grammar. Before the fix only the
+/// adverbial opening was recognized, so Twinferno produced NO delayed trigger at all
+/// — the copy was dropped outright and its retarget sentence was left as an honest
+/// `orphaned_copy_retarget` residual (a correct refusal to bind a copy that did not
+/// exist, which is why the orphan is the symptom and not the disease).
+#[test]
+fn effect_next_cast_copy_lowers_in_possessive_word_order_twinferno() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "Choose one —\n\
+         • When you cast your next instant or sorcery spell this turn, copy that spell. \
+         You may choose new targets for the copy.\n\
+         • Target creature you control gains double strike until end of turn.",
+        "Twinferno",
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(
+        orphaned, 0,
+        "the copy must be lowered, so its retarget clause has something to bind to"
+    );
+    assert!(
+        retargets.contains(&CopyRetargetPermission::MayChooseNewTargets),
+        "the delayed-trigger CopySpell must carry MayChooseNewTargets, got {retargets:?}"
+    );
+}
+
 /// CR 707.10c: COVERAGE HONESTY — a "you may choose new targets for the copy"
 /// sentence with NO preceding `CopySpell` anywhere in the chain must stay an
 /// honest `orphaned_copy_retarget` residual, never a silently-wrong retarget.

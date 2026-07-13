@@ -1208,11 +1208,22 @@ fn try_parse_enters_this_way_additional_counter(lower: &str) -> Option<Effect> {
 fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     use crate::types::triggers::TriggerMode;
 
-    // Must start with "when you next cast a " or "when you next cast an ".
-    // Article choice depends on the payload — "a creature spell" vs "an instant or sorcery spell".
-    let article_result: nom::IResult<&str, &str, OracleError<'_>> =
-        alt((tag("when you next cast a "), tag("when you next cast an "))).parse(tp.lower);
-    let Ok((_, matched_prefix)) = article_result else {
+    // CR 603.7: the SAME one-shot next-cast delayed trigger is printed with two word
+    // orders, and they are grammar variants of one clause, not two clauses:
+    //   "when you NEXT CAST a[n] <spell> this turn"  — Galvanic Iteration, Doublecast
+    //   "when you CAST YOUR NEXT <spell> this turn"  — Twinferno
+    // One `alt` over the openings — parameterize the opening, don't proliferate the
+    // parser. The payload after either is the same "[type-phrase] spell
+    // [post-modifier]" shape, so every downstream stage is untouched. (The article is
+    // part of the first opening because it varies with the payload — "a creature
+    // spell" vs "an instant or sorcery spell"; the possessive opening takes none.)
+    let opening_result: nom::IResult<&str, &str, OracleError<'_>> = alt((
+        tag("when you next cast a "),
+        tag("when you next cast an "),
+        tag("when you cast your next "),
+    ))
+    .parse(tp.lower);
+    let Ok((_, matched_prefix)) = opening_result else {
         // CR 603.7: non-cast "when you next <event> this turn" one-shot delayed
         // triggers (e.g. All-Out Assault "When you next attack this turn, ...").
         // The spell-cast arm above owns the rich spell-filter / disjunction
