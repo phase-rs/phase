@@ -2262,14 +2262,17 @@ fn parse_filtered_landing_zone_this_way(lower: &str) -> Option<QuantityRef> {
     let rest = remainder.trim_start();
     let (rest, _) = opt(alt((
         tag::<_, _, OracleError<'_>>("that was "),
-        tag("that were "),
+        tag::<_, _, OracleError<'_>>("that were "),
     )))
     .parse(rest)
     .ok()?;
-    let (rest, _) = alt((tag("returned"), tag("put into a graveyard")))
-        .parse(rest)
-        .ok()?;
-    let (rest, _) = tag(" this way").parse(rest).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("returned"),
+        tag::<_, _, OracleError<'_>>("put into a graveyard"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" this way").parse(rest).ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
