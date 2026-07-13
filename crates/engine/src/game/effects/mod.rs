@@ -3709,6 +3709,7 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         // published its affected ids, and the `TrackedSetAggregate` reduced an
         // empty set to 0 — a fully-supported-looking card that exiles nothing.
         Effect::ExileTop { count, .. } => quantity_hits_tracked(count),
+        Effect::Incubate { count } => quantity_hits_tracked(count),
         Effect::Token {
             count,
             power,
