@@ -185,6 +185,10 @@ fn invoke_calamity_opens_free_cast_window_and_exiles_cast_spells() {
                 "the MV-3 hand sorcery still fits the remaining budget of 4",
             );
         }
+            assert!(
+                !candidates.contains(&gy_instant),
+                "the spell already cast this way must not be offered a second time",
+            );
         other => panic!("the window must re-offer after the first free cast, got {other:?}"),
     }
 

@@ -8500,13 +8500,16 @@ fn handle_resolution_cast_success(
             if casts_left == 0 {
                 return None;
             }
-            let candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
+            let mut candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
                 state,
                 controller,
                 &filter,
                 &zones,
                 budget_left,
             );
+            // CR 608.2g: Finalize runs before the chosen card is removed from
+            // its origin zone; it cannot be offered again while already cast.
+            candidates.retain(|&id| id != cast_object);
             if candidates.is_empty() {
                 return None;
             }
