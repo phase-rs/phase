@@ -28821,3 +28821,26 @@ fn dynamic_pt_pump_binds_x_and_y_axes_to_distinct_quantities() {
         "toughness axis must be half rounded UP, got {toughness:?}"
     );
 }
+
+/// #5743 review [HIGH] regression guard: a "+X/+Y" / "-X/-Y" pump WITHOUT a
+/// structured "where X is <A>, and Y is <B>" paired binding must stay
+/// unsupported — it must NOT synthesize a cost-X static. Snowblind's
+/// "Enchanted creature gets -X/-Y." defines X/Y in later conditional sentences
+/// (no `{X}` cost), so it previously regressed to a bogus -CostXPaid/-CostXPaid.
+#[test]
+fn distinct_xy_pump_without_paired_binding_is_unsupported() {
+    // Snowblind: no where-clause at all on the -X/-Y line.
+    assert!(
+        super::shared::parse_static_line_multi("Enchanted creature gets -X/-Y.").is_empty(),
+        "Snowblind -X/-Y must not synthesize a static without a paired binding"
+    );
+    // A +X/+Y line with a where-clause that binds only X (no ", and Y is") is
+    // likewise unsupported rather than reusing X's quantity for Y.
+    assert!(
+        super::shared::parse_static_line_multi(
+            "Enchanted creature gets +X/+Y, where X is the number of Forests you control."
+        )
+        .is_empty(),
+        "+X/+Y with an X-only binding must stay unsupported"
+    );
+}
