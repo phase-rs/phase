@@ -232,6 +232,7 @@ pub(crate) fn additional_cost_declaration_is_offerable(
     pending: &PendingCast,
     cost: AbilityCost,
 ) -> Result<bool, EngineError> {
+    let exile_this_way_cost = is_exile_any_number_effect_cost(&cost);
     let split = split_declared_mana_addition_and_residual(state, pending, cost)?;
     if let Some(residual) = split.residual.as_ref() {
         if !residual.is_payable(state, player, pending.object_id) {
@@ -240,12 +241,26 @@ pub(crate) fn additional_cost_declaration_is_offerable(
     }
     let mut pending = pending.clone();
     pending.declared_mana_additions.extend(split.declared);
-    let total = super::casting::recompute_pending_mana_total(
+    let mut total = super::casting::recompute_pending_mana_total(
         state,
         player,
         &pending,
         pending.ability.chosen_x,
     );
+    // CR 601.2f: An optional exile-this-way cost can make the announced X
+    // payable. The declaration preview runs before the cards are selected, so
+    // account for the greatest legal generic reduction here; otherwise the
+    // prompt is incorrectly skipped and the cast fails at mana payment.
+    if exile_this_way_cost {
+        total = total.reduced_by_generic(exile_any_number_cost_reduction_capacity(
+            state,
+            player,
+            pending.object_id,
+        ));
+        if !cost_has_x(&total) {
+            super::casting::apply_cost_floor(state, player, pending.object_id, &mut total);
+        }
+    }
     if total.is_without_paying_mana() {
         return Ok(true);
     }
@@ -20868,6 +20883,43 @@ its replicate cost was paid.)\nDraw a card.";
         pending.ability.set_chosen_x_recursive(2);
         pending.cost.concretize_x(2);
         state.pending_cast = Some(Box::new(pending.clone()));
+        let optional_cost = match &additional_cost {
+            AdditionalCost::Optional { cost, .. } => cost.clone(),
+            other => panic!("expected optional March cost, got {other:?}"),
+        };
+        assert!(
+            additional_cost_declaration_is_offerable(
+                &state,
+                caster,
+                &pending,
+                optional_cost.clone()
+            )
+            .expect("March offerability preview succeeds"),
+            "the exile discount must make X=2 offerable with only {{W}} available"
+        );
+        let mut no_white_cards = state.clone();
+        no_white_cards
+            .objects
+            .get_mut(&white)
+            .unwrap()
+            .color
+            .clear();
+        no_white_cards
+            .objects
+            .get_mut(&second_white)
+            .unwrap()
+            .color
+            .clear();
+        assert!(
+            !additional_cost_declaration_is_offerable(
+                &no_white_cards,
+                caster,
+                &pending,
+                optional_cost,
+            )
+            .expect("March empty-hand offerability preview succeeds"),
+            "X=2 remains unpayable when no white card can supply the discount"
+        );
         let mut events = Vec::new();
         crate::game::stack::push_to_stack(
             &mut state,
@@ -20884,6 +20936,18 @@ its replicate cost was paid.)\nDraw a card.";
             },
             &mut events,
         );
+        assert!(matches!(
+            finish_pending_cast_cost_or_pay(
+                &mut state,
+                caster,
+                pending.clone(),
+                pending.ability.clone(),
+                pending.cost.clone(),
+                &mut events,
+            )
+            .expect("March post-target cost flow succeeds"),
+            WaitingFor::OptionalCostChoice { .. }
+        ));
         let waiting = handle_decide_additional_cost(
             &mut state,
             caster,
