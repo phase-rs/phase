@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -1161,7 +1161,24 @@ pub fn filter_events_for_viewer(
     events
         .iter()
         .filter(|event| event_visible_to_viewer(event, state, viewer))
-        .cloned()
+        .map(|event| match event {
+            // `CardId` is assigned from the pre-shuffle object sequence when a
+            // deck loads. An opponent can use it to recover hidden deck order,
+            // including the identity of a face-down spell; only the public
+            // stack-object reference is safe to retain here.
+            GameEvent::SpellCast {
+                controller,
+                object_id,
+                ..
+            } if !viewer_has_private_access_to_player(state, viewer, *controller) => {
+                GameEvent::SpellCast {
+                    card_id: CardId(0),
+                    controller: *controller,
+                    object_id: *object_id,
+                }
+            }
+            other => other.clone(),
+        })
         .collect()
 }
 
@@ -1920,6 +1937,64 @@ mod tests {
         } else {
             panic!("expected ZoneChanged");
         }
+    }
+
+    #[test]
+    fn opponent_spell_cast_hides_stable_card_id_but_keeps_public_stack_reference() {
+        let mut state = GameState::new_two_player(42);
+        let face_down_spell = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(1),
+            "Secret Morph".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&face_down_spell).unwrap().face_down = true;
+        let own_spell = create_object(
+            &mut state,
+            CardId(702),
+            PlayerId(0),
+            "Known Spell".to_string(),
+            Zone::Stack,
+        );
+        let events = vec![
+            GameEvent::SpellCast {
+                card_id: CardId(701),
+                controller: PlayerId(1),
+                object_id: face_down_spell,
+            },
+            GameEvent::SpellCast {
+                card_id: CardId(702),
+                controller: PlayerId(0),
+                object_id: own_spell,
+            },
+        ];
+
+        let viewer = filter_events_for_viewer(&events, &state, PlayerId(0));
+        assert!(matches!(
+            viewer.as_slice(),
+            [
+                GameEvent::SpellCast {
+                    card_id: CardId(0),
+                    controller: PlayerId(1),
+                    object_id,
+                },
+                GameEvent::SpellCast {
+                    card_id: CardId(702),
+                    controller: PlayerId(0),
+                    ..
+                },
+            ] if *object_id == face_down_spell
+        ));
+
+        let spectator = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));
+        assert!(spectator.iter().all(|event| matches!(
+            event,
+            GameEvent::SpellCast {
+                card_id: CardId(0),
+                ..
+            }
+        )));
     }
 
     #[test]
