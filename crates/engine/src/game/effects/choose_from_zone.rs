@@ -1842,6 +1842,143 @@ mod tests {
         }
     }
 
+    #[test]
+    fn atraxa_style_choice_puts_all_unchosen_cards_on_bottom() {
+        use super::super::resolve_ability_chain;
+        use crate::game::engine::apply;
+        use crate::types::ability::{LibraryPosition, QuantityExpr, TargetFilter};
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Atraxa, Grand Unifier".to_string(),
+            Zone::Battlefield,
+        );
+        let mut revealed = Vec::new();
+        for i in 0..10 {
+            let id = create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Revealed Card {i}"),
+                Zone::Library,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![match i % 3 {
+                0 => CoreType::Creature,
+                1 => CoreType::Instant,
+                _ => CoreType::Land,
+            }];
+            revealed.push(id);
+        }
+        let padding = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Library Padding".to_string(),
+            Zone::Library,
+        );
+        let mut ordered_library = revealed.clone();
+        ordered_library.push(padding);
+        state.players[0].library = ordered_library.into();
+
+        let bottom = Box::new(ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ExiledBySource,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Bottom,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        ));
+        let change_zone = Box::new(ResolvedAbility {
+            sub_ability: Some(bottom),
+            ..ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Hand,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        });
+        let choose = ResolvedAbility {
+            sub_ability: Some(change_zone),
+            ..ResolvedAbility::new(
+                Effect::ChooseFromZone {
+                    count: 8,
+                    zone: Zone::Library,
+                    additional_zones: Vec::new(),
+                    zone_owner: ZoneOwner::Controller,
+                    filter: None,
+                    chooser: Chooser::Controller,
+                    up_to: true,
+                    constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes {
+                        categories: vec![CoreType::Creature, CoreType::Instant, CoreType::Land],
+                    }),
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+        let reveal = ResolvedAbility {
+            sub_ability: Some(Box::new(choose)),
+            ..ResolvedAbility::new(
+                Effect::RevealTop {
+                    player: TargetFilter::Controller,
+                    count: 10,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &reveal, &mut events, 0).unwrap();
+        let chosen = vec![revealed[0], revealed[1], revealed[2]];
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: chosen.clone(),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        for id in &chosen {
+            assert_eq!(state.objects[id].zone, Zone::Hand);
+        }
+        let mut bottom_cards: Vec<_> = state.players[0].library.iter().skip(1).copied().collect();
+        let mut unchosen: Vec<_> = revealed
+            .iter()
+            .filter(|id| !chosen.contains(id))
+            .copied()
+            .collect();
+        bottom_cards.sort_by_key(|id| id.0);
+        unchosen.sort_by_key(|id| id.0);
+        assert_eq!(state.players[0].library[0], padding);
+        assert_eq!(bottom_cards, unchosen);
+    }
+
     /// CR 608.2d (override): a random `ChooseFromZone` picks the card(s) itself
     /// (no interactive prompt) and writes them onto the ability's `targets` so
     /// the chain forwards them to the sub-ability. Deterministic under seed.
