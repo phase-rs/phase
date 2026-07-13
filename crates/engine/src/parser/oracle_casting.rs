@@ -1734,11 +1734,25 @@ mod tests {
         )
         .expect("trap alt-cost should parse");
         match option.condition {
-            Some(ParsedCondition::BattlefieldEntriesThisTurn {
-                filter: TargetFilter::Typed(filter),
-                count: 2,
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Max,
+                                    },
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
             }) => {
-                assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+                // Per-opponent Max is the semantic fix: "an opponent had two or
+                // more lands enter" means ONE opponent with 2+, never two
+                // opponents with 1 each (which a summed count would accept).
+                assert_eq!(filter.controller, None);
                 assert!(filter.type_filters.contains(&TypeFilter::Land));
             }
             other => panic!("expected opponent land entry condition, got {other:?}"),

@@ -39759,8 +39759,8 @@ fn hyldas_crown_cost_reduction_applies_only_during_your_turn() {
 /// reparse, mirroring production) and applied through `apply_cost_reduction`.
 ///
 /// Discriminating assertion: `generic_of(&def)` is 3 with a Spacecraft
-/// attacker declaration present and 6 without. Reverting the
-/// `YouAttackedWithAtLeast { filter }` parser arm leaves `condition: None`
+/// attacker declaration present and 6 without. Reverting the filtered
+/// attacked-with parser arm leaves `condition: None`
 /// (try_parse_cost_reduction returns None), so the positive case would read
 /// {6} and this assertion fails. Reverting the runtime filter arm in
 /// `restrictions::evaluate_condition` would treat the filtered count as the
@@ -39768,7 +39768,7 @@ fn hyldas_crown_cost_reduction_applies_only_during_your_turn() {
 #[test]
 fn thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker() {
     use crate::parser::oracle_cost::try_parse_cost_reduction;
-    use crate::types::ability::{Effect, ParsedCondition};
+    use crate::types::ability::{Effect, ParsedCondition, QuantityExpr, QuantityRef};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -39783,9 +39783,14 @@ fn thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker() {
     assert!(
         matches!(
             reduction.condition,
-            Some(ParsedCondition::YouAttackedWithAtLeast {
-                count: 1,
-                filter: Some(_)
+            Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::AttackedThisTurn {
+                        filter: Some(_),
+                        ..
+                    },
+                },
+                ..
             })
         ),
         "must gate on a filtered attacked-with condition, got {:?}",

@@ -2945,9 +2945,16 @@ mod tests {
     #[test]
     fn evaluates_opponent_searched_library_this_turn_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
+        // Production (`effects::search_library`) records the search in BOTH the
+        // legacy set and the `PlayerPerformedAction` ledger; the shared grammar
+        // now counts the latter, so this test must simulate both halves.
         state
             .players_who_searched_library_this_turn
             .insert(PlayerId(1));
+        state.player_actions_this_turn.push((
+            PlayerId(1),
+            crate::types::events::PlayerActionKind::SearchedLibrary,
+        ));
 
         assert!(parse_and_evaluate_condition(
             &state,
@@ -2960,8 +2967,34 @@ mod tests {
     #[test]
     fn evaluates_you_attacked_with_two_or_more_creatures_this_turn_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
-        state.players_attacked_this_turn.insert(PlayerId(0));
-        state.attacking_creatures_this_turn.insert(PlayerId(0), 2);
+        state.active_player = PlayerId(0);
+        // The shared grammar counts `attacker_declarations_this_turn` snapshots;
+        // production `combat::declare_attackers` records those AND the summary
+        // counters, so this test must simulate both halves (see
+        // `zero_attacker_declaration_does_not_satisfy_you_attacked_this_turn`).
+        for card_id in [2, 3] {
+            let attacker = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(card_id),
+                PlayerId(0),
+                format!("Attacker {card_id}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            let record = state
+                .objects
+                .get(&attacker)
+                .unwrap()
+                .snapshot_for_attack_declaration(attacker);
+            state.attacker_declarations_this_turn.push(record);
+        }
+        record_attackers_declared(&mut state, 2);
 
         assert!(parse_and_evaluate_condition(
             &state,
