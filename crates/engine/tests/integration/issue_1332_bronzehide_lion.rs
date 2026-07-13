@@ -131,7 +131,10 @@ fn bronzehide_lion_aura_grant_expires_at_end_of_turn() {
         "the granted ability must make the enchanted creature indestructible before end of turn"
     );
 
+    // The grant lasts through the end step and expires during cleanup, so cross
+    // the actual turn boundary before checking the derived keyword set.
     runner.advance_to_end_step();
+    runner.advance_to_phase(engine::types::phase::Phase::PreCombatMain);
     runner.advance_until_stack_empty();
 
     assert!(
