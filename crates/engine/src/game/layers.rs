@@ -4568,21 +4568,45 @@ fn apply_continuous_effect_filtered(
         return;
     }
 
-    let scan_zone = effect
-        .affected_filter
-        .extract_in_zone()
-        .unwrap_or(Zone::Battlefield);
-    let scan_ids = zone_cache.ids_for(state, scan_zone);
+    // CR 611.3a: a compound (`Or`) affected filter may combine disjuncts that
+    // imply different zones — Secret Arcade's "nonland permanents you control
+    // and permanent spells you control" unions a battlefield-implicit
+    // disjunct with a stack-scoped one. Each disjunct's zone must default
+    // independently (mirroring the plain `unwrap_or(Battlefield)` default
+    // used for a non-`Or` filter below); a single `extract_in_zone()` call
+    // over the whole tree would stop at the first explicit zone marker found
+    // anywhere and silently drop a sibling disjunct's implicit-battlefield
+    // population. For a non-`Or` filter this produces exactly one zone,
+    // identical to the previous single-zone behavior.
+    let mut scan_zones: Vec<Zone> = Vec::new();
+    match &effect.affected_filter {
+        TargetFilter::Or { filters } => {
+            for f in filters {
+                let zone = f.extract_in_zone().unwrap_or(Zone::Battlefield);
+                if !scan_zones.contains(&zone) {
+                    scan_zones.push(zone);
+                }
+            }
+        }
+        other => scan_zones.push(other.extract_in_zone().unwrap_or(Zone::Battlefield)),
+    }
+
     let ctx = FilterContext::from_source(state, effect.source_id);
-    let affected_ids: Vec<ObjectId> = scan_ids
-        .iter()
-        // Incremental fast path: re-apply only to the freshly-entered objects.
-        // The rest of the battlefield was not reset and keeps its prior derived
-        // values, so re-applying to it would double-apply.
-        .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
-        .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
-        .filter(|&&id| {
-            effect.condition.as_ref().is_none_or(|condition| {
+    let mut affected_ids: Vec<ObjectId> = Vec::new();
+    for &zone in &scan_zones {
+        let zone_ids = zone_cache.ids_for(state, zone);
+        for &id in zone_ids {
+            // Incremental fast path: re-apply only to the freshly-entered
+            // objects. The rest of the battlefield was not reset and keeps
+            // its prior derived values, so re-applying to it would
+            // double-apply.
+            if !restrict_to.is_none_or(|ids| ids.contains(&id)) {
+                continue;
+            }
+            if !matches_target_filter(state, id, &effect.affected_filter, &ctx) {
+                continue;
+            }
+            let condition_ok = effect.condition.as_ref().is_none_or(|condition| {
                 evaluate_condition_with_recipient(
                     state,
                     condition,
@@ -4590,10 +4614,12 @@ fn apply_continuous_effect_filtered(
                     effect.source_id,
                     id,
                 )
-            })
-        })
-        .copied()
-        .collect();
+            });
+            if condition_ok {
+                affected_ids.push(id);
+            }
+        }
+    }
 
     record_attribution(state, effect, &affected_ids);
 
