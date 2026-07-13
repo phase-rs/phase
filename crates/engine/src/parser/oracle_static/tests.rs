@@ -28843,4 +28843,14 @@ fn distinct_xy_pump_without_paired_binding_is_unsupported() {
         .is_empty(),
         "+X/+Y with an X-only binding must stay unsupported"
     );
+    // `Y` is supported only as the toughness axis of the paired +X/+Y form;
+    // other Y placements cannot inherit X/cost-X semantics.
+    assert!(
+        super::shared::parse_static_line_multi("Enchanted creature gets +Y/+X.").is_empty(),
+        "+Y/+X must stay unsupported rather than treating Y as cost-X"
+    );
+    assert!(
+        super::shared::parse_static_line_multi("Enchanted creature gets +Y/+Y.").is_empty(),
+        "+Y/+Y must stay unsupported rather than treating Y as cost-X"
+    );
 }

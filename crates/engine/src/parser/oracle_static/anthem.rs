@@ -1197,6 +1197,14 @@ pub(crate) fn parse_dynamic_pt_in_text(
     // "gets -X/-Y" (X/Y defined by later conditional sentences, no `{X}` cost)
     // must not emit a bogus `-CostXPaid/-CostXPaid` static.
     let is_distinct_xy = p_mag == PtAxisMag::VarX && t_mag == PtAxisMag::VarY;
+    // `Y` is not a generic cost variable in this grammar. The only supported
+    // Y-bearing form is Aspect of Wolf's ordered `+X/+Y` pair, whose distinct
+    // bindings are carried by the structured where-clause below. Reject every
+    // other placement so `+Y/+X` or `+Y/+Y` cannot silently borrow `CostXPaid`
+    // or an X-only binding.
+    if (matches!(p_mag, PtAxisMag::VarY) || matches!(t_mag, PtAxisMag::VarY)) && !is_distinct_xy {
+        return None;
+    }
 
     // CR 706.2 + CR 706.3b: "where X is the result" binds X to the preceding
     // die roll's result. `parse_cda_quantity` has no "the result" arm; fall
