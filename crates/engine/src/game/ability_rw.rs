@@ -1910,6 +1910,8 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::CastVariantPaidInstead { .. }
         | AbilityCondition::HasMaxSpeed
         | AbilityCondition::IsMonarch
+        // CR 309.7: controller-state predicate; reads no object, writes nothing.
+        | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
         | AbilityCondition::IsRingBearer
@@ -5886,6 +5888,8 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         | AbilityCondition::CastVariantPaidInstead { .. }
         | AbilityCondition::HasMaxSpeed
         | AbilityCondition::IsMonarch
+        // CR 309.7: controller-state predicate; reads no object, writes nothing.
+        | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
         | AbilityCondition::IsRingBearer

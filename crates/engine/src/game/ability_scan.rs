@@ -2233,6 +2233,8 @@ fn scan_ability_condition(x: &AbilityCondition) -> Axes {
         }
         AbilityCondition::HasMaxSpeed => Axes::NONE,
         AbilityCondition::IsMonarch => Axes::NONE,
+        // CR 309.7: controller-state predicate — touches no scan axis.
+        AbilityCondition::CompletedDungeon { .. } => Axes::NONE,
         AbilityCondition::IsInitiative => Axes::NONE,
         AbilityCondition::HasCityBlessing => Axes::NONE,
         AbilityCondition::IsRingBearer => Axes::NONE,

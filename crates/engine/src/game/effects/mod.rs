@@ -2416,6 +2416,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::PreviousEffectAmount { .. }
             | AbilityCondition::HasMaxSpeed
             | AbilityCondition::IsMonarch
+            | AbilityCondition::CompletedDungeon { .. }
             | AbilityCondition::IsInitiative
             | AbilityCondition::HasCityBlessing
             | AbilityCondition::IsRingBearer
@@ -8948,6 +8949,13 @@ pub(crate) fn evaluate_condition(
             crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
         AbilityCondition::IsMonarch => eval_is_monarch(state, ability.controller),
+        // CR 309.7: dungeon completion is a controller-state predicate, evaluated
+        // as the ability resolves. Delegates to the single truth function shared
+        // with `TriggerCondition::CompletedDungeon` so the intervening-if reading
+        // and the resolution reading of the same clause cannot drift.
+        AbilityCondition::CompletedDungeon { specific } => {
+            crate::game::dungeon::has_completed_dungeon(state, ability.controller, specific)
+        }
         // CR 726.3: The initiative is a player designation that effects can identify.
         AbilityCondition::IsInitiative => eval_is_initiative(state, ability.controller),
         // CR 702.131c: The city's blessing is a player designation that effects

@@ -45397,3 +45397,45 @@ fn instead_override_owned_by_a_later_handler_keeps_its_branch() {
         sub.condition
     );
 }
+
+/// CR 309.7 + CR 614.1a: "If you've completed a dungeon, copy that spell twice
+/// instead" (Tomb of Horrors Adventurer) must lower to a real conditional BRANCH
+/// carrying the TYPED dungeon predicate — never to an honest-but-inert
+/// `Unimplemented`, and never to an unconditional sibling.
+///
+/// This is the regression that exposed the vocabulary asymmetry: the condition
+/// parsed fine as `StaticCondition::CompletedADungeon`, but the
+/// StaticCondition -> AbilityCondition bridge declared it had "no
+/// effect-resolution equivalent" while `AbilityCondition::CompletedDungeon` did
+/// not yet exist. So the CR 614 branch guard — correctly — refused to emit the
+/// override body as an unconditional sequel, and the branch became Unimplemented.
+/// The fix is the condition lowering, not a weaker guard.
+#[test]
+fn instead_override_lowers_the_typed_completed_dungeon_condition() {
+    let def = parse_effect_chain(
+        "Copy that spell. If you've completed a dungeon, copy that spell twice instead.",
+        AbilityKind::Spell,
+    );
+    let branch = def
+        .sub_ability
+        .as_ref()
+        .expect("the override must attach to the base copy as a branch");
+    let Some(AbilityCondition::ConditionInstead { inner }) = branch.condition.as_ref() else {
+        panic!(
+            "the override must carry a ConditionInstead wrapper, got {:?}",
+            branch.condition
+        );
+    };
+    assert!(
+        matches!(
+            inner.as_ref(),
+            AbilityCondition::CompletedDungeon { specific: None }
+        ),
+        "CR 309.7: the dungeon predicate must lower to the TYPED \
+         AbilityCondition::CompletedDungeon, not fall through to Unimplemented — got {inner:?}"
+    );
+    assert!(
+        !matches!(&*branch.effect, Effect::Unimplemented { .. }),
+        "the override body must be the real second copy, not Unimplemented"
+    );
+}

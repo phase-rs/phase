@@ -4487,6 +4487,24 @@ pub(crate) fn static_condition_to_ability_condition(
                 ..Default::default()
             }),
         }),
+        // CR 309.7 ("A player completes a dungeon as that dungeon card is removed from the
+        // game") + CR 608.2c: "if you've completed a dungeon" is a plain game-state
+        // predicate about the CONTROLLER, evaluated as the ability resolves — it is not
+        // source-bound, layer-bound, or cost-bound like the unbridgeable statics below.
+        // `AbilityCondition::CompletedDungeon { specific }` is its exact effect-resolution
+        // equivalent and has existed all along; listing `CompletedADungeon` among the
+        // "no equivalent -> None" arms was a vocabulary asymmetry, not a real gap.
+        //
+        // It went unnoticed while an unlowerable condition merely fell through silently.
+        // Once the CR 614 branch guard started reporting such conditions honestly, the
+        // asymmetry surfaced as a regression: Tomb of Horrors Adventurer's "If you've
+        // completed a dungeon, copy that spell twice instead" lost its branch to
+        // `Unimplemented`. The `specific: None` form matches the bare "a dungeon" reading;
+        // a specific-dungeon static has no `StaticCondition` spelling today, so there is
+        // nothing else to map here.
+        StaticCondition::CompletedADungeon => {
+            Some(AbilityCondition::CompletedDungeon { specific: None })
+        }
         StaticCondition::DevotionGE { .. }
         // CR 702.176a + CR 611.3a: Persistent alternative-cost markers are
         // source-bound static predicates with no effect-resolution
@@ -4519,7 +4537,6 @@ pub(crate) fn static_condition_to_ability_condition(
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::RingLevelAtLeast { .. }
-        | StaticCondition::CompletedADungeon
         | StaticCondition::ControlsCommander { .. }
         | StaticCondition::EnchantedIsFaceDown
         // CR 311.2 / CR 901.7: plane face-up status is a duration-only continuous-
@@ -4573,6 +4590,13 @@ pub(crate) fn ability_condition_to_static_condition(
 ) -> Option<StaticCondition> {
     match ac {
         AbilityCondition::IsYourTurn => Some(StaticCondition::DuringYourTurn),
+        // CR 309.7: round-trips the bridge in `static_condition_to_ability_condition`.
+        // Only the "any dungeon" reading round-trips — `StaticCondition` has no
+        // specific-dungeon spelling, so a specific one has no static form to bridge to.
+        AbilityCondition::CompletedDungeon { specific: None } => {
+            Some(StaticCondition::CompletedADungeon)
+        }
+        AbilityCondition::CompletedDungeon { specific: Some(_) } => None,
         // CR 301.5 + CR 303.4: round-trips the bidirectional bridge in
         // `static_condition_to_ability_condition` (a continuous "attached to a
         // creature" gate can ride per-`StaticDefinition`).

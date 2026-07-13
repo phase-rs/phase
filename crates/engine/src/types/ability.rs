@@ -16487,6 +16487,22 @@ pub enum AbilityCondition {
     /// CR 701.54a: True when the ability's source permanent is its controller's
     /// Ring-bearer. For "unless ~ is your Ring-bearer", wrap with `Not`.
     IsRingBearer,
+    /// CR 309.7: "if you've completed a dungeon" — true when the ability's
+    /// controller has completed at least one dungeon (`specific: None`) or the
+    /// named dungeon (`specific: Some(d)`). Negation wraps with `Not`.
+    ///
+    /// The resolution-time sibling of `TriggerCondition::CompletedDungeon`, and
+    /// deliberately shaped identically: both delegate to the single truth
+    /// function `game::dungeon::has_completed_dungeon`, so the intervening-if
+    /// reading and the resolution reading of the same printed clause can never
+    /// drift. It belongs with the other controller-designation predicates above
+    /// (`IsMonarch` CR 725, `IsInitiative` CR 726, `HasCityBlessing` CR 702.131c)
+    /// rather than being folded into them — each is its own CR rule section, so
+    /// the categorical boundary keeps them siblings.
+    CompletedDungeon {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        specific: Option<crate::game::dungeon::DungeonId>,
+    },
     /// CR 608.2c: "If [target] has [keyword], [override effect] instead"
     /// Checked at resolution time against the first resolved object target's keywords.
     /// Uses "Instead" override semantics: swaps the parent effect when condition is met.

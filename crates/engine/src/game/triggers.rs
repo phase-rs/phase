@@ -7391,13 +7391,9 @@ pub(crate) fn check_trigger_condition(
         // CR 309.7: True when the controller has completed a dungeon. `specific: None`
         // matches "any dungeon"; `specific: Some(d)` matches dungeon `d`. Negation
         // ("haven't completed Tomb of Annihilation") wraps via `Not`.
-        TriggerCondition::CompletedDungeon { specific } => state
-            .dungeon_progress
-            .get(&controller)
-            .is_some_and(|p| match specific {
-                None => !p.completed.is_empty(),
-                Some(dungeon) => p.completed.contains(dungeon),
-            }),
+        TriggerCondition::CompletedDungeon { specific } => {
+            crate::game::dungeon::has_completed_dungeon(state, controller, specific)
+        }
         // CR 903.3 / CR 903.3d: Lieutenant ("your commander") requires ownership;
         // generic ("a commander") is controller-only.
         TriggerCondition::ControlsCommander { ownership } => match ownership {

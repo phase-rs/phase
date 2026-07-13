@@ -3715,6 +3715,10 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         ),
         AbilityCondition::HasMaxSpeed => "has max speed".into(),
         AbilityCondition::IsMonarch => "is monarch".into(),
+        AbilityCondition::CompletedDungeon { specific } => match specific {
+            None => "you've completed a dungeon".into(),
+            Some(dungeon) => format!("you've completed {dungeon}"),
+        },
         AbilityCondition::IsInitiative => "has the initiative".into(),
         AbilityCondition::HasCityBlessing => "has the city's blessing".into(),
         AbilityCondition::IsRingBearer => "is the ring-bearer".into(),
@@ -7082,6 +7086,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ManaColorSpent { .. } => ("ManaColorSpent", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
+        // CR 309.7: evaluated at resolution via `dungeon::has_completed_dungeon`.
+        AbilityCondition::CompletedDungeon { .. } => ("CompletedDungeon", Handled),
         AbilityCondition::IsInitiative => ("IsInitiative", Handled),
         AbilityCondition::HasCityBlessing => ("HasCityBlessing", Handled),
         AbilityCondition::IsRingBearer => ("IsRingBearer", Handled),
