@@ -58,6 +58,39 @@ if [ -n "${GIT_INDEX_FILE:-}" ] || [ "$BASE" = "$(git rev-parse HEAD 2>/dev/null
     DIFF_MODE="--cached"
 fi
 
+# ---------------------------------------------------------------------------
+# DO NOT "harden" families (A), (B), (E), (F) by filtering them through the
+# census lexer (scripts/zone_authority_census.py `strip_noncode`). It looks like
+# the obvious single-authority move. It would BLIND this gate. (#76)
+#
+# Those families match ON the string literal itself:
+#
+#     .contains("        "lit" =>        == "long sentence"        name: "..."
+#
+# `strip_noncode` returns a code stream with literals REMOVED, so the very quote
+# each pattern keys on is gone: every one of them would silently stop matching
+# real violations, and the gate would pass string-matching parser code forever
+# while reporting green. (Measured during #76: routing these through stripped
+# code misread 194 REAL match arms as non-matches.)
+#
+# What they are exposed to is the mirror-image, and it is BENIGN: a forbidden
+# pattern written inside a COMMENT or a literal is a FALSE HIT. That is loud (it
+# blocks a commit, the author sees exactly why) and it already has an escape
+# hatch (`// allow-noncombinator:`). #76 measured 10 such lines in the whole
+# parser scope, all of them doc comments describing the forbidden pattern.
+# A false MISS from this class is structurally impossible here: these greps read
+# raw text, so literal-awareness could only ever REMOVE matches, never add them.
+#
+# If the false hits ever become a real cost, the fix is NOT strip_noncode: it is
+# a POSITION mask (which character offsets are code vs comment vs literal), and
+# these greps would filter candidates by match offset. Two APIs, one grammar.
+#
+# Family (D) is the opposite case and DOES delegate: it needs paren counting on
+# CODE (see scripts/lib/detect-cross-product-alts.py), where a `)` inside
+# `take_until(")")` is data. It reads structure from the code stream and arms
+# from the raw text.
+# ---------------------------------------------------------------------------
+
 # (A) String-method dispatch. The "..." suffix on `.contains` / `.starts_with`
 # / `.ends_with` / `.find` / `.rfind` / `.split` / `.trim_*_matches` matches
 # only string-literal arguments — `.contains(&item)` (Vec/slice op),
@@ -142,6 +175,23 @@ files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" \
 if [ -z "$files" ]; then
     printf 'Gate A PASS head=%s base=%s\n' "$HEAD_SHA" "$BASE_SHA"
     exit 0
+fi
+
+# (D0) Family (D)'s own seam suite, ahead of the scan it protects — the same
+# shape as section (B0) of check-engine-authorities.sh, and for the same reason.
+# The cross-product detector finds an `alt` block's end by COUNTING PARENS, which
+# is a lex; a regression there does not fail this gate, it silently mis-scopes it
+# in both directions (a phantom block from an `alt((` in a comment BLOCKS a good
+# commit; a stray `))` in a comment truncates a real block so a cross product
+# SHIPS). Neither shows up as a failure here, so the suite that pins the lexing
+# runs first. It costs ~5ms and only when parser files actually changed.
+if command -v python3 >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/lib/detect_cross_product_alts_tests.py" ]; then
+    if ! python3 "$SCRIPT_DIR/lib/detect_cross_product_alts_tests.py" >/dev/null 2>&1; then
+        echo "ERROR: the cross-product detector's own test suite is RED." >&2
+        echo "       Family (D) cannot be trusted until it passes:" >&2
+        echo "           python3 scripts/lib/detect_cross_product_alts_tests.py" >&2
+        exit 1
+    fi
 fi
 
 while IFS= read -r file; do
