@@ -7302,9 +7302,9 @@ fn structurally_bound_where_x_clause<'a>(clause: TextPair<'a>) -> TextPair<'a> {
     // `parse_dynamic_pt_in_text` then splits it back and assigns each half to its
     // axis. Guarded on both halves parsing so a genuine "…, and <verb>" next
     // instruction still falls through to the comma-bounding below.
-    if let Some((x_part, y_part)) = clause.split_around(", and y is ") {
-        if parse_where_x_quantity_expression(x_part.original).is_some()
-            && parse_where_x_quantity_expression(y_part.original).is_some()
+    if let Ok((_, (x_part, y_part))) = nom_primitives::split_once_on(clause.lower, ", and y is ") {
+        if parse_where_x_quantity_expression(x_part).is_some()
+            && parse_where_x_quantity_expression(y_part).is_some()
         {
             return clause;
         }

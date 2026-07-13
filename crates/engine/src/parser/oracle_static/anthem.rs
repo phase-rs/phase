@@ -1153,24 +1153,20 @@ fn strip_trailing_distributive_each(s: &str) -> &str {
     }
 }
 
-/// Split a compound "+X/+Y" pump binding clause `<A> and Y is <B>` into the
+/// Split a compound "+X/+Y" pump binding clause `<A>, and Y is <B>` into the
 /// X-axis expression (`A`) and Y-axis expression (`B`) when the two axes bind to
 /// different quantities (Aspect of Wolf: "X is half the number of Forests you
 /// control, rounded down, and Y is half the number of Forests you control,
-/// rounded up"). Returns `None` for the common single-quantity clause. `wx` is
-/// already lowercased, so the " and y is " boundary matches the printed
-/// "and Y is". The trailing comma left on `A` and the sentence period on `B` are
-/// trimmed so each half feeds `parse_cda_quantity` cleanly.
+/// rounded up"). Returns `None` for the common single-quantity clause. `wx`
+/// reaches here in original case (printed "and Y is"), so it is lowercased
+/// before locating the boundary via the `split_once_on` combinator. The
+/// separator `", and y is "` consumes the joining comma, and the sentence period
+/// is already stripped upstream by `strip_trailing_where_x`, so each half feeds
+/// the case-insensitive `parse_cda_quantity` after a plain whitespace trim.
 fn split_x_and_y_where_clause(wx: &str) -> Option<(String, String)> {
-    // `wx` arrives in original case (it is sliced from `.original`), so lowercase
-    // before locating the " and y is " boundary; the halves feed
-    // `parse_cda_quantity`, which is itself case-insensitive.
     let lower = wx.to_lowercase();
-    let (_, (x_expr, y_expr)) = nom_primitives::split_once_on(&lower, " and y is ").ok()?;
-    Some((
-        x_expr.trim().trim_end_matches(',').to_string(),
-        y_expr.trim().trim_end_matches('.').trim().to_string(),
-    ))
+    let (_, (x_expr, y_expr)) = nom_primitives::split_once_on(&lower, ", and y is ").ok()?;
+    Some((x_expr.trim().to_string(), y_expr.trim().to_string()))
 }
 
 pub(crate) fn parse_dynamic_pt_in_text(
