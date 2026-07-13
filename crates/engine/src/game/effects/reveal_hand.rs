@@ -199,6 +199,76 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
+    #[test]
+    fn deep_cavern_bat_reveal_choice_excludes_lands() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let bat = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Deep-Cavern Bat".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Plains".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let spell = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Deduce".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let parsed = parse_oracle_text(
+            "Flying, lifelink\nWhen this creature enters, look at target opponent's hand. You may exile a nonland card from it until this creature leaves the battlefield.",
+            "Deep-Cavern Bat",
+            &[],
+            &["Creature".to_string()],
+            &["Bat".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("Bat ETB execute");
+        let mut ability = build_resolved_from_def(execute, bat, PlayerId(0));
+        ability.targets = vec![TargetRef::Player(PlayerId(1))];
+        resolve(&mut state, &ability, &mut Vec::new()).expect("Bat hand look resolves");
+
+        match &state.waiting_for {
+            WaitingFor::RevealChoice {
+                cards, optional, ..
+            } => {
+                assert!(*optional);
+                assert_eq!(cards, &vec![spell]);
+                assert!(!cards.contains(&land));
+            }
+            other => panic!("expected Bat RevealChoice, got {other:?}"),
+        }
+    }
+
     fn make_reveal_ability(controller: PlayerId, target_player: PlayerId) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::RevealHand {
