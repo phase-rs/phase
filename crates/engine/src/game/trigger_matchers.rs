@@ -14769,6 +14769,157 @@ mod tests {
         );
     }
 
+    /// CR 701.50a: THE ACCEPTANCE SET. Every card in the pool that triggers on connive —
+    /// Glorious Purpose, Iron Monger (Sadistic Tycoon), Ultron (Unlimited); three cards,
+    /// not four — carries the SAME trigger clause and must therefore lower to the SAME
+    /// subject filter. Pinning that here is what makes the look-back fix a fix for the
+    /// CLASS rather than for one card: any future connive-trigger card that lowers to a
+    /// different filter shape shows up as a failure of this test, not as a silent gap.
+    ///
+    /// Their differing *effects* are deliberately irrelevant — the trigger's subject
+    /// grammar is the axis under test.
+    #[test]
+    fn all_three_connive_trigger_cards_lower_to_one_subject_filter() {
+        let cards: [(&str, &str); 3] = [
+            (
+                "Glorious Purpose",
+                "Whenever a creature you control connives, put a +1/+1 counter on that creature and a plan counter on this enchantment.",
+            ),
+            (
+                "Iron Monger, Sadistic Tycoon",
+                "Whenever a creature you control connives, put a +1/+1 counter on each Villain you control.",
+            ),
+            (
+                "Ultron, Unlimited",
+                "Whenever a creature you control connives, you may pay {1}. If you do, create a 2/2 colorless Robot Villain artifact creature token.",
+            ),
+        ];
+
+        let expected = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        for (name, line) in cards {
+            let trigger = parse_trigger_line(line, name);
+            assert_eq!(
+                trigger.mode,
+                TriggerMode::Connives,
+                "{name} must lower to TriggerMode::Connives"
+            );
+            assert_eq!(
+                trigger.valid_card.as_ref(),
+                Some(&expected),
+                "{name} must lower to the one live Connives subject shape \
+                 (Typed {{ Creature, controller: You }}) — a new shape here means the \
+                 look-back fix no longer covers the whole class"
+            );
+        }
+    }
+
+    /// CR 701.50a: the ordinary path is untouched by the look-back fallback — a conniver
+    /// still on the battlefield matches on the LIVE path, and an opponent's conniver still
+    /// does not satisfy "a creature you control". Guards against the fallback being
+    /// mistaken for a blanket "always match" (the failure mode a vacuous LKI guard hides).
+    #[test]
+    fn connives_live_conniver_matches_and_opponents_does_not() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(810),
+            PlayerId(0),
+            "Glorious Purpose".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever a creature you control connives, put a +1/+1 counter on that creature.",
+            "Glorious Purpose",
+        );
+
+        let mine = create_object(
+            &mut state,
+            CardId(811),
+            PlayerId(0),
+            "Conniver".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, mine);
+        let theirs = create_object(
+            &mut state,
+            CardId(812),
+            PlayerId(1),
+            "Conniver".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, theirs);
+
+        let event_of = |id| GameEvent::EffectResolved {
+            kind: EffectKind::Connive,
+            source_id: id,
+            subject: None,
+        };
+        assert!(
+            match_connives(&event_of(mine), &trigger, source, &state),
+            "a live conniver I control must still match on the live path"
+        );
+        assert!(
+            !match_connives(&event_of(theirs), &trigger, source, &state),
+            "an opponent's live conniver must NOT fire 'a creature you control connives'"
+        );
+    }
+
+    /// CR 701.50a + CR 111.7: the LKI fallback must still enforce the TYPE axis, not just
+    /// the controller axis. A ceased-to-exist NON-creature conniver (a permanent made to
+    /// connive that is not a creature — CR 701.50a connives a *permanent*) must fail the
+    /// `Creature` filter even though its controller matches and its LKI snapshot exists.
+    ///
+    /// Without this, a fallback that merely answered "was it yours?" would pass the
+    /// ceased-to-exist token test above while silently over-firing on every permanent.
+    #[test]
+    fn connives_lki_fallback_still_enforces_the_type_filter() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(820),
+            PlayerId(0),
+            "Glorious Purpose".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever a creature you control connives, put a +1/+1 counter on that creature.",
+            "Glorious Purpose",
+        );
+
+        // A Clue token: my permanent, but NOT a creature.
+        let clue = create_object(
+            &mut state,
+            CardId(821),
+            PlayerId(0),
+            "Clue Token".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&clue) {
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.is_token = true;
+        }
+        crate::game::zones::move_to_zone(&mut state, clue, Zone::Graveyard, &mut Vec::new());
+        assert!(
+            state.lki_cache.contains_key(&clue),
+            "fixture must reach the LKI path, not fall out on a missing snapshot"
+        );
+        state.objects.remove(&clue);
+
+        assert!(
+            !match_connives(
+                &GameEvent::EffectResolved {
+                    kind: EffectKind::Connive,
+                    source_id: clue,
+                    subject: None,
+                },
+                &trigger,
+                source,
+                &state,
+            ),
+            "a ceased-to-exist NON-creature conniver must fail the Creature filter via LKI"
+        );
+    }
+
     /// CR 603.10a + CR 111.7: Crime Novelist's "Whenever you sacrifice an
     /// artifact" trigger must look back in time. When a sacrificed Treasure
     /// TOKEN has already ceased to exist (CR 111.7 SBA purge removes it from
