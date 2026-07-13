@@ -11791,6 +11791,73 @@ mod tests {
         );
     }
 
+    /// CR 202.3 + CR 601.2f (#5606): drive the full cast/payment pipeline. A
+    /// battlefield permanent granting "Instant and sorcery spells you cast with
+    /// mana value 4 or greater cost {1} less to cast" reduces the mana actually
+    /// PAID when the controller casts a qualifying instant, but not a
+    /// sub-threshold one. Each instant is funded to its full printed cost and
+    /// cast through `GameRunner::cast(..).resolve()`; the leftover pool proves the
+    /// reduction reached the payment step, not just the cost-display helper.
+    /// Reverting the parser fix (`spell_filter` → null) reduces the MV-3 spell
+    /// too, so the second assertion flips.
+    #[test]
+    fn mana_value_gated_cost_reduction_through_cast_pipeline() {
+        let caster = PlayerId(0);
+        // Cast an instant of printed mana value `mv` under the reducer, funded to
+        // its full printed cost; return the unspent mana (funded − paid).
+        let leftover_after_casting = |mv: u32| -> u32 {
+            let mut scenario = crate::game::scenario::GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            scenario.add_creature_from_oracle(
+                caster,
+                "Cost Reducer",
+                2,
+                2,
+                "Instant and sorcery spells you cast with mana value 4 or greater cost {1} less to cast.",
+            );
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(caster, "Test Instant", true, "You gain 1 life.")
+                .with_mana_cost(ManaCost::generic(mv))
+                .id();
+            scenario.with_mana_pool(
+                caster,
+                (0..mv)
+                    .map(|_| {
+                        crate::types::mana::ManaUnit::new(
+                            crate::types::mana::ManaType::Colorless,
+                            ObjectId(9999),
+                            false,
+                            vec![],
+                        )
+                    })
+                    .collect(),
+            );
+            let mut runner = scenario.build();
+            let outcome = runner.cast(spell).resolve();
+            outcome
+                .state()
+                .players
+                .iter()
+                .find(|p| p.id == caster)
+                .map(|p| p.mana_pool.total() as u32)
+                .unwrap_or(0)
+        };
+
+        // CR 202.3: MV 5 (≥ 4) instant pays {4} of {5} funded → 1 mana left.
+        assert_eq!(
+            leftover_after_casting(5),
+            1,
+            "MV 5 instant must receive the {{1}} reduction through the cast pipeline"
+        );
+        // CR 202.3: the mana-value gate excludes the MV 3 (< 4) instant → full {3}
+        // paid → 0 left (this flips to 1 if the parser fix is reverted).
+        assert_eq!(
+            leftover_after_casting(3),
+            0,
+            "MV 3 instant must NOT be reduced through the cast pipeline"
+        );
+    }
+
     /// CR 118.9 + CR 107.14: Primal Prayers grants {E} as an alternative cost
     /// for creature spells with MV ≤ 3 that the controller casts.
     #[test]
