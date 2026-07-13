@@ -45303,6 +45303,7 @@ fn drawn_this_turn_followup_overwrites_prior_life_payment() {
         kind: AbilityKind::Spell,
         chain_rounding: None,
         actor: None,
+        in_trigger: false,
         repeat_until: None,
     };
 

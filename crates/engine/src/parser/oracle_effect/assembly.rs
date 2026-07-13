@@ -59,12 +59,13 @@ use super::{
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
     def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
-    def_is_keyword_counter_placement, fold_cast_copy_of_card_defs, has_explicit_player_target,
-    inject_chosen_color_choice_grant, mark_uses_tracked_set,
-    parse_spell_graveyard_replacement_rider, publishes_tracked_set_from_resolution,
-    retarget_counter_additional_cost_to_target, rewrite_parent_targets_to_tracked_set,
-    rewrite_rounding_mode, rewrite_that_type_mana_instead, stamp_delayed_returns,
-    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
+    def_is_keyword_counter_placement, demote_unbindable_batch_aggregate,
+    fold_cast_copy_of_card_defs, has_explicit_player_target, inject_chosen_color_choice_grant,
+    mark_uses_tracked_set, parse_spell_graveyard_replacement_rider,
+    publishes_aggregate_set_from_resolution, publishes_tracked_set_from_resolution,
+    rebind_tracked_aggregate_to_chain_set, retarget_counter_additional_cost_to_target,
+    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
+    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
 
 // ===========================================================================
@@ -2038,6 +2039,50 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         mark_uses_tracked_set(current);
                         rewrite_parent_targets_to_tracked_set(&mut current.effect);
                     }
+                }
+            }
+
+            // CR 608.2c: Re-anchor this clause's set-anaphor AGGREGATE ("their
+            // total power", "the greatest power among them") to the set an
+            // EARLIER clause published, overriding the leaf combinator's
+            // context-free triggering-batch reading.
+            //
+            // Strictly prior by construction: `defs` holds only the clauses
+            // already emitted, so a clause does not count itself as its own
+            // publisher — which is what keeps Witch-king, Sky Scourge ("exile
+            // the top X cards …, where X is their total power", whose own
+            // `ExileTop` IS a publisher) on the triggering-batch reading while
+            // Kylox, Visionary Inventor (a preceding SACRIFICE clause) flips to
+            // the chain set.
+            //
+            // A separate scan from `any_prior_publishes` above, on its own
+            // predicate: this axis additionally counts `Effect::Sacrifice` as a
+            // producer, and it must not widen the pronoun→target rewrite that
+            // the gate above drives. See
+            // `publishes_aggregate_set_from_resolution`.
+            if defs
+                .iter()
+                .any(|d| publishes_aggregate_set_from_resolution(&d.effect))
+            {
+                for current in &mut current_defs {
+                    rebind_tracked_aggregate_to_chain_set(current);
+                }
+            }
+
+            // CR 603.2c: An anaphor left on the TRIGGERING-BATCH reading in a
+            // chain that has NO trigger event has nothing to refer to — the
+            // aggregate would reduce an empty set to a confident 0. Fail
+            // honestly instead. (Angrath, Minotaur Pirate's loyalty ability:
+            // "Destroy all creatures target opponent controls. Angrath deals
+            // damage to that player equal to their total power.")
+            if !ir.in_trigger {
+                let fragment = clause_ir
+                    .where_x_expression
+                    .as_deref()
+                    .map(|expr| format!("where X is {expr}"))
+                    .unwrap_or_else(|| clause_ir.source.fragment().unwrap_or_default().to_string());
+                for current in &mut current_defs {
+                    demote_unbindable_batch_aggregate(current, &fragment);
                 }
             }
 

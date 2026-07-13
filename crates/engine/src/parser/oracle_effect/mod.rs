@@ -106,8 +106,8 @@ use crate::types::ability::{
     RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SkipScope,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
     SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    UntilCondition, ZoneOwner,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -21800,6 +21800,188 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
         )
 }
 
+/// CR 608.2c + CR 701.21a: Does this clause publish, at resolution, a chain
+/// tracked set that a LATER set-AGGREGATE anaphor ("their total power", "the
+/// greatest power among them") would reduce?
+///
+/// A superset of [`publishes_tracked_set_from_resolution`] by exactly one
+/// producer: `Effect::Sacrifice` (CR 701.21a). A sacrifice publishes its
+/// affected ids as the chain set at resolution
+/// (`game/effects/mod.rs::publish_tracked_set_with_causes`), and that set is the
+/// antecedent of Kylox, Visionary Inventor's "their" ("sacrifice any number of
+/// other creatures, then exile the top X cards of your library, where X is their
+/// total power").
+///
+/// Sacrifice is deliberately NOT added to
+/// [`publishes_tracked_set_from_resolution`] itself. That predicate drives
+/// `rewrite_parent_targets_to_tracked_set` — the pronoun→TARGET rewrite axis —
+/// where re-pointing a post-sacrifice clause's `ParentTarget` at the sacrificed
+/// set is a different question with a far wider blast radius. Two axes, two
+/// predicates; this one only ever re-anchors an aggregate's `source` field.
+fn publishes_aggregate_set_from_resolution(effect: &Effect) -> bool {
+    publishes_tracked_set_from_resolution(effect) || matches!(effect, Effect::Sacrifice { .. })
+}
+
+/// CR 608.2c: Re-anchor a batched set-anaphor aggregate to the CHAIN-published
+/// set.
+///
+/// The leaf quantity combinator is context-free: "their total power" and "the
+/// greatest power among them" both parse to `TrackedSetAggregate { source:
+/// TriggeringBatch }`, because the pronoun ALONE cannot say whether its
+/// antecedent is the triggering batch or a set that an earlier clause published.
+/// The two readings are byte-identical in the leaf text and resolve from
+/// different state:
+///
+///   Witch-king, Sky Scourge  "Whenever you attack with one or more Wraiths,
+///     exile the top X cards …, where X is their total power."
+///     -> TRIGGERING BATCH (the attacking Wraiths).
+///   Kylox, Visionary Inventor  "Whenever Kylox attacks, sacrifice any number of
+///     other creatures, then exile the top X cards …, where X is their total
+///     power."
+///     -> CHAIN SET (the creatures the PRECEDING clause sacrificed).
+///
+/// The disambiguator is therefore the SIBLING CLAUSE, which is only visible one
+/// layer up from the leaf — here, at chain assembly. CR 608.2c: an ability's
+/// instructions are followed in the order written, so when an earlier
+/// instruction has just established a set of objects, the pronoun refers to it.
+/// Binding the batch reading in a chain that published a set is a silent 0 (the
+/// event batch and the chain set are different state); this pass is what keeps
+/// that from shipping as a supported-looking card.
+///
+/// Mirrors `rebind_anaphoric_object_scope` (the object-scope analogue).
+pub(crate) fn rebind_tracked_aggregate_to_chain_set(def: &mut AbilityDefinition) {
+    each_quantity_expr_mut(&mut def.effect, &mut rebind_tracked_aggregate_expr);
+    if let Some(spec) = def.multi_target.as_mut() {
+        spec.map_quantities(|expr| {
+            let mut slot = expr;
+            rebind_tracked_aggregate_expr(&mut slot);
+            slot
+        });
+    }
+    if let Some(repeat_for) = def.repeat_for.as_mut() {
+        rebind_tracked_aggregate_expr(repeat_for);
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rebind_tracked_aggregate_to_chain_set(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        rebind_tracked_aggregate_to_chain_set(else_ability);
+    }
+}
+
+/// CR 603.2c: Demote an UNBINDABLE triggering-batch anaphor to an honest gap.
+///
+/// `TrackedSetAggregate { source: TriggeringBatch }` reduces the objects of the
+/// CURRENT TRIGGER EVENT. A chain that is not a triggered ability's body — a
+/// spell, or an activated/loyalty ability — has no trigger event, so the pronoun
+/// has no antecedent at all: the aggregate would reduce an EMPTY set to 0 while
+/// the card still rendered as fully supported. That is strictly worse than a
+/// gap, because a confident 0 is indistinguishable from a correct answer.
+///
+/// This is a live shape, not a hypothetical. Angrath, Minotaur Pirate's
+/// "−11: Destroy all creatures target opponent controls. Angrath deals damage to
+/// that player equal to their total power." carries the possessive anaphor in a
+/// LOYALTY ability. Its true antecedent is the creatures the preceding clause
+/// destroyed — a CHAIN set — but the clause ALSO needs "that player" to bind to
+/// the targeted opponent, which is a separate (player-anaphor) binding gap. With
+/// only half the clause representable, the honest answer is a gap, not a
+/// confident 0. The `Unimplemented` marker is the single authority for that
+/// (`Effect::unimplemented`), never a hand-rolled sentinel.
+///
+/// Demotes exactly the node that carries the unbindable anaphor, so sibling
+/// clauses that DID parse (Angrath's `DestroyAll`) are preserved.
+pub(crate) fn demote_unbindable_batch_aggregate(def: &mut AbilityDefinition, fragment: &str) {
+    if def_slots_reference_triggering_batch(def) {
+        *def.effect = Effect::unimplemented("tracked_set_anaphor", fragment);
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        demote_unbindable_batch_aggregate(sub, fragment);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        demote_unbindable_batch_aggregate(else_ability, fragment);
+    }
+}
+
+/// CR 603.2c: Does THIS def's own quantity slots (not its sub-abilities') carry
+/// a triggering-batch aggregate? Companion to
+/// [`demote_unbindable_batch_aggregate`], which recurses separately so it can
+/// demote the precise node that holds the anaphor.
+fn def_slots_reference_triggering_batch(def: &AbilityDefinition) -> bool {
+    fn expr_references_batch(expr: &QuantityExpr) -> bool {
+        match expr {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::TrackedSetAggregate {
+                        source: TrackedAnaphorSource::TriggeringBatch,
+                        ..
+                    },
+            } => true,
+            QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => false,
+            QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
+            | QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::UpTo { max: inner }
+            | QuantityExpr::Power {
+                exponent: inner, ..
+            } => expr_references_batch(inner),
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+                exprs.iter().any(expr_references_batch)
+            }
+            QuantityExpr::Difference { left, right } => {
+                expr_references_batch(left) || expr_references_batch(right)
+            }
+        }
+    }
+    // `each_quantity_expr_mut` is the only quantity visitor over `Effect`; it is
+    // mutable-only, so probe a throwaway clone (parse-time, and only on the
+    // no-trigger path).
+    let mut found = false;
+    let mut effect = def.effect.clone();
+    each_quantity_expr_mut(&mut effect, &mut |expr| {
+        found |= expr_references_batch(expr);
+    });
+    found
+        || def.repeat_for.as_ref().is_some_and(expr_references_batch)
+        || def.multi_target.as_ref().is_some_and(|spec| {
+            expr_references_batch(&spec.min) || spec.max.as_ref().is_some_and(expr_references_batch)
+        })
+}
+
+/// CR 608.2c: Retarget every `TrackedSetAggregate` in one `QuantityExpr` tree
+/// from the context-free `TriggeringBatch` default to the chain-published set.
+/// A `source` the parser already committed to `ChainSet` (the explicit "those
+/// exiled cards" anaphor) is left alone — it named its set outright.
+fn rebind_tracked_aggregate_expr(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::TrackedSetAggregate {
+                    source: source @ TrackedAnaphorSource::TriggeringBatch,
+                    ..
+                },
+        } => *source = TrackedAnaphorSource::ChainSet,
+        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => rebind_tracked_aggregate_expr(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                rebind_tracked_aggregate_expr(inner);
+            }
+        }
+        QuantityExpr::Difference { left, right } => {
+            rebind_tracked_aggregate_expr(left);
+            rebind_tracked_aggregate_expr(right);
+        }
+    }
+}
+
 /// CR 508.1a + CR 508.1d + CR 608.2c: A mass "attack this turn if able" coercion —
 /// a `GenericEffect` carrying a `MustAttack` (CR 508.1a, attack-if-able) or
 /// `MustAttackPlayer` (CR 508.1d, directed attack) static over a BROADCAST
@@ -22264,6 +22446,17 @@ pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Surveil { count, .. }
         | Effect::PutCounter { count, .. } => f(count),
         Effect::Sacrifice { count, .. } => f(count),
+        // CR 608.2c: the two remaining `where X is …` quantity carriers reached
+        // by the set-anaphor grammar — `ExileTop` (Kylox, Visionary Inventor /
+        // Witch-king, Sky Scourge: "exile the top X cards … where X is their
+        // total power") and `Discover` (Aloy, Savior of Meridian: "discover X,
+        // where X is the greatest power among them"). Without these arms a
+        // `TrackedSetAggregate` bound into either slot is invisible to every
+        // caller of this visitor, including the chain-set re-anchor.
+        Effect::ExileTop { count, .. } => f(count),
+        Effect::Discover {
+            mana_value_limit, ..
+        } => f(mana_value_limit),
         _ => {}
     }
 }
@@ -24567,6 +24760,7 @@ pub(crate) fn parse_effect_chain_ir(
                 kind,
                 chain_rounding,
                 actor: ctx.actor.clone(),
+                in_trigger: ctx.in_trigger,
                 repeat_until: None,
             };
         }
@@ -27707,6 +27901,7 @@ pub(crate) fn parse_effect_chain_ir(
         kind,
         chain_rounding,
         actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
         repeat_until: pending_repeat_until,
     }
 }
