@@ -45507,3 +45507,67 @@ fn instead_override_lowers_the_typed_completed_dungeon_condition() {
         "the override body must be the real second copy, not Unimplemented"
     );
 }
+
+/// CR 608.2c + CR 614.6: the honest-failure path is CLAUSE-scoped — an "instead"
+/// override must never absorb the sentence BEFORE it, and must never be emitted
+/// as an unconditional sequel to the effect it is supposed to REPLACE.
+///
+/// Piece It Together is the live witness ("Draw a card. If Piece It Together's
+/// intensity is 4, instead take an extra turn after this one."). Two facts must
+/// hold together, and they are asserted as an INVARIANT rather than as one
+/// expected shape, because the override's shape legitimately changes as
+/// condition grammar lands:
+///
+///   1. the preceding `Draw a card.` always survives as the chain root — a
+///      line-level blob that swallowed it would silently cost a working effect;
+///   2. the override is EITHER a real conditional branch (`ConditionInstead`)
+///      OR an honest `Effect::Unimplemented` — but NEVER a bare effect with no
+///      condition, which is the CR 614.6 double-execution defect.
+///
+/// Pinning "must be Unimplemented" here would pin a TRANSIENT state: the
+/// intensity bind has since landed, so this card now takes the branch arm. The
+/// invariant below is true on both sides of that change, and on both sides of
+/// every future condition-grammar landing.
+fn assert_override_is_branch_or_honest(chain: &str) {
+    let def = parse_effect_chain(chain, AbilityKind::Spell);
+    assert!(
+        matches!(&*def.effect, Effect::Draw { .. }),
+        "the preceding Draw must survive as the chain root, never absorbed into the \
+         override — got {:?} for {chain:?}",
+        def.effect
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .unwrap_or_else(|| panic!("the override clause must produce a def for {chain:?}"));
+    if matches!(&*sub.effect, Effect::Unimplemented { .. }) {
+        return; // honest failure — clause-scoped, body never emitted
+    }
+    assert!(
+        matches!(
+            sub.condition.as_ref(),
+            Some(AbilityCondition::ConditionInstead { .. })
+        ),
+        "CR 614.6: a lowered override must be a ConditionInstead BRANCH, never an \
+         unconditional sequel — got effect={:?} condition={:?} for {chain:?}",
+        sub.effect,
+        sub.condition
+    );
+}
+
+#[test]
+fn instead_override_never_absorbs_the_preceding_sentence() {
+    // The intensity condition now LOWERS (the bind landed on main), so this card
+    // takes the branch arm: Draw root + ConditionInstead{QuantityCheck{Intensity}}.
+    assert_override_is_branch_or_honest(
+        "Draw a card. If this card's intensity is 4, instead take an extra turn after this one.",
+    );
+    // A condition with no typed variant takes the honest-failure arm instead.
+    assert_override_is_branch_or_honest(
+        "Draw a card. If the cracks in this artifact's art are completely covered, draw two cards instead.",
+    );
+    // A plainly lowerable condition takes the branch arm.
+    assert_override_is_branch_or_honest(
+        "Draw a card. If you control three or more artifacts, draw two cards instead.",
+    );
+}
