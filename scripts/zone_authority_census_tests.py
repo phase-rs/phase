@@ -212,6 +212,7 @@ class LifetimeTests(unittest.TestCase):
         # drifts for every line that follows.
         code = code_of("char::<_, OracleError<'_>>('{'),")
         self.assertNotIn("{", code)
+        self.assertNotIn("}", code)  # the line is brace-neutral; the scan must agree
 
     def test_lifetime_does_not_desync_a_cfg_test_skip_region(self) -> None:
         # The mis-scope, end to end. A lifetime + a `'}'` char literal inside a
@@ -237,12 +238,59 @@ class LifetimeTests(unittest.TestCase):
         self.assertIn("add_to_zone(a);", code)
         self.assertEqual(code.count("{"), code.count("}"))
 
+    def test_char_a_is_a_literal_but_lifetime_a_is_not(self) -> None:
+        # The minimal pair, on one line: `'a'` IS a char literal, `'a` is NOT. Rust
+        # resolves this the same way -- a quote closing after exactly one char is a
+        # literal -- and the scanner must resolve it identically or the generic
+        # parameter list is eaten.
+        code = code_of("fn f<'a>(x: &'a str) -> char { 'a' }")
+        self.assertIn("(x: &'a str)", code)  # the lifetimes survive as ordinary code
+        self.assertNotIn("'a'", code)  # the char literal does not
+        self.assertEqual(code.count("{"), 1)
+
+    def test_multiple_lifetimes_on_one_line(self) -> None:
+        # Four ticks pair up 1-2 and 3-4, so the braces happen to balance and the hit
+        # happens to survive -- but the parameter list in between is still eaten. The
+        # damage is only invisible to the brace counter, not absent.
+        code = code_of("fn f<'a, 'b>(x: &'a str, y: &'b str) { self.hand.push_back(x); }")
+        self.assertIn("&'a str", code)
+        self.assertIn("&'b str", code)
+
+    def test_static_lifetime(self) -> None:
+        # `'static` is the lifetime the tree has most of, and it bites like any other:
+        # its tick pairs with the `'x'` literal's opening quote and takes the fn's `{`.
+        code = code_of("const S: &'static str = \"x\"; fn g() { assert_eq!(S.next(), Some('x')); }")
+        self.assertIn("&'static str", code)
+        self.assertEqual(code.count("{"), 1)
+
+    def test_anonymous_lifetime_vs_underscore_char(self) -> None:
+        # The other minimal pair: `'_` is the anonymous LIFETIME, `'_'` is the
+        # underscore CHAR. One char then a quote is the only thing that separates them.
+        code = code_of("fn f(x: &'_ str) -> char { '_' }")
+        self.assertIn("&'_ str", code)
+        self.assertEqual(code.count("{"), 1)
+        self.assertEqual(code.count("}"), 1)
+
     # ---- the char literals themselves must still be consumed whole ----
+
+    def test_byte_char_literal_is_stripped_despite_its_prefix(self) -> None:
+        # `b'x'` is the two-letter-prefix shape that bit the raw-string branch (`br#"`),
+        # so it gets its own test rather than a line in a list. It is SAFE here, and
+        # for a reason worth pinning: CANDIDATE only stops on a `b` that a `"` follows
+        # (`[bcr](?=r?#*")`), so a byte-char literal is never entered at its `b` -- the
+        # candidate fires on the QUOTE, the char regex matches `'x'` there, and the `b`
+        # is emitted as the ordinary identifier character it lexes like. A `b` prefix
+        # alternative in the char regex would therefore be dead code, and is absent.
+        for lit in ("b'x'", "b'\\''", "b'\"'", "b'{'"):
+            with self.subTest(lit=lit):
+                code = code_of(f"let c = {lit}; add_to_zone(a);")
+                self.assertNotIn("{", code)
+                self.assertIn("add_to_zone(a);", code)
 
     def test_char_literal_escapes_are_still_stripped(self) -> None:
         # Each is ONE char once escapes are honoured, so each must be consumed whole.
         # `'\''` is the sharp one: its escaped quote must not be read as the closer.
-        for lit in ("'x'", "'{'", "'}'", "'\\n'", "'\\''", "'\\\\'", "'\\x41'", "'\\u{1F600}'", "b'x'"):
+        for lit in ("'x'", "'{'", "'}'", "'\\n'", "'\\''", "'\\\\'", "'\\x41'", "'\\u{1F600}'", "'\\u{10FFFF}'"):
             with self.subTest(lit=lit):
                 code = code_of(f"let c = {lit}; add_to_zone(a);")
                 self.assertNotIn("{", code)
