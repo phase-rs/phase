@@ -2590,3 +2590,239 @@ fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
         );
     }
 }
+
+/// CR 118.9 + CR 202.3 + CR 601.2b: As Foretold — "Once each turn, you may pay
+/// {0} rather than pay the mana cost for a spell you cast with mana value X or
+/// less, where X is the number of time counters on ~". Runtime proof of the two
+/// NEW axes over the unlimited alt-cost grants:
+///  1. DYNAMIC mana-value gate: a spell with MV > (time counters on the source)
+///     is NOT offered the grant; a spell with MV ≤ that count IS offered {0}.
+///  2. ONCE-PER-TURN frequency: accepting consumes the source's per-turn slot
+///     (`alt_cost_grant_permissions_used`), so the grant is spent for the turn.
+#[test]
+fn as_foretold_dynamic_alt_cost_offered_and_consumed() {
+    use engine::types::counter::CounterType;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // As Foretold on the battlefield (only the alt-cost line matters here; time
+    // counters are seeded directly). Hosted on a permanent via the full parser.
+    let foretold_id = scenario
+        .add_creature(P0, "As Foretold", 0, 0)
+        .from_oracle_text(
+            "Once each turn, you may pay {0} rather than pay the mana cost for a spell \
+             you cast with mana value X or less, where X is the number of time counters on ~.",
+        )
+        .id();
+    // Two time counters → dynamic threshold X = 2.
+    scenario.with_counter(foretold_id, CounterType::Time, 2);
+
+    // MV-2 spell (≤ threshold): eligible for the grant.
+    let mv2_id = scenario
+        .add_creature_to_hand(P0, "Test Two Drop", 1, 1)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    // --- MV-2 spell: at/under the threshold → grant offered as {0} vs printed. ---
+    let mv2_card = runner.state().objects[&mv2_id].card_id;
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: mv2_id,
+            card_id: mv2_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the MV-2 spell should succeed");
+    handle_target_selection(&mut runner, &result);
+
+    match &runner.state().waiting_for {
+        WaitingFor::OptionalCostChoice { cost, .. } => match cost {
+            AdditionalCost::Choice(alt, printed) => {
+                assert_eq!(
+                    *alt,
+                    AbilityCost::Mana {
+                        cost: ManaCost::zero()
+                    },
+                    "alternative cost must be {{0}}"
+                );
+                assert_eq!(
+                    *printed,
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![],
+                            generic: 2,
+                        }
+                    },
+                    "printed fallback must be the spell's {{2}} mana cost"
+                );
+            }
+            other => panic!("expected AdditionalCost::Choice(alt, printed), got {other:?}"),
+        },
+        other => panic!("expected OptionalCostChoice for the As Foretold grant, got {other:?}"),
+    }
+
+    // Accept the {0} alternative → the spell reaches the stack and the source's
+    // once-per-turn slot is consumed (CR 118.9 + CR 601.2b).
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("accepting the alternative cost should succeed");
+    assert_eq!(
+        runner.state().objects[&mv2_id].zone,
+        Zone::Stack,
+        "MV-2 spell should be on the stack after paying the {{0}} alternative"
+    );
+    assert!(
+        runner
+            .state()
+            .alt_cost_grant_permissions_used
+            .contains(&foretold_id),
+        "accepting As Foretold's alternative cost must consume its per-turn slot"
+    );
+}
+
+/// CR 118.9 + CR 601.2b: Declining As Foretold's alternative cost pays the
+/// printed mana cost instead and must NOT consume the once-per-turn slot — the
+/// grant remains available for a later spell the same turn.
+#[test]
+fn as_foretold_decline_printed_cost_does_not_consume_slot() {
+    use engine::types::counter::CounterType;
+    use engine::types::mana::{ManaType, ManaUnit};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let foretold_id = scenario
+        .add_creature(P0, "As Foretold", 0, 0)
+        .from_oracle_text(
+            "Once each turn, you may pay {0} rather than pay the mana cost for a spell \
+             you cast with mana value X or less, where X is the number of time counters on ~.",
+        )
+        .id();
+    scenario.with_counter(foretold_id, CounterType::Time, 2);
+
+    let mv2_id = scenario
+        .add_creature_to_hand(P0, "Test Two Drop", 1, 1)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Two generic-payable mana so the printed {2} cost can be paid on decline.
+    for _ in 0..2 {
+        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            Vec::new(),
+        ));
+    }
+
+    let mv2_card = runner.state().objects[&mv2_id].card_id;
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: mv2_id,
+            card_id: mv2_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the MV-2 spell should succeed");
+    handle_target_selection(&mut runner, &result);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ),
+        "As Foretold must offer the alternative cost, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Decline → pay the printed {2} cost; the slot must remain unspent.
+    runner
+        .act(GameAction::DecideOptionalCost { pay: false })
+        .expect("declining the alternative cost should succeed");
+    assert_eq!(
+        runner.state().objects[&mv2_id].zone,
+        Zone::Stack,
+        "MV-2 spell should be on the stack after paying the printed {{2}} cost"
+    );
+    assert!(
+        !runner
+            .state()
+            .alt_cost_grant_permissions_used
+            .contains(&foretold_id),
+        "declining the alternative cost must NOT consume As Foretold's per-turn slot"
+    );
+}
+
+/// CR 202.3 + CR 118.9: As Foretold's DYNAMIC gate — a spell whose mana value
+/// EXCEEDS the number of time counters on the source is NOT offered the grant.
+/// With 2 time counters, an MV-3 spell is above the threshold. Sole cast so the
+/// pipeline is clean (mirrors the Rooftop Storm negative arm).
+#[test]
+fn as_foretold_dynamic_gate_excludes_above_threshold_spell() {
+    use engine::types::counter::CounterType;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let foretold_id = scenario
+        .add_creature(P0, "As Foretold", 0, 0)
+        .from_oracle_text(
+            "Once each turn, you may pay {0} rather than pay the mana cost for a spell \
+             you cast with mana value X or less, where X is the number of time counters on ~.",
+        )
+        .id();
+    scenario.with_counter(foretold_id, CounterType::Time, 2);
+
+    // MV-3 spell: strictly above the 2-counter threshold.
+    let mv3_id = scenario
+        .add_creature_to_hand(P0, "Test Three Drop", 1, 1)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 3,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Sanity: the grant static is present so the negative below is meaningful.
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .any(|o| o.static_definitions.iter_unchecked().any(|d| matches!(
+                d.mode,
+                engine::types::statics::StaticMode::CastWithAlternativeCost { .. }
+            ))),
+        "As Foretold must carry a CastWithAlternativeCost static"
+    );
+
+    let mv3_card = runner.state().objects[&mv3_id].card_id;
+    if let Ok(res) = runner.act(GameAction::CastSpell {
+        object_id: mv3_id,
+        card_id: mv3_card,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    }) {
+        handle_target_selection(&mut runner, &res);
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice { .. }
+            ),
+            "MV-3 spell exceeds the {{2}}-counter threshold and must NOT be offered \
+             the As Foretold grant, got {:?}",
+            runner.state().waiting_for,
+        );
+    }
+}

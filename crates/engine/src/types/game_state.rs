@@ -2262,6 +2262,13 @@ pub struct PendingCast {
     /// across a multiplayer save/restore.
     #[serde(default, skip_serializing_if = "ActivationResidual::is_none")]
     pub activation_residual: ActivationResidual,
+    /// CR 118.9 + CR 601.2b: When this cast is offered a once-per-turn
+    /// `CastWithAlternativeCost` grant (As Foretold), the granting permanent's id.
+    /// Carried across the `OptionalCostChoice` round-trip so the accept handler can
+    /// stamp `ability.context.alt_cost_grant_source`; `None` for self-options and
+    /// `Unlimited` grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_cost_grant_source: Option<ObjectId>,
 }
 
 fn default_origin_zone() -> Zone {
@@ -2318,6 +2325,7 @@ impl PendingCast {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         }
     }
 
@@ -7493,6 +7501,14 @@ pub struct GameState {
     /// CR 400.7: Zone change creates new ObjectId, naturally resetting.
     #[serde(default)]
     pub hand_cast_free_permissions_used: HashSet<ObjectId>,
+    /// CR 118.9 + CR 601.2b: Tracks which once-per-turn `CastWithAlternativeCost`
+    /// grant sources (As Foretold) have already had their alternative cost applied
+    /// to a spell this turn. Keyed by the granting permanent's ObjectId. Unlimited
+    /// grants (Fist of Suns, Rooftop Storm, Jodah) never populate this.
+    /// CR 400.7: Zone change creates a new ObjectId, so the permission naturally
+    /// resets when the source leaves and returns.
+    #[serde(default)]
+    pub alt_cost_grant_permissions_used: HashSet<ObjectId>,
     /// CR 601.2a: Tracks once-per-turn `PlayFromExile` permission sources
     /// consumed this turn. Keyed by the granting source's ObjectId.
     #[serde(default)]
@@ -9616,6 +9632,7 @@ impl GameState {
             graveyard_cast_permissions_used_per_type: HashSet::new(),
             pending_permanent_type_slot: None,
             hand_cast_free_permissions_used: HashSet::new(),
+            alt_cost_grant_permissions_used: HashSet::new(),
             exile_play_permissions_used: HashSet::new(),
             exile_play_single_use_consumed: HashSet::new(),
             exile_cast_permissions_used: HashSet::new(),
@@ -10618,6 +10635,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         graveyard_cast_permissions_used_per_type: _,
         pending_permanent_type_slot: _,
         hand_cast_free_permissions_used: _,
+        alt_cost_grant_permissions_used: _,
         exile_play_permissions_used: _,
         exile_play_single_use_consumed: _,
         exile_cast_permissions_used: _,
@@ -10909,6 +10927,7 @@ impl PartialEq for GameState {
                 == other.graveyard_cast_permissions_used_per_type
             && self.pending_permanent_type_slot == other.pending_permanent_type_slot
             && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
+            && self.alt_cost_grant_permissions_used == other.alt_cost_grant_permissions_used
             && self.exile_play_permissions_used == other.exile_play_permissions_used
             && self.exile_play_single_use_consumed == other.exile_play_single_use_consumed
             && self.exile_cast_permissions_used == other.exile_cast_permissions_used
@@ -12107,6 +12126,7 @@ mod tests {
                 payment_mode: CastPaymentMode::Auto,
                 assist_state: AssistState::NotOffered,
                 activation_residual: ActivationResidual::None,
+                alt_cost_grant_source: None,
             })
         }
 
@@ -12474,6 +12494,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),

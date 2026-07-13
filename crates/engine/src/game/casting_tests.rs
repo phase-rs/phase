@@ -11712,6 +11712,7 @@ fn add_primal_prayers_grant(state: &mut GameState, controller: PlayerId) -> Obje
             amount: QuantityExpr::Fixed { value: 1 },
         },
         timing_permission: Some(CastTimingPermission::AsThoughHadFlash),
+        frequency: crate::types::statics::CastFrequency::Unlimited,
     })
     .affected(TargetFilter::Typed(
         TypedFilter::creature()

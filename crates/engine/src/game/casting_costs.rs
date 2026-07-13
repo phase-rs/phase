@@ -421,6 +421,11 @@ pub(crate) fn handle_decide_additional_cost(
                     !is_card_additional_cost_choice && matches!(fallback, AbilityCost::Mana { .. });
                 if is_spell_alternative_choice {
                     ability.context.alternative_mana_cost_paid = true;
+                    // CR 118.9 + CR 601.2b: accepting a once-per-turn grant's
+                    // alternative cost records the source on the ability context so
+                    // finalize_cast consumes its per-turn slot. Declining (below)
+                    // leaves it `None` — the printed cost was paid, nothing spent.
+                    ability.context.alt_cost_grant_source = pending.alt_cost_grant_source;
                     match preferred {
                         AbilityCost::Mana { cost } => {
                             alternative_base_override = Some(cost.clone());
@@ -532,6 +537,11 @@ pub(crate) fn payable_spell_alternative_cost(
 pub(crate) struct PayableSpellAlternativeCost {
     pub(crate) cost: AbilityCost,
     pub(crate) timing_permission: Option<CastTimingPermission>,
+    /// CR 118.9 + CR 601.2b: `Some(source_id)` when the offered alternative cost
+    /// comes from a once-per-turn grant (As Foretold). Threaded onto the pending
+    /// cast so its per-turn slot is consumed at finalize. `None` for self-options
+    /// and `Unlimited` grants.
+    pub(crate) once_per_turn_source: Option<ObjectId>,
 }
 
 pub(crate) fn payable_spell_alternative_cost_details(
@@ -577,6 +587,9 @@ pub(crate) fn payable_spell_alternative_cost_details(
             Some(PayableSpellAlternativeCost {
                 cost,
                 timing_permission: None,
+                // CR 118.9: a spell's own printed alternative cost carries no
+                // per-turn grant slot to consume.
+                once_per_turn_source: None,
             })
         } else {
             None
@@ -593,6 +606,7 @@ pub(crate) fn payable_spell_alternative_cost_details(
         PayableSpellAlternativeCost {
             cost: granted.cost,
             timing_permission: granted.timing_permission,
+            once_per_turn_source: granted.once_per_turn_source,
         },
     )
 }
@@ -616,6 +630,7 @@ pub(crate) fn payable_spell_alternative_cost_for_timing(
         PayableSpellAlternativeCost {
             cost: granted.cost,
             timing_permission: granted.timing_permission,
+            once_per_turn_source: granted.once_per_turn_source,
         },
     )
 }
@@ -4085,6 +4100,10 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             })
             .or_else(|| payable_spell_alternative_cost_details(state, player, object_id));
         if let Some(alt_cost) = alt_cost {
+            // CR 118.9 + CR 601.2b: carry the once-per-turn grant source (As
+            // Foretold) across the choice round-trip so its per-turn slot is
+            // consumed at finalize. `None` for self-options / `Unlimited` grants.
+            let alt_cost_grant_source = alt_cost.once_per_turn_source;
             let mut pending = PendingCast::new(object_id, card_id, ability, ManaCost::NoCost);
             pending.base_cost = base_cost.clone();
             pending.casting_variant = casting_variant;
@@ -4092,6 +4111,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             pending.distribute = distribute.clone();
             pending.origin_zone = origin_zone;
             pending.payment_mode = payment_mode;
+            pending.alt_cost_grant_source = alt_cost_grant_source;
             pending.additional_cost_flow =
                 imposed_required_cost.clone().map(AdditionalCost::Required);
             let alt_cost_required_for_timing = cast_timing_permission.is_some()
@@ -4100,6 +4120,10 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 match alt_cost.cost {
                     AbilityCost::Mana { cost: alt_mana } => {
                         pending.ability.context.alternative_mana_cost_paid = true;
+                        // CR 118.9 + CR 601.2b: timing-immediate-pay branch skips
+                        // the accept handler, so stamp the grant source directly on
+                        // the ability context for finalize to consume.
+                        pending.ability.context.alt_cost_grant_source = alt_cost_grant_source;
                         pending.base_cost = Some(alt_mana);
                         pending.cost = super::casting::recompute_pending_mana_total(
                             state,
@@ -6776,6 +6800,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // Unimplemented effect through the cost pipeline (from continue_with_no_ability).
     // Only those remain `ability: None` on the stack — they simply enter the
     // battlefield on resolution. All other spells get their ResolvedAbility.
+    // CR 118.9 + CR 601.2b: capture the once-per-turn CastWithAlternativeCost
+    // grant source from the ability context BEFORE the placeholder branch may drop
+    // the ability (permanent spells with no spell ability carry `stack_ability =
+    // None`, but their alternative cost was still applied and must consume the
+    // slot). Recorded on the context at the alt-vs-printed accept / timing branch.
+    let alt_cost_grant_source = ability.context.alt_cost_grant_source;
     let is_placeholder = matches!(
         ability.effect,
         crate::types::ability::Effect::Unimplemented { .. }
@@ -7144,6 +7174,17 @@ fn finalize_cast_with_phyrexian_choices_inner(
             state.exile_cast_permissions_used.insert(source);
         }
         _ => {}
+    }
+    // CR 118.9 + CR 601.2b: consume a once-per-turn `CastWithAlternativeCost`
+    // grant's slot (As Foretold) when its alternative cost was applied to this
+    // cast — recorded on the ability context at the alt-vs-printed choice (or the
+    // timing-immediate branch). Unlimited grants / self-options carry `None`.
+    // Consumed at finalize (not at accept) so an aborted cast — which
+    // `handle_cancel_cast` reverts before finalize — never spends the slot, matching
+    // every sibling permission. As Foretold's grant rides `CastingVariant::Normal`,
+    // so the `match casting_variant` above never covers it — this is a separate block.
+    if let Some(src) = alt_cost_grant_source {
+        state.alt_cost_grant_permissions_used.insert(src);
     }
     if let Some((source, crate::types::statics::CastFrequency::OncePerTurn)) =
         exile_play_permission_source
@@ -10424,6 +10465,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         }
     }
 
@@ -11707,6 +11749,7 @@ mod tests {
                 cost: ManaCost::zero(),
             },
             timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::creature()
@@ -11948,6 +11991,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
             },
             timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::creature()
@@ -15411,6 +15455,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         };
 
         let result = pay_additional_cost(
@@ -15541,6 +15586,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         };
 
         let mut events = Vec::new();
@@ -15640,6 +15686,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         };
 
         // Exactly one card is required. Selecting two must fail.
@@ -15728,6 +15775,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         };
 
         // `red` is not in the legal-cards list, so the cost handler must reject
@@ -15849,6 +15897,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         };
 
         let result = pay_additional_cost(

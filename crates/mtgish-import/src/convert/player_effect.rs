@@ -70,6 +70,9 @@ fn apply_with_controller(
                     StaticDefinition::new(StaticMode::CastWithAlternativeCost {
                         cost: alt_cost,
                         timing_permission: Some(CastTimingPermission::AsThoughHadFlash),
+                        // CR 118.9: flash-granting alternative cost applies without
+                        // a per-turn limit.
+                        frequency: CastFrequency::Unlimited,
                     })
                     .affected(scope)
                     .active_zones(vec![Zone::Battlefield]),
