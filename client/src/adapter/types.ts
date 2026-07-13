@@ -1815,6 +1815,12 @@ export interface PriorityYield {
   target: YieldTarget;
 }
 
+export type PrecastCopyShortcutResponse =
+  | { type: "Propose"; data: { route_id: number } }
+  | { type: "Decline" }
+  | { type: "Accept" }
+  | { type: "Shorten"; data: { breakpoint_id: number } };
+
 export type GameAction =
   | { type: "PassPriority" }
   | { type: "RollPlanarDie" }
@@ -1960,12 +1966,6 @@ export type GameAction =
   | { type: "DeclineShortcut" }
   | { type: "PrecastCopyShortcut"; data: { epoch: number; response: PrecastCopyShortcutResponse } }
   | { type: "Concede"; data: { player_id: PlayerId } };
-
-export type PrecastCopyShortcutResponse =
-  | { type: "Propose"; data: { route_id: number } }
-  | { type: "Decline" }
-  | { type: "Accept" }
-  | { type: "Shorten"; data: { breakpoint_id: number } };
 
 // CR 605.3b + CR 106.1a: Shape of the prompt surfaced by WaitingFor::ChooseManaColor.
 export type ManaChoicePrompt =
