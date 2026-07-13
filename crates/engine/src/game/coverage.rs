@@ -2404,6 +2404,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::BeneathTop { .. },
                 }) => d.push(("redirect".into(), "library beneath top X".into())),
+                Some(SpellStackToGraveyardReplacement::Library {
+                    position: LibraryPosition::RandomWithinTop { .. },
+                }) => d.push(("redirect".into(), "library random within top N".into())),
                 Some(SpellStackToGraveyardReplacement::Hand) => {
                     d.push(("redirect".into(), "hand".into()))
                 }

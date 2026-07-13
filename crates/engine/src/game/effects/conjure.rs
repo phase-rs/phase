@@ -3,13 +3,15 @@ use crate::game::printed_cards::{apply_card_face_to_object, apply_copiable_value
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::{
-    ConjureSource, CopiableValues, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+    ConjureSource, CopiableValues, Effect, EffectError, EffectKind, LibraryPosition,
+    ResolvedAbility, TargetFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::zones::Zone;
+use rand::Rng;
 
 /// The fully-resolved identity of a conjured card for one `ConjureCard` entry.
 enum ConjuredIdentity {
@@ -42,12 +44,13 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (cards, destination, tapped) = match &ability.effect {
+    let (cards, destination, tapped, library_position) = match &ability.effect {
         Effect::Conjure {
             cards,
             destination,
             tapped,
-        } => (cards, *destination, *tapped),
+            library_position,
+        } => (cards, *destination, *tapped, library_position.clone()),
         _ => return Ok(()),
     };
 
@@ -94,6 +97,15 @@ pub fn resolve(
                 card_name.clone(),
                 destination,
             );
+
+            // `create_object` appends a library-bound card to the bottom. When the
+            // conjure carries a positional constraint (the Alchemy "into the top N
+            // cards … at random" arm), move it to the resolved slot instead.
+            if destination == Zone::Library {
+                if let Some(position) = &library_position {
+                    reposition_conjured_in_library(state, ability, obj_id, position);
+                }
+            }
 
             // CR 613.7d: an object receives a timestamp when it enters a zone.
             // Stage 2 stamps battlefield entries only, so only draw one when the
@@ -200,12 +212,131 @@ fn resolve_duplicate_reference(
     object_ids.into_iter().next()
 }
 
+/// Reposition a just-conjured card within its owner's library. `create_object`
+/// appended it to the bottom; this moves it to the slot named by `position`.
+/// Only `RandomWithinTop` is produced by the parser today (the Alchemy "into the
+/// top N cards … at random" conjure); the other positions are honored for
+/// completeness so the field composes with any future positional conjure.
+fn reposition_conjured_in_library(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    object_id: ObjectId,
+    position: &LibraryPosition,
+) {
+    let owner = ability.controller;
+    // Library length excluding the just-appended conjured card, so index math and
+    // the random range treat the card as being *inserted* among the existing ones.
+    let existing_len = state
+        .players
+        .iter()
+        .find(|p| p.id == owner)
+        .map_or(0, |p| p.library.len())
+        .saturating_sub(1);
+    let index = match position {
+        LibraryPosition::Top => 0,
+        LibraryPosition::Bottom => existing_len,
+        // 1-based ("second from the top" => n=2, index 1); clamped to the bottom.
+        LibraryPosition::NthFromTop { n } => (*n as usize).saturating_sub(1).min(existing_len),
+        LibraryPosition::BeneathTop { depth } => {
+            (resolve_quantity_with_targets(state, depth, ability).max(0) as usize).min(existing_len)
+        }
+        // Digital-only Alchemy (no CR entry): insert at a uniformly random 0-based
+        // index in `[0, min(n, existing_len + 1))`, so the card lands somewhere
+        // among the top N cards.
+        LibraryPosition::RandomWithinTop { n } => {
+            let n = resolve_quantity_with_targets(state, n, ability).max(1) as usize;
+            let upper = n.min(existing_len + 1).max(1);
+            state.rng.random_range(0..upper)
+        }
+    };
+    let Some(player) = state.players.iter_mut().find(|p| p.id == owner) else {
+        return;
+    };
+    // A just-conjured card is already in the library (create_object appended it);
+    // this only reorders within the same zone, so it is not a replaceable zone event.
+    if let Some(current) = player.library.iter().position(|id| *id == object_id) {
+        // allow-raw-zone: in-library reorder of a just-conjured card, not a zone event.
+        player.library.remove(current);
+    }
+    let clamped = index.min(player.library.len());
+    // allow-raw-zone: in-library reorder of a just-conjured card, not a zone event.
+    player.library.insert(clamped, object_id);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::ability::{ConjureCard, QuantityExpr, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+
+    /// Issue #5614: "conjure a duplicate … into the top five cards of your library
+    /// at random" must land the conjured card in a random slot AMONG the top five —
+    /// not push it to the bottom (the collapsed `Zone::Library` behavior). Runs many
+    /// conjures against a large library and asserts every one lands within the top
+    /// five and that the slot actually varies (proving it is random, not a fixed
+    /// top/bottom placement). Reverting `reposition_conjured_in_library` — which
+    /// leaves the card at the bottom `create_object` places it — fails this test.
+    #[test]
+    fn conjure_random_within_top_lands_among_top_n_and_varies() {
+        use crate::types::ability::LibraryPosition;
+        use std::collections::HashSet;
+
+        let mut state = GameState::new_two_player(42);
+
+        // A library far larger than N, so "top five" is a genuine constraint.
+        for i in 0..20 {
+            crate::game::zones::create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                format!("Filler {i}"),
+                Zone::Library,
+            );
+        }
+
+        let mut indices = HashSet::new();
+        for iter in 0..40 {
+            let name = format!("Conjured {iter}");
+            let ability = ResolvedAbility::new(
+                Effect::Conjure {
+                    cards: vec![ConjureCard {
+                        source: ConjureSource::Named { name: name.clone() },
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }],
+                    destination: Zone::Library,
+                    tapped: false,
+                    library_position: Some(LibraryPosition::RandomWithinTop {
+                        n: QuantityExpr::Fixed { value: 5 },
+                    }),
+                },
+                vec![],
+                ObjectId(99),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            let library = &state.players[0].library;
+            let index = library
+                .iter()
+                .position(|id| state.objects[id].name == name)
+                .expect("conjured card is in the library");
+            assert!(
+                index < 5,
+                "conjured card must land among the top five, got index {index}"
+            );
+            indices.insert(index);
+        }
+
+        // The slot is drawn from the RNG, so across 40 conjures more than one
+        // distinct position must appear — a fixed top (always 0) or bottom
+        // placement would collapse this set to a single value.
+        assert!(
+            indices.len() > 1,
+            "random-within-top slot should vary across draws, saw {indices:?}"
+        );
+    }
 
     #[test]
     fn battlefield_conjure_records_zone_change_for_turn_history() {
@@ -220,6 +351,7 @@ mod tests {
                 }],
                 destination: Zone::Battlefield,
                 tapped: false,
+                library_position: None,
             },
             vec![],
             ObjectId(99),
@@ -287,6 +419,7 @@ mod tests {
                 }],
                 destination: Zone::Hand,
                 tapped: false,
+                library_position: None,
             },
             vec![TargetRef::Object(referenced)],
             ObjectId(99),

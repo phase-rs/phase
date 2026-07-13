@@ -617,6 +617,11 @@ pub(crate) fn move_object(
                         }
                         _ => None,
                     },
+                    // Digital-only Alchemy: `RandomWithinTop` only flows from the
+                    // Conjure resolver (`conjure.rs`), which places the card
+                    // directly and never routes through this rebuilt-tail path.
+                    // Exhaustiveness arm: default placement.
+                    LibraryPosition::RandomWithinTop { .. } => None,
                 };
                 zones::move_to_library_at_index(state, req.object_id, index, events);
                 return ZoneMoveResult::Done;
@@ -1685,6 +1690,11 @@ pub(crate) fn deliver_replaced_zone_change(
                         }
                         _ => None,
                     },
+                    // Digital-only Alchemy: `RandomWithinTop` only flows from the
+                    // Conjure resolver (`conjure.rs`), which places the card
+                    // directly and never routes through this path. Exhaustiveness
+                    // arm: default placement.
+                    LibraryPosition::RandomWithinTop { .. } => None,
                 };
                 zones::move_to_library_at_index(state, object_id, index, events);
             }

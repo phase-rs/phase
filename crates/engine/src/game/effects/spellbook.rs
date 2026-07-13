@@ -122,6 +122,7 @@ pub fn complete_draft(
             }],
             destination,
             tapped,
+            library_position: None,
         },
         Vec::new(),
         source_id,
