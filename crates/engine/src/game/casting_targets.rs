@@ -257,6 +257,9 @@ fn maybe_pause_for_cast_distribution(
         return Ok(None);
     };
     let assigned_targets = distribution_targets(ability);
+    if assigned_targets.is_empty() {
+        return Ok(None);
+    }
     let mut pending_dist = pending.clone();
     pending_dist.ability = ability.clone();
     state.pending_cast = Some(Box::new(pending_dist));

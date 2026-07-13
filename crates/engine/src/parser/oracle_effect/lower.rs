@@ -6120,19 +6120,11 @@ fn parse_leading_command_return_destination(input: &str) -> OracleResult<'_, Ret
 /// CR 601.2d: Cap "any number of" target selection to the distribution pool.
 /// Without this, the controller can select more permanents than counters or
 /// damage and the assign step deadlocks (each chosen target must receive at
-/// least one). Fixed positive distributions still require at least one target;
-/// "up to" and variable amounts can legally resolve to an empty pool.
+/// least one). "Any number" always permits zero targets, even when the pool is
+/// fixed and positive (Stolen Goodies).
 fn multi_target_for_distribute_among(distribution_amount: &QuantityExpr) -> MultiTargetSpec {
-    let (inner, is_up_to) = distribution_amount.peel_up_to();
-    let min = if is_up_to {
-        QuantityExpr::Fixed { value: 0 }
-    } else {
-        match inner {
-            QuantityExpr::Fixed { value } if *value > 0 => QuantityExpr::Fixed { value: 1 },
-            _ => QuantityExpr::Fixed { value: 0 },
-        }
-    };
-    MultiTargetSpec::bounded_expr(min, inner.clone())
+    let (inner, _) = distribution_amount.peel_up_to();
+    MultiTargetSpec::bounded_expr(QuantityExpr::Fixed { value: 0 }, inner.clone())
 }
 
 /// CR 601.2d: The keywords that introduce a divided/distributed *damage* effect.
