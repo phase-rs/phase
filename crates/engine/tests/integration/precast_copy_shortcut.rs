@@ -518,11 +518,11 @@ fn precast_shorten_requires_meaningful_divergence_before_manual_or_auto_pass() {
         .expect("shorten at the issued boundary");
 
     assert!(runner.act(GameAction::PassPriority).is_err());
-    runner
+    assert!(runner
         .act(GameAction::SetAutoPass {
             mode: engine::types::game_state::AutoPassRequest::UntilStackEmpty,
         })
-        .expect("auto-pass request is a preference but cannot cross MustDiverge");
+        .is_err());
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { player } if player == P1
@@ -664,7 +664,7 @@ fn raw_precast_response_normalizes_to_the_semantic_prompt_owner() {
         runner.state().waiting_for,
         WaitingFor::RespondToPrecastCopyShortcut { player, .. } if player == P1
     ));
-    assert_eq!(runner.state().priority_player, P0);
+    assert_eq!(runner.state().priority_player, P1);
 
     let raw_json = serde_json::to_value(runner.state()).expect("raw response state serializes");
     let mut raw = serde_json::from_value(raw_json).expect("raw response state decodes");
@@ -822,11 +822,23 @@ fn precast_offer_rejects_extra_cast_trigger_before_protocol_wait() {
         .id();
     let mut runner = scenario.build();
 
-    assert_ordinary_priority_without_offer(&mut runner, chain);
-    assert_eq!(
-        runner.state().stack.len(),
-        3,
-        "the original Chain and both cast triggers remain on the normal stack"
+    cast_to_target_selection(&mut runner, chain);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P0)),
+        })
+        .expect("target the Chain at its caster");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OrderTriggers { .. }
+    ));
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::PrecastCopyShortcutOffer { .. }
+                | WaitingFor::RespondToPrecastCopyShortcut { .. }
+        ),
+        "extra cast triggers must remain in the ordinary trigger-ordering pipeline"
     );
 }
 

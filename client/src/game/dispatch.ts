@@ -736,12 +736,12 @@ export async function dispatchResolveAll(
   aiSeats: { playerId: number; difficulty: string }[],
 ): Promise<void> {
   if (batchResolveInProgress) return;
-  const { adapter } = useGameStore.getState();
-  if (!adapter) {
+  const { adapter: batchAdapter } = useGameStore.getState();
+  if (!batchAdapter) {
     debugLog("dispatchResolveAll: no adapter");
     return;
   }
-  if (!adapter.resolveAll || aiSeats.length === 0) {
+  if (!batchAdapter.resolveAll || aiSeats.length === 0) {
     // No batch drain (multiplayer transports), or no AI deciders for the other
     // seats (local hotseat — every seat is a human, #4978): those seats are
     // humans, and CR 117.4 entitles each of them to their own priority window
@@ -776,7 +776,7 @@ export async function dispatchResolveAll(
       const instant = stackPressureFromLength(stackLen) === "Instant";
       const chunkSize = instant ? BATCH_CHUNK_INSTANT : BATCH_CHUNK_SIZE;
 
-      const batchResult: BatchResolveResult = await adapter.resolveAll(
+      const batchResult: BatchResolveResult = await batchAdapter.resolveAll(
         requester, aiSeats, chunkSize,
       );
 
@@ -806,7 +806,7 @@ export async function dispatchResolveAll(
       // Equivalent or fresher: only `WasmAdapter` implements `resolveAll`, and
       // worker FIFO guarantees this snapshot reflects at least the chunk's end
       // state.
-      const snapshot = await adapter.getSnapshot();
+      const snapshot = await batchAdapter.getSnapshot();
       useGameStore.getState().commitEngineSnapshot(snapshot);
 
       // Anything other than Priority ends the drain — GameOver included, since

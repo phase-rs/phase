@@ -3416,28 +3416,46 @@ impl TrustedGameStateEnvelope {
 /// Decodes both current trusted snapshots and historical raw `GameState`
 /// snapshots. The raw form has no pre-cast route authority, so restoring it
 /// always drops any protocol wait before it reaches a live game session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum PersistedGameState {
-    Raw(Box<GameState>),
-    Trusted(Box<TrustedGameStateEnvelope>),
+    Raw(GameState),
+    Trusted(TrustedGameStateEnvelope),
+}
+
+impl<'de> Deserialize<'de> for PersistedGameState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("state").is_some() {
+            serde_json::from_value(value)
+                .map(Self::Trusted)
+                .map_err(serde::de::Error::custom)
+        } else {
+            serde_json::from_value(value)
+                .map(Self::Raw)
+                .map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 impl PersistedGameState {
     /// Captures a current trusted snapshot for a persistence boundary.
     pub fn capture(state: GameState) -> Self {
-        Self::Trusted(Box::new(TrustedGameStateEnvelope::capture(state)))
+        Self::Trusted(TrustedGameStateEnvelope::capture(state))
     }
 
     /// Restores the persisted form through the appropriate trust boundary.
     pub fn into_game_state(self) -> GameState {
         match self {
             Self::Raw(state) => {
-                let mut state = *state;
+                let mut state = state;
                 crate::game::precast_copy_shortcut::normalize_untrusted_restore(&mut state);
                 state
             }
-            Self::Trusted(envelope) => (*envelope).into_game_state(),
+            Self::Trusted(envelope) => envelope.into_game_state(),
         }
     }
 }
