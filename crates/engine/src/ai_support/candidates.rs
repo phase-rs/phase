@@ -3006,6 +3006,7 @@ pub fn candidate_actions_broad_with_probe(
         // CR 732.2a: proposing a shortcut is optional. Offer both legal actions so the
         // policy/search layer, rather than the candidate generator, decides whether an AI
         // proposer declares or returns to ordinary priority.
+        // (Scored by `phase_ai::policies::loop_shortcut::LoopShortcutPolicy`.)
         WaitingFor::LoopShortcut { proposer, .. } => vec![
             candidate(
                 GameAction::DeclareShortcut {

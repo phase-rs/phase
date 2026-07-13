@@ -41,7 +41,6 @@ golgari thug	Draw	Optional	none	Mill	-	IndividualDraw
 grave-shell scarab	Draw	Optional	none	Mill	-	IndividualDraw
 greater mossdog	Draw	Optional	none	Mill	-	IndividualDraw
 hullbreacher	Draw	Mandatory	none	Token	-	IndividualDraw
-island sanctuary	Draw	Mandatory	none	Unimplemented	-	IndividualDraw
 jace, wielder of mysteries	Draw	Mandatory	none	WinTheGame	-	IndividualDraw
 laboratory maniac	Draw	Mandatory	none	WinTheGame	-	IndividualDraw
 life from the loam	Draw	Optional	none	Mill	-	IndividualDraw
@@ -51,7 +50,7 @@ moldervine cloak	Draw	Optional	none	Mill	-	IndividualDraw
 necroplasm	Draw	Optional	none	Mill	-	IndividualDraw
 nightmare void	Draw	Optional	none	Mill	-	IndividualDraw
 notion thief	Draw	Mandatory	none	Unimplemented	nested-draw	IndividualDraw
-obstinate familiar	Draw	Mandatory	none	Unimplemented	-	IndividualDraw
+obstinate familiar	Draw	Optional	Prevent	none	-	IndividualDraw
 ormos, archive keeper	Draw	Mandatory	none	PutCounter	-	IndividualDraw
 out of the tombs	Draw	Mandatory	none	ChangeZone	-	IndividualDraw
 parallel thoughts	Draw	Optional	none	ChangeZone	-	IndividualDraw

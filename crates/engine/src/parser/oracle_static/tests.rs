@@ -19671,6 +19671,117 @@ fn static_all_permanents_are_enchantments() {
     );
 }
 
+// CR 109.2 + issue #5740: Secret Arcade's compound-subject additive-type
+// static — "Nonland permanents you control and permanent spells you control
+// are enchantments in addition to their other types." The compound split
+// itself is already generic (`parse_continuous_subject_filter` delegates to
+// `parse_shared_controller_compound_subject_filter`), but the "permanent
+// spells you control" conjunct falls through to the bare type-phrase grammar,
+// which has no notion that a bare "spell(s)" head noun denotes an object on
+// the stack (CR 109.2) — so before this fix the word was silently swallowed
+// and the conjunct collapsed to a battlefield-scoped `Typed{Permanent}`
+// filter, identical to "permanents you control" (dropping the Nonland
+// restriction and never reaching the stack).
+//
+// `parse_continuous_subject_filter("permanent spells you control")` in
+// isolation must resolve to the same stack-scoped shape
+// `oracle_target::scope_target_spell_phrase` already produces for targeting
+// grammar ("target artifact or enchantment spell").
+#[test]
+fn parse_continuous_subject_filter_scopes_spell_conjunct_to_stack() {
+    let filter = parse_continuous_subject_filter("permanent spells you control")
+        .expect("'permanent spells you control' must resolve to a filter");
+    match &filter {
+        TargetFilter::And { filters } => {
+            assert!(
+                filters.contains(&TargetFilter::StackSpell),
+                "expected the And to carry a StackSpell conjunct, got {filters:?}"
+            );
+            let has_permanent_you_control = filters.iter().any(|f| {
+                matches!(
+                    f,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters.contains(&TypeFilter::Permanent)
+                            && tf.controller == Some(ControllerRef::You)
+                )
+            });
+            assert!(
+                has_permanent_you_control,
+                "expected a Typed{{Permanent, controller: You}} conjunct, got {filters:?}"
+            );
+        }
+        other => panic!("expected And{{[StackSpell, Typed]}}, got {other:?}"),
+    }
+}
+
+// Issue #5740: the full Secret Arcade line must produce a compound-subject
+// additive static whose `affected` is an `Or` of the battlefield conjunct
+// (nonland permanents you control) and the stack-scoped conjunct (permanent
+// spells you control), both feeding the same `AddType(Enchantment)`
+// modification.
+#[test]
+fn secret_arcade_compound_additive_type_static_spans_battlefield_and_stack() {
+    let def = parse_static_line(
+        "Nonland permanents you control and permanent spells you control are enchantments in addition to their other types.",
+    )
+    .expect("Secret Arcade's compound additive-type static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Enchantment,
+            }),
+        "expected AddType Enchantment, got {:?}",
+        def.modifications
+    );
+    match &def.affected {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(filters.len(), 2, "expected Or of 2 conjuncts: {filters:?}");
+            let battlefield_conjunct = filters.iter().any(|f| {
+                matches!(
+                    f,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters.contains(&TypeFilter::Permanent)
+                            && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Land)))
+                            && tf.controller == Some(ControllerRef::You)
+                )
+            });
+            assert!(
+                battlefield_conjunct,
+                "expected a Typed{{Permanent, Non(Land), controller: You}} conjunct, got {filters:?}"
+            );
+            let stack_conjunct = filters
+                .iter()
+                .any(|f| matches!(f, TargetFilter::And { filters } if filters.contains(&TargetFilter::StackSpell)));
+            assert!(
+                stack_conjunct,
+                "expected an And{{[StackSpell, ..]}} conjunct, got {filters:?}"
+            );
+        }
+        other => panic!("expected Some(Or{{..}}), got {other:?}"),
+    }
+}
+
+// Issue #5740 (no-regression): a single-subject additive-type static with no
+// "spell" word in its subject must be completely unaffected by the new
+// stack-scoping — still a plain battlefield `Typed` filter.
+#[test]
+fn single_subject_additive_type_static_unaffected_by_spell_scoping() {
+    let def =
+        parse_static_line("Creatures you control are Bears in addition to their other types.")
+            .expect("single-subject additive-type static must still parse");
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "expected a plain Creature filter, got {tf:?}"
+            );
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+        other => panic!("expected a plain Typed filter (no stack-scoping), got {other:?}"),
+    }
+}
+
 // --- Group C2: All [subject] are [color] (global color-defining statics) ---
 
 #[test]
@@ -28776,5 +28887,81 @@ fn filter_scoped_cant_be_activated_parses_mana_ability_exemption() {
         ),
         "expected no exemption, got {:?}",
         s[0].mode
+    );
+}
+
+/// CR 613.4c: a "+X/+Y" pump whose two axes bind to DIFFERENT quantities —
+/// Aspect of Wolf: "X is half the number of Forests you control, rounded down,
+/// and Y is half ..., rounded up". Power scales by the rounded-DOWN half,
+/// toughness by the rounded-UP half (the discriminating detail: a single-quantity
+/// implementation would apply the same rounding to both axes).
+#[test]
+fn dynamic_pt_pump_binds_x_and_y_axes_to_distinct_quantities() {
+    let s = super::shared::parse_static_line_multi(
+        "Enchanted creature gets +X/+Y, where X is half the number of Forests you control, rounded down, and Y is half the number of Forests you control, rounded up.",
+    );
+    assert_eq!(s.len(), 1, "Aspect of Wolf: {s:?}");
+    let power = s[0].modifications.iter().find_map(|m| match m {
+        ContinuousModification::AddDynamicPower { value } => Some(value),
+        _ => None,
+    });
+    let toughness = s[0].modifications.iter().find_map(|m| match m {
+        ContinuousModification::AddDynamicToughness { value } => Some(value),
+        _ => None,
+    });
+    assert!(
+        matches!(
+            power,
+            Some(QuantityExpr::DivideRounded {
+                divisor: 2,
+                rounding: RoundingMode::Down,
+                ..
+            })
+        ),
+        "power axis must be half rounded DOWN, got {power:?}"
+    );
+    assert!(
+        matches!(
+            toughness,
+            Some(QuantityExpr::DivideRounded {
+                divisor: 2,
+                rounding: RoundingMode::Up,
+                ..
+            })
+        ),
+        "toughness axis must be half rounded UP, got {toughness:?}"
+    );
+}
+
+/// #5743 review [HIGH] regression guard: a "+X/+Y" / "-X/-Y" pump WITHOUT a
+/// structured "where X is <A>, and Y is <B>" paired binding must stay
+/// unsupported — it must NOT synthesize a cost-X static. Snowblind's
+/// "Enchanted creature gets -X/-Y." defines X/Y in later conditional sentences
+/// (no `{X}` cost), so it previously regressed to a bogus -CostXPaid/-CostXPaid.
+#[test]
+fn distinct_xy_pump_without_paired_binding_is_unsupported() {
+    // Snowblind: no where-clause at all on the -X/-Y line.
+    assert!(
+        super::shared::parse_static_line_multi("Enchanted creature gets -X/-Y.").is_empty(),
+        "Snowblind -X/-Y must not synthesize a static without a paired binding"
+    );
+    // A +X/+Y line with a where-clause that binds only X (no ", and Y is") is
+    // likewise unsupported rather than reusing X's quantity for Y.
+    assert!(
+        super::shared::parse_static_line_multi(
+            "Enchanted creature gets +X/+Y, where X is the number of Forests you control."
+        )
+        .is_empty(),
+        "+X/+Y with an X-only binding must stay unsupported"
+    );
+    // `Y` is supported only as the toughness axis of the paired +X/+Y form;
+    // other Y placements cannot inherit X/cost-X semantics.
+    assert!(
+        super::shared::parse_static_line_multi("Enchanted creature gets +Y/+X.").is_empty(),
+        "+Y/+X must stay unsupported rather than treating Y as cost-X"
+    );
+    assert!(
+        super::shared::parse_static_line_multi("Enchanted creature gets +Y/+Y.").is_empty(),
+        "+Y/+Y must stay unsupported rather than treating Y as cost-X"
     );
 }

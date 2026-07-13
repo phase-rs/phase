@@ -3703,7 +3703,19 @@ fn target_filter_carries_predicate_property(filter: &TargetFilter) -> bool {
     }
 }
 
-fn scope_target_spell_phrase(filter: TargetFilter, phrase: &str) -> TargetFilter {
+/// CR 109.2: a bare "spell"/"spells" head noun means the filter denotes an
+/// object on the stack, not a permanent — rewrites a plain `Typed` filter into
+/// `TargetFilter::StackSpell` (or `And{[StackSpell, Typed]}` when other
+/// type/controller constraints remain). `phrase` must be the lowercase slice of
+/// the source text the filter was parsed from, so the word-boundary scan sees
+/// the original wording (e.g. "artifact or enchantment spell").
+///
+/// Public within the crate so static-ability subject resolution
+/// (`oracle_static::parse_continuous_subject_filter`'s fallback) can apply the
+/// same stack-scoping to a "you control"-suffixed subject conjunct that
+/// mentions "spell(s)" (Secret Arcade's "permanent spells you control") — not
+/// just target-noun-phrase grammar.
+pub(crate) fn scope_target_spell_phrase(filter: TargetFilter, phrase: &str) -> TargetFilter {
     if !target_phrase_mentions_spell_word(phrase) {
         return filter;
     }

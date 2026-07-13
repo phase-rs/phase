@@ -4116,6 +4116,31 @@ fn replacement_condition_quantity_ctx(
     }
 }
 
+/// CR 102.1: Whether the replacement source controller's relative turn role
+/// (`You` / `Opponent`) matches the current active player. Undefined scopes fail
+/// closed at replacement-check time (no resolution context).
+fn replacement_active_player_matches(
+    active_player_req: Option<ControllerRef>,
+    state: &GameState,
+    controller: PlayerId,
+) -> bool {
+    match active_player_req {
+        Some(ControllerRef::You) => state.active_player == controller,
+        Some(ControllerRef::Opponent) => state.active_player != controller,
+        Some(ControllerRef::ScopedPlayer) => false,
+        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => false,
+        Some(ControllerRef::ParentTargetController) => false,
+        Some(ControllerRef::ParentTargetOwner) => false,
+        Some(ControllerRef::DefendingPlayer) => false,
+        Some(ControllerRef::SourceChosenPlayer) => false,
+        Some(ControllerRef::ChosenPlayer { .. }) => false,
+        Some(ControllerRef::TriggeringPlayer) => false,
+        Some(ControllerRef::EnchantedPlayer) => false,
+        Some(ControllerRef::ActivePlayer) => false,
+        None => true,
+    }
+}
+
 fn evaluate_replacement_condition(
     condition: &ReplacementCondition,
     controller: PlayerId,
@@ -4535,6 +4560,13 @@ fn evaluate_replacement_condition(
         // step exactly as the "during [its controller's / your] untap step"
         // wording requires.
         ReplacementCondition::DuringUntapStep => state.phase == crate::types::phase::Phase::Untap,
+        // CR 504.1 + CR 614.1a: draw-step gate. The turn-based draw (CR 504.1)
+        // occurs during the active player's draw step; "during your draw step"
+        // scopes to `active_player == controller`.
+        ReplacementCondition::DuringDrawStep { active_player_req } => {
+            state.phase == crate::types::phase::Phase::Draw
+                && replacement_active_player_matches(active_player_req.clone(), state, controller)
+        }
         // CR 614.1d: "if you control [N or more] [filter]" — replacement applies only
         // while the controller has at least `minimum` permanents matching `filter` on
         // the battlefield. minimum=1 covers the singular "a [type]" form (Worship);
@@ -6442,6 +6474,21 @@ fn apply_single_replacement(
         _ => None,
     };
     let replacement_applied = proposed.applied_set().clone();
+
+    // CR 614.6 + CR 614.12a: Optional `Prevent` replacements (Obstinate Familiar,
+    // Island Sanctuary — "you may skip that draw") suppress the event only on
+    // the accept (Execute) branch. Declining leaves the original event intact
+    // so it proceeds unmodified; `draw_applier` reads `quantity_modification`
+    // from the definition regardless of branch, so short-circuit here.
+    if matches!(branch, ReplacementBranch::Decline) {
+        if let Some(repl_def) = repl_def_ref {
+            if replacement_mode_is_optional(&repl_def.mode)
+                && repl_def.quantity_modification == Some(QuantityModification::Prevent)
+            {
+                return Ok(proposed);
+            }
+        }
+    }
 
     if let Some(handler) = registry.get(&event_key) {
         let event_type = event_key.to_string();
@@ -16211,6 +16258,196 @@ mod tests {
             .pending_replacement
             .as_ref()
             .is_some_and(|pending| pending.is_optional));
+    }
+
+    /// CR 504.1 + CR 614.1a + issue #5655: "during your draw step" gates on the
+    /// source controller's draw step, not merely `phase == Draw`.
+    #[test]
+    fn during_draw_step_your_turn_gate_requires_controller_active_player() {
+        let condition = ReplacementCondition::DuringDrawStep {
+            active_player_req: Some(ControllerRef::You),
+        };
+        let source = ObjectId(10);
+        let draw_event = |player_id: PlayerId| ProposedEvent::Draw {
+            player_id,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut state = GameState::new_two_player(42);
+        state.phase = crate::types::phase::Phase::Draw;
+        state.active_player = PlayerId(0);
+        assert!(
+            evaluate_replacement_condition(
+                &condition,
+                PlayerId(0),
+                source,
+                &state,
+                None,
+                &draw_event(PlayerId(0)),
+            ),
+            "controller's draw step must satisfy your-draw-step gate"
+        );
+
+        state.active_player = PlayerId(1);
+        assert!(
+            !evaluate_replacement_condition(
+                &condition,
+                PlayerId(0),
+                source,
+                &state,
+                None,
+                &draw_event(PlayerId(0)),
+            ),
+            "opponent's draw step must not satisfy your-draw-step gate"
+        );
+    }
+
+    /// CR 504.1 + CR 614.1a + issue #5655: optional draw-skip with a your-draw-step
+    /// gate must not prompt when the controller draws during an opponent's draw step.
+    #[test]
+    fn during_draw_step_your_turn_gate_skips_replacement_on_opponents_draw_step() {
+        let source = ObjectId(90);
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+            .quantity_modification(QuantityModification::Prevent)
+            .condition(ReplacementCondition::DuringDrawStep {
+                active_player_req: Some(ControllerRef::You),
+            });
+        repl.mode = ReplacementMode::Optional { decline: None };
+        let mut state = test_state_with_object(source, Zone::Battlefield, vec![repl]);
+        state.phase = crate::types::phase::Phase::Draw;
+        state.active_player = PlayerId(1);
+        state.players[0].library.push_back(ObjectId(200));
+        state.objects.insert(
+            ObjectId(200),
+            GameObject::new(
+                ObjectId(200),
+                CardId(200),
+                PlayerId(0),
+                "Top Card".to_string(),
+                Zone::Library,
+            ),
+        );
+
+        let draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+
+        match replace_event(&mut state, draw, &mut events) {
+            ReplacementResult::Execute(ProposedEvent::Draw { count, .. }) => {
+                assert_eq!(count, 1, "draw must proceed without optional skip prompt");
+            }
+            other => panic!(
+                "your-draw-step gate must bypass replacement on opponent's draw step, got {other:?}"
+            ),
+        }
+    }
+
+    /// CR 614.6 + CR 614.12a + issue #5655: declining an optional draw-skip
+    /// replacement (Obstinate Familiar) must leave the original draw intact.
+    #[test]
+    fn optional_draw_skip_decline_leaves_original_draw() {
+        let source = ObjectId(90);
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+            .quantity_modification(QuantityModification::Prevent);
+        repl.mode = ReplacementMode::Optional { decline: None };
+        let mut state = test_state_with_object(source, Zone::Battlefield, vec![repl]);
+        state.players[0].library.push_back(ObjectId(200));
+        state.objects.insert(
+            ObjectId(200),
+            GameObject::new(
+                ObjectId(200),
+                CardId(200),
+                PlayerId(0),
+                "Top Card".to_string(),
+                Zone::Library,
+            ),
+        );
+
+        let draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+
+        assert_eq!(
+            replace_event(&mut state, draw, &mut events),
+            ReplacementResult::NeedsChoice(PlayerId(0)),
+            "optional draw skip must prompt"
+        );
+
+        let result = continue_replacement(&mut state, 1, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::Execute(_)),
+            "declining optional skip must resume the original draw, got {result:?}"
+        );
+        if let ReplacementResult::Execute(ProposedEvent::Draw { count, .. }) = result {
+            assert_eq!(count, 1, "declined draw must retain its original count");
+        } else {
+            panic!("expected surviving Draw event after decline");
+        }
+    }
+
+    /// CR 614.6 + CR 614.12a + issue #5655: declining an optional draw-skip with
+    /// an accept-branch execute rider (Island Sanctuary class) must still leave the
+    /// original draw intact.
+    #[test]
+    fn optional_draw_skip_with_execute_decline_leaves_original_draw() {
+        let source = ObjectId(90);
+        let execute = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+            .quantity_modification(QuantityModification::Prevent)
+            .execute(execute);
+        repl.mode = ReplacementMode::Optional { decline: None };
+        let mut state = test_state_with_object(source, Zone::Battlefield, vec![repl]);
+        state.players[0].library.push_back(ObjectId(200));
+        state.objects.insert(
+            ObjectId(200),
+            GameObject::new(
+                ObjectId(200),
+                CardId(200),
+                PlayerId(0),
+                "Top Card".to_string(),
+                Zone::Library,
+            ),
+        );
+
+        let draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+
+        assert_eq!(
+            replace_event(&mut state, draw, &mut events),
+            ReplacementResult::NeedsChoice(PlayerId(0)),
+            "optional draw skip with execute rider must prompt"
+        );
+
+        let result = continue_replacement(&mut state, 1, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::Execute(_)),
+            "declining optional skip with execute rider must resume the original draw, got {result:?}"
+        );
+        if let ReplacementResult::Execute(ProposedEvent::Draw { count, .. }) = result {
+            assert_eq!(count, 1, "declined draw must retain its original count");
+        } else {
+            panic!("expected surviving Draw event after decline");
+        }
     }
 
     #[test]

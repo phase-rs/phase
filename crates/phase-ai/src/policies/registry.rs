@@ -21,6 +21,7 @@ use super::interaction_reservation::InteractionReservationPolicy;
 use super::landfall_timing::LandfallTimingPolicy;
 use super::lethality_awareness::LethalityAwarenessPolicy;
 use super::life_total_resource::LifeTotalResourcePolicy;
+use super::loop_shortcut::LoopShortcutPolicy;
 use super::payment_selection::PaymentSelectionPolicy;
 use super::payoff::{
     PayoffPolicy, ARTIFACT_SYNERGY, BLINK_PAYOFF, ENCHANTMENTS_PAYOFF, ENERGY_PAYOFF,
@@ -125,6 +126,7 @@ pub enum PolicyId {
     PaymentSelection,
     SeparatePilesTiming,
     XCastGate,
+    LoopShortcut,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -372,6 +374,7 @@ impl Default for PolicyRegistry {
             Box::new(SeparatePilesTimingPolicy),
             Box::new(PayoffPolicy::new(&REANIMATOR_PAYOFF)),
             Box::new(PayoffPolicy::new(&BLINK_PAYOFF)),
+            Box::new(LoopShortcutPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {
