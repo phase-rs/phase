@@ -39,6 +39,7 @@ const SHRIEKWOOD: &str = "Trample\nWhenever you attack with one or more creature
 const SKULLSPORE: &str = "Whenever one or more nontoken creatures you control die, create a green Fungus Dinosaur creature token with base power and toughness each equal to the total power of those creatures.";
 const ANGRATH: &str =
     "Destroy all creatures target opponent controls. Angrath deals damage to that player equal to their total power.";
+const PREMONITION: &str = "When you set this scheme in motion, reveal the top two cards of your library and put them into your hand. When you reveal one or more nonland cards this way, this scheme deals damage equal to their total mana value to any target.";
 
 /// Every `TrackedSetAggregate` reachable in a card's parse, as
 /// `(function, property, source)`. Serialized so the walk is total — a new
@@ -208,6 +209,33 @@ fn angrath_batch_anaphor_in_a_non_trigger_ability_stays_an_honest_red() {
         has_unimplemented("Angrath, Minotaur Pirate", ANGRATH),
         "the unbindable anaphor must fail honestly (Effect::unimplemented), not \
          resolve to a silent 0"
+    );
+}
+
+/// CR 603.2c: HONEST-RED CONTROL #2 — a batch anaphor inside a trigger whose
+/// EVENT carries no object set.
+///
+/// Being inside a trigger is not enough: the triggering event must actually
+/// expose its subjects to `extract_sources_from_event`, which only the
+/// declared-attackers batch (CR 508.1) and the per-object zone-change batch
+/// (CR 603.10a) do. A Premonition of Your Demise's "their total mana value" sits
+/// in a `SetInMotion` scheme trigger, whose event carries no revealed cards — so
+/// binding it to "the batch" deals 0 damage while rendering as fully supported.
+///
+/// This face was caught by the full-pool ledger (it went RED -> GREEN as a
+/// silent 0), which is exactly what the ledger is for. It must stay an honest gap
+/// until the reveal batch is a real carrier.
+#[test]
+fn scheme_reveal_batch_anaphor_stays_an_honest_red() {
+    let bound = aggregates("A Premonition of Your Demise", PREMONITION);
+    assert!(
+        bound.is_empty(),
+        "a SetInMotion trigger's event exposes no revealed-card set, so the batch \
+         anaphor is unbindable and must not be emitted. Got {bound:?}"
+    );
+    assert!(
+        has_unimplemented("A Premonition of Your Demise", PREMONITION),
+        "the unbindable anaphor must fail honestly, not deal 0 damage as a green"
     );
 }
 

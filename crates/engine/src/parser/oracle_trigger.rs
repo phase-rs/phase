@@ -1321,6 +1321,31 @@ fn trigger_effect_requires_stack_time_targets(ability: &AbilityDefinition) -> bo
 ///
 /// Applies all post-extraction transforms: condition composition, target-player
 /// surfacing, constraint merging, trigger zone derivation, cost-X rewriting.
+/// CR 508.1 + CR 603.10a: Does this trigger's event carry the SET of objects
+/// that a batch anaphor ("them", "those creatures", "their total power") refers
+/// to — i.e. will `extract_sources_from_event` yield them at resolution?
+///
+/// Deliberately a PROVEN whitelist, not a blacklist. Only two event shapes carry
+/// their subjects into `state.current_trigger_events`:
+///
+///   * the declared-attackers batch (CR 508.1) — `AttackersDeclared` names every
+///     attacker (Witch-king, Sky Scourge; Aloy, Savior of Meridian; Shriekwood
+///     Devourer; Vulpine Harvester).
+///   * the per-object zone-change batch (CR 603.10a) — a batched "one or more …
+///     die/enter" trigger emits one `ZoneChanged` PER object, and the batch is
+///     reconstructed by collecting across them (The Skullspore Nexus).
+///
+/// Every other trigger event exposes NO object set, so an anaphor bound to its
+/// "batch" would reduce an EMPTY set to a confident 0 while the card still
+/// rendered as fully supported. A whitelist fails those honestly; a blacklist
+/// would silently admit each newly-added mode as a fresh 0.
+fn mode_exposes_subject_batch(mode: &TriggerMode) -> bool {
+    matches!(
+        mode,
+        TriggerMode::Attacks | TriggerMode::YouAttack | TriggerMode::ChangesZoneAll
+    )
+}
+
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let mut def = ir.partial_def.clone();
     let modifiers = &ir.modifiers;
@@ -1369,6 +1394,28 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // quantities to `PlayerScope::ScopedPlayer` so they resolve against the
     // damaged/attacked player rather than an absent chosen target.
     let mut execute = execute;
+    // CR 603.2c: A `TrackedSetAggregate { source: TriggeringBatch }` reduces the
+    // objects of THIS trigger's event, read back through
+    // `extract_sources_from_event`. That only yields anything for the events that
+    // actually carry their subjects — the declared-attackers batch (CR 508.1) and
+    // the per-object zone-change batch (CR 603.10a). Every other trigger event
+    // exposes NO object set, so an anaphor bound to its "batch" would reduce an
+    // EMPTY set to a confident 0 while the card rendered as fully supported.
+    //
+    // A Premonition of Your Demise is the live proof: "When you reveal one or
+    // more nonland cards this way, this scheme deals damage equal to their total
+    // mana value" is a `SetInMotion` scheme trigger. Its event carries no revealed
+    // cards, so binding "their" to the batch deals 0 damage — strictly worse than
+    // the honest gap it replaced. Bind only where the batch is PROVEN reachable;
+    // everything else fails honestly (`Effect::unimplemented`).
+    if !mode_exposes_subject_batch(&def.mode) {
+        if let Some(ability) = execute.as_deref_mut() {
+            crate::parser::oracle_effect::demote_unbindable_batch_aggregate(
+                ability,
+                &modifiers.effect_lower,
+            );
+        }
+    }
     if modifiers.relative_player_scope == Some(ControllerRef::TargetPlayer) {
         if let Some(ability) = execute.as_deref_mut() {
             crate::parser::oracle_effect::rewrite_event_player_quantity_refs_to_scoped(ability);
