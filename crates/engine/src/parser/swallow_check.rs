@@ -322,6 +322,23 @@ fn detect_replacement(
     //   $ rg '^    \w*Enter\w*\s*[,{(]' crates/engine/src/types/
     //     StaticMode::EntersWithAdditionalCounters   StaticMode::CantEnterBattlefieldFrom
     //     ContinuousModification::AddCounterOnEnter  Effect::AddPendingEntersModifications
+    //
+    // That grep is exactly why `Effect::AddPendingETBCounters` was missing below: it keys
+    // on variants NAMED Enter*, and this one is named Add*. It is the DELAYED CR 614.1c
+    // carrier — the enters-with rider that binds to a LATER cast instead of to the source
+    // permanent. Yuna, Grand Summoner ("When you next cast a creature spell this turn,
+    // that creature enters with two additional +1/+1 counters on it") lowers to
+    // `CreateDelayedTrigger{ WhenNextEvent{SpellCast} -> AddPendingETBCounters }`;
+    // Osteomancer Adept's graveyard-cast rider lowers to a sequential
+    // `AddPendingETBCounters` consumed as `CastFromZone` permission metadata. Both ARE the
+    // replacement, and neither produces a `ReplacementDefinition`. Omitting it reported 5
+    // FALSE POSITIVES pool-wide: chocobo camp, kumano faces kakkazan, osteomancer adept,
+    // summon: fenrir, yuna.
+    //
+    // It must be probed via the tree-global typed evidence, NOT via the structural
+    // `effect_is_replacement_carrier` walk: that walk descends `sub_ability` / `else_ability`
+    // / `mode_abilities` only, so it cannot see a carrier nested inside an EFFECT — and
+    // Yuna's carrier lives inside `Effect::CreateDelayedTrigger`'s inner definition.
     if evidence.any_static_mode(|m| {
         matches!(
             m,
@@ -329,8 +346,12 @@ fn detect_replacement(
         )
     }) || evidence.any::<ContinuousModification>(|m| {
         matches!(m, ContinuousModification::AddCounterOnEnter { .. })
-    }) || evidence.any_effect(|e| matches!(e, Effect::AddPendingEntersModifications { .. }))
-    {
+    }) || evidence.any_effect(|e| {
+        matches!(
+            e,
+            Effect::AddPendingEntersModifications { .. } | Effect::AddPendingETBCounters { .. }
+        )
+    }) {
         return;
     }
     // CR 614.1c + CR 614.12: the per-object enters-modifier slots — an "as it enters"
@@ -7923,6 +7944,58 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             has_owned_triggering(target),
             "Tinybones must restrict the cast to the damaged player's graveyard \
              via Owned{{TriggeringPlayer}}; got {target:?}"
+        );
+    }
+
+    /// CR 614.1c: `Effect::AddPendingETBCounters` IS the "enters with ..." replacement in
+    /// its DELAYED form — the rider binds to a later cast, not to the source permanent.
+    /// The `Replacement` detector reported 5 pool-wide FALSE POSITIVES until the shared
+    /// carrier helper accepted it (chocobo camp, kumano faces kakkazan, osteomancer adept,
+    /// summon: fenrir, yuna). Both producing grammars are pinned: the delayed
+    /// when-you-next-cast trigger (Yuna) and the cast-this-way graveyard rider
+    /// (Osteomancer Adept).
+    ///
+    /// The negative assertions cannot be vacuous: the detector only fires when the
+    /// "enters with " marker is present AND no carrier is found, and the POSITIVE CONTROL
+    /// below carries the same marker with no carrier — it must still fire. If the control
+    /// ever goes quiet, the detector is broken, not the cards.
+    #[test]
+    fn replacement_accepts_add_pending_etb_counters_as_a_614_1c_carrier() {
+        let yuna = parse_named(
+            "{T}: Add one mana of any color. When you next cast a creature spell this turn, that creature enters with two additional +1/+1 counters on it.",
+            "Yuna, Grand Summoner",
+            &["Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&yuna, "Replacement"),
+            "CR 614.1c: the delayed enters-with rider lowers to AddPendingETBCounters, which \
+             IS the replacement — it must not be reported as swallowed"
+        );
+
+        let osteomancer = parse_named(
+            "{T}: Until end of turn, you may cast creature spells from your graveyard. If you cast a spell this way, that creature enters with a finality counter on it.",
+            "Osteomancer Adept",
+            &["Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&osteomancer, "Replacement"),
+            "the cast-this-way graveyard rider is the same CR 614.1c carrier"
+        );
+
+        // POSITIVE CONTROL: the same "enters with" marker with NO carrier the parser can
+        // build. Undead Sprinter is a MEASURED true positive of this detector (its
+        // cast-permission is a STATIC, and the static path has no enters-with rider hook —
+        // see the CR 614.1c static-path gap). The detector MUST still fire on it, or the
+        // two assertions above prove nothing.
+        let uncarried = parse_named(
+            "Trample, haste\nYou may cast this card from your graveyard if a non-Zombie creature died this turn. If you do, this creature enters with a +1/+1 counter on it.",
+            "Undead Sprinter",
+            &["Creature"],
+        );
+        assert!(
+            has_swallowed_detector(&uncarried, "Replacement"),
+            "positive control: an enters-with clause with NO carrier must still be reported \
+             — if this goes quiet the detector is dead and the assertions above are vacuous"
         );
     }
 }
