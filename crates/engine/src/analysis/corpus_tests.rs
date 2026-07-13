@@ -999,6 +999,40 @@ fn drive_drain_idx17_targeted_wins_live() {
     );
 }
 
+/// Issue #4787: Bloodthirsty Conqueror + Enduring Tenacity is the reported
+/// targeted drain/refill loop. It is structurally close to idx17 (Sanguine Bond +
+/// Exquisite Blood), but the report names this concrete card pair, so keep a
+/// direct live witness pinned to the actual parsed cards.
+#[test]
+fn drive_bloodthirsty_conqueror_enduring_tenacity_wins_live() {
+    let Some(mut board) = corpus::build_drain_board(
+        card_db(),
+        &["Bloodthirsty Conqueror", "Enduring Tenacity"],
+        200,
+    ) else {
+        return; // export absent: skip
+    };
+    corpus::seed_lifegain_cascade(&mut board);
+    let trace = corpus::drive_pass_priority(&mut board, 40);
+    assert!(
+        trace.iter().all(|t| !matches!(
+            t.wf,
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
+        )),
+        "Enduring Tenacity's targeted trigger must auto-resolve to the sole opponent"
+    );
+    let (beat, winner) = corpus::first_gameover_beat(&trace)
+        .expect("Bloodthirsty Conqueror + Enduring Tenacity must win LIVE via the persisted ring");
+    assert_eq!(
+        winner, P0,
+        "the single non-falling player (P0) must be the winner"
+    );
+    assert!(
+        beat <= 12,
+        "the live win must fire from the ring, not the natural 704.5a death; got beat {beat}"
+    );
+}
+
 /// C-L1-probe — Defect-2 BOUNDED-TERMINATION regression guard. After the live drive
 /// has populated the ring at the RESOLVING `Priority{non-active}` window (ring ≥ 2,
 /// stack≠∅, BEFORE any `GameOver`), call `legal_actions` directly. The legality
