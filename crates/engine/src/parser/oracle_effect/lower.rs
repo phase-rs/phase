@@ -29,12 +29,12 @@ use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, CastingPermission, Comparator, ConjureSource, ContinuousModification,
-    ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission, MultiTargetSpec,
-    ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
-    QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TypeFilter, TypedFilter,
+    ControllerRef, DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect,
+    EffectScope, FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission,
+    MultiTargetSpec, ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue,
+    QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -7869,6 +7869,14 @@ pub(super) fn apply_where_x_effect_expression(
             mana_value_limit: amount,
             ..
         }
+        // CR 701.47a: "amass Orcs X, where X is …" (Fall of Cair Andros) — "put N
+        // +1/+1 counters on that creature", so N is the bound quantity. Without
+        // this arm the where-X binding was never attempted and the bare
+        // `Variable("X")` SURVIVED — amassing 0 counters at runtime while the face
+        // still rendered as fully supported. This match is NOT exhaustive over the
+        // 64 `QuantityExpr`-carrying variants, and the `_ => {}` below turns every
+        // unenumerated one into that same silent fabrication rather than a red.
+        | Effect::Amass { count: amount, .. }
         | Effect::Incubate { count: amount } => {
             bind_where_x_quantity(amount, where_x_expression, &mut unbound_where_x);
         }
@@ -8560,10 +8568,77 @@ fn apply_where_x_to_filter_prop(
     })
 }
 
+/// CR 120.10: the BARE demonstrative "that excess damage" — no subject, no
+/// "dealt this way" tail to anchor it.
+///
+/// The shared quantity grammar deliberately declines this phrase, because out of
+/// context its antecedent is ambiguous and the two readings resolve from DIFFERENT
+/// state (see [`rebind_context_dependent_where_x`]). Only the def-level licence can
+/// bind it, so it is recognised here rather than in the leaf combinators.
+fn parse_bare_excess_demonstrative(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(value((), (tag("that "), tag("excess damage")))).parse(input)
+}
+
+/// CR 120.10 + CR 107.3c: licence a resolution-local demonstrative where-X tail
+/// against the definition's OWN condition, normalizing it onto the explicit phrase
+/// the shared quantity grammar already binds.
+///
+/// "…, where X is that excess damage" has two readings, and a context-free leaf
+/// combinator cannot separate them:
+///
+///   - Contest of Claws — "IF EXCESS DAMAGE WAS DEALT THIS WAY, discover X, where X
+///     is that excess damage." The sibling condition lowers to
+///     `AbilityCondition::PreviousEffectAmount { channel: Excess }` on THIS def. That
+///     condition is the LICENCE: it proves the antecedent is this resolution's own
+///     excess tally, which `last_effect_excess_amount` is holding and which
+///     `QuantityRef::PreviousEffectAmount { channel: Excess }` reads correctly.
+///
+///   - Fall of Cair Andros — "Whenever a creature an opponent controls is dealt
+///     excess noncombat damage, amass Orcs X, where X is that excess damage." The
+///     antecedent is the TRIGGERING EVENT. The triggered ability resolves as its own
+///     top-level chain and the depth-0 prelude has already CLEARED
+///     `last_effect_excess_amount`, so the resolution-local read would silently
+///     amass 0 while rendering as supported. It carries no such condition, so it is
+///     not licensed, and CR 107.3c keeps it an honest gap.
+///
+/// The disambiguator therefore lives exactly one layer above the leaf — on the def,
+/// next to the effect — which is why this runs here and not in `oracle_nom`.
+/// Rewriting onto the explicit phrase (rather than binding a second leaf) keeps ONE
+/// grammar and ONE binding authority.
+///
+/// This mirrors the `rebind_target_anaphor` seam below, which likewise resolves a
+/// demonstrative anaphor at the lowering layer against a disambiguator the leaf
+/// cannot see.
+fn rebind_context_dependent_where_x(
+    def: &AbilityDefinition,
+    where_x_expression: Option<&str>,
+) -> Option<String> {
+    let expression = where_x_expression?;
+    let normalized = expression.trim().trim_end_matches('.').to_ascii_lowercase();
+    parse_bare_excess_demonstrative(normalized.as_str()).ok()?;
+    // The licence: this definition's own condition reads the resolution-local
+    // EXCESS channel ("if excess damage was dealt this way").
+    matches!(
+        def.condition.as_ref(),
+        Some(AbilityCondition::PreviousEffectAmount {
+            channel: DamageChannel::Excess,
+            ..
+        })
+    )
+    .then(|| "the amount of excess damage dealt this way".to_string())
+}
+
 pub(super) fn apply_where_x_ability_expression(
     def: &mut AbilityDefinition,
     where_x_expression: Option<&str>,
 ) {
+    // CR 120.10: a context-dependent demonstrative tail is licensed against this
+    // def's condition and normalized onto the phrase the shared grammar binds,
+    // BEFORE any of the rewrites below consume it. Unlicensed demonstratives fall
+    // through unchanged and are reported as CR 107.3c gaps by the passes below.
+    let licensed_where_x = rebind_context_dependent_where_x(def, where_x_expression);
+    let where_x_expression = licensed_where_x.as_deref().or(where_x_expression);
+
     // CR 107.3i: All instances of X on an object share one value at any given
     // time. Substitute X in this AbilityDefinition's condition before walking
     // into effect/sub_ability/etc. The recursion below visits every chained

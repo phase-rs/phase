@@ -29,9 +29,11 @@
 //! Oracle text below is read from the card export, not from memory.
 
 use engine::game::quantity::resolve_quantity;
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{DamageChannel, Effect, QuantityExpr, QuantityRef};
+use engine::types::game_state::{CastOfferKind, WaitingFor};
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 
 /// Pull the single quantity a parsed one-clause ability carries.
@@ -99,10 +101,15 @@ fn excess_damage_this_way_reads_the_excess_not_the_total_and_not_zero() {
 /// A context-free leaf combinator cannot separate them; the disambiguator (the
 /// sibling "dealt this way" condition vs. the trigger condition) lives one layer up.
 /// Binding the bare demonstrative here would have swapped a crude raw-text
-/// fabrication for a better-disguised one. Until the clause-layer rebind exists,
-/// it stays red.
+/// fabrication for a better-disguised one.
+///
+/// The def-level licence now EXISTS (`rebind_context_dependent_where_x`), so this
+/// case is no longer "pending" — it is the standing NEGATIVE side of that licence.
+/// This oracle text carries NO condition, so nothing licences a resolution-local
+/// read and CR 107.3c keeps it a gap. If the licence were ever widened to bind the
+/// demonstrative unconditionally, this test is what turns red.
 #[test]
-fn bare_that_excess_damage_stays_an_honest_red_pending_clause_layer_rebind() {
+fn bare_that_excess_damage_stays_an_honest_red_without_a_licensing_condition() {
     let parsed = parse_oracle_text(
         "You gain X life, where X is that excess damage.",
         "~",
@@ -261,6 +268,152 @@ fn subjectless_amount_of_excess_phrase_reads_the_excess_channel() {
         resolved, 5,
         "\"the amount of excess damage dealt this way\" must read the EXCESS channel \
          (5), not the total (9). Got {resolved} from {expr:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #91: the where-X binding is a DEF-LEVEL single authority.
+//
+// "that excess damage" is a demonstrative whose antecedent a context-free leaf
+// combinator cannot resolve. The disambiguator is the DEF's own condition:
+//
+//   Contest of Claws     "IF EXCESS DAMAGE WAS DEALT THIS WAY, discover X, where
+//                         X is that excess damage."
+//                        -> AbilityCondition::PreviousEffectAmount { channel:
+//                           Excess } sits on the same def. That condition is the
+//                           LICENCE: it proves the antecedent is this resolution's
+//                           own excess tally, which is live and correct to read.
+//
+//   Fall of Cair Andros  "Whenever a creature an opponent controls is dealt excess
+//                         noncombat damage, amass Orcs X, where X is that excess
+//                         damage."
+//                        -> NO such condition. The antecedent is the TRIGGERING
+//                           EVENT, and the depth-0 prelude has already cleared
+//                           `last_effect_excess_amount`. Binding here would amass 0
+//                           while rendering as supported. It stays an honest red.
+//
+// The licence check therefore has to run where the condition is visible — the
+// def-level pass (`apply_where_x_ability_expression`). It could not, because the
+// Discover clause parser made its OWN bind-or-red decision at clause-parse time,
+// before any condition was attached, and by def-level time the Discover shape was
+// already gone (replaced by the gap node).
+// ---------------------------------------------------------------------------
+
+/// CR 120.10 + CR 701.57a — Contest of Claws, driven through the REAL cast
+/// pipeline (Oracle text verbatim from MTGJSON, not paraphrased).
+///
+/// A 5-power creature dealt into a 2-toughness creature deals 3 excess (CR 120.10:
+/// "excess damage equal to the difference"). The excess is stamped by the LIVE
+/// damage effect during the same resolution — not hand-written onto the state —
+/// and the discover in the very next instruction must run for exactly that 3.
+///
+/// The discover offer carries the RESOLVED N (`discover_value`), so this reads the
+/// bound quantity straight out of live pause-state. The two outcomes are cleanly
+/// separable:
+///   - bound: `discover_value == 3` and the mana-value-3 card is the hit.
+///   - fabricated: discover for 0 — no nonland card has mana value <= 0, so the
+///     library is milled to exile and NO offer is ever raised.
+#[test]
+fn contest_of_claws_discovers_for_the_resolution_chain_excess() {
+    // Verbatim Oracle text (MTGJSON `AtomicCards.json`).
+    const CONTEST_OF_CLAWS: &str = "Target creature you control deals damage equal to its power to another target creature. If excess damage was dealt this way, discover X, where X is that excess damage. (Exile cards from the top of your library until you exile a nonland card with that mana value or less. Cast it without paying its mana cost or put it into your hand. Put the rest on the bottom in a random order.)";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // 5 power into 2 toughness => 3 excess (CR 120.10).
+    let dealer = scenario.add_creature(P0, "Dealer", 5, 5).id();
+    let victim = scenario.add_creature(P1, "Victim", 0, 2).id();
+    // The discover hit: a nonland card whose mana value equals the excess.
+    let hit = scenario
+        .add_spell_to_library_top(P0, "Discover Hit", false)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Contest of Claws", false, CONTEST_OF_CLAWS)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[dealer, victim])
+        .resolve();
+
+    // CR 120.10: the live damage effect stamped the excess channel.
+    assert_eq!(
+        outcome.state().last_effect_excess_amount,
+        Some(3),
+        "the real resolution chain must stamp 3 excess (5 power dealt into 2 toughness)",
+    );
+
+    match outcome.final_waiting_for() {
+        WaitingFor::CastOffer {
+            kind:
+                CastOfferKind::Discover {
+                    hit_card,
+                    discover_value,
+                    ..
+                },
+            ..
+        } => {
+            assert_eq!(
+                *discover_value, 3,
+                "CR 107.3c + CR 120.10: \"where X is that excess damage\" must bind X to the \
+                 3 excess this resolution actually dealt, not fabricate 0",
+            );
+            assert_eq!(
+                *hit_card, hit,
+                "discover 3 must hit the mana-value-3 card on top of the library",
+            );
+        }
+        other => panic!(
+            "expected a Discover offer for 3 — \"where X is that excess damage\" did not bind. \
+             The resolution halted at: {other:?}",
+        ),
+    }
+}
+
+/// GATE — Fall of Cair Andros must stay an HONEST RED (Oracle text verbatim).
+///
+/// Its "that excess damage" reads the TRIGGERING EVENT, and the def carries no
+/// "dealt this way" condition to licence a resolution-local read. The licence
+/// check is the condition, so this face has none and must not bind. Binding it
+/// would silently amass 0 while rendering as fully supported — strictly worse
+/// than the gap node.
+///
+/// This is the negative control that keeps the def-level rebind honest: a fix that
+/// bound the demonstrative unconditionally would turn this red green and pass every
+/// positive witness above.
+#[test]
+fn fall_of_cair_andros_trigger_excess_stays_an_honest_red() {
+    let parsed = parse_oracle_text(
+        "Whenever a creature an opponent controls is dealt excess noncombat damage, amass Orcs X, \
+         where X is that excess damage. (Put X +1/+1 counters on an Army you control. It's also an \
+         Orc. If you don't control an Army, create a 0/0 black Orc Army creature token first.)",
+        "Fall of Cair Andros",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+
+    // The clause lives in the trigger's execute step, so look there as well as in
+    // the top-level abilities — a gap in either place is the honest red.
+    let has_gap = parsed
+        .abilities
+        .iter()
+        .any(|def| matches!(&*def.effect, Effect::Unimplemented { .. }))
+        || parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_ref())
+            .any(|e| matches!(&*e.effect, Effect::Unimplemented { .. }));
+
+    assert!(
+        has_gap,
+        "Fall of Cair Andros' \"that excess damage\" names the TRIGGERING EVENT's excess, not a \
+         resolution-local tally, and the def carries no \"dealt this way\" condition to licence \
+         one. It must stay an Effect::unimplemented gap — binding it would amass 0 while \
+         rendering as supported. Parsed abilities: {:?} triggers: {:?}",
+        parsed.abilities, parsed.triggers,
     );
 }
 
