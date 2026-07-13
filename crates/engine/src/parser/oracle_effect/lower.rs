@@ -7740,6 +7740,21 @@ fn parse_amount_of_mana_paid_this_way(input: &str) -> OracleResult<'_, ()> {
 pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
     let expression = where_x_expression.trim().trim_end_matches('.');
     let expression_lower = expression.to_ascii_lowercase();
+    // CR 702.51c + CR 603.3: Knight-Errant of Eos reads the number of
+    // creatures that convoked the spell which became this permanent. The
+    // casting pipeline preserves that count through the zone change, so the
+    // ETB reveal filter can use the existing source-relative quantity.
+    if all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("the number of creatures that convoked "),
+        alt((tag("this creature"), tag("~"))),
+    ))
+    .parse(expression_lower.as_str())
+    .is_ok()
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::ConvokedCreatureCount,
+        });
+    }
     // CR 107.3i + CR 608.2g: Within a single resolution, X has one value used
     // everywhere it appears. Join Forces ("Each player draws X cards, where
     // X is the total amount of mana paid this way") binds X to the total
