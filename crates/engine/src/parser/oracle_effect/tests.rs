@@ -26936,6 +26936,69 @@ fn any_player_may_have_deal_damage_with_if_no_one_does_reward() {
     );
 }
 
+/// CR 608.2d + CR 101.4: Zur's Weirding — "any other player may pay 2 life"
+/// must peel to `optional: true` + `optional_for: AnyOtherPlayer`, distinct
+/// from both `AnyOpponent` (controller-relative) and `AnyPlayer` (excludes no
+/// one). The reported defect (issue #5657) was that the clause fell to
+/// `Effect::Unimplemented { name: "any" }` mid-chain (no peel existed),
+/// severing the following "if a player does … / otherwise …" branches; the
+/// peeled root effect must therefore no longer be `Unimplemented`.
+#[test]
+fn any_other_player_may_pay_life_sets_anyotherplayer_scope() {
+    let def = parse_effect_chain(
+        "any other player may pay 2 life. if a player does, put that card \
+             into its owner's graveyard. otherwise, that player draws a card",
+        AbilityKind::Spell,
+    );
+    assert!(def.optional, "should be optional");
+    assert_eq!(
+        def.optional_for,
+        Some(crate::types::ability::OpponentMayScope::AnyOtherPlayer),
+        "should have AnyOtherPlayer scope"
+    );
+    assert_ne!(
+        def.optional_for,
+        Some(crate::types::ability::OpponentMayScope::AnyOpponent),
+        "AnyOtherPlayer must NOT collapse to AnyOpponent (controller-relative)"
+    );
+    assert_ne!(
+        def.optional_for,
+        Some(crate::types::ability::OpponentMayScope::AnyPlayer),
+        "AnyOtherPlayer must NOT collapse to AnyPlayer (excludes no one)"
+    );
+    // Core defect: the "any other player may …" clause used to become the
+    // imperative `Effect::Unimplemented { name: "any" }` fallback because no
+    // opponent-may peel matched it. The peel must now consume it so the root
+    // effect is a real effect, not the gap node.
+    assert!(
+        !matches!(*def.effect, Effect::Unimplemented { .. }),
+        "peeled root effect must not be Unimplemented, got {:?}",
+        def.effect
+    );
+}
+
+/// CR 608.2d: the bare "any other player may …" peel must set the scope on the
+/// parse context exactly like the sibling `any opponent may` peel (which is
+/// asserted in `clause_shell.rs`), covering the whole "any other player may X"
+/// class rather than Zur's Weirding alone.
+#[test]
+fn any_other_player_may_peel_is_distinct_from_any_opponent() {
+    let other = parse_effect_chain("any other player may pay 2 life", AbilityKind::Spell);
+    let opp = parse_effect_chain("any opponent may pay 2 life", AbilityKind::Spell);
+    assert_eq!(
+        other.optional_for,
+        Some(crate::types::ability::OpponentMayScope::AnyOtherPlayer)
+    );
+    assert_eq!(
+        opp.optional_for,
+        Some(crate::types::ability::OpponentMayScope::AnyOpponent)
+    );
+    assert_ne!(
+        other.optional_for, opp.optional_for,
+        "the 'other' peel must not alias the opponent peel"
+    );
+}
+
 /// CR 608.2e + CR 109.5: Braids, Arisen Nightmare's decline-consequence
 /// tail. "If you do, each opponent may sacrifice ... For each opponent who
 /// doesn't, that player loses 2 life and you draw a card." must lower to a

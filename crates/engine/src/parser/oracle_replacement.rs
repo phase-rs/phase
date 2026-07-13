@@ -466,7 +466,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             if optional_modal_present {
                 def = def.mode(ReplacementMode::Optional { decline: None });
             }
-            def = def.execute(parse_effect_chain(effect_after_modal, AbilityKind::Spell));
+            let mut execute = parse_effect_chain(effect_after_modal, AbilityKind::Spell);
+            rewrite_draw_replacement_execute_referents(&mut execute);
+            def = def.execute(execute);
         }
         // CR 614.1a: Player scope for draw replacements.
         apply_draw_player_scope(&lower, &mut def);
@@ -555,7 +557,7 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             // damage recipients. Generic `ParentTarget*` resolution is left
             // untouched.
             let mut execute = parse_effect_chain(&e, AbilityKind::Spell);
-            rewrite_damage_recipient_to_post_replacement_target(&mut execute);
+            rewrite_replacement_event_recipient_to_post_replacement_target(&mut execute);
             def = def.execute(execute);
         }
         // CR 614.1a: Parse the subject to determine player scope.
@@ -8554,7 +8556,7 @@ fn parse_damage_to_player_instead_followup(
 
     let effect_text = original_text.get(effect_start..effect_start + effect_len)?;
     let mut followup = parse_effect_chain(effect_text, AbilityKind::Spell);
-    rewrite_damage_recipient_to_post_replacement_target(&mut followup);
+    rewrite_replacement_event_recipient_to_post_replacement_target(&mut followup);
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -9064,7 +9066,7 @@ fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut Ability
 /// `ParentTarget` to `PostReplacementDamageTarget` so the runtime resolves
 /// it against `state.post_replacement_event_target`.
 ///
-/// Sibling of `rewrite_damage_recipient_to_post_replacement_target` which
+/// Sibling of `rewrite_replacement_event_recipient_to_post_replacement_target` which
 /// handles the player-anaphor cohort ("that player draws cards ..."). Kept
 /// separate so the player walker stays scoped to player refs and this walker
 /// only fires when the caller has confirmed the shield is event-driven (via
@@ -9173,16 +9175,63 @@ fn rewrite_parent_target_to_self_ref(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 615.5: In a prevention follow-up attached to "damage would be dealt to a
-/// player", the surface subject "that player" refers to the prevented event's
-/// damage recipient. The ordinary effect parser has no active trigger event in
-/// this replacement context, so it lowers a standalone non-trigger "that player"
-/// subject to `TargetFilter::ParentTargetController` (the generic CR 608.2c
-/// anaphor) — or, inside a trigger context, to `TargetFilter::TriggeringPlayer`.
-/// Neither resolves correctly here (there is no parent target and no trigger
-/// event), so rewrite the anaphoric recipient to `PostReplacementDamageTarget`
-/// at the call site.
-fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefinition) {
+/// CR 614.6 + CR 608.2c: In a draw-replacement execute chain ("they reveal it
+/// instead. Then any other player may … / otherwise, that player draws"), surface
+/// pronouns refer to the replaced draw's affected player and the card they would
+/// have drawn — not the ability's controller. The generic effect parser lowers
+/// "they reveal it" to `RevealTop { player: Controller }` and standalone "that
+/// player" subjects to `ParentTargetController` / `TriggeringPlayer`. Rewrite at
+/// the parser seam, mirroring the lifegain-replacement and CR 615.5 prevention
+/// follow-up paths.
+fn rewrite_draw_replacement_execute_referents(def: &mut AbilityDefinition) {
+    rewrite_reveal_top_player_to_post_replacement_target(def);
+    rewrite_replacement_event_recipient_to_post_replacement_target(def);
+}
+
+/// CR 614.6 + CR 701.20a: "they reveal it" in a draw replacement reveals the top
+/// card of the *drawing player's* library, not the enchantment controller's.
+fn rewrite_reveal_top_player_to_post_replacement_target(def: &mut AbilityDefinition) {
+    match def.effect.as_mut() {
+        Effect::RevealTop { player, .. } => {
+            if matches!(
+                player,
+                TargetFilter::Controller
+                    | TargetFilter::ParentTargetController
+                    | TargetFilter::TriggeringPlayer
+                    | TargetFilter::Player
+            ) {
+                *player = TargetFilter::PostReplacementDamageTarget;
+            }
+        }
+        // CR 701.20a: a subject-bound "they reveal it" can lower to
+        // `Reveal { ParentTarget }` before chain lowering; in a draw replacement
+        // the anaphor is the would-be-drawn library top, not a parent target slot.
+        Effect::Reveal {
+            target: TargetFilter::ParentTarget,
+        } => {
+            *def.effect = Effect::RevealTop {
+                player: TargetFilter::PostReplacementDamageTarget,
+                count: 1,
+            };
+        }
+        _ => {}
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_reveal_top_player_to_post_replacement_target(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_reveal_top_player_to_post_replacement_target(else_branch);
+    }
+}
+
+/// CR 614.6 + CR 615.5: In an event-driven replacement execute chain, the
+/// surface recipient (for example, "that player") refers to the affected player
+/// of the replaced Draw, life-gain, or damage event. The ordinary effect parser
+/// has no active replacement event, so it lowers the anaphor to
+/// `ParentTargetController` or `TriggeringPlayer`; neither resolves correctly
+/// once the replacement continuation runs. Rewrite that recipient to the
+/// explicit post-replacement event target at the parser seam.
+fn rewrite_replacement_event_recipient_to_post_replacement_target(def: &mut AbilityDefinition) {
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
         if matches!(
             f,
@@ -9194,10 +9243,10 @@ fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefiniti
         }
     });
     if let Some(sub) = def.sub_ability.as_mut() {
-        rewrite_damage_recipient_to_post_replacement_target(sub);
+        rewrite_replacement_event_recipient_to_post_replacement_target(sub);
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
-        rewrite_damage_recipient_to_post_replacement_target(else_branch);
+        rewrite_replacement_event_recipient_to_post_replacement_target(else_branch);
     }
 }
 
@@ -18921,6 +18970,72 @@ mod snapshot_tests {
             );
             node = ability.sub_ability.as_deref();
         }
+    }
+
+    /// CR 614.6 + CR 608.2d: Zur's Weirding — the draw-replacement execute must
+    /// thread the affected drawing player through "they reveal it" and "that
+    /// player draws", and peel "any other player may" to `AnyOtherPlayer`.
+    #[test]
+    fn zurs_weirding_draw_replacement_threads_affected_player_referents() {
+        use crate::types::ability::{AbilityCondition, OpponentMayScope};
+        let def = parse_replacement_line(
+            "If a player would draw a card, they reveal it instead. Then any other player may pay 2 life. \
+             If a player does, put that card into its owner's graveyard. Otherwise, that player draws a card.",
+            "Zur's Weirding",
+        )
+        .expect("Zur's Weirding must parse as a Draw replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::AnyPlayer));
+
+        let execute = def.execute.as_ref().expect("execute chain must be present");
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::RevealTop {
+                    player: TargetFilter::PostReplacementDamageTarget,
+                    count: 1,
+                }
+            ),
+            "reveal-it must target the drawing player via PostReplacementDamageTarget, got {:?}",
+            execute.effect
+        );
+
+        let opponent_may = execute
+            .sub_ability
+            .as_ref()
+            .expect("reveal must chain to opponent-may");
+        assert!(opponent_may.optional);
+        assert_eq!(
+            opponent_may.optional_for,
+            Some(OpponentMayScope::AnyOtherPlayer),
+            "any other player may must peel to AnyOtherPlayer"
+        );
+
+        let if_player_does = opponent_may
+            .sub_ability
+            .as_ref()
+            .expect("opponent-may must chain to if-a-player-does");
+        assert_eq!(
+            if_player_does.condition,
+            Some(AbilityCondition::effect_performed())
+        );
+
+        let else_draw = if_player_does
+            .else_ability
+            .as_ref()
+            .expect("if-a-player-does must carry otherwise draw");
+        assert!(
+            matches!(
+                *else_draw.effect,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::PostReplacementDamageTarget,
+                }
+            ),
+            "otherwise draw must draw one card for the drawing player, got {:?}",
+            else_draw.effect
+        );
     }
 
     /// CR 614.1a + CR 614.6: A "you may instead" lead-in on a draw

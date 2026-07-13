@@ -6,7 +6,7 @@ use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
 use crate::types::statics::StaticMode;
 #[cfg(test)]
 use crate::types::zones::Zone;
@@ -139,7 +139,13 @@ pub fn resolve(
     // (num_cards > 1) performs that many individual card draws, each offered
     // replacement independently, instead of the whole count being replaced or
     // drawn as one atomic batch.
-    match start_draw_sequence(state, drawing_player, num_cards, events) {
+    match start_draw_sequence_with_replacement_applied(
+        state,
+        drawing_player,
+        num_cards,
+        ability.replacement_applied.clone(),
+        events,
+    ) {
         ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}
         ReplacementResult::NeedsChoice(_) => return Ok(()),
     }
@@ -166,7 +172,24 @@ pub(crate) fn start_draw_sequence(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
-    let frame_id = state.draw_sequences.push(player, count);
+    start_draw_sequence_with_replacement_applied(state, player, count, HashSet::new(), events)
+}
+
+/// CR 614.5 + CR 121.2: Begin a draw instruction with replacements that have
+/// already applied to its originating event. A replacement's continuation can
+/// itself instruct a player to draw; every individual draw in that instruction
+/// must retain the originating event's applied set so the same replacement is
+/// not offered again after a pause or a multi-card sequence.
+fn start_draw_sequence_with_replacement_applied(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    count: u32,
+    applied: HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+) -> replacement::ReplacementResult {
+    let frame_id = state
+        .draw_sequences
+        .push_with_replacement_applied(player, count, applied);
     resume_draw_sequence(state, frame_id, events)
 }
 
@@ -216,11 +239,19 @@ pub(crate) fn resume_draw_sequence(
         }
         frame.remaining -= 1;
         let player = frame.player;
+        let applied = frame.applied.clone();
 
         let mut unit_drawn: u32 = 0;
-        let result = draw_through_replacement(state, player, 1, events, |state, event, events| {
-            unit_drawn = apply_draw_after_replacement(state, event, events);
-        });
+        let result = draw_through_replacement_with_applied(
+            state,
+            player,
+            1,
+            applied,
+            events,
+            |state, event, events| {
+                unit_drawn = apply_draw_after_replacement(state, event, events);
+            },
+        );
         match result {
             ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
                 // The unit's delivery may itself have pushed and popped a nested
@@ -276,10 +307,31 @@ pub(crate) fn draw_through_replacement(
     events: &mut Vec<GameEvent>,
     apply_executed: impl FnOnce(&mut GameState, ProposedEvent, &mut Vec<GameEvent>),
 ) -> replacement::ReplacementResult {
+    draw_through_replacement_with_applied(
+        state,
+        player_id,
+        count,
+        HashSet::new(),
+        events,
+        apply_executed,
+    )
+}
+
+/// CR 614.5: Propose a draw while preserving replacements already applied to
+/// the instruction that produced it. The public wrapper starts a fresh draw;
+/// draw sequences use this authority to resume replacement continuations.
+fn draw_through_replacement_with_applied(
+    state: &mut GameState,
+    player_id: crate::types::player::PlayerId,
+    count: u32,
+    applied: HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+    apply_executed: impl FnOnce(&mut GameState, ProposedEvent, &mut Vec<GameEvent>),
+) -> replacement::ReplacementResult {
     let proposed = ProposedEvent::Draw {
         player_id,
         count,
-        applied: HashSet::new(),
+        applied,
     };
     let result = replacement::replace_event(state, proposed, events);
     match &result {

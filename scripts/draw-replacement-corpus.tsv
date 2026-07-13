@@ -73,4 +73,4 @@ tomorrow, azami's familiar	Draw	Mandatory	none	Dig	-	IndividualDraw
 uba mask	Draw	Mandatory	none	ChangeZone	-	IndividualDraw
 underrealm lich	Draw	Mandatory	none	Dig	-	IndividualDraw
 vnwxt, verbose host	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
-zur's weirding	Draw	Mandatory	none	Reveal	nested-draw	IndividualDraw
+zur's weirding	Draw	Mandatory	none	RevealTop	nested-draw	IndividualDraw
