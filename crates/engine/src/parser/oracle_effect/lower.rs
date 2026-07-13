@@ -1652,10 +1652,11 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
         return TargetChoiceTiming::Stack;
     };
     let off_battlefield_origin = origin.is_some_and(|zone| zone != Zone::Battlefield)
-        || target
-            .extract_zones()
-            .iter()
-            .any(|zone| *zone != Zone::Battlefield);
+        || (clause_ir.multi_target.is_some() || clause_ir.parsed.multi_target.is_some())
+            && target
+                .extract_zones()
+                .iter()
+                .any(|zone| *zone != Zone::Battlefield);
     if !off_battlefield_origin {
         return TargetChoiceTiming::Stack;
     }

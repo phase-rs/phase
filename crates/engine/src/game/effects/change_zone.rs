@@ -544,12 +544,12 @@ pub fn resolve(
         // battlefield.
         let scan_zones = if exile_tracked_set_library_only {
             vec![Zone::Library]
+        } else if let Some(origin) = origin {
+            vec![origin]
         } else {
             let extracted = target_filter.extract_zones();
             if extracted.len() > 1 {
                 extracted
-            } else if let Some(origin) = origin {
-                vec![origin]
             } else if let Some(zone) = target_filter.extract_in_zone() {
                 vec![zone]
             } else if let Some(zones) = tracked_set_member_zones(state, target_filter) {
