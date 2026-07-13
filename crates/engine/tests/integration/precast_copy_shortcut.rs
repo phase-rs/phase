@@ -798,9 +798,9 @@ fn precast_offer_uses_effective_copy_count_replacements_only() {
     }
 }
 
-/// A second player's Magecraft trigger makes the post-cast stack longer than
-/// the preflight transcript. It remains an ordinary priority sequence rather
-/// than a shortcut wait that cannot be materialized.
+/// A second caster-controlled Magecraft trigger makes the post-cast transcript
+/// non-canonical. It remains an ordinary trigger-ordering sequence rather than
+/// a shortcut wait that cannot be materialized.
 #[test]
 fn precast_offer_rejects_extra_cast_trigger_before_protocol_wait() {
     let mut scenario = GameScenario::new_n_player(2, 4_242);
@@ -812,7 +812,7 @@ fn precast_offer_rejects_extra_cast_trigger_before_protocol_wait() {
         witherbloom_db(),
     );
     scenario.add_real_card(
-        P1,
+        P0,
         "Witherbloom Apprentice",
         Zone::Battlefield,
         witherbloom_db(),
@@ -828,22 +828,20 @@ fn precast_offer_rejects_extra_cast_trigger_before_protocol_wait() {
             target: Some(TargetRef::Player(P0)),
         })
         .expect("target the Chain at its caster");
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { player } if player == P0
-    ));
-    assert_eq!(
-        runner.state().stack.len(),
-        3,
-        "the ordinary stack contains Chain plus both players' Magecraft triggers"
-    );
+    match &runner.state().waiting_for {
+        WaitingFor::OrderTriggers { player, triggers } => {
+            assert_eq!(*player, P0);
+            assert_eq!(triggers.len(), 2);
+        }
+        other => panic!("extra Magecraft trigger must enter ordinary ordering, got {other:?}"),
+    }
     assert!(
         !matches!(
             runner.state().waiting_for,
             WaitingFor::PrecastCopyShortcutOffer { .. }
                 | WaitingFor::RespondToPrecastCopyShortcut { .. }
         ),
-        "extra cast triggers must remain in the ordinary post-cast pipeline"
+        "extra cast triggers must remain in the ordinary trigger-ordering pipeline"
     );
 }
 
