@@ -6883,7 +6883,18 @@ fn spell_casting_option_parses_trap_alternative_cost() {
                 shards: vec![],
             },
         })
-        .condition(crate::types::ability::ParsedCondition::OpponentSearchedLibraryThisTurn)
+        .condition(crate::types::ability::ParsedCondition::QuantityComparison {
+            lhs: crate::types::ability::QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::PlayerActionsThisTurn {
+                    player: crate::types::ability::PlayerScope::Opponent {
+                        aggregate: crate::types::ability::AggregateFunction::Max,
+                    },
+                    action: crate::types::events::PlayerActionKind::SearchedLibrary,
+                },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+        })
     );
     assert_eq!(r.abilities.len(), 1);
     assert!(!matches!(
