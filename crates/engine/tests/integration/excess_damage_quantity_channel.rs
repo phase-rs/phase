@@ -181,3 +181,112 @@ fn no_excess_dealt_resolves_to_zero() {
          to the total (2). Got {resolved} from {expr:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #85 item (1): the SUBJECT-LESS excess phrase — "the excess damage dealt this
+// way" — silently reads the TOTAL channel.
+//
+// Root cause (parser/oracle_quantity.rs, `parse_damage_dealt_phrase`):
+//
+//     let (input, _) = opt(take_until("damage dealt")).parse(input)?;
+//     let (input, _) = tag("damage dealt").parse(input)?;
+//
+// `take_until("damage dealt")` DISCARDS everything before the verb phrase —
+// including the word "excess". So the subject-less excess phrase matches the
+// generic damage arm and returns `PreviousEffectAmount { channel: Total }`.
+// An unanchored scan swallowing a semantically load-bearing qualifier.
+//
+// The t78 grammar (oracle_nom/quantity.rs) only bound the form that names its
+// subject ("...dealt TO that creature this way"), so the subject-less form was
+// never reached by it and kept falling to the swallowing arm. That asymmetry is
+// the bug.
+//
+// Faces (Oracle text read from MTGJSON, not memory):
+//   Razor Rings                  "...deals 4 damage to target attacking or blocking
+//                                 creature. You gain life equal to the excess damage
+//                                 dealt this way."
+//   Cramped Vents // Access Maze "...deals 6 damage ... You gain life equal to the
+//                                 excess damage dealt this way."
+//   Windswift Slice              "...equal to the amount of excess damage dealt this way."
+//   Ravenous Pursuit             "...where X is the amount of excess damage dealt this way."
+// ---------------------------------------------------------------------------
+
+/// CR 120.10: Razor Rings deals 4 to a 1/1 — total 4, excess 3. "You gain life
+/// equal to the excess damage dealt this way" must gain 3, not 4.
+///
+/// Pre-fix this reads the TOTAL channel and gains 4 — a live, silently-wrong
+/// result that renders as fully supported.
+#[test]
+fn subjectless_excess_phrase_reads_the_excess_not_the_total() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Razor Rings", 1, 1).id();
+    let mut runner = scenario.build();
+
+    // 4 damage into a 1/1: total 4, excess 3 (CR 120.10 — "excess damage equal
+    // to the difference").
+    runner.state_mut().last_effect_amount = Some(4);
+    runner.state_mut().last_effect_excess_amount = Some(3);
+
+    let expr = only_quantity("You gain X life, where X is the excess damage dealt this way.");
+    let resolved = resolve_quantity(runner.state(), &expr, P0, source);
+
+    assert_eq!(
+        resolved, 3,
+        "the SUBJECT-LESS excess phrase must read the EXCESS channel (3), not the \
+         total (4). `take_until(\"damage dealt\")` discards the word \"excess\", so \
+         this phrase falls to the generic damage arm and silently gains the full 4. \
+         Got {resolved} from {expr:?}"
+    );
+}
+
+/// Same defect via the "the amount of excess ..." determiner (Windswift Slice,
+/// Ravenous Pursuit). The "amount of" prefix is an independent axis from the
+/// "excess" qualifier and must not be what decides the channel.
+#[test]
+fn subjectless_amount_of_excess_phrase_reads_the_excess_channel() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Windswift Slice", 1, 1).id();
+    let mut runner = scenario.build();
+
+    runner.state_mut().last_effect_amount = Some(9);
+    runner.state_mut().last_effect_excess_amount = Some(5);
+
+    let expr =
+        only_quantity("You gain X life, where X is the amount of excess damage dealt this way.");
+    let resolved = resolve_quantity(runner.state(), &expr, P0, source);
+
+    assert_eq!(
+        resolved, 5,
+        "\"the amount of excess damage dealt this way\" must read the EXCESS channel \
+         (5), not the total (9). Got {resolved} from {expr:?}"
+    );
+}
+
+/// NEGATIVE CONTROL — the plain (non-excess) phrase must KEEP reading the total.
+///
+/// Without this, a fix that simply routed every "damage dealt this way" phrase to
+/// the excess channel would pass both witnesses above while breaking the 8 pool
+/// faces that correctly want the total ("you gain life equal to the damage dealt
+/// this way").
+#[test]
+fn plain_damage_dealt_this_way_still_reads_the_total_channel() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Sanguine Bond", 1, 1).id();
+    let mut runner = scenario.build();
+
+    runner.state_mut().last_effect_amount = Some(4);
+    // Deliberately different, so a resolver reading the wrong channel is caught.
+    runner.state_mut().last_effect_excess_amount = Some(3);
+
+    let expr = only_quantity("You gain X life, where X is the damage dealt this way.");
+    let resolved = resolve_quantity(runner.state(), &expr, P0, source);
+
+    assert_eq!(
+        resolved, 4,
+        "the PLAIN damage phrase must still read the TOTAL channel (4), not the \
+         excess (3). Got {resolved} from {expr:?}"
+    );
+}

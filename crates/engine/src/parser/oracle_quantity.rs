@@ -38,9 +38,9 @@ use crate::parser::oracle_target::{parse_target, parse_type_phrase, parse_type_p
 use crate::parser::oracle_util::merge_or_filters;
 use crate::types::ability::{
     AggregateFunction, AttackScope, AttackSubject, Comparator, ControllerRef, CountScope,
-    DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter,
-    ThisWayCause, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
+    DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, ObjectScope,
+    PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, RoundingMode,
+    TargetFilter, ThisWayCause, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
@@ -1236,21 +1236,26 @@ fn parse_owned_cards_in_zones_quantity(
     Ok((rest, expr))
 }
 
-fn parse_previous_effect_amount_this_way(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
-    all_consuming(value(
-        (),
-        terminated(
-            (
-                opt(tag("the ")),
-                alt((
-                    parse_life_paid_or_lost_phrase,
-                    parse_damage_dealt_phrase,
-                    parse_dealt_damage_phrase,
-                    parse_counters_removed_phrase,
-                )),
-            ),
-            tag(" this way"),
+/// CR 608.2c + CR 120.6 / CR 120.10: "[the] <numeric result> this way", reporting
+/// WHICH damage channel the phrase named.
+///
+/// The damage arm carries a channel because "excess" is an independent qualifier
+/// axis over the same verb phrase; every other arm (life, counters) has no excess
+/// reading and reports `Total`.
+fn parse_previous_effect_amount_this_way(
+    input: &str,
+) -> nom::IResult<&str, DamageChannel, OracleError<'_>> {
+    all_consuming(terminated(
+        preceded(
+            opt(tag("the ")),
+            alt((
+                value(DamageChannel::Total, parse_life_paid_or_lost_phrase),
+                parse_damage_dealt_phrase,
+                value(DamageChannel::Total, parse_dealt_damage_phrase),
+                value(DamageChannel::Total, parse_counters_removed_phrase),
+            )),
         ),
+        tag(" this way"),
     ))
     .parse(input)
 }
@@ -1262,10 +1267,35 @@ fn parse_life_paid_or_lost_phrase(input: &str) -> nom::IResult<&str, (), OracleE
     Ok((input, ()))
 }
 
-fn parse_damage_dealt_phrase(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+/// CR 120.6 / CR 120.10: "[the] [amount of] [excess] damage dealt this way",
+/// reporting which channel the qualifier selected.
+///
+/// "excess" is a QUALIFIER on the damage, not part of the verb phrase. The prior
+/// implementation scanned with a single `take_until("damage dealt")`, which
+/// DISCARDS everything before the verb — including the word "excess" — so
+/// "the amount of excess damage dealt this way" matched the generic arm and read
+/// the TOTAL channel. Razor Rings gained the full 4 instead of the 3 excess; the
+/// same silent overcount hit Cramped Vents // Access Maze, Windswift Slice,
+/// Ravenous Pursuit, and Unleash the Inferno. An unanchored scan that swallows a
+/// semantically load-bearing qualifier reads as supported and is simply wrong.
+///
+/// The fix is to make the scan STOP AT the qualifier instead of swallowing it.
+/// The excess reading is tried first with a scan anchored on
+/// `"excess damage dealt"`; only if that fails does the pre-existing permissive
+/// total scan run, unchanged. Every phrase that matched before still matches —
+/// this is a pure channel correction, not a narrowing.
+fn parse_damage_dealt_phrase(input: &str) -> nom::IResult<&str, DamageChannel, OracleError<'_>> {
+    if let Ok((rest, _)) = (
+        opt(take_until::<_, _, OracleError<'_>>("excess damage dealt")),
+        tag::<_, _, OracleError<'_>>("excess damage dealt"),
+    )
+        .parse(input)
+    {
+        return Ok((rest, DamageChannel::Excess));
+    }
     let (input, _) = opt(take_until("damage dealt")).parse(input)?;
     let (input, _) = tag("damage dealt").parse(input)?;
-    Ok((input, ()))
+    Ok((input, DamageChannel::Total))
 }
 
 fn parse_dealt_damage_phrase(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
@@ -1604,13 +1634,14 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     //   - counter-removal chains: "counters removed", "counter removed"
     //     (Sensational Spider-Man's "stun counters removed this way";
     //     `state.last_effect_amount` is stamped by the preceding RemoveCounter).
-    // PreviousEffectAmount reads `state.last_effect_amount`, which the
-    // upstream effect (damage / counter removal / life loss) stamps.
-    if parse_previous_effect_amount_this_way(lower).is_ok() {
+    // PreviousEffectAmount reads `state.last_effect_amount` (CR 120.6) or
+    // `state.last_effect_excess_amount` (CR 120.10), whichever channel the phrase
+    // named — the combinator reports it rather than the caller assuming `Total`.
+    // Assuming Total here is precisely what made "the excess damage dealt this
+    // way" gain the FULL damage instead of the overkill (Razor Rings).
+    if let Ok((_, channel)) = parse_previous_effect_amount_this_way(lower) {
         return Some(QuantityExpr::Ref {
-            qty: QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            },
+            qty: QuantityRef::PreviousEffectAmount { channel },
         });
     }
 
@@ -5077,13 +5108,14 @@ mod tests {
         );
     }
 
+    /// CR 120.6: the TOTAL channel. Every phrase here names an unqualified
+    /// numeric result — no "excess" qualifier — so it reads `last_effect_amount`.
     #[test]
     fn parse_event_context_quantity_previous_effect_this_way_variants() {
         for phrase in [
             "the life lost this way",
             "the amount of life paid this way",
             "the damage dealt this way",
-            "the amount of excess damage dealt this way",
             "opponents dealt damage this way",
             "the number of stun counters removed this way",
         ] {
@@ -5094,7 +5126,43 @@ mod tests {
                         channel: crate::types::ability::DamageChannel::Total,
                     },
                 }),
-                "phrase {phrase:?} must map to PreviousEffectAmount"
+                "phrase {phrase:?} must map to PreviousEffectAmount on the TOTAL channel"
+            );
+        }
+    }
+
+    /// CR 120.10: the EXCESS channel. "excess" is a QUALIFIER on the damage, and
+    /// it selects a different resolution-local tally
+    /// (`last_effect_excess_amount`) than the bare phrase does.
+    ///
+    /// REGRESSION PIN. This list previously sat in the TOTAL test above — the
+    /// pin PROTECTED the bug. `parse_damage_dealt_phrase` scanned with
+    /// `take_until("damage dealt")`, which discards every prefix INCLUDING the
+    /// word "excess", so an excess phrase matched the generic damage arm and read
+    /// the full damage. Razor Rings ("You gain life equal to the excess damage
+    /// dealt this way") gained 4 off a 1/1 instead of the 3 overkill; the same
+    /// silent overcount hit Cramped Vents // Access Maze, Windswift Slice,
+    /// Ravenous Pursuit, and Unleash the Inferno.
+    ///
+    /// The determiner ("the" / "the amount of") is an INDEPENDENT axis from the
+    /// qualifier, so both determiner forms are pinned — the channel must not
+    /// depend on which determiner was printed.
+    #[test]
+    fn parse_event_context_quantity_excess_damage_this_way_reads_the_excess_channel() {
+        for phrase in [
+            "the excess damage dealt this way",
+            "the amount of excess damage dealt this way",
+            "excess damage dealt this way",
+        ] {
+            assert_eq!(
+                parse_event_context_quantity(phrase),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: crate::types::ability::DamageChannel::Excess,
+                    },
+                }),
+                "phrase {phrase:?} names EXCESS damage (CR 120.10) and must read the \
+                 excess channel, not the total"
             );
         }
     }
