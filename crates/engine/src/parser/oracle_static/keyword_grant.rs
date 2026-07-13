@@ -1837,7 +1837,7 @@ pub(crate) fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousMo
 /// canonical inner classifier without exposing the private
 /// `parse_quoted_ability` / `parse_quoted_rule_static_modifications` helpers.
 pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModification> {
-    // CR 207.2c: A trailing sentence COMMA carried INSIDE the closing quote
+    // A trailing sentence COMMA carried INSIDE the closing quote
     // (Oracle convention: `...until end of turn," and it loses all other
     // abilities`) is the OUTER sentence's list/clause punctuation, never the
     // granted ability's own text — an ability's own text always terminates in a
