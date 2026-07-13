@@ -167,6 +167,30 @@ mod tests {
             state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
         }
 
+        let mut setup_events = Vec::new();
+        resolve(
+            &mut state,
+            &make_incubate_ability(QuantityExpr::Fixed { value: 1 }),
+            &mut setup_events,
+        )
+        .expect("setup Incubator resolves");
+        let transformed_incubator = state
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| state.objects[id].name == "Incubator")
+            .expect("setup creates an Incubator");
+        crate::game::transform::transform_permanent(
+            &mut state,
+            transformed_incubator,
+            &mut setup_events,
+        )
+        .expect("setup Incubator transforms");
+        assert_eq!(
+            state.objects[&transformed_incubator].name, "Phyrexian Token",
+            "the setup token must be a transformed creature before Sunfall resolves"
+        );
+
         let incubate = ResolvedAbility::new(
             Effect::Incubate {
                 count: QuantityExpr::Ref {
@@ -202,7 +226,11 @@ mod tests {
 
         crate::game::effects::resolve_ability_chain(&mut state, &sunfall, &mut Vec::new(), 0)
             .expect("Sunfall resolves");
-        assert_eq!(state.exile.len(), 3, "all three creatures are exiled");
+        assert_eq!(
+            state.exile.len(),
+            4,
+            "all three creatures and the transformed Incubator are exiled"
+        );
         let incubator = state
             .battlefield
             .iter()
@@ -211,7 +239,7 @@ mod tests {
             .expect("Sunfall creates an Incubator");
         assert_eq!(
             incubator.counters.get(&CounterType::Plus1Plus1).copied(),
-            Some(3),
+            Some(4),
             "the Incubator must get one counter for each creature exiled"
         );
     }
