@@ -7,7 +7,7 @@ use strum::EnumCount;
 
 use super::ability::{
     AbilityCost, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter, QuantityExpr,
-    QuantityRef, TargetFilter,
+    QuantityRef, ReplacementDefinition, TargetFilter,
 };
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
@@ -1195,6 +1195,21 @@ pub enum StaticMode {
         /// `Effect::CastFromZone.enters_with_counter`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_with_counter: Option<super::counter::CounterType>,
+        /// CR 614.1a + CR 603.6c + CR 611.2c + CR 607.1: Optional granted
+        /// replacement installed on the permanent played/cast via this permission
+        /// — "If you do, it gains '‹replacement›'." Per CR 611.2c the granted
+        /// ability then persists on that object independent of this permission's
+        /// source (base-install achieves this — see
+        /// `zone_pipeline::apply_zone_delivery_tail`). The Eighth Doctor grants
+        /// "If this permanent would leave the battlefield, exile it instead of
+        /// putting it anywhere else." — a `Moved`/`SelfRef` battlefield-exit →
+        /// Exile redirect (CR 614.1a). Installed at the battlefield-entry seam via
+        /// `GameState.pending_etb_replacements`, mirroring `enters_with_counter`.
+        /// `None` (default) preserves every existing graveyard-cast shape. General
+        /// carrier: any granted per-object replacement. Preserved through serde
+        /// only (Display/FromStr default it to `None`, like `enters_with_counter`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        granted_replacement: Option<Box<ReplacementDefinition>>,
     },
     /// CR 401.5 + CR 118.9 + CR 601.2a: Static ability granting permission to
     /// play/cast the top card of the controller's library when it matches
@@ -3192,6 +3207,7 @@ impl FromStr for StaticMode {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                granted_replacement: None,
             },
             s if s.starts_with("GraveyardCastPermission(") => {
                 let inner = s
@@ -3211,6 +3227,9 @@ impl FromStr for StaticMode {
                         // to None.
                         extra_cost: None,
                         enters_with_counter: None,
+                        // CR 614.1a: the granted-replacement payload rides on serde,
+                        // not the Display/FromStr round-trip; default to None.
+                        granted_replacement: None,
                     }
                 } else {
                     StaticMode::GraveyardCastPermission {
@@ -3219,6 +3238,7 @@ impl FromStr for StaticMode {
                         graveyard_destination_replacement: None,
                         extra_cost: None,
                         enters_with_counter: None,
+                        granted_replacement: None,
                     }
                 }
             }
@@ -4004,6 +4024,7 @@ mod tests {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                granted_replacement: None,
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -4011,6 +4032,7 @@ mod tests {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                granted_replacement: None,
             },
             // CR 601.2f: Festival of Embers — graveyard cast with an additional
             // pay-life cost. NOTE: `extra_cost`-bearing variants are NOT in this
@@ -4195,6 +4217,7 @@ mod tests {
                     mode: CastCostMode::Additional,
                 }),
                 enters_with_counter: None,
+                granted_replacement: None,
             },
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,

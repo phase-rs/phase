@@ -7719,6 +7719,17 @@ pub struct GameState {
     /// Consumed when the object enters the battlefield. Each entry: (object_id, counter_type, count).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_etb_counters: Vec<(ObjectId, CounterType, u32)>,
+    /// CR 614.1a + CR 614.12: Pending granted leave-the-battlefield replacements
+    /// for objects that haven't entered the battlefield yet. Queued by a
+    /// play/cast-from-zone permission that grants a per-object replacement to the
+    /// object played this way (The Eighth Doctor). Installed onto the object's
+    /// `base_replacement_definitions` when it enters
+    /// (`zone_pipeline::apply_zone_delivery_tail`), then removed from this queue.
+    /// Same transient, turn-scoped lifetime class as `pending_etb_counters`. Each
+    /// entry: (object_id, granted replacement).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_etb_replacements:
+        Vec<(ObjectId, Box<crate::types::ability::ReplacementDefinition>)>,
 
     /// Modal modes chosen this turn per source: (ObjectId, mode_index).
     /// CR 700.2: "choose one that hasn't been chosen this turn"
@@ -9658,6 +9669,7 @@ impl GameState {
             pending_spell_cost_reductions: Vec::new(),
             pending_next_spell_modifiers: Vec::new(),
             pending_etb_counters: Vec::new(),
+            pending_etb_replacements: Vec::new(),
             modal_modes_chosen_this_turn: HashSet::new(),
             modal_modes_chosen_this_game: HashSet::new(),
             revealed_cards: HashSet::new(),
@@ -10660,6 +10672,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_spell_cost_reductions: _,
         pending_next_spell_modifiers: _,
         pending_etb_counters: _,
+        pending_etb_replacements: _,
         modal_modes_chosen_this_turn: _,
         modal_modes_chosen_this_game: _,
         revealed_cards: _,
@@ -10955,6 +10968,7 @@ impl PartialEq for GameState {
             && self.pending_spell_cost_reductions == other.pending_spell_cost_reductions
             && self.pending_next_spell_modifiers == other.pending_next_spell_modifiers
             && self.pending_etb_counters == other.pending_etb_counters
+            && self.pending_etb_replacements == other.pending_etb_replacements
             && self.modal_modes_chosen_this_turn == other.modal_modes_chosen_this_turn
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.revealed_cards == other.revealed_cards

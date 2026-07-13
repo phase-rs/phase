@@ -1483,6 +1483,15 @@ fn static_is_replacement_carrier(static_def: &StaticDefinition) -> bool {
             graveyard_destination_replacement: Some(_),
             ..
         }
+        // CR 614.1a + CR 603.6c: "If you do, it gains \"If this permanent would
+        // leave the battlefield, exile it instead of putting it anywhere else.\""
+        // (The Eighth Doctor). The granted per-object leave-the-battlefield → exile
+        // redirect IS the replaced event; `Some(_)` is the rider (`None` keeps
+        // warning). Installed at battlefield entry via `pending_etb_replacements`.
+        | StaticMode::GraveyardCastPermission {
+            granted_replacement: Some(_),
+            ..
+        }
         // CR 614.1a + CR 701.23: "If an opponent would search a library, that player
         // searches the top four cards of that library instead" (aven mindcensor) — the
         // replaced search IS this mode.
@@ -2948,6 +2957,48 @@ fn cast_this_way_alt_cost_is_only_if_marker(stripped: &str, evidence: &UnitEvide
     !has_other_if
 }
 
+/// CR 614.1a + CR 607.1 + CR 603.6c: a `GraveyardCastPermission` carrying a
+/// `granted_replacement` rider ("If you do, it gains \"If this permanent would
+/// leave the battlefield, exile it instead of putting it anywhere else.\"" — The
+/// Eighth Doctor) represents that entire "if you do, it gains … instead …"
+/// sentence structurally (the granted leave-the-battlefield → exile
+/// replacement). Suppress only that represented sentence; any other independent
+/// conditional in the same item must remain visible to the audit.
+fn granted_leave_battlefield_rider_is_only_if_marker(
+    stripped: &str,
+    evidence: &UnitEvidence,
+) -> bool {
+    if !evidence.any_static_mode(|mode| {
+        matches!(
+            mode,
+            StaticMode::GraveyardCastPermission {
+                granted_replacement: Some(_),
+                ..
+            }
+        )
+    }) {
+        return false;
+    }
+
+    let residual: String = stripped
+        .split('.')
+        .filter(|sentence| {
+            let sentence = sentence.trim_start();
+            // The represented rider sentence is the one that both grants ("it
+            // gains") and describes the leave-the-battlefield redirect; drop only
+            // that one.
+            let is_rider = sentence.contains("it gains") // allow-noncombinator: swallow detector marker scan on classified text
+                && sentence.contains("leave the battlefield"); // allow-noncombinator: swallow detector marker scan on classified text
+            !is_rider
+        })
+        .collect::<Vec<_>>()
+        .join(".");
+    let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !has_other_if
+}
+
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
@@ -3058,6 +3109,13 @@ fn detect_condition_if(
         return;
     }
     if cast_this_way_alt_cost_is_only_if_marker(&stripped, evidence) {
+        return;
+    }
+    // CR 614.1a + CR 607.1 + CR 603.6c: "If you do, it gains \"If this permanent
+    // would leave the battlefield, exile it instead …\"" (The Eighth Doctor) is
+    // represented by the permission's `granted_replacement` rider, not a swallowed
+    // condition.
+    if granted_leave_battlefield_rider_is_only_if_marker(&stripped, evidence) {
         return;
     }
     // CR 615.5: "If damage is prevented this way, [effect]" is not an
@@ -5453,6 +5511,45 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Condition_If"));
+    }
+
+    /// CR 614.1a + CR 607.1 + CR 603.6c: The Eighth Doctor's granted
+    /// leave-the-battlefield → exile rider on its `GraveyardCastPermission` is a
+    /// structurally represented replacement carrier, so the whole "If you do, it
+    /// gains \"If this permanent would leave the battlefield, exile it instead of
+    /// putting it anywhere else.\"" sentence must trip NEITHER the
+    /// `Replacement_Instead` nor the `Condition_If` swallow detector. Guards the
+    /// carrier-class suppression (reverting either exemption flips one assertion).
+    #[test]
+    fn eighth_doctor_granted_leave_battlefield_rider_is_not_swallowed() {
+        let parsed = parse_named(
+            "When The Eighth Doctor enters, mill three cards.\n\
+             Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. \
+             If you do, it gains \"If this permanent would leave the battlefield, exile it instead of putting it anywhere else.\"",
+            "The Eighth Doctor",
+            &["Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Replacement_Instead"),
+            "granted leave-battlefield rider must not report Replacement_Instead: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "granted leave-battlefield rider must not report Condition_If: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            parsed.statics.iter().any(|s| matches!(
+                s.mode,
+                StaticMode::GraveyardCastPermission {
+                    granted_replacement: Some(_),
+                    ..
+                }
+            )),
+            "expected a GraveyardCastPermission carrying granted_replacement, got {:?}",
+            parsed.statics
+        );
     }
 
     /// CR 509.1c: "must be blocked if able" riders are represented by

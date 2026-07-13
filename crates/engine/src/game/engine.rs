@@ -7561,6 +7561,24 @@ fn handle_play_land(
         }
     }
 
+    // CR 305.1 + CR 614.1a + CR 603.6c: a land played from the graveyard via a
+    // once-per-turn permission inherits that permission's granted "if this
+    // permanent would leave the battlefield, exile it instead" rider, installed
+    // as it enters the battlefield (same `pending_etb_replacements` queue and
+    // `apply_zone_delivery_tail` drain as the spell path). The land keeps its
+    // storage ObjectId across the graveyard→battlefield move, so keying the queue
+    // on `object_id` at play time drains against the same id at entry. Net-new
+    // path: no counter rider populates this queue for a land today.
+    if let Some(source) = gy_permission_source {
+        if let Some(replacement) =
+            super::casting::graveyard_permission_granted_replacement(state, source)
+        {
+            state
+                .pending_etb_replacements
+                .push((object_id, replacement));
+        }
+    }
+
     match super::replacement::replace_event(state, proposed, events) {
         super::replacement::ReplacementResult::Execute(event) => {
             if let crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } = event

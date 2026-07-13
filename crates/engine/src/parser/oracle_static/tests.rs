@@ -12783,13 +12783,94 @@ fn graveyard_cast_permission_muldrotha_legacy_and() {
     ));
 }
 
+/// CR 305.1 + CR 601.2a + CR 614.1a: The Eighth Doctor's disjunctive once-per-turn
+/// permission carries the granted leave-the-battlefield-exile replacement rider
+/// ("If you do, it gains \"If ~ would leave the battlefield, exile it instead of
+/// putting it anywhere else.\""). The whole line lowers to a
+/// `GraveyardCastPermission { granted_replacement: Some(..) }` whose boxed def is
+/// a `Moved`/`SelfRef` battlefield-exit → Exile redirect. Tests the
+/// granted-replacement CARRIER class, not the Doctor string.
 #[test]
-fn graveyard_cast_permission_disjunctive_rejects_unmodeled_granted_rider() {
+fn graveyard_cast_permission_disjunctive_parses_granted_leave_battlefield_rider() {
     let text = "Once during each of your turns, you may play a historic land or cast a historic permanent spell from your graveyard. If you do, it gains \"If ~ would leave the battlefield, exile it instead of putting it anywhere else.\"";
-    assert!(
-        parse_static_line(text).is_none(),
-        "unmodeled granted leave-battlefield replacement must remain an honest coverage gap"
+    let def = parse_static_line(text).expect("granted leave-battlefield rider must now parse");
+    let StaticMode::GraveyardCastPermission {
+        frequency: CastFrequency::OncePerTurn,
+        play_mode: CardPlayMode::Play,
+        granted_replacement: Some(repl),
+        ..
+    } = &def.mode
+    else {
+        panic!(
+            "expected OncePerTurn Play permission with a granted replacement, got {:?}",
+            def.mode
+        );
+    };
+    assert_eq!(
+        repl.event,
+        crate::types::replacements::ReplacementEvent::Moved
     );
+    assert_eq!(repl.valid_card, Some(TargetFilter::SelfRef));
+    let execute = repl
+        .execute
+        .as_ref()
+        .expect("granted rider must carry an execute effect");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "expected battlefield→exile SelfRef redirect, got {:?}",
+        execute.effect
+    );
+    // The permission's affected set is unchanged: Or[historic land, historic
+    // permanent].
+    let filter = def.affected.as_ref().expect("should have affected filter");
+    assert!(
+        matches!(filter, TargetFilter::Or { filters } if filters.len() == 2),
+        "expected Or over both historic branches, got {filter:?}"
+    );
+}
+
+/// Building-block test: `parse_leave_battlefield_exile_replacement_def` lowers the
+/// normalized inner rider text (self-ref `~`) to the shared `Moved`/`SelfRef` →
+/// Exile redirect, and still accepts the un-normalized pronoun form (proves the
+/// `~` alt arm didn't regress the "it" path). Exercises the shared builder
+/// directly, not one card's Oracle string.
+#[test]
+fn leave_battlefield_exile_replacement_def_builds_moved_selfref_redirect() {
+    for inner in [
+        "if ~ would leave the battlefield, exile it instead of putting it anywhere else",
+        "if it would leave the battlefield, exile it instead of putting it anywhere else",
+    ] {
+        let def =
+            crate::parser::oracle_effect::parse_leave_battlefield_exile_replacement_def(inner)
+                .unwrap_or_else(|| panic!("should parse leave-battlefield rider: {inner:?}"));
+        assert_eq!(
+            def.event,
+            crate::types::replacements::ReplacementEvent::Moved
+        );
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.as_ref().expect("execute effect");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::ChangeZone {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "got {:?}",
+            execute.effect
+        );
+    }
 }
 
 /// CR 305.1 + CR 601.2a + CR 700.6: Tail-zone disjunctive permission —

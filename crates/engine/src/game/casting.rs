@@ -2208,6 +2208,68 @@ pub(super) fn selected_static_permission_enters_with_counter(
         })
 }
 
+// CR 614.1a + CR 607.1: Shared single-authority extractor for the granted
+// leave-the-battlefield-exile replacement rider carried on a
+// `GraveyardCastPermission` / `ExileCastPermission` static. Mirrors the
+// `permission_counter` inner fn shape. Returns the cloned boxed def (`None` when
+// the permission carries no rider).
+fn permission_granted_replacement(
+    def: &StaticDefinition,
+) -> Option<Box<crate::types::ability::ReplacementDefinition>> {
+    match &def.mode {
+        StaticMode::GraveyardCastPermission {
+            granted_replacement,
+            ..
+        } => granted_replacement.clone(),
+        // `ExileCastPermission` carries no `granted_replacement` field today; if a
+        // printed exile-cast carrier ships, the field + arm slot in here.
+        _ => None,
+    }
+}
+
+// CR 614.1a + CR 608.2c + CR 607.1: Spell path — read the granted leave-the-
+// battlefield-exile replacement rider from the *selected* cast permission (the
+// one authorizing THIS cast, embedded in `casting_variant`) so a non-consumed
+// sibling permission's rider cannot leak (CR 608.2c). Mirrors
+// `selected_static_permission_enters_with_counter`, including its CR 607.1
+// self-granting `.or_else` fallback (a self-granting source is the cast object,
+// now on the Stack, so its Graveyard-scoped permission no longer functions in
+// zone — read the rider directly from the committed authorizing definition).
+pub(super) fn selected_static_permission_granted_replacement(
+    state: &GameState,
+    casting_variant: &crate::types::game_state::CastingVariant,
+) -> Option<Box<crate::types::ability::ReplacementDefinition>> {
+    use crate::types::game_state::CastingVariant;
+    let source = match casting_variant {
+        CastingVariant::GraveyardPermission { source, .. }
+        | CastingVariant::ExilePermission { source, .. } => *source,
+        _ => return None,
+    };
+    let source_obj = state.objects.get(&source)?;
+    active_static_definitions(state, source_obj)
+        .find_map(permission_granted_replacement)
+        .or_else(|| {
+            source_obj
+                .static_definitions
+                .iter_all()
+                .find_map(permission_granted_replacement)
+        })
+}
+
+// CR 305.1 + CR 614.1a + CR 607.1: Land path — read the granted leave-the-
+// battlefield-exile replacement rider from the graveyard-play permission on the
+// `source` permanent (The Eighth Doctor). A played land never self-grants this
+// permission, so the spell-only self-granting fallback is omitted; routing
+// through the shared `permission_granted_replacement` extractor keeps rider
+// reading single-authority.
+pub(super) fn graveyard_permission_granted_replacement(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Option<Box<crate::types::ability::ReplacementDefinition>> {
+    let source_obj = state.objects.get(&source_id)?;
+    active_static_definitions(state, source_obj).find_map(permission_granted_replacement)
+}
+
 // CR 205.1b + CR 613.1d: read the enters-with type-grant rider ("… is a [type]
 // in addition to its other types") from the *consumed* cast-this-way permission
 // only (the one supporting THIS cast), not any permission carrying modifications,

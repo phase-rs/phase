@@ -981,6 +981,10 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.pending_next_spell_modifiers.clear();
     // CR 614.1c: Pending ETB counters are turn-scoped (e.g., "this turn" effects).
     state.pending_etb_counters.clear();
+    // CR 614.1a: Backstop-clear pending granted ETB replacements for spells that
+    // never resolved this turn (e.g. countered). The play→enter path is same-turn,
+    // so this never drops a live install.
+    state.pending_etb_replacements.clear();
     state.modal_modes_chosen_this_turn.clear();
     for player in &mut state.players {
         player.has_drawn_this_turn = false;

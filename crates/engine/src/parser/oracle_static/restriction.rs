@@ -1622,6 +1622,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                granted_replacement: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -1745,6 +1746,9 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         graveyard_destination_replacement,
         extra_cost,
         enters_with_counter,
+        // CR 614.1a: This non-disjunctive builder handles no granted-replacement
+        // rider today (the disjunctive Eighth Doctor form does); default to None.
+        granted_replacement: None,
     })
     .affected(affected)
     .description(text.to_string());
@@ -1880,10 +1884,13 @@ fn inject_owner_you_filter_prop(filter: TargetFilter) -> Option<TargetFilter> {
 /// filter (The Eighth Doctor: both "historic permanent"), the union collapses
 /// to that single filter; otherwise it emits `TargetFilter::Or`.
 ///
-/// A trailing rider ("If you do, it gains \"…\"") is intentionally rejected:
-/// the granted leave-battlefield exile rider is a CR 614.1a Moved replacement
-/// on the resolved permanent. Parsing only the permission would make coverage
-/// report support while dropping rules text.
+/// A trailing granted-replacement rider ("... . If you do, it gains \"…\".") is
+/// now parsed into `granted_replacement` (see below): the granted
+/// leave-battlefield exile rider is a CR 614.1a "instead" (Moved) replacement
+/// installed on the permanent played this way at the battlefield-entry seam. A
+/// rider tail that is *present but unparsable* aborts the whole permission
+/// rather than emitting a permission with a silently-dropped rider — reporting
+/// coverage while losing rules text would be a dishonest gap.
 fn try_parse_disjunctive_graveyard_cast_permission(
     text: &str,
     lower: &str,
@@ -1897,14 +1904,37 @@ fn try_parse_disjunctive_graveyard_cast_permission(
         "once during each of your turns, you may play ",
     )
     .or_else(|| nom_tag_lower(lower, lower, "once each turn, you may play "))?;
-    if nom_primitives::scan_contains(rest, "if you do, it gains") {
-        return None;
-    }
+
+    // CR 614.1a + CR 607.1: Split off the optional granted-replacement rider
+    // tail — "... . If you do, it gains \"<replacement>\"." — before the branch
+    // logic. `split_once_on` is the structural "everything up to delimiter"
+    // combinator. Absent (`Err`) → no rider (Serra Paragon / Muldrotha forms
+    // unaffected). Present → strip the surrounding quotes with a nom `delimited`
+    // combinator and parse the inner text via the shared leave-battlefield
+    // builder; a rider tail present but unparsable aborts the whole permission
+    // (never emit a permission with a silently-dropped rider — honest gap).
+    let (permission_clause, granted_replacement) =
+        match nom_primitives::split_once_on(rest, ". if you do, it gains ") {
+            Ok((_, (before, after))) => {
+                use nom::character::complete::char;
+                use nom::sequence::delimited;
+                let (_, inner) =
+                    delimited(char::<_, OracleError<'_>>('"'), take_until("\""), char('"'))
+                        .parse(after.trim())
+                        .ok()?;
+                let def =
+                    crate::parser::oracle_effect::parse_leave_battlefield_exile_replacement_def(
+                        inner,
+                    )?;
+                (before, Some(Box::new(def)))
+            }
+            Err(_) => (rest, None),
+        };
 
     // CR 305.1 + CR 601.2a: The disjunction connector " or cast " splits the
     // land-play branch from the spell-cast branch. `split_once_on` is the
     // structural "everything up to delimiter" combinator.
-    let (land_branch, spell_branch) = nom_primitives::split_once_on(rest, " or cast ")
+    let (land_branch, spell_branch) = nom_primitives::split_once_on(permission_clause, " or cast ")
         .ok()
         .map(|(_, pair)| pair)?;
 
@@ -1941,6 +1971,10 @@ fn try_parse_disjunctive_graveyard_cast_permission(
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            // CR 614.1a: The Eighth Doctor's granted "if this permanent would
+            // leave the battlefield, exile it instead" rider, installed on the
+            // permanent played this way at the battlefield-entry seam.
+            granted_replacement,
         })
         .affected(affected)
         .description(text.to_string()),
@@ -1982,6 +2016,7 @@ fn try_parse_unlimited_combined_graveyard_permission(
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            granted_replacement: None,
         })
         .affected(affected)
         .description(text.to_string()),

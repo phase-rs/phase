@@ -211,13 +211,32 @@ pub fn resolve(
                     // layer reset (evaluate_layers rebuilds live
                     // replacement_definitions from base — layers.rs). The base
                     // store is otherwise the printed baseline (CR 613.1,
-                    // game_object.rs); this is a deliberate, prune-bounded
-                    // exception: the three lapse prunes (control swap, source
-                    // leave-play, host leave-play) remove this def on every
-                    // CR 611.2b lapse, so base never accumulates a stale runtime
-                    // rider. printed_cards.rs is the only intrinsic base-write
-                    // precedent; there is no additive-runtime base-push
-                    // precedent, so this exception is documented here. This
+                    // game_object.rs). Three additive base-write sites bear on
+                    // this invariant (two production, one test-only), documented
+                    // together so this note does not drift:
+                    // (1) THIS `ControllerControlsSource`-gated push — the only
+                    //     *prune-bounded* additive base-write: its three CR 611.2b
+                    //     lapse prunes (control swap, source leave-play, host
+                    //     leave-play) remove this def on every lapse, so base never
+                    //     accumulates a stale runtime rider.
+                    // (2) The granted-ETB-replacement drain
+                    //     (`zone_pipeline::apply_zone_delivery_tail`, The Eighth
+                    //     Doctor) — an *ungated* base-write (`condition: None`, no
+                    //     lapse prune) that relies for cleanup solely on "a
+                    //     battlefield exit mints a new object whose base is rebuilt
+                    //     from the printed card"; correct because that granted
+                    //     replacement is itself self-exiling.
+                    // (3) `morph.rs` (test scaffolding only, under `#[cfg(test)]`)
+                    //     manually base+live-pushes a `TurnFaceUp` replacement to
+                    //     exercise the base→live layer-reset survival path
+                    //     (CR 614.1e + CR 708.11 — "As [this] is turned face up").
+                    //     It is NOT a production runtime rider; it has NOT been
+                    //     migrated and remains a raw
+                    //     `Arc::make_mut(&mut base_replacement_definitions).push`.
+                    // Only production sites (1) and (2) route through
+                    // `GameObject::install_replacement` — its single authority is
+                    // scoped to exactly those two callers (see its doc); the
+                    // morph.rs test push stays a bare manual write. This
                     // gate-scoping keeps transient riders (die-exile, Crafty
                     // Cutpurse, end-of-turn) live-only and untouched.
                     //
@@ -234,11 +253,7 @@ pub fn resolve(
                         Some(ReplacementCondition::ControllerControlsSource { .. })
                     );
                     if let Some(obj) = state.objects.get_mut(&obj_id) {
-                        if install_to_base {
-                            std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
-                                .push(replacement.clone());
-                        }
-                        obj.replacement_definitions.push(replacement);
+                        obj.install_replacement(replacement, install_to_base);
                         attached += 1;
                     }
                 }

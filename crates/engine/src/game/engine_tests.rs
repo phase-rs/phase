@@ -9200,6 +9200,7 @@ fn grant_graveyard_creature_cast_and_bury(
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                granted_replacement: None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),

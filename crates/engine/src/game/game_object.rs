@@ -1191,6 +1191,26 @@ pub(crate) fn chosen_card_type_of(attrs: &[ChosenAttribute]) -> Option<CoreType>
 }
 
 impl GameObject {
+    /// CR 613.1 + CR 614.1a: install a replacement definition onto this object.
+    /// `to_base = true` also writes it to the printed-characteristics base store
+    /// (`base_replacement_definitions`) so it survives every layer reset — the
+    /// layer pass rebuilds the live store from base (see the
+    /// `replacement_definitions = base_replacement_definitions` reset below in
+    /// this file); the live store is always updated so the def functions this
+    /// pass. Single authority for additive replacement installs (shared by
+    /// `effects::add_target_replacement` and the granted-ETB-replacement drain in
+    /// `zone_pipeline::apply_zone_delivery_tail`).
+    pub(crate) fn install_replacement(
+        &mut self,
+        def: crate::types::ability::ReplacementDefinition,
+        to_base: bool,
+    ) {
+        if to_base {
+            std::sync::Arc::make_mut(&mut self.base_replacement_definitions).push(def.clone());
+        }
+        self.replacement_definitions.push(def);
+    }
+
     /// Apply an Alchemy "perpetually" modification to this card: record it on the
     /// object (so it persists across zones/serialization and can be re-applied
     /// after a copy rebuilds base characteristics) and edit the corresponding

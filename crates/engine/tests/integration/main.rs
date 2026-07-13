@@ -99,6 +99,7 @@ mod dream_salvage_target_opponent_discards;
 mod dredgers_insight_mill_from_among;
 mod druid_of_purification_destroy_chosen_4780;
 mod duskmantle_seer_each_player_reveal;
+mod eighth_doctor_granted_leave_battlefield_exile;
 mod elemental_spectacle_regression;
 mod elusive_otter_repro;
 mod embiggen_typeline_pump;

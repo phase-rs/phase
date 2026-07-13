@@ -1237,6 +1237,37 @@ pub(crate) fn apply_zone_delivery_tail(
     library_placement: Option<&LibraryPosition>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
+    // CR 614.1a + CR 613.1: install queued granted replacements onto the entering
+    // permanent (The Eighth Doctor's "if this permanent would leave the
+    // battlefield, exile it instead"). This is the single post-counter
+    // convergence point reached by BOTH the immediate `deliver_replaced_zone_change`
+    // fall-through and the counter-pause resume (`ContinueZoneDeliveryTail`), so a
+    // single drain here fires exactly once per delivery and cannot double-install.
+    // Persistent granted riders MUST go to base (`to_base = true`): the layer pass
+    // rebuilds live `replacement_definitions` from base every pass
+    // (game_object.rs). Cleanup is by object-mint on battlefield exit (a new object
+    // rebuilds base from the printed card), so base never accumulates a stale
+    // rider — this rider is itself self-exiling, so there is no lapse prune and
+    // none is needed (CR 611.2c: the granted ability persists on the object
+    // independent of the granting source).
+    if to == Zone::Battlefield {
+        let installs: Vec<_> = state
+            .pending_etb_replacements
+            .iter()
+            .filter(|(oid, _)| *oid == object_id)
+            .map(|(_, r)| r.clone())
+            .collect();
+        if !installs.is_empty() {
+            state
+                .pending_etb_replacements
+                .retain(|(oid, _)| *oid != object_id);
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                for replacement in installs {
+                    obj.install_replacement(*replacement, true);
+                }
+            }
+        }
+    }
     // CR 701.24a: To shuffle a library, randomize the cards within it so that
     // no player knows their order. A request that places the object at a specific
     // position is NOT a shuffle (a placement instruction is not a shuffle

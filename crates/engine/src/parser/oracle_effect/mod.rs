@@ -1669,6 +1669,11 @@ fn parse_leave_battlefield_rider_ref(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((
+            // `~` is the normalized self-reference token ("this permanent" →
+            // `~`); accepting it alongside the un-normalized phrase forms lets the
+            // shared def-builder parse a granted rider whether or not the caller
+            // normalized the host reference.
+            tag("~"),
             tag("it"),
             tag("the card"),
             tag("the creature"),
@@ -1686,11 +1691,17 @@ fn parse_leave_battlefield_rider_ref(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// CR 614.1a + CR 614.6: Detect "If it would leave the battlefield, exile it
-/// instead of putting it anywhere else." riders attached to a previously
-/// selected object. The carried `ReplacementDefinition` is installed on the
-/// parent target, where `valid_card: SelfRef` binds to that host object.
-fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> {
+/// CR 614.1a + CR 614.6 + CR 603.6c: Build the "If ‹this permanent› would leave
+/// the battlefield, exile it instead of putting it anywhere else."
+/// `ReplacementDefinition` from its (lowercased) inner text. The produced def is
+/// a `Moved`/`SelfRef` battlefield-exit → Exile redirect (Rest-in-Peace class),
+/// where `valid_card: SelfRef` binds to the host object the def is installed on.
+/// Shared builder: used by the effect-rider wrapper
+/// (`try_parse_leave_battlefield_exile_replacement`) AND by the granted-permission
+/// carrier (`oracle_static::restriction::try_parse_disjunctive_graveyard_cast_permission`).
+pub(crate) fn parse_leave_battlefield_exile_replacement_def(
+    lower: &str,
+) -> Option<ReplacementDefinition> {
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("if "))
         .parse(lower)
         .ok()?;
@@ -1709,27 +1720,36 @@ fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> 
         .ok()?;
     parse_optional_period_and_end(rest)?;
 
-    let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
-        .valid_card(TargetFilter::SelfRef)
-        .execute(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::ChangeZone {
-                origin: Some(Zone::Battlefield),
-                destination: Zone::Exile,
-                target: TargetFilter::SelfRef,
-                owner_library: false,
-                enter_transformed: false,
-                enters_under: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                up_to: false,
-                enter_with_counters: vec![],
-                conditional_enter_with_counters: vec![],
-                face_down_profile: None,
-                enters_modified_if: None,
-            },
-        ));
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            )),
+    )
+}
 
+/// CR 614.1a + CR 614.6: Detect "If it would leave the battlefield, exile it
+/// instead of putting it anywhere else." riders attached to a previously
+/// selected object. The carried `ReplacementDefinition` is installed on the
+/// parent target, where `valid_card: SelfRef` binds to that host object.
+fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> {
+    let replacement = parse_leave_battlefield_exile_replacement_def(lower)?;
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
         target: TargetFilter::Any,

@@ -6953,6 +6953,20 @@ fn finalize_cast_with_phyrexian_choices_inner(
             .push((object_id, counter_type, 1));
     }
 
+    // CR 614.1a + CR 603.6c + CR 607.1: install the granted "if this permanent
+    // would leave the battlefield, exile it instead" rider from the consumed
+    // permission (The Eighth Doctor). Queued now (spell on the stack); applied
+    // when the permanent enters the battlefield (shared `pending_etb_replacements`
+    // drain in `zone_pipeline::apply_zone_delivery_tail`). Read from the SELECTED
+    // permission (CR 608.2c) so a sibling permission's rider cannot leak.
+    let static_perm_granted_replacement =
+        super::casting::selected_static_permission_granted_replacement(state, &casting_variant);
+    if let Some(replacement) = static_perm_granted_replacement {
+        state
+            .pending_etb_replacements
+            .push((object_id, replacement));
+    }
+
     // CR 205.1b + CR 613.1d: A `CastFromZone` grant whose rider was "… is a
     // [type] in addition to its other types" (The Tomb of Aclazotz) records the
     // additive type-changing modifications on the granted `ExileWithAltCost`.
