@@ -1769,7 +1769,14 @@ fn scan_mana_abilities(
         let penalty = object_mana_ability_penalty(state, object_id, ability);
         let source_could_produce_two_or_more_colors =
             source_could_produce_two_or_more_colors(state, object_id, controller);
-        for row in emit_source_rows(state, controller, object_id, ability_index, ability) {
+        for row in emit_source_rows(
+            state,
+            controller,
+            object_id,
+            ability_index,
+            ability,
+            require_current_payability,
+        ) {
             let option = ManaSourceOption {
                 object_id,
                 ability_index: Some(ability_index),
@@ -1803,6 +1810,7 @@ fn emit_source_rows(
     object_id: ObjectId,
     _ability_index: usize,
     ability: &AbilityDefinition,
+    require_current_payability: bool,
 ) -> Vec<SourceRow> {
     let Effect::Mana {
         produced,
@@ -1847,6 +1855,21 @@ fn emit_source_rows(
                 atomic_combination: (types.len() > 1).then_some(types),
                 restrictions: concrete_restrictions.clone(),
             }]
+        }
+        // CR 106.5: a pure chosen-color source with no color chosen cannot
+        // produce mana. Display/preview paths may show all five colors, but
+        // auto-tap must not plan a payment around an undefined mana type.
+        ManaProduction::ChosenColor {
+            fixed_alternative: None,
+            ..
+        } if !require_current_payability
+            && state
+                .objects
+                .get(&object_id)
+                .and_then(|obj| obj.chosen_color())
+                .is_none() =>
+        {
+            Vec::new()
         }
         _ => mana_options_from_production(state, controller, object_id, produced)
             .into_iter()

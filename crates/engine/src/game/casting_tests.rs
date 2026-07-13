@@ -583,6 +583,91 @@ fn x_spell_cap_excludes_mana_restricted_to_activated_abilities() {
 }
 
 #[test]
+fn worldsouls_rage_offered_x_is_payable_with_an_unchosen_citadel_copy() {
+    let mut state = setup_game_at_main_phase();
+    create_tap_mana_source(
+        &mut state,
+        "Unchosen Sunken Citadel Copy",
+        ManaProduction::ChosenColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            contribution: ManaContribution::Base,
+            fixed_alternative: None,
+        },
+    );
+    for (name, color, count) in [
+        ("Forest Stand-In", ManaColor::Green, 2),
+        ("Island Stand-In", ManaColor::Blue, 4),
+        ("Mountain Stand-In", ManaColor::Red, 2),
+    ] {
+        for _ in 0..count {
+            create_tap_mana_source(
+                &mut state,
+                name,
+                ManaProduction::Fixed {
+                    colors: vec![color],
+                    contribution: ManaContribution::Base,
+                },
+            );
+        }
+    }
+
+    let spell = create_object(
+        &mut state,
+        CardId(9_019),
+        PlayerId(0),
+        "Worldsoul's Rage Stand-In".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red, ManaCostShard::Green],
+            generic: 0,
+        };
+        Arc::make_mut(&mut obj.abilities).push(parse_effect_chain(
+            "~ deals X damage to any target. Put up to X land cards from your hand and/or graveyard onto the battlefield tapped.",
+            AbilityKind::Spell,
+        ));
+    }
+
+    let cast = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(9_019),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("Worldsoul's Rage should begin casting");
+    let max = match cast.waiting_for {
+        WaitingFor::ChooseXValue { max, .. } => max,
+        other => panic!("expected X choice before target selection, got {other:?}"),
+    };
+    assert_eq!(max, 6, "the unchosen Citadel copy produces no mana, so eight basics must cap {{X}}{{R}}{{G}} at X=6");
+
+    let after_x = apply_as_current(&mut state, GameAction::ChooseX { value: max })
+        .expect("the offered maximum X must remain castable");
+    assert!(matches!(
+        after_x.waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    let after_target = apply_as_current(
+        &mut state,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(PlayerId(1))),
+        },
+    )
+    .expect("choosing a legal damage target must pay the mana cost");
+    assert!(matches!(
+        after_target.waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(state.stack.len(), 1);
+}
+
+#[test]
 fn ability_condition_currently_met_gates_on_board_relative_quantity() {
     let mut state = GameState::new_two_player(42);
     // Hideaway-shaped source: a {T}-cost ability gated by "creatures you
