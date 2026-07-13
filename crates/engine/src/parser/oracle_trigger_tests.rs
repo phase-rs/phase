@@ -1487,6 +1487,53 @@ fn trigger_dies_if_it_was_enchanted_attaches_attachment_lookback() {
     }
 }
 
+/// CR 603.4 + CR 120.1: Wolverine's end-step trigger puts a +1/+1 counter ONLY
+/// if it dealt damage to another creature this turn. Pre-fix the intervening-if
+/// (dealing-direction, creature target) was swallowed (`condition: None`).
+#[test]
+fn parse_wolverine_end_step_dealt_damage_to_creature_intervening_if() {
+    let def = parse_trigger_line(
+        "At the beginning of each end step, if Wolverine dealt damage to another creature \
+         this turn, put a +1/+1 counter on Wolverine.",
+        "Wolverine, Best There Is",
+    );
+
+    // Revert-guard: pre-fix `def.condition` is None.
+    match &def.condition {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn { source, target, .. },
+                },
+            comparator: Comparator::GE,
+            ..
+        }) => {
+            assert!(matches!(**source, TargetFilter::SelfRef));
+            match &**target {
+                TargetFilter::Typed(t) => {
+                    assert!(t
+                        .type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Creature)));
+                    assert!(t
+                        .properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::Another)));
+                }
+                other => panic!("expected Typed creature target, got {other:?}"),
+            }
+        }
+        other => panic!("expected DamageDealtThisTurn intervening-if, got {other:?}"),
+    }
+
+    let execute = def.execute.as_deref().expect("execute must be Some");
+    assert!(
+        matches!(*execute.effect, Effect::PutCounter { .. }),
+        "execute must be PutCounter, got {:?}",
+        execute.effect,
+    );
+}
+
 /// CR 208.1 + CR 603.4 + CR 603.10a + CR 608.2h: Deathknell Berserker -- a
 /// dies-trigger intervening "if" gated on the creature's last-known power
 /// ("if its power was 3 or greater"). The look-back reads the dying creature's

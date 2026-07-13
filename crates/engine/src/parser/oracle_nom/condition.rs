@@ -324,7 +324,7 @@ fn parse_damage_dealt_this_turn_conditions(input: &str) -> OracleResult<'_, Stat
         parse_subject_was_dealt_excess_damage_this_turn,
         parse_player_was_dealt_damage_threshold_this_turn,
         parse_player_dealt_combat_damage_by_source_this_turn,
-        parse_source_dealt_damage_to_opponent_this_turn,
+        parse_source_dealt_damage_this_turn,
         parse_source_was_dealt_damage_this_turn,
     ))
     .parse(input)
@@ -503,12 +503,11 @@ fn parse_player_dealt_combat_damage_by_source_this_turn(
     ))
 }
 
-fn parse_source_dealt_damage_to_opponent_this_turn(
-    input: &str,
-) -> OracleResult<'_, StaticCondition> {
+fn parse_source_dealt_damage_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     // CR 120.1 + CR 120.2a + CR 603.4: "<source-anaphor> dealt [combat] damage to a
-    // player/opponent this turn" — the *dealing* direction (source = the ability's
-    // own permanent). "it" is the source anaphor for triggered-ability
+    // player/opponent/creature this turn" — the *dealing* direction (source = the
+    // ability's own permanent). This covers player, opponent, AND creature (incl.
+    // "another creature") targets. "it" is the source anaphor for triggered-ability
     // intervening-ifs (Wave of Rats' dies trigger); "~"/"this creature"/"this
     // permanent" cover the self-ref forms. The optional "combat" qualifier narrows
     // the damage channel (CR 120.2a) so combat-only history is required.
@@ -528,6 +527,17 @@ fn parse_source_dealt_damage_to_opponent_this_turn(
             alt((tag("an opponent"), tag("opponent"))),
         ),
         value(TargetFilter::Player, alt((tag("a player"), tag("player")))),
+        // CR 120.1: the dealing-direction *creature* target (Wolverine, Best
+        // There Is: "if ~ dealt damage to another creature this turn"). "another"
+        // excludes the source itself (FilterProp::Another).
+        value(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Another])),
+            tag("another creature"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::creature()),
+            alt((tag("a creature"), tag("creature"))),
+        ),
     ))
     .parse(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
@@ -15261,6 +15271,44 @@ mod tests {
                 assert_eq!(typed.controller, Some(ControllerRef::Opponent));
             }
             other => panic!("expected opponent damage threshold quantity, got {other:?}"),
+        }
+    }
+
+    /// CR 120.1 + CR 603.4: "~ dealt damage to another creature this turn" — the
+    /// dealing-direction *creature* target (Wolverine, Best There Is). "another"
+    /// excludes the source (FilterProp::Another); no "combat" -> DamageKindFilter::Any.
+    #[test]
+    fn parse_source_dealt_damage_to_another_creature_this_turn() {
+        let (rest, c) =
+            parse_inner_condition("~ dealt damage to another creature this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::DamageDealtThisTurn {
+                                source,
+                                target,
+                                damage_kind,
+                                ..
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(*source, TargetFilter::SelfRef);
+                assert_eq!(
+                    *target,
+                    TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::Another])
+                    )
+                );
+                assert_eq!(damage_kind, DamageKindFilter::Any);
+            }
+            other => {
+                panic!("expected DamageDealtThisTurn SelfRef->another-creature, got {other:?}")
+            }
         }
     }
 
