@@ -119,7 +119,27 @@ def is_cfg_test_attr(line: str) -> bool:
 # A non-raw literal: `"..."` (with a `b`/`c` prefix, which is part of the token),
 # or a char literal. The char alternative earns its place: `'"'` must be consumed
 # whole, or the leaked `"` opens a phantom string that swallows the line.
-STRING_LIT = re.compile(r'(?:b|c)?"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
+#
+# The char alternative is EXACTLY ONE char (or one escape) followed by the closing
+# quote, and that precision is the whole point: in Rust a `'` also opens a LIFETIME
+# (`&'a str`, `Foo<'_>`) and a loop LABEL (`'outer: loop`), neither of which is ever
+# closed by a second `'`. A permissive `'(?:\\.|[^'\\])*'` cannot tell them apart --
+# it runs from a lifetime tick to whatever quote comes next and eats the code in
+# between, braces included:
+#
+#     char::<_, OracleError<'_>>('{'),   ->   char::<_, OracleError<{'),
+#
+# which does not merely lose a hit: it LEAKS a `{` into the code stream and desyncs
+# brace tracking for the rest of the file -- the raw-string failure mode again.
+# Rust's own rule is the one encoded here: `'x'`, `'\n'`, `'\x41'`, `'\u{1F600}'` are
+# literals; a `'` that does not close after one char is a lifetime, and the scanner
+# emits its tick as ordinary code. (The byte form `b'x'` needs no prefix alternative:
+# CANDIDATE only stops on a `b` that a `"` follows, so a byte-char literal is always
+# entered at its quote and its `b` is scanned as the ordinary code it lexes like.)
+STRING_LIT = re.compile(
+    r'(?:b|c)?"(?:\\.|[^"\\])*"'
+    r"|'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{1,6}\}|.)|[^'\\])'"
+)
 
 # A raw-string opener: `r"`, `r#"`, `r##"`, and the byte/C-string forms `br#"` /
 # `cr#"`. Rust raw strings do NOT nest and honour NO escapes, so the `#` count is
@@ -281,8 +301,11 @@ def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
             continue
 
         # A literal may open here. The `r`/`b`/`c` prefixes only mean "literal"
-        # at a token boundary -- mid-identifier they are ordinary letters. A bare
-        # quote needs no boundary: it always opens one.
+        # at a token boundary -- mid-identifier they are ordinary letters. A `"`
+        # needs no boundary: it always opens a string. A `'` is the one candidate
+        # that is genuinely ambiguous, and STRING_LIT is what resolves it: it opens
+        # a char literal only if a single char (or escape) then a closing quote
+        # follows -- otherwise it is a lifetime or a loop label and falls through.
         boundary = i == 0 or line[i - 1] not in IDENT_CHARS
         if boundary:
             m = _match_raw_open(line, i)
@@ -298,7 +321,9 @@ def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
                 i = m.end()
                 continue
 
-        # A false candidate: an `r`/`b`/`c` that opens nothing.
+        # A false candidate: an `r`/`b`/`c` that opens nothing, or a `'` that opens
+        # a lifetime rather than a literal. Either way it is ordinary code: emit the
+        # one character and let the next slice pick up the rest of the token.
         append(ch)
         i += 1
 

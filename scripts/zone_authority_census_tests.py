@@ -171,6 +171,85 @@ class RawStringTests(unittest.TestCase):
         self.assertIn("add_to_zone(a);", code_of(src))
 
 
+class LifetimeTests(unittest.TestCase):
+    """A `'` opens a char literal ONLY when a single char (or escape) closes it.
+    Everywhere else in Rust it opens a LIFETIME (`&'a str`, `Foo<'_>`) or a loop
+    LABEL (`'outer:`), which no second `'` ever closes.
+
+    Read as a permissive `'...'` literal, a lifetime tick runs to whatever quote
+    comes next and eats the code in between -- the same ceiling as raw strings, and
+    with the same two failure modes: a swallowed HIT, and a leaked BRACE that
+    desyncs the scanner for the rest of the file.
+    """
+
+    def test_lifetime_does_not_swallow_the_hit_after_it(self) -> None:
+        # The census-visible loss. An ODD number of ticks is what bites: the lifetime
+        # tick pairs with the OPENING quote of a later char literal, and everything
+        # between them -- here a `container`-family hit AND the fn's `{` -- is eaten
+        # as literal content:
+        #
+        #     fn drain(&'a mut self) { self.hand.push_back(c); assert!(c != 'x'); }
+        #       ->  fn drain(&x'); }
+        #
+        # The census does not report a mis-scan; it reports one fewer hit, which
+        # reads exactly like migration progress.
+        code = code_of("    fn drain(&'a mut self) { self.hand.push_back(c); assert!(c != 'x'); }")
+        self.assertIn(".hand.push_back(c);", code)
+        self.assertEqual(code.count("{"), 1)
+
+    def test_lifetime_does_not_eat_a_brace(self) -> None:
+        # `struct S<'a> { x: &'a str }` -- the `{` lives BETWEEN the two ticks, so a
+        # permissive char literal eats it and the line closes a brace it never opened.
+        code = code_of("struct S<'a> { x: &'a str }")
+        self.assertEqual(code.count("{"), 1)
+        self.assertEqual(code.count("}"), 1)
+
+    def test_lifetime_before_a_brace_char_literal_does_not_leak_the_brace(self) -> None:
+        # The witness, verbatim from crates/engine/src/parser/oracle_replacement.rs:
+        # the lifetime tick in `<'_>` pairs with the OPENING quote of the `'{'` char
+        # literal, so the `{` is left behind as code. This is the strictly worse
+        # direction: not a missed hit but an INVENTED brace, and brace depth then
+        # drifts for every line that follows.
+        code = code_of("char::<_, OracleError<'_>>('{'),")
+        self.assertNotIn("{", code)
+
+    def test_lifetime_does_not_desync_a_cfg_test_skip_region(self) -> None:
+        # The mis-scope, end to end. A lifetime + a `'}'` char literal inside a
+        # `#[cfg(test)]` body leaves the eaten line closing braces it never opened;
+        # brace tracking walks out through the mod's floor and the scanner either
+        # raises CensusError or swallows the production code that follows.
+        src = (
+            "fn prod_before() { add_to_zone(a); }\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    fn t(c: &'a char) -> bool { *c == '}' }\n"
+            "}\n"
+            "fn prod_after() { add_to_zone(b); }\n"
+        )
+        code = code_of(src)  # must not raise CensusError
+        self.assertIn("add_to_zone(a);", code)
+        self.assertIn("add_to_zone(b);", code)
+
+    def test_loop_label_is_not_a_char_literal(self) -> None:
+        # `'outer:` is the same shape as a lifetime and fails the same way: the label
+        # tick pairs with the char literal's quote and the loop's `{` goes with it.
+        code = code_of("'outer: loop { if c == 'x' { add_to_zone(a); } }")
+        self.assertIn("add_to_zone(a);", code)
+        self.assertEqual(code.count("{"), code.count("}"))
+
+    # ---- the char literals themselves must still be consumed whole ----
+
+    def test_char_literal_escapes_are_still_stripped(self) -> None:
+        # Each is ONE char once escapes are honoured, so each must be consumed whole.
+        # `'\''` is the sharp one: its escaped quote must not be read as the closer.
+        for lit in ("'x'", "'{'", "'}'", "'\\n'", "'\\''", "'\\\\'", "'\\x41'", "'\\u{1F600}'", "b'x'"):
+            with self.subTest(lit=lit):
+                code = code_of(f"let c = {lit}; add_to_zone(a);")
+                self.assertNotIn("{", code)
+                self.assertNotIn("}", code)
+                self.assertIn("add_to_zone(a);", code)
+
+
 class PreservedBehaviourTests(unittest.TestCase):
     """The scanner's existing contracts. The raw-string branch must not cost any
     of them."""
