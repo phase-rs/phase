@@ -431,11 +431,27 @@ fn rewrite_cost_x_in_effect(effect: &mut crate::types::ability::Effect) {
         | Effect::Mill { count: amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
-        | Effect::Token { count: amount, .. }
         | Effect::Dig { count: amount, .. }
         | Effect::DamageAll { amount, .. }
         | Effect::DamageEachPlayer { amount, .. } => {
             rewrite_variable_x_to_cost_x_paid(amount);
+        }
+        // CR 107.3c: a token's P/T is an X site just like `Pump`'s. `Token` was rewritten
+        // for its `count` only, so an X/X token minted by an X-cost ability kept a bare
+        // `Variable("X")` in its power/toughness — which resolves to 0, so Shark Typhoon's
+        // cycling trigger created an **0/0 Shark** that died immediately to state-based
+        // actions (CR 704.5f) while the card rendered as fully supported. The P/T rewriter
+        // already handled every shape needed here (including a `PtValue::Quantity` wrapping
+        // the placeholder); `Token` simply never reached it.
+        Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } => {
+            rewrite_variable_x_to_cost_x_paid(count);
+            rewrite_trigger_pt_variable_x(power);
+            rewrite_trigger_pt_variable_x(toughness);
         }
         Effect::Pump {
             power, toughness, ..
