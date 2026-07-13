@@ -28739,3 +28739,42 @@ fn dynamic_pt_pump_scales_by_source_intensity() {
         s[0].modifications
     );
 }
+
+/// CR 605.1a: the filter-scoped "Activated abilities of <types> can't be
+/// activated" static now carries the optional "unless they're mana abilities"
+/// carve-out — Damping Matrix (artifacts and creatures) and Sharkey (lands).
+#[test]
+fn filter_scoped_cant_be_activated_parses_mana_ability_exemption() {
+    let s = super::shared::parse_static_line_multi(
+        "Activated abilities of artifacts and creatures can't be activated unless they're mana abilities.",
+    );
+    assert_eq!(s.len(), 1, "Damping Matrix: {s:?}");
+    assert!(
+        matches!(
+            s[0].mode,
+            StaticMode::CantBeActivated {
+                exemption: ActivationExemption::ManaAbilities,
+                ..
+            }
+        ),
+        "expected mana-ability exemption, got {:?}",
+        s[0].mode
+    );
+
+    // Regression: the Karn/Clarion form (no carve-out) still parses to None.
+    let s = super::shared::parse_static_line_multi(
+        "Activated abilities of artifacts your opponents control can't be activated.",
+    );
+    assert_eq!(s.len(), 1, "Karn/Clarion: {s:?}");
+    assert!(
+        matches!(
+            s[0].mode,
+            StaticMode::CantBeActivated {
+                exemption: ActivationExemption::None,
+                ..
+            }
+        ),
+        "expected no exemption, got {:?}",
+        s[0].mode
+    );
+}
