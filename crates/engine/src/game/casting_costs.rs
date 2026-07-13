@@ -8,7 +8,7 @@ use crate::types::ability::{
     CounterCostSelection, Effect, KickerVariant, ObjectProperty, QuantityExpr, QuantityRef,
     ReplacementDefinition, ResolvedAbility, SacrificeCost, SacrificeRequirement,
     SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition,
-    TapCreaturesAggregate, TargetFilter, TypeFilter, TypedFilter, EXILE_COST_X,
+    TapCreaturesAggregate, TargetFilter, ThisWayCause, TypeFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -518,7 +518,14 @@ pub(crate) fn handle_decide_additional_cost(
     // cost before mana payment begins. The recompute reads the in-flight cast's
     // flag via `state.pending_cast`, so publish `updated_pending` there for the
     // duration of the recompute, then restore the prior value.
-    if optional_cost_paid {
+    // CR 601.2f: An exile-this-way reduction cannot be calculated until the
+    // caster has selected the cards; recomputing here could count an unrelated
+    // older tracked set. The selection handler publishes the fresh set first.
+    if optional_cost_paid
+        && !cost_to_pay
+            .as_ref()
+            .is_some_and(is_exile_any_number_effect_cost)
+    {
         recompute_pending_cast_cost_after_additional_cost(state, player, &mut updated_pending);
     }
 
@@ -3457,11 +3464,56 @@ pub(crate) fn handle_exile_for_cost(
         (expected, expected),
         legal_cards,
         chosen,
+        None,
         events,
         "card(s)",
         "Selected card not eligible for exile",
         |state, player, id, _pending| {
             // Re-validate: chosen cards must still be in the cost's source zone.
+            let still_in_zone = state
+                .players
+                .get(player.0 as usize)
+                .is_some_and(|p| match zone {
+                    ExileCostSourceZone::Hand => p.hand.contains(&id),
+                    ExileCostSourceZone::Graveyard => p.graveyard.contains(&id),
+                });
+            if !still_in_zone {
+                return Err(EngineError::InvalidAction(format!(
+                    "Selected card is no longer in {:?}",
+                    zone.as_zone()
+                )));
+            }
+            Ok(())
+        },
+    )
+}
+
+/// CR 601.2b + CR 601.2h + CR 701.13: Complete an optional "exile any
+/// number" additional cost, preserving the selected set for its cast-time
+/// "for each card exiled this way" reduction.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_exile_any_number_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    zone: ExileCostSourceZone,
+    pending: PendingCast,
+    maximum: usize,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    finish_exile_selection_for_cost(
+        state,
+        player,
+        pending,
+        (0, maximum),
+        legal_cards,
+        chosen,
+        Some(ThisWayCause::Exiled),
+        events,
+        "card(s)",
+        "Selected card not eligible for exile",
+        |state, player, id, _pending| {
             let still_in_zone = state
                 .players
                 .get(player.0 as usize)
@@ -3507,6 +3559,7 @@ pub(crate) fn handle_exile_permanent_for_cost(
         (expected, expected),
         legal_cards,
         chosen,
+        None,
         events,
         "permanent(s)",
         "Selected permanent not eligible to exile as a cost",
@@ -3545,6 +3598,7 @@ fn finish_exile_selection_for_cost(
     bounds: (usize, usize),
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
+    this_way_cause: Option<ThisWayCause>,
     events: &mut Vec<GameEvent>,
     object_label: &str,
     illegal_message: &str,
@@ -3571,6 +3625,17 @@ fn finish_exile_selection_for_cost(
 
     for &id in chosen {
         revalidate(state, player, id, &pending)?;
+    }
+
+    // CR 601.2f: Cost reductions that count cards exiled this way read the
+    // fresh payment set, never an unrelated resolution's tracked set.
+    if let Some(cause) = this_way_cause {
+        state.chain_tracked_set_id = None;
+        super::effects::publish_tracked_set_with_causes(
+            state,
+            chosen.iter().copied().map(|id| (id, Some(cause))).collect(),
+        );
+        recompute_pending_cast_cost_after_additional_cost(state, player, &mut pending);
     }
 
     // CR 608.2k: Capture the first exiled object's public characteristics BEFORE
@@ -3744,6 +3809,7 @@ pub(crate) fn handle_exile_materials_for_cost(
         bounds,
         legal_cards,
         chosen,
+        None,
         events,
         "material(s)",
         "Selected object not eligible as craft material",
@@ -5809,6 +5875,31 @@ fn pay_additional_cost_with_source(
         cost
     };
 
+    // CR 601.2b + CR 601.2h: Legacy card data represents an optional
+    // "exile any number of [quality] cards" cost as ChangeZone. Surface every
+    // eligible card and allow the caster to select any subset.
+    if let Some((zone, filter)) = exile_any_number_effect_cost_parts(&cost) {
+        let eligible = super::casting::find_eligible_exile_for_cost_targets(
+            state,
+            player,
+            pending.object_id,
+            zone,
+            Some(filter),
+        );
+        return Ok(WaitingFor::PayCost {
+            player,
+            kind: PayCostKind::ExileFromZone { zone },
+            count: eligible.len(),
+            min_count: 0,
+            choices: eligible,
+            resume: CostResume::SpellCost {
+                spell: Box::new(pending),
+                cost: Box::new(cost),
+                source: cost_source,
+            },
+        });
+    }
+
     match cost {
         AbilityCost::PayLife { amount } => {
             // CR 118.3 + CR 119.4 + CR 119.8: Pay life as an additional cost via
@@ -6374,6 +6465,28 @@ fn pay_additional_cost_with_source(
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+pub(crate) fn is_exile_any_number_effect_cost(cost: &AbilityCost) -> bool {
+    exile_any_number_effect_cost_parts(cost).is_some()
+}
+
+fn exile_any_number_effect_cost_parts(
+    cost: &AbilityCost,
+) -> Option<(ExileCostSourceZone, &TargetFilter)> {
+    let AbilityCost::EffectCost { effect } = cost else {
+        return None;
+    };
+    let Effect::ChangeZone {
+        origin: Some(origin),
+        destination: Zone::Exile,
+        target,
+        ..
+    } = effect.as_ref()
+    else {
+        return None;
+    };
+    Some((ExileCostSourceZone::try_from_zone(*origin)?, target))
 }
 
 fn prepend_deferred_required_cost(cost: AbilityCost, pending: &mut PendingCast) -> AbilityCost {
@@ -7095,6 +7208,65 @@ fn condition_matches_with_additional_cost_paid(
         }),
         _ => super::layers::evaluate_condition(state, condition, controller, spell_id),
     }
+}
+
+fn exile_any_number_cost_reduction_capacity(
+    state: &GameState,
+    player: PlayerId,
+    spell_id: ObjectId,
+) -> u32 {
+    let Some(spell) = state.objects.get(&spell_id) else {
+        return 0;
+    };
+    let Some(AdditionalCost::Optional { cost, .. }) = spell.additional_cost.as_ref() else {
+        return 0;
+    };
+    let Some((zone, cost_filter)) = exile_any_number_effect_cost_parts(cost) else {
+        return 0;
+    };
+    let eligible = super::casting::find_eligible_exile_for_cost_targets(
+        state,
+        player,
+        spell_id,
+        zone,
+        Some(cost_filter),
+    );
+    let ctx = super::filter::FilterContext::from_source(state, spell_id);
+
+    spell
+        .static_definitions
+        .iter_all()
+        .filter_map(|definition| {
+            let StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::Cost { generic, .. },
+                dynamic_count:
+                    Some(QuantityRef::FilteredTrackedSetSize {
+                        filter,
+                        caused_by: Some(ThisWayCause::Exiled),
+                    }),
+                ..
+            } = &definition.mode
+            else {
+                return None;
+            };
+            if !matches!(definition.affected, Some(TargetFilter::SelfRef)) {
+                return None;
+            }
+            let condition = definition.condition.as_ref()?;
+            if !sacrificed_this_way_condition_matches(state, condition, spell.controller, spell_id)
+            {
+                return None;
+            }
+            let count = eligible
+                .iter()
+                .filter(|&&id| super::filter::matches_target_filter(state, id, filter, &ctx))
+                .count()
+                .try_into()
+                .unwrap_or(u32::MAX);
+            Some(generic.saturating_mul(count))
+        })
+        .fold(0, u32::saturating_add)
 }
 
 pub(super) fn retrace_discard_land_cost() -> AbilityCost {
@@ -9958,7 +10130,12 @@ pub(super) fn max_x_value_excluding(
     // CR 107.1b: Each `ManaCostShard::X` in the cost contributes `value` generic,
     // so for `{X}{X}` each point of X costs 2 mana. Dividing by `x_count` yields
     // the largest X the caster can actually afford.
-    let available = pool + permanent_capacity + delve_capacity;
+    // CR 601.2f: An optional exile-this-way reduction expands the largest
+    // affordable X even though the card selection happens later in the cast.
+    let exile_reduction_capacity = object_id
+        .map(|spell_id| exile_any_number_cost_reduction_capacity(state, player, spell_id))
+        .unwrap_or(0);
+    let available = pool + permanent_capacity + delve_capacity + exile_reduction_capacity;
     let formula_max = available.saturating_sub(fixed_portion) / x_count;
 
     // An object-less X cost (the `max_x_value` public path used by the
@@ -20578,5 +20755,187 @@ its replicate cost was paid.)\nDraw a card.";
             "excluding one real card leaves insufficient Delve capacity for {{X}}{{X}}"
         );
         assert!(state.objects[&real_b].is_delve_eligible(PlayerId(0)));
+    }
+
+    #[test]
+    fn march_exiles_matching_hand_cards_and_reduces_the_chosen_x_cost() {
+        use crate::ai_support::candidate_actions;
+        use crate::parser::oracle::parse_oracle_text;
+
+        let caster = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        let parsed = parse_oracle_text(
+            "As an additional cost to cast this spell, you may exile any number of white cards from your hand. This spell costs {2} less to cast for each card exiled this way.\nExile target artifact, creature, or enchantment with mana value X or less.",
+            "March of Otherworldly Light",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let additional_cost = parsed
+            .additional_cost
+            .clone()
+            .expect("March additional cost parses");
+        let symbolic_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::White],
+            generic: 0,
+        };
+        let march = create_object(
+            &mut state,
+            CardId(9_000),
+            caster,
+            "March of Otherworldly Light".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&march).unwrap();
+            object.card_types.core_types.push(CoreType::Instant);
+            object.mana_cost = symbolic_cost.clone();
+            object.additional_cost = Some(additional_cost.clone());
+            for definition in parsed.statics {
+                object.static_definitions.push(definition);
+            }
+        }
+        let white = create_object(
+            &mut state,
+            CardId(9_001),
+            caster,
+            "White Card".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&white)
+            .unwrap()
+            .color
+            .push(ManaColor::White);
+        let second_white = create_object(
+            &mut state,
+            CardId(9_003),
+            caster,
+            "Second White Card".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&second_white)
+            .unwrap()
+            .color
+            .push(ManaColor::White);
+        let blue = create_object(
+            &mut state,
+            CardId(9_002),
+            caster,
+            "Blue Card".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&blue)
+            .unwrap()
+            .color
+            .push(ManaColor::Blue);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::White,
+            ObjectId(9_099),
+            false,
+            vec![],
+        ));
+
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            march,
+            caster,
+        );
+        let mut pending = PendingCast::new(march, CardId(9_000), ability, symbolic_cost.clone());
+        pending.base_cost = Some(symbolic_cost.clone());
+        state.pending_cast = Some(Box::new(pending.clone()));
+        assert_eq!(
+            max_x_value_excluding(
+                &state,
+                caster,
+                &symbolic_cost,
+                Some(march),
+                &std::collections::HashSet::new(),
+            ),
+            4,
+            "each white card supplies two generic reduction toward X"
+        );
+
+        pending.ability.set_chosen_x_recursive(2);
+        pending.cost.concretize_x(2);
+        state.pending_cast = Some(Box::new(pending.clone()));
+        let mut events = Vec::new();
+        crate::game::stack::push_to_stack(
+            &mut state,
+            StackEntry {
+                id: march,
+                source_id: march,
+                controller: caster,
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(9_000),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            },
+            &mut events,
+        );
+        let waiting = handle_decide_additional_cost(
+            &mut state,
+            caster,
+            pending,
+            &additional_cost,
+            true,
+            &mut events,
+        )
+        .expect("March cost declaration succeeds");
+        assert!(matches!(
+            &waiting,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone {
+                    zone: ExileCostSourceZone::Hand,
+                },
+                choices,
+                count: 2,
+                min_count: 0,
+                ..
+            } if choices == &vec![white, second_white]
+        ));
+
+        state.waiting_for = waiting;
+        let candidates = candidate_actions(&state);
+        assert!(candidates.iter().any(|candidate| matches!(
+            &candidate.action,
+            GameAction::SelectCards { cards } if cards.is_empty()
+        )));
+        assert!(candidates.iter().any(|candidate| matches!(
+            &candidate.action,
+            GameAction::SelectCards { cards } if cards == &vec![white]
+        )));
+        assert!(candidates.iter().any(|candidate| matches!(
+            &candidate.action,
+            GameAction::SelectCards { cards } if cards == &vec![white, second_white]
+        )));
+        assert!(!candidates.iter().any(|candidate| matches!(
+            &candidate.action,
+            GameAction::SelectCards { cards } if cards.contains(&blue)
+        )));
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![white, second_white],
+            },
+        )
+        .expect("March exile payment succeeds");
+        assert_eq!(state.objects[&white].zone, Zone::Exile);
+        assert_eq!(state.objects[&second_white].zone, Zone::Exile);
+        assert_eq!(state.objects[&blue].zone, Zone::Hand);
+        assert!(state.stack.iter().any(|entry| entry.source_id == march));
+        assert_eq!(state.players[0].mana_pool.total(), 0);
     }
 }
