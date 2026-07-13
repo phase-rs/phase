@@ -32,7 +32,8 @@
     "label": "Detector de combos",
     "title": "Detectar bucles infinitos: terminar bucles obligatorios automáticamente y mostrar recursos ∞ (desactivado por defecto)",
     "on": "Activado",
-    "off": "Desactivado"
+    "off": "Desactivado",
+    "interactive": "Interactivo"
   },
   "gameMenu": {
     "sections": {

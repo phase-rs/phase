@@ -189,6 +189,7 @@ pub(crate) fn resolve_connive_effect(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Connive,
                 source_id: conniver_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -239,6 +240,7 @@ pub(crate) fn resolve_connive_effect(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Connive,
         source_id: conniver_id,
+        subject: None,
     });
     Ok(())
 }

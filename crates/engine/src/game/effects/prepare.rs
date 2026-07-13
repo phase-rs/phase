@@ -81,6 +81,7 @@ pub fn resolve_become_prepared(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::BecomePrepared,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -110,6 +111,7 @@ pub fn resolve_become_unprepared(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::BecomeUnprepared,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }

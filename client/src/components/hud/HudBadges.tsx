@@ -413,6 +413,7 @@ const UNBOUNDED_FAMILY: Record<ResourceAxisTag, ResourceAxisFamily> = {
   EtbTriggers: "triggers",
   LtbTriggers: "triggers",
   SacTriggers: "triggers",
+  Poison: "counters",
 };
 
 /** Map an engine-provided `ResourceAxis` to its display family. Presentation

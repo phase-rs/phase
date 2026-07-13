@@ -76,6 +76,26 @@ describe("HostSetup", () => {
     );
   });
 
+  it("submits interactive loop detection when selected", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn();
+
+    render(
+      <HostSetup
+        onHost={onHost}
+        onBack={vi.fn()}
+        connectionMode="server"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Interactive" }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+    expect(onHost).toHaveBeenCalledWith(
+      expect.objectContaining({ loopDetection: { type: "Interactive" } }),
+    );
+  });
+
   it("submits Two-Headed Giant as a four-seat human-only team format", async () => {
     const user = userEvent.setup();
     const onHost = vi.fn();

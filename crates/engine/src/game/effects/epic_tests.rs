@@ -353,7 +353,7 @@ fn targeted_epic_retarget_completion_resolves_as_epic_copy() {
         GameEvent::EffectResolved {
             kind: EffectKind::EpicCopy,
             source_id,
-        } if *source_id == proto
+        ..} if *source_id == proto
     )));
     assert!(!result.events.iter().any(|event| matches!(
         event,
@@ -392,7 +392,7 @@ fn legacy_copy_retarget_completion_uses_copy_as_default_source() {
         GameEvent::EffectResolved {
             kind: EffectKind::CopySpell,
             source_id,
-        } if *source_id == copy_id
+        ..} if *source_id == copy_id
     )));
 }
 

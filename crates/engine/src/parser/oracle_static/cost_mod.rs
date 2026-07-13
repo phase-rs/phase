@@ -94,6 +94,47 @@ pub(crate) fn parse_action_cost_reduction(text: &str, lower: &str) -> Option<Sta
     )
 }
 
+/// CR 601.2f + CR 602.1 + CR 606.1 + CR 118.7: shared grammar head for
+/// "<activated|loyalty> abilities of <subject> cost {N|X} <less|more> to activate".
+/// Returns `(keyword_tag, subject_slice, amount, is_x, mode)` with the remainder
+/// positioned immediately after "activate", so the static caller can continue with
+/// `opt(parse_where_x_is_self_stat)` and the transient-effect caller can ignore the
+/// tail. Single authority for both the permanent-static form (dispatch.rs) and the
+/// transient (this-turn) form, which lowers to a `GenericEffect` carrying the same
+/// `StaticMode::ReduceAbilityCost` for a `Duration::UntilEndOfTurn` (oracle_effect,
+/// The Dining Car's chaos body).
+/// The input must already be lowercase (mana braces are case-stable: `{2}`, `{x}`).
+pub(crate) fn parse_activated_ability_cost_head(
+    i: &str,
+) -> OracleResult<'_, (&'static str, &str, u32, bool, CostModifyMode)> {
+    let (i, keyword) = alt((
+        value("activated", tag("activated abilities of ")),
+        value("loyalty", tag("loyalty abilities of ")),
+    ))
+    .parse(i)?;
+    let (i, subject) = take_until(" cost ").parse(i)?;
+    let (i, _) = tag(" cost ").parse(i)?;
+    // CR 107.3 + CR 601.2f: the amount is a fixed `{N}` (Training Grounds) or the
+    // variable `{X}` (Agatha), whose value is supplied by a trailing referent the
+    // caller parses.
+    let (i, (amount_n, is_x)) = nom::sequence::delimited(
+        tag("{"),
+        alt((
+            map(nom_primitives::parse_number, |n| (n, false)),
+            value((0u32, true), tag("x")),
+        )),
+        tag("}"),
+    )
+    .parse(i)?;
+    let (i, _) = tag(" ").parse(i)?;
+    let (i, mode) = alt((
+        value(CostModifyMode::Reduce, tag("less to activate")),
+        value(CostModifyMode::Raise, tag("more to activate")),
+    ))
+    .parse(i)?;
+    Ok((i, (keyword, subject, amount_n, is_x, mode)))
+}
+
 pub(crate) fn parse_activated_cost_reduction_minimum_mana(lower: &str) -> Option<u32> {
     preceded(
         take_until::<_, _, OracleError<'_>>(

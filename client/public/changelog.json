@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 171,
+      "date": "2026-07-12",
+      "title": "Captain America throws, Ram Through tramples",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Captain America, First Avenger can now throw an attached Equipment for damage divided among up to three targets, then Catch one at the start of combat\n• Exile-then-pile effects now work: an opponent can split cards exiled this way and you can put the chosen pile onto the battlefield (Boneyard Parley)\n• Call the Spirit Dragons now gives itself the correct per-color counters and follows through on its win condition\n• Conjure can now put cards into the top N cards of a library at random\n• Fear of Sleep Paralysis now keeps stun counters on opponents’ permanents from being removed\n• Source-intensity scaling now powers the right P/T bonuses (Minthara of the Absolute, Teysa of the Ghost Council, Quickbeast Amulet)\n• “Tapped creatures” and “untapped creatures” now work as status restrictions, so their anthems apply correctly (Builder's Blessing, Augusta, Saryth, Sword of the Paruns)\n\n🛠️ Cards That Now Work Right\n• Linked exiles now stay connected to the card that made them: Isochron Scepter, Hideaway lands, Saruman of Many Colors, and similar cards copy or let you play the right exiled card\n• Land Equilibrium's land-entry replacement, Tinker's artifact sacrifice cost, and Rayami's blood-counter keyword grants now follow their printed rules\n• Tail Swipe, Joust, Blizzard Brawl, and related two-target fight spells keep both targets and apply their bonus to the right creature\n• Mercenaries, Total War, and Desperate Gambit now apply their prevention, destruction, and chosen-source effects to the correct player or source\n• Nefarious Lich now exiles the right number of graveyard cards for incoming damage and loses the game only when it cannot; self-protection cards no longer prevent damage their source deals (Swans of Bryn Argoll, Phytohydra, Lichenthrope)\n• Ram Through now sends trample excess to the defending player; Kinetic Ooze's “any number” counter-doubling choice no longer gets stuck\n• Aura follow-up sentences beginning with “It” now affect the enchanted creature, and dynamic “for each” pumps retain their scaling and trailing type changes\n\n⚔️ Combat & Gameplay\n• Divided damage and counter effects keep “one, two, or three targets” together as a target-count choice instead of misreading it as a spell choice\n• Coin-flip outcomes now stay within the resolution that created them, so repeat-until-you-win effects such as Unleash the Flux resolve reliably\n\n🖥️ Interface\n• Forge deck files can now be imported directly\n\n🌐 Multiplayer\n• P2P games now commit the engine state and available actions together, preventing a host softlock where the board showed actions the engine would reject",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1525991025997512859"
+    },
+    {
       "id": 170,
       "date": "2026-07-11",
       "title": "Fireball finally charges for extra targets",

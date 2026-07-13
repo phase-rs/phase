@@ -2881,6 +2881,15 @@ mod tests {
         ));
     }
 
+    /// CR 508.1a: "you attacked this turn" is satisfied only by a declaration that
+    /// actually named an attacker.
+    ///
+    /// The condition is now read by the shared static-condition grammar as a count over
+    /// `attacker_declarations_this_turn` — the same per-attacker records that carry the
+    /// LKI a filtered variant ("you attacked with a Spacecraft") needs. Production
+    /// `combat::declare_attackers` populates those records AND calls
+    /// `record_attackers_declared`; this test must therefore simulate both halves, not
+    /// just the summary counters.
     #[test]
     fn zero_attacker_declaration_does_not_satisfy_you_attacked_this_turn() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
@@ -2895,6 +2904,26 @@ mod tests {
             "you attacked this turn"
         ));
 
+        let attacker = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(2),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        let record = state
+            .objects
+            .get(&attacker)
+            .unwrap()
+            .snapshot_for_attack_declaration(attacker);
+        state.attacker_declarations_this_turn.push(record);
         record_attackers_declared(&mut state, 1);
 
         assert!(parse_and_evaluate_condition(

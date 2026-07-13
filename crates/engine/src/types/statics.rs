@@ -1185,6 +1185,16 @@ pub enum StaticMode {
         /// (Lurrus, Karador, Conduit). Routed through `pay_additional_cost`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         extra_cost: Option<CastExtraCost>,
+        /// CR 122.1 + CR 614.1c + CR 607.1: Optional enters-with counter rider
+        /// linked to the "cast a spell this way" permission — "If you cast a
+        /// spell this way, that <permanent> enters with a [counter] counter on
+        /// it." (Noctis, Prince of Lucis; Leonardo, Sewer Samurai — both
+        /// finality). `None` (default) preserves the existing graveyard-cast
+        /// shapes. Placed at the shared `finalize_cast` seam via
+        /// `casting::selected_static_permission_enters_with_counter`. Mirrors
+        /// `Effect::CastFromZone.enters_with_counter`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_with_counter: Option<super::counter::CounterType>,
     },
     /// CR 401.5 + CR 118.9 + CR 601.2a: Static ability granting permission to
     /// play/cast the top card of the controller's library when it matches
@@ -1363,6 +1373,16 @@ pub enum StaticMode {
         /// `TopOfLibraryCastPermission.alt_cost`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         extra_cost: Option<CastExtraCost>,
+        /// CR 122.1 + CR 614.1c + CR 607.1: Optional enters-with counter rider
+        /// linked to the "cast a spell this way" permission — "If you cast a
+        /// spell this way, that <permanent> enters with a [counter] counter on
+        /// it." (Intrepid Paleontologist — finality). `None` (default)
+        /// preserves the existing exile-cast shapes (Maralen, The Matrix of
+        /// Time, Azula, Valgavoth). Placed at the shared `finalize_cast` seam
+        /// via `casting::selected_static_permission_enters_with_counter`.
+        /// Mirrors `Effect::CastFromZone.enters_with_counter`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_with_counter: Option<super::counter::CounterType>,
     },
     /// CR 113.6 + CR 601.2a: Marker static identifying a source whose linked
     /// "play a card from exile with a collection counter on it" permission is
@@ -2328,6 +2348,10 @@ impl Hash for StaticMode {
                 play_mode,
                 graveyard_destination_replacement,
                 extra_cost,
+                // `CounterType` derives Hash but is collision-safe to skip: the
+                // enters-with rider never distinguishes two otherwise-equal
+                // permissions in the interned set (mirrors `extra_cost` below).
+                ..
             } => {
                 frequency.hash(state);
                 play_mode.hash(state);
@@ -2360,6 +2384,9 @@ impl Hash for StaticMode {
                 mana_spend_permission,
                 grants_flash,
                 extra_cost,
+                // Collision-safe skip of the enters-with rider (see the
+                // `GraveyardCastPermission` note above).
+                ..
             } => {
                 frequency.hash(state);
                 play_mode.hash(state);
@@ -2688,6 +2715,10 @@ impl fmt::Display for StaticMode {
                 play_mode,
                 graveyard_destination_replacement,
                 extra_cost,
+                // CR 122.1: the enters-with counter payload rides on serde, not
+                // the Display round-trip (mirrors `extra_cost`); FromStr
+                // defaults it to None.
+                ..
             } => {
                 write!(f, "GraveyardCastPermission({play_mode},{frequency}")?;
                 if matches!(graveyard_destination_replacement, Some(Zone::Exile)) {
@@ -2744,6 +2775,9 @@ impl fmt::Display for StaticMode {
                 mana_spend_permission,
                 grants_flash,
                 extra_cost,
+                // CR 122.1: enters-with counter payload rides on serde, not the
+                // Display round-trip (see `GraveyardCastPermission` above).
+                ..
             } => {
                 // Positional, lossless round-trip. Segments 1-2 (play_mode,
                 // frequency) are always present; the optional "free" cost
@@ -3157,6 +3191,7 @@ impl FromStr for StaticMode {
                 play_mode: CardPlayMode::Cast,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             s if s.starts_with("GraveyardCastPermission(") => {
                 let inner = s
@@ -3175,6 +3210,7 @@ impl FromStr for StaticMode {
                         // serde, not the FromStr round-trip, so FromStr defaults
                         // to None.
                         extra_cost: None,
+                        enters_with_counter: None,
                     }
                 } else {
                     StaticMode::GraveyardCastPermission {
@@ -3182,6 +3218,7 @@ impl FromStr for StaticMode {
                         play_mode: CardPlayMode::Cast,
                         graveyard_destination_replacement: None,
                         extra_cost: None,
+                        enters_with_counter: None,
                     }
                 }
             }
@@ -3255,6 +3292,7 @@ impl FromStr for StaticMode {
                 mana_spend_permission: None,
                 grants_flash: false,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             s if s.starts_with("ExileCastPermission(") => {
                 // Display form: "ExileCastPermission(<play_mode>,<frequency>[,free]
@@ -3312,6 +3350,7 @@ impl FromStr for StaticMode {
                     mana_spend_permission,
                     grants_flash,
                     extra_cost: None,
+                    enters_with_counter: None,
                 }
             }
             "CantBeCountered" => StaticMode::CantBeCountered,
@@ -3964,12 +4003,14 @@ mod tests {
                 play_mode: CardPlayMode::Cast,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             // CR 601.2f: Festival of Embers — graveyard cast with an additional
             // pay-life cost. NOTE: `extra_cost`-bearing variants are NOT in this
@@ -4000,6 +4041,7 @@ mod tests {
                 mana_spend_permission: None,
                 grants_flash: false,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -4010,6 +4052,7 @@ mod tests {
                 mana_spend_permission: None,
                 grants_flash: false,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             // Persistent, your-turn-only exile-play permission
             // (The Matrix of Time; Prosper/Tibalt impulse-commander class).
@@ -4022,6 +4065,7 @@ mod tests {
                 mana_spend_permission: None,
                 grants_flash: false,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             // CR 609.4b + CR 702.8a: Azula, Cunning Usurper — Cast mode from a
             // persistent pool, your-turn-only, granting any-type mana and flash.
@@ -4036,6 +4080,7 @@ mod tests {
                 ),
                 grants_flash: true,
                 extra_cost: None,
+                enters_with_counter: None,
             },
             // NOTE: Valgavoth (alternative pay-life) and Dawnhand (additional
             // remove-counters) `extra_cost`-bearing exile permissions are
@@ -4137,6 +4182,7 @@ mod tests {
                     },
                     mode: CastCostMode::Alternative,
                 }),
+                enters_with_counter: None,
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -4148,6 +4194,7 @@ mod tests {
                     },
                     mode: CastCostMode::Additional,
                 }),
+                enters_with_counter: None,
             },
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -4166,6 +4213,7 @@ mod tests {
                     },
                     mode: CastCostMode::Additional,
                 }),
+                enters_with_counter: None,
             },
             StaticMode::Other("Custom".to_string()),
         ];

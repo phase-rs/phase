@@ -1832,46 +1832,52 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
 ///   effect reading the triggering spell's cost; Wildgrowth Archaic,
 ///   Expressive Firedancer rider, Mana Sculpt rider).
 fn parse_mana_spent_to_cast_amount(input: &str) -> Option<QuantityRef> {
-    // Consume optional leading "the ".
+    // Consume optional leading "the ", then the shared "amount of " head.
     let rest = tag::<_, _, OracleError<'_>>("the ")
         .parse(input)
         .map_or(input, |(r, _)| r);
-    // Consume the core phrase. Accept both "mana you spent" and "mana spent".
-    let rest = alt((
-        value(
-            (),
-            tag::<_, _, OracleError<'_>>("amount of mana you spent to cast "),
-        ),
-        value((), tag("amount of mana spent to cast ")),
+    let rest = tag::<_, _, OracleError<'_>>("amount of ")
+        .parse(rest)
+        .ok()?
+        .0;
+
+    // CR 107.4h: "{S} spent to cast <subject>" — the snow mana symbol refers to
+    // mana produced by a snow source. `FromSource` counts exactly the spent-mana
+    // snapshots whose PRODUCING source matches the filter (game/quantity.rs).
+    // Graven Lore, Blessing of Frost, Blood on the Snow.
+    if let Ok((subject, _)) = nom_quantity::parse_snow_mana_symbol(rest) {
+        let subject = tag::<_, _, OracleError<'_>>(" spent to cast ")
+            .parse(subject)
+            .ok()?
+            .0;
+        let (_, scope) = nom_quantity::parse_mana_spent_self_subject(subject).ok()?;
+        return Some(QuantityRef::ManaSpentToCast {
+            scope,
+            metric: crate::types::ability::CastManaSpentMetric::FromSource {
+                source_filter: nom_quantity::snow_source_filter(),
+            },
+        });
+    }
+
+    // "mana [you] spent to cast <subject>" — total mana paid.
+    let subject = alt((
+        value((), tag::<_, _, OracleError<'_>>("mana you spent to cast ")),
+        value((), tag("mana spent to cast ")),
     ))
     .parse(rest)
     .ok()?
     .0;
-    // Dispatch on subject: self-referential vs triggering-spell anaphora.
-    alt((
-        value(
-            QuantityRef::ManaSpentToCast {
-                scope: crate::types::ability::CastManaObjectScope::SelfObject,
-                metric: crate::types::ability::CastManaSpentMetric::Total,
-            },
-            alt((
-                tag::<_, _, OracleError<'_>>("this spell"),
-                tag("this creature"),
-                tag("it"),
-                tag("~"),
-            )),
-        ),
-        value(
-            QuantityRef::ManaSpentToCast {
-                scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
-                metric: crate::types::ability::CastManaSpentMetric::Total,
-            },
-            alt((tag("that spell"), tag("that creature"))),
-        ),
-    ))
-    .parse(rest)
-    .ok()
-    .map(|(_, qty)| qty)
+
+    // The subject anaphora IS the scope signal (CR 400.7d). Delegate to the
+    // shared `parse_mana_spent_self_subject` combinator — the single authority —
+    // instead of re-listing the pronouns here. That duplicate list is why Toph,
+    // Greatest Earthbender ("...spent to cast her") fell through to a raw-text
+    // `QuantityRef::Variable` and resolved to 0.
+    let (_, scope) = nom_quantity::parse_mana_spent_self_subject(subject).ok()?;
+    Some(QuantityRef::ManaSpentToCast {
+        scope,
+        metric: crate::types::ability::CastManaSpentMetric::Total,
+    })
 }
 
 /// CR 603.7c: Classify the prefix of a `"<referent>'s <property>"` possessive

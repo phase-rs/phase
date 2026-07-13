@@ -2625,7 +2625,7 @@ fn parse_clone_replacement(
     // Clone/Phantasmal Image class; graveyard (Superior Spider-Man) extends the
     // same building block. The zone flows onto the filter's `FilterProp::InZone`
     // below so `find_copy_targets` can scan the correct zone without branching.
-    let (type_text, suffix, source_zone) = split_on_clone_source_zone(after_copy)?;
+    let (type_text, suffix, source_zone, owner_scope) = split_on_clone_source_zone(after_copy)?;
     // Strip "any " / "a " / "an " article before the type phrase
     let type_text = alt((tag::<_, _, OracleError<'_>>("any "), tag("a "), tag("an ")))
         .parse(type_text)
@@ -2643,6 +2643,39 @@ fn parse_clone_replacement(
     // battlefield to preserve existing Clone/Phantasmal Image filter shape.
     if source_zone != Zone::Battlefield {
         filter = attach_zone_to_filter(filter, source_zone);
+    }
+
+    // CR 108.3 + CR 400.3: a possessive source zone ("your graveyard") scopes the
+    // copy source to the controller's OWN zone. Cards in a graveyard are owned,
+    // not controlled, and `find_copy_targets` evaluates the filter through the
+    // owner-aware LKI controller lookup, so binding `ControllerRef::You` restricts
+    // the eligible sources to the controller's own graveyard. Without this an
+    // opponent's Doctor milled from their own library this turn would be an
+    // illegal-but-accepted copy source (The Fourteenth Doctor). Recurses into
+    // Or/And leaves via `inject_controller`.
+    if let Some(scope) = owner_scope {
+        filter = inject_controller(filter, scope);
+    }
+
+    // CR 400.7 + CR 608.2c: a "that was put there from <zone> this turn"
+    // relative clause on the copy-source filter (a Doctor card in your graveyard
+    // put there from your library THIS turn — The Fourteenth Doctor). Reuse the
+    // shared zone-change suffix combinator and push
+    // `FilterProp::ZoneChangedThisTurn` onto the copy-source filter;
+    // `find_copy_targets` applies the full `TargetFilter`, so this restricts
+    // eligible sources at runtime with no resolver change. `to` is the source
+    // zone (Graveyard, the "there" of "put there"); `from` is parsed ("your
+    // library" → Library). Fail-soft: no match leaves `filter` and `suffix`
+    // unchanged, so battlefield/other clones (whose suffix begins ", except …")
+    // are untouched.
+    let mut suffix = suffix;
+    if let Some((prop, consumed)) =
+        super::oracle_target::parse_zone_changed_this_turn_suffix(suffix, Some(source_zone))
+    {
+        suffix = &suffix[consumed..];
+        if let TargetFilter::Typed(ref mut tf) = filter {
+            tf.properties.push(prop);
+        }
     }
 
     // CR 707.9 / CR 614.1c: The suffix carries any "except it's a {type}" and
@@ -2769,28 +2802,48 @@ pub(crate) fn find_copy_verb_present(lower: &str) -> bool {
 /// returned `type_text` is the span between "enter as a copy of " and the zone
 /// clause; `suffix` is everything after the zone clause (including the leading
 /// `,` / `.` boundary).
-fn split_on_clone_source_zone(after_copy: &str) -> Option<(&str, &str, Zone)> {
-    let candidates: &[(&str, Zone)] = &[
-        (" on the battlefield", Zone::Battlefield),
-        (" in any graveyard", Zone::Graveyard),
-        (" in a graveyard", Zone::Graveyard),
+fn split_on_clone_source_zone(
+    after_copy: &str,
+) -> Option<(&str, &str, Zone, Option<ControllerRef>)> {
+    // Each candidate carries the source zone plus an optional OWNER scope. Cards
+    // in a graveyard/library are owned, not controlled (CR 108.3 + CR 400.3), so
+    // a possessive qualifier ("your graveyard") restricts the copy source to the
+    // controller's own zone. The scope is threaded onto the copy-source filter as
+    // `ControllerRef::You`; unqualified "a"/"any" graveyard variants stay `None`.
+    let candidates: &[(&str, Zone, Option<ControllerRef>)] = &[
+        (" on the battlefield", Zone::Battlefield, None),
+        (" in any graveyard", Zone::Graveyard, None),
+        (" in a graveyard", Zone::Graveyard, None),
+        // CR 400.3: possessive graveyard — "a Doctor card in your graveyard"
+        // (The Fourteenth Doctor). Earliest-POSITION wins, so array order is
+        // irrelevant and this cannot disturb the "a"/"any" graveyard variants.
+        // `ControllerRef::You` scopes the source to the controller's OWN
+        // graveyard so an opponent's Doctor is never an eligible copy source.
+        (
+            " in your graveyard",
+            Zone::Graveyard,
+            Some(ControllerRef::You),
+        ),
     ];
     // Earliest-matching phrase wins — "in a graveyard" before "in any graveyard"
     // when both appear; structurally equivalent to `split_on_first_of` but also
     // returns the zone selector.
-    let mut best: Option<(usize, usize, Zone)> = None;
-    for &(phrase, zone) in candidates {
+    let mut best: Option<(usize, usize, Zone, Option<ControllerRef>)> = None;
+    for (phrase, zone, owner_scope) in candidates {
         if let Ok((_, (before, _))) = nom_primitives::split_once_on(after_copy, phrase) {
             let pos = before.len();
-            if best.is_none_or(|(best_pos, _, _)| pos < best_pos) {
-                best = Some((pos, phrase.len(), zone));
+            if best
+                .as_ref()
+                .is_none_or(|(best_pos, _, _, _)| pos < *best_pos)
+            {
+                best = Some((pos, phrase.len(), *zone, owner_scope.clone()));
             }
         }
     }
-    if let Some((pos, len, zone)) = best {
+    if let Some((pos, len, zone, owner_scope)) = best {
         let type_text = &after_copy[..pos];
         let suffix = &after_copy[pos + len..];
-        return Some((type_text, suffix, zone));
+        return Some((type_text, suffix, zone, owner_scope));
     }
     // CR 614.1c fallback: no explicit zone qualifier means battlefield
     // (Spark Double's "you may have ~ enter as a copy of a creature or
@@ -2806,7 +2859,7 @@ fn split_on_clone_source_zone(after_copy: &str) -> Option<(&str, &str, Zone)> {
         // Suffix INCLUDES the leading `, except <body>` so `parse_clone_suffix`
         // → `parse_except_clause` sees the expected `, except ` start.
         let suffix = &after_copy[pos..];
-        return Some((type_text, suffix, Zone::Battlefield));
+        return Some((type_text, suffix, Zone::Battlefield, None));
     }
     // CR 614.1c: no zone phrase and no "except" clause — the whole post-`copy
     // of` remainder is the type phrase. Drop the sentence-final period so the
@@ -2814,7 +2867,12 @@ fn split_on_clone_source_zone(after_copy: &str) -> Option<(&str, &str, Zone)> {
     // controller-scoped filters like "a creature you control" (Mirror Image)
     // or "an artifact or creature you control" (Waxen Shapethief), which carry
     // no zone/except boundary to absorb the trailing punctuation.
-    Some((after_copy.trim_end_matches('.'), "", Zone::Battlefield))
+    Some((
+        after_copy.trim_end_matches('.'),
+        "",
+        Zone::Battlefield,
+        None,
+    ))
 }
 
 /// Attach `FilterProp::InZone { zone }` to a filter produced by `parse_type_phrase`.
@@ -2838,15 +2896,21 @@ fn attach_zone_to_filter(filter: TargetFilter, zone: Zone) -> TargetFilter {
     }
 }
 
-/// Parse a trailing "When you do, ..." reflexive trigger clause.
+/// Parse a trailing "When you do, ..." / "If you do, ..." reflexive trigger clause.
 ///
-/// Delegates to the existing effect-chain parser, which routes
-/// `strip_if_you_do_conditional` to set `condition = AbilityCondition::WhenYouDo`
-/// on the resulting AbilityDefinition (CR 603.12 reflexive trigger semantics).
-/// Returns None when the text doesn't start with a "when you do" phrase or the
-/// chain parser produces an unimplemented effect (so the caller can fall back
-/// to the plain BecomeCopy replacement without a reflexive trigger).
+/// Delegates to the existing effect-chain parser. The "when you do" connector
+/// maps to `AbilityCondition::WhenYouDo`; the "if you do" connector maps to
+/// `AbilityCondition::EffectOutcome { OptionalEffectPerformed }`. On the
+/// clone-replacement path the parent "do" is the optional copy, applied via the
+/// copy-target-choice completion (a non-cost `BecomeCopy` parent), so the
+/// condition is normalized to `WhenYouDo` (CR 603.12) — see the normalization
+/// note below. Returns None when the text doesn't start with a "when you do" /
+/// "if you do" phrase or the chain parser produces an unimplemented effect (so
+/// the caller can fall back to the plain BecomeCopy replacement without a
+/// reflexive trigger).
 fn parse_when_you_do_reflexive(post_period: &str) -> Option<AbilityDefinition> {
+    use crate::types::ability::{AbilityCondition, EffectOutcomeSignal};
+
     // Strip the sentence terminator / separator space preceding the reflexive
     // clause. These are structural punctuation, not parsing dispatch.
     let trimmed = post_period.trim_start_matches(['.', ' ']);
@@ -2858,15 +2922,43 @@ fn parse_when_you_do_reflexive(post_period: &str) -> Option<AbilityDefinition> {
     // seam for future reflexive-clause variants ("when that happens", etc.)
     // without reshaping the guard.
     let lower = trimmed.to_lowercase();
+    // CR 603.12: both reflexive connectors — "when you do" (Superior Spider-Man)
+    // and "if you do" (The Fourteenth Doctor).
     nom_on_lower(trimmed, &lower, |i| {
-        value((), tag::<_, _, OracleError<'_>>("when you do")).parse(i)
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("when you do"),
+                tag("if you do"),
+            )),
+        )
+        .parse(i)
     })?;
-    let def = super::oracle_effect::parse_effect_chain(trimmed, AbilityKind::Spell);
+    let mut def = super::oracle_effect::parse_effect_chain(trimmed, AbilityKind::Spell);
     // Reject unimplemented fallbacks — the chain parser returns
     // `Effect::Unimplemented` when no pattern matches, which would attach a
     // dead sub_ability to the clone replacement.
     if matches!(*def.effect, Effect::Unimplemented { .. }) {
         return None;
+    }
+    // CR 603.12: The reflexive parent here is the optional enter-as-a-copy
+    // replacement, resolved via the copy-target-choice completion — a non-cost
+    // `BecomeCopy` parent, NOT an `Effect::OptionalEffect` resolution. The engine
+    // gates `BecomeCopy` / copy-replacement reflexives on `WhenYouDo`, which is
+    // unconditionally true when the sub-ability is reached (the copy having been
+    // performed is guaranteed by the CopyTargetChoice completion path; a declined
+    // copy never reaches the sub-ability). The generic "if you do" mapping to
+    // `EffectOutcome { OptionalEffectPerformed }` reads a resolution-context flag
+    // that this replacement path never sets, so it would silently never fire.
+    // Normalize it to the `WhenYouDo` contract (Superior Spider-Man's "when you
+    // do" already lands there).
+    if matches!(
+        def.condition,
+        Some(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        })
+    ) {
+        def.condition = Some(AbilityCondition::WhenYouDo);
     }
     Some(def)
 }
@@ -16649,23 +16741,151 @@ mod tests {
     #[test]
     fn split_on_clone_source_zone_prefers_battlefield_when_present() {
         // Phantasmal Image-style text should still resolve to battlefield.
-        let (type_text, _suffix, zone) =
+        let (type_text, _suffix, zone, owner_scope) =
             split_on_clone_source_zone("any creature on the battlefield, except...").unwrap();
         assert_eq!(type_text, "any creature");
         assert_eq!(zone, Zone::Battlefield);
+        // Unqualified battlefield source carries no owner scope.
+        assert_eq!(owner_scope, None);
     }
 
     #[test]
     fn split_on_clone_source_zone_accepts_graveyard_variants() {
-        let (type_text, _, zone) =
+        let (type_text, _, zone, owner_scope) =
             split_on_clone_source_zone("any creature card in a graveyard, except...").unwrap();
         assert_eq!(type_text, "any creature card");
         assert_eq!(zone, Zone::Graveyard);
+        // "a graveyard" is unqualified — any player's graveyard, no owner scope.
+        assert_eq!(owner_scope, None);
 
-        let (type_text, _, zone) =
+        let (type_text, _, zone, owner_scope) =
             split_on_clone_source_zone("any creature card in any graveyard, except...").unwrap();
         assert_eq!(type_text, "any creature card");
         assert_eq!(zone, Zone::Graveyard);
+        assert_eq!(owner_scope, None);
+
+        // CR 400.3: possessive "in your graveyard" (The Fourteenth Doctor) scopes
+        // the copy source to the controller's OWN graveyard.
+        let (type_text, suffix, zone, owner_scope) =
+            split_on_clone_source_zone("a doctor card in your graveyard that was put there")
+                .unwrap();
+        assert_eq!(type_text, "a doctor card");
+        assert_eq!(zone, Zone::Graveyard);
+        assert_eq!(suffix, " that was put there");
+        assert_eq!(owner_scope, Some(ControllerRef::You));
+    }
+
+    /// CR 614.1c + CR 707.9 + CR 400.7 + CR 603.12: The Fourteenth Doctor's
+    /// enter-as-a-copy-FROM-GRAVEYARD replacement, gated on a "put there from
+    /// your library this turn" zone-change predicate, with a reflexive "if you
+    /// do, it gains haste" sub-ability. Before the fix this whole clause fell to
+    /// `Effect::Unimplemented`. Tests the building-block dispatch: possessive
+    /// graveyard zone + ZoneChangedThisTurn predicate + "if you do" connector.
+    #[test]
+    fn fourteenth_doctor_graveyard_copy_with_zone_change_predicate_and_haste() {
+        use crate::types::ability::{AbilityCondition, Effect, FilterProp, TypeFilter};
+
+        let def = parse_replacement_line(
+            "You may have The Fourteenth Doctor enter as a copy of a Doctor card in your graveyard that was put there from your library this turn. If you do, it gains haste until end of turn.",
+            "The Fourteenth Doctor",
+        )
+        .expect("should parse graveyard-copy replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+
+        let execute = def.execute.as_ref().expect("execute present");
+        let Effect::BecomeCopy { target, .. } = &*execute.effect else {
+            panic!("expected BecomeCopy, got {:?}", execute.effect);
+        };
+
+        // Copy-source filter: a Doctor card in the graveyard that was put there
+        // from the library this turn.
+        match target {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.type_filters
+                        .contains(&TypeFilter::Subtype("Doctor".to_string())),
+                    "filter must scope to Doctor subtype, got {:?}",
+                    tf.type_filters
+                );
+                // CR 400.3: "your graveyard" scopes the copy source to the
+                // controller's OWN graveyard — an opponent's milled Doctor must
+                // not be an eligible copy source.
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::You),
+                    "possessive 'your graveyard' must bind ControllerRef::You, got {:?}",
+                    tf.controller
+                );
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard
+                        }
+                    )),
+                    "filter must carry InZone(Graveyard), got {:?}",
+                    tf.properties
+                );
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::ZoneChangedThisTurn {
+                            from: Some(Zone::Library),
+                            to: Some(Zone::Graveyard),
+                        }
+                    )),
+                    "filter must gate on Library->Graveyard this turn, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+
+        // Reflexive "If you do, it gains haste until end of turn." attaches as a
+        // sub-ability. CR 603.12: normalized to `WhenYouDo` because the parent is
+        // a non-cost BecomeCopy replacement (the copy-completion path the engine
+        // gates on `WhenYouDo`), not an `Effect::OptionalEffect` resolution.
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("reflexive haste sub_ability");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::WhenYouDo),
+            "reflexive haste must gate on WhenYouDo (the BecomeCopy reflexive contract), got {:?}",
+            sub.condition
+        );
+        assert!(
+            !matches!(*sub.effect, Effect::Unimplemented { .. }),
+            "reflexive haste sub-ability must not be Unimplemented"
+        );
+        // The reflexive grants the Haste keyword until end of turn.
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*sub.effect
+        else {
+            panic!(
+                "expected GenericEffect granting haste, got {:?}",
+                sub.effect
+            );
+        };
+        assert!(
+            static_abilities
+                .iter()
+                .any(|s| s.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste
+                    }
+                ))),
+            "reflexive sub-ability must grant Haste, got {:?}",
+            sub.effect
+        );
     }
 
     /// CR 614.1c + CR 601.2h + CR 202.2: Wildgrowth Archaic's replacement line

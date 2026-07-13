@@ -570,6 +570,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsHarnessed
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
         | StaticCondition::RecipientAttackingOwnerTarget { .. }
         | StaticCondition::SourceIsPaired
@@ -2372,10 +2373,10 @@ fn resolve_ref(
             }
             count
         }
-        // CR 609.3: Numeric result from the preceding effect in a sub_ability chain.
+        // CR 608.2c: Numeric result from the preceding effect in a sub_ability chain.
         // The resolver stamps this from the parent effect's semantic event class.
         QuantityRef::PreviousEffectAmount => state.last_effect_amount.unwrap_or(0),
-        // CR 609.3: "for each [thing] this way" — read the most recent tracked set size.
+        // CR 608.2c: "for each [thing] this way" — read the most recent tracked set size.
         QuantityRef::TrackedSetSize => state
             .tracked_object_sets
             .iter()
@@ -2418,7 +2419,7 @@ fn resolve_ref(
                 .count();
             usize_to_i32_saturating(count)
         }
-        // CR 608.2c + CR 609.3 + CR 107.3e + CR 202.3: Reduce a numeric property
+        // CR 608.2c + CR 107.3e + CR 202.3: Reduce a numeric property
         // over the most recent chain tracked set. Mirrors `FilteredTrackedSetSize`'s set
         // selection (highest id = the set the preceding chain effect published)
         // but aggregates a per-member value instead of counting. The members are

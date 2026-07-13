@@ -218,7 +218,7 @@ pub(super) fn try_parse_add_mana_effect_with_context(
     // `parse_mana_production_clause` so the where-X count is resolved here,
     // co-located with `apply_where_x_count_expression`.
     if let Some((count, color_options)) = parse_repeated_count_color_choice(clause) {
-        let (count, target) = apply_where_x_count_expression(count, where_x_expression.as_deref());
+        let (count, target) = apply_where_x_count_expression(count, where_x_expression.as_deref())?;
         return Some(Effect::Mana {
             produced: ManaProduction::AnyOneColor {
                 count,
@@ -297,7 +297,7 @@ pub(super) fn try_parse_add_mana_effect_with_context(
 
     if let Some((count, rest)) = parse_mana_count_prefix(clause) {
         let (count, where_x_target) =
-            apply_where_x_count_expression(count, where_x_expression.as_deref());
+            apply_where_x_count_expression(count, where_x_expression.as_deref())?;
         let rest = rest.trim().trim_end_matches(['.', '"']).trim();
         let rest_lower = rest.to_lowercase();
 
@@ -645,7 +645,7 @@ pub(super) fn try_parse_add_mana_effect_with_context(
         .map(|(count, _)| count)
         .unwrap_or(QuantityExpr::Fixed { value: 1 });
     let (fallback_count, fallback_target) =
-        apply_where_x_count_expression(fallback_count, where_x_expression.as_deref());
+        apply_where_x_count_expression(fallback_count, where_x_expression.as_deref())?;
 
     // Scan for mana production type at word boundaries using nom combinators.
     let produced = scan_mana_production_type(&clause_lower, fallback_count.clone(), contribution)?;
@@ -1048,10 +1048,13 @@ pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)
     ))
 }
 
+/// CR 107.3c: Bind a "where X is …" mana count, or FAIL (`None`) when the
+/// definition has no typed home. Never fabricates a raw-text placeholder — see
+/// `apply_where_x_quantity_expression` for why such a node is dead at runtime.
 pub(super) fn apply_where_x_count_expression(
     count: QuantityExpr,
     where_x_expression: Option<&str>,
-) -> (QuantityExpr, Option<TargetFilter>) {
+) -> Option<(QuantityExpr, Option<TargetFilter>)> {
     match (&count, where_x_expression) {
         (
             QuantityExpr::Ref {
@@ -1059,19 +1062,15 @@ pub(super) fn apply_where_x_count_expression(
             },
             Some(expression),
         ) if name.eq_ignore_ascii_case("X") => {
-            if let Some(count) = super::parse_where_x_quantity_expression(expression) {
-                return (count, where_x_expression_target_filter(expression));
-            }
-            (
-                QuantityExpr::Ref {
-                    qty: QuantityRef::Variable {
-                        name: expression.to_string(),
-                    },
-                },
-                None,
-            )
+            // CR 107.3c: the clause DEFINES X. An unrepresentable definition is a
+            // PARSE FAILURE (`None`), never a raw-text placeholder: the fabricated
+            // `QuantityRef::Variable { name: "<oracle text>" }` is dead at runtime
+            // (game/quantity.rs resolves a non-`X` variable name to 0), so the mana
+            // clause produced ZERO mana while still reading as supported.
+            let count = super::parse_where_x_quantity_expression(expression)?;
+            Some((count, where_x_expression_target_filter(expression)))
         }
-        _ => (count, None),
+        _ => Some((count, None)),
     }
 }
 

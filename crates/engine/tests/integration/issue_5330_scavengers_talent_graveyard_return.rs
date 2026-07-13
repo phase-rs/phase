@@ -132,9 +132,9 @@ fn scavengers_talent_level3_return_targets_graveyard_creature_cards() {
         return_step.condition
     );
     assert!(
-        enter_with_counters.iter().any(|(counter, _)| {
-            matches!(counter, CounterType::Generic(name) if name == "finality")
-        }),
+        enter_with_counters
+            .iter()
+            .any(|(counter, _)| { matches!(counter, CounterType::Finality) }),
         "return must enter with a finality counter, got {enter_with_counters:?}"
     );
 
@@ -237,9 +237,7 @@ fn scavengers_talent_level3_end_step_returns_creature_with_finality() {
             .state()
             .objects
             .get(&gy_creature)
-            .and_then(|o| o
-                .counters
-                .get(&CounterType::Generic("finality".to_string())))
+            .and_then(|o| o.counters.get(&CounterType::Finality))
             .copied(),
         Some(1),
         "returned creature must enter with a finality counter"

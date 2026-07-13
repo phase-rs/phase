@@ -1610,6 +1610,7 @@ fn resolve_keyword_action(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Equip,
                 source_id: equipment_id,
+                subject: None,
             });
         }
         // CR 702.122a: This permanent becomes an artifact creature UEOT.
@@ -1639,6 +1640,7 @@ fn resolve_keyword_action(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Crew,
                 source_id: vehicle_id,
+                subject: None,
             });
         }
         // CR 702.171a: This permanent becomes saddled UEOT.
@@ -1655,6 +1657,7 @@ fn resolve_keyword_action(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Saddle,
                 source_id: mount_id,
+                subject: None,
             });
         }
         // CR 702.184a: Put charge counters equal to the tapped creature's power.
@@ -1701,6 +1704,7 @@ fn resolve_keyword_action(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Station,
                 source_id: spacecraft_id,
+                subject: None,
             });
         }
     }

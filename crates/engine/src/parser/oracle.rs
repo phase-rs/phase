@@ -6451,14 +6451,66 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         }
     }
     // CR 602.5: "if <condition>" gate (Lightning Storm "if ~ is on the stack").
+    // An unrecognized condition fails the whole gate (the `?`) — see
+    // `require_restriction_condition`.
     if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>("if ")).parse(lower.as_str()) {
         let condition_start = phrase.len() - rest.len();
         let condition_text = phrase[condition_start..].trim();
-        return Some(vec![ActivationRestriction::RequiresCondition {
-            condition: parse_restriction_condition(condition_text),
-        }]);
+        return Some(vec![require_restriction_condition(condition_text)?]);
     }
     None
+}
+
+/// CR 602.5: Build a `RequiresCondition` activation restriction, or fail.
+///
+/// The single authority for turning restriction text into an `ActivationRestriction`.
+/// It returns `None` — never `RequiresCondition { condition: None }` — when the
+/// condition does not parse.
+///
+/// This distinction is the whole point: `restrictions::evaluate_activation_restriction`
+/// evaluates a `None` condition with `Option::is_none_or`, i.e. as ALWAYS TRUE. So an
+/// unparsed condition stored as `None` does not merely lose the restriction — it
+/// consumes the source clause (removing it from the text that would otherwise become
+/// `Effect::Unimplemented`) and then reports the ability as fully supported while
+/// letting it be activated in precisely the situations the card forbids. Callers must
+/// propagate this `None` so the source text stays visible to the ordinary fallback.
+fn require_restriction_condition(condition_text: &str) -> Option<ActivationRestriction> {
+    Some(ActivationRestriction::RequiresCondition {
+        condition: Some(parse_restriction_condition(condition_text)?),
+    })
+}
+
+/// CR 602.5: Atomically commit an "activate only if <condition>" gate found while
+/// peeling activation constraints off the end of an ability line.
+///
+/// The single authority for that commit. Every peeling branch must route through it,
+/// because the commit is not one mutation but three that have to succeed or fail
+/// together: the trailing cadence suffix ("… and only once each turn") records its own
+/// restriction, the condition records another, and the caller truncates the source line
+/// to drop the text it just consumed.
+///
+/// Returns `false` having mutated NOTHING when the condition does not parse. The caller
+/// must then leave `remaining` intact so the clause stays in the ability text and
+/// surfaces as `Effect::Unimplemented`. Committing the cadence restriction while
+/// dropping the condition — the pre-`SharedRestrictionParse` behavior — produced an
+/// ability that was rate-limited but otherwise activatable at will, which is not what
+/// any of these cards say.
+fn commit_requires_condition(
+    condition_text: &str,
+    restrictions: &mut Vec<ActivationRestriction>,
+) -> bool {
+    let mut text = condition_text.trim().to_string();
+    // Stage the cadence restrictions so a failed condition parse commits none of them.
+    let mut staged: Vec<ActivationRestriction> = Vec::new();
+    strip_once_per_turn_suffix(&mut text, &mut staged);
+    let Some(condition) = parse_restriction_condition(&text) else {
+        return false;
+    };
+    restrictions.append(&mut staged);
+    restrictions.push(ActivationRestriction::RequiresCondition {
+        condition: Some(condition),
+    });
+    true
 }
 
 // CR 602.1b: Activation instructions after the colon restrict when an ability
@@ -6544,17 +6596,15 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
 
         if let Some((before, after)) = tp.rsplit_around(" and only if ") {
             if !before.original.trim().is_empty() {
-                let mut condition_text = after.original.trim().to_string();
-                strip_once_per_turn_suffix(&mut condition_text, &mut constraints.restrictions);
+                // Commit before truncating: an unparsed condition must leave `remaining`
+                // whole so the clause reaches the Unimplemented fallback.
+                if !commit_requires_condition(after.original, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = before
                     .original
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&condition_text),
-                    });
                 continue;
             }
         }
@@ -6792,80 +6842,62 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
 
         if let Some(idx) = tp.rfind("activate only if ") {
             if idx == 0 {
-                let mut condition_text = remaining["activate only if ".len()..].trim().to_string();
-                strip_once_per_turn_suffix(&mut condition_text, &mut constraints.restrictions);
+                let condition_text = remaining["activate only if ".len()..].to_string();
+                if !commit_requires_condition(&condition_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining.clear();
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&condition_text),
-                    });
                 break;
             }
             if lower[..idx].ends_with(". ") {
-                let mut condition_text = remaining[idx + "activate only if ".len()..]
-                    .trim()
-                    .to_string();
-                strip_once_per_turn_suffix(&mut condition_text, &mut constraints.restrictions);
+                let condition_text = remaining[idx + "activate only if ".len()..].to_string();
+                if !commit_requires_condition(&condition_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&condition_text),
-                    });
                 continue;
             }
         }
 
         if let Some(idx) = tp.rfind("activate only from ") {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate only from ".len()..]
-                    .trim()
-                    .to_string();
+                let restriction_text = remaining[idx + "activate only from ".len()..].trim();
+                let full_text = format!("from {restriction_text}");
+                if !commit_requires_condition(&full_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                let full_text = format!("from {restriction_text}");
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&full_text),
-                    });
                 continue;
             }
         }
 
         if let Some(idx) = tp.rfind("activate only ") {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate only ".len()..].trim().to_string();
+                let restriction_text = remaining[idx + "activate only ".len()..].to_string();
+                if !commit_requires_condition(&restriction_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&restriction_text),
-                    });
                 continue;
             }
         }
 
         if let Some(idx) = tp.rfind("activate no more than ") {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate no more than ".len()..]
-                    .trim()
-                    .to_string();
+                let restriction_text = remaining[idx + "activate no more than ".len()..].trim();
+                let full_text = format!("no more than {restriction_text}");
+                if !commit_requires_condition(&full_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                let full_text = format!("no more than {restriction_text}");
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&full_text),
-                    });
                 continue;
             }
         }

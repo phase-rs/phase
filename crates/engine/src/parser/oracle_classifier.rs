@@ -548,6 +548,14 @@ fn is_static_compound_pattern(lower: &str) -> bool {
         opt(alt((
             tag::<_, _, OracleError<'_>>("once during each of your turns, "),
             tag("once each turn, "),
+            // CR 117.1c: "During your turn, you may [cast|play] … from <zone>"
+            // — the timing qualifier gates a standing cast-from-zone permission
+            // (Leonardo, Sewer Samurai; Festival of Embers). Route to the static
+            // parser ahead of the Priority-8 "enters … counter" replacement gate;
+            // the graveyard/exile builder honors the qualifier via a
+            // `DuringYourTurn` condition. Narrowly widens only the leading
+            // frequency/timing qualifier, not the zone anchors below.
+            tag("during your turn, "),
         ))),
         alt((tag("you may play"), tag("you may cast"))),
     )
@@ -567,7 +575,14 @@ fn is_static_compound_pattern(lower: &str) -> bool {
             // permission (The Matrix of Time). Routes to `parse_static_line` so
             // it lowers to `StaticMode::ExileCastPermission { pool: Persistent }`
             // instead of falling through to the imperative impulse-draw flow.
-            || scan_contains(lower, "from among cards exiled with"))
+            || scan_contains(lower, "from among cards exiled with")
+            // CR 108.3 + CR 113.6b: The "cards you own exiled with ~" variant
+            // (Intrepid Paleontologist; Dawnhand Dissident) carries a "you own"
+            // ownership infix between "cards" and "exiled with". Tolerate it so
+            // the ExileCastPermission line routes to the static parser instead
+            // of the Priority-8 replacement gate. Narrowly widens the exile
+            // anchor to accept the ownership infix.
+            || scan_contains(lower, "from among cards you own exiled with"))
     {
         return true;
     }

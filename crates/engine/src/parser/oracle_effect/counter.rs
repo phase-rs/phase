@@ -61,6 +61,63 @@ fn is_it_pronoun(text: &str) -> bool {
         .is_some()
 }
 
+/// CR 608.2c + CR 111.10 + CR 122.1: a same-chain counter anaphor placed AFTER a
+/// token-creating clause binds to that just-created token
+/// (`TargetFilter::LastCreated`) — the anaphor's most-recent object referent —
+/// rather than the ability source (`SelfRef`) or an unbound parent target.
+/// Recognizes three anaphor forms: the object-pronoun class (`it`/`them`/…, via
+/// [`is_it_pronoun`]), the demonstratives `that creature`/`that token`/`that
+/// permanent`, and the definite back-references `the token`/`the permanent`.
+/// `the creature` is deliberately EXCLUDED: it legitimately binds a chosen
+/// target slot (Longstalk Brawl's "the creature you control" →
+/// `ParentTargetSlot`) and is genuinely ambiguous.
+///
+/// Returns `Some(LastCreated)` only when the chain's most-recent referent is a
+/// created token (`ctx.token_created_in_chain`) AND, for the demonstrative /
+/// definite forms, no non-self trigger subject re-anchors the reference — Pip-Boy
+/// 3000's "Whenever equipped creature attacks … put a +1/+1 counter on that
+/// creature" keeps its `resolve_that_creature_in_trigger` triggering-source
+/// binding. That subject gate is intentionally SKIPPED for the object-pronoun
+/// form so this helper reproduces the legacy ungated bare-"it" binding exactly,
+/// making the it-branch refactor provably behavior-preserving. `None` ⇒ the
+/// caller applies its own default (source / parent / typed target).
+pub(super) fn counter_anaphor_created_token_binding(
+    anaphor_lower: &str,
+    ctx: &ParseContext,
+) -> Option<TargetFilter> {
+    let it_pronoun = is_it_pronoun(anaphor_lower);
+    let demonstrative = nom_on_lower(anaphor_lower, anaphor_lower, |i| {
+        value(
+            (),
+            alt((
+                tag("that creature"),
+                tag("that token"),
+                tag("that permanent"),
+                tag("the token"),
+                tag("the permanent"),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some();
+    if !it_pronoun && !demonstrative {
+        return None;
+    }
+    // A demonstrative/definite anaphor under a non-self, non-`Any` trigger subject
+    // refers to that triggering object, not the created token — the subject gate
+    // preserves that legacy binding. The bare object pronoun has no such
+    // re-anchor, so its gate is only the token flag.
+    let subject_allows_token = matches!(
+        ctx.subject,
+        None | Some(TargetFilter::SelfRef) | Some(TargetFilter::Any)
+    );
+    if ctx.token_created_in_chain && (it_pronoun || subject_allows_token) {
+        Some(TargetFilter::LastCreated)
+    } else {
+        None
+    }
+}
+
 fn starts_with_deferred_dynamic_counter_placement(input: &str) -> bool {
     let Ok((after_type, _)) = nom_primitives::parse_counter_type_typed(input) else {
         return false;
@@ -203,11 +260,8 @@ fn resolve_counter_placement_target<'a>(
         // Token/CopyTokenOf/Populate creator; explicit "~"/name sources return
         // above at the SelfRef guard and never reach here, and non-token
         // self-triggers leave the flag false, so both keep `SelfRef`.
-        let it_target = if ctx.token_created_in_chain {
-            TargetFilter::LastCreated
-        } else {
-            resolve_it_pronoun(ctx)
-        };
+        let it_target = counter_anaphor_created_token_binding(on_rest, ctx)
+            .unwrap_or_else(|| resolve_it_pronoun(ctx));
         return (it_target, parsed_remainder, None);
     }
     // CR 608.2k + CR 301.5a: "that creature" in a trigger whose subject is a
@@ -223,6 +277,17 @@ fn resolve_counter_placement_target<'a>(
         // ASCII-equal-length guard above keeps byte offsets aligned.
         let offset = text.len() - rem.len();
         return (TargetFilter::TriggeringSource, &text[offset..], None);
+    }
+    // CR 608.2c + CR 111.10: a same-chain demonstrative/definite anaphor
+    // ("that creature"/"that token"/"that permanent"/"the token"/"the permanent")
+    // placed after a token-creating clause binds to the just-created token, not
+    // the unbound parent target. Otterball Antics ("... put a +1/+1 counter on
+    // that creature"), Retrieve the Esper ("... put two +1/+1 counters on that
+    // token"), Grist ("... put a deathtouch counter on the token"). Reached only
+    // after the non-self "that creature" trigger re-anchor above returns None, so
+    // Pip-Boy 3000's triggering-source binding is preserved.
+    if let Some(bound) = counter_anaphor_created_token_binding(on_rest, ctx) {
+        return (bound, parsed_remainder, None);
     }
     // CR 115.1d: "up to N" (and "each of up to N") modifies the target count,
     // not the counter count. Strip it and emit a MultiTargetSpec.

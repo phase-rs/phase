@@ -369,11 +369,11 @@ pub(crate) struct ClauseIr {
     pub(crate) boundary: Option<ClauseBoundary>,
     /// CR 608.2c: Leading or suffix conditional guard.
     pub(crate) condition: Option<AbilityCondition>,
-    /// CR 609.3: "You may" optional effect.
+    /// CR 608.2d: "You may" optional effect.
     pub(crate) is_optional: bool,
     /// CR 608.2d: Opponent-may scope.
     pub(crate) opponent_may_scope: Option<OpponentMayScope>,
-    /// CR 609.3: "for each" / "N times" repeat quantity.
+    /// CR 608.2c: "for each" / "N times" repeat quantity.
     pub(crate) repeat_for: Option<QuantityExpr>,
     /// Player scope iteration ("each opponent", "each player").
     pub(crate) player_scope: Option<PlayerFilter>,

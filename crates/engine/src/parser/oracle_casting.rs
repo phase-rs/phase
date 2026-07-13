@@ -441,18 +441,29 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     let mut restrictions = scan_timing_restrictions(rest);
 
     // Extract condition clauses: "if ...", "only if ...", or "... and only if ..."
+    //
+    // CR 601.3: An unrecognized condition must FAIL this candidate parse (the `?`), not
+    // be stored as `RequiresCondition { condition: None }`. A `None` condition consumes
+    // the "only if …" clause and then evaluates permissively at runtime
+    // (`Option::is_none_or` → true in `restrictions::evaluate_casting_restriction`), so
+    // the spell would be castable in exactly the situations its printed text forbids —
+    // and the card would still report as fully supported. Failing here leaves the whole
+    // line to the ordinary `Effect::Unimplemented` fallback, which is honest.
+    //
+    // Bailing also discards any timing restrictions already scanned from this line. That
+    // is intentional: a line we only half understand must not be applied in half.
     if let Ok((condition, _)) =
         alt((tag::<_, _, OracleError<'_>>("only if "), tag("if "))).parse(rest)
     {
         let condition_text = strip_casting_condition_suffixes(condition);
         restrictions.push(CastingRestriction::RequiresCondition {
-            condition: parse_restriction_condition(condition_text),
+            condition: Some(parse_restriction_condition(condition_text)?),
         });
     }
     if let Some(condition) = rest.split(" and only if ").nth(1) {
         let condition_text = strip_casting_condition_suffixes(condition);
         restrictions.push(CastingRestriction::RequiresCondition {
-            condition: parse_restriction_condition(condition_text),
+            condition: Some(parse_restriction_condition(condition_text)?),
         });
     }
 
@@ -757,7 +768,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         AdditionalCostRepeatability, BeholdCostAction, CardSelectionMode, Comparator,
-        ControllerRef, FilterProp, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
+        ControllerRef, CountScope, FilterProp, ParsedCondition, QuantityExpr, QuantityRef,
         TargetFilter, TypeFilter,
     };
     use crate::types::keywords::Keyword;
@@ -814,14 +825,26 @@ mod tests {
             "Cast this spell only if you control two or more Vampires.",
         )
         .expect("restrictions should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::YouControlSubtypeCountAtLeast {
-                    subtype: "vampire".to_string(),
-                    count: 2,
-                }),
-            }]
+        // CR 601.3: the shared static-condition grammar owns this phrase, so the
+        // restriction is the generic ObjectCount comparison — the same reading a
+        // static ability with these words produces.
+        assert!(
+            matches!(
+                restrictions.as_slice(),
+                [CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf)
+                            }
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 2 },
+                    }),
+                }] if tf.controller == Some(ControllerRef::You)
+                    && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Vampire"))
+            ),
+            "got {restrictions:?}"
         );
     }
 
@@ -831,17 +854,23 @@ mod tests {
             "Cast this spell only if there are four or more card types among cards in your graveyard and only as a sorcery.",
         )
         .expect("restrictions should parse");
-        assert_eq!(
-            restrictions,
-            vec![
-                CastingRestriction::AsSorcery,
-                CastingRestriction::RequiresCondition {
-                    condition: Some(ParsedCondition::ZoneCardTypeCountAtLeast {
-                        zone: Zone::Graveyard,
-                        count: 4
-                    }),
-                },
-            ]
+        assert!(
+            matches!(
+                restrictions.as_slice(),
+                [
+                    CastingRestriction::AsSorcery,
+                    CastingRestriction::RequiresCondition {
+                        condition: Some(ParsedCondition::QuantityComparison {
+                            lhs: QuantityExpr::Ref {
+                                qty: QuantityRef::DistinctCardTypes { .. }
+                            },
+                            comparator: Comparator::GE,
+                            rhs: QuantityExpr::Fixed { value: 4 },
+                        }),
+                    },
+                ]
+            ),
+            "got {restrictions:?}"
         );
     }
 
@@ -871,11 +900,26 @@ mod tests {
             "Tragic Backstory \u{2014} Cast this spell only if a creature died this turn.",
         )
         .expect("restrictions should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::CreatureDiedThisTurn),
-            }]
+        // CR 700.4: "died" = moved from the battlefield to a graveyard. The shared
+        // grammar spells that out as a zone-change count rather than an opaque leaf.
+        assert!(
+            matches!(
+                restrictions.as_slice(),
+                [CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ZoneChangeCountThisTurn {
+                                from: Some(Zone::Battlefield),
+                                to: Some(Zone::Graveyard),
+                                ..
+                            }
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                }]
+            ),
+            "got {restrictions:?}"
         );
     }
 
@@ -885,11 +929,24 @@ mod tests {
             "Cast this spell only if you've cast another spell this turn.",
         )
         .expect("restrictions should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::YouCastSpellCountAtLeast { count: 1 }),
-            }]
+        // "another spell" — the spell being cast is itself counted, so the threshold is 2.
+        assert!(
+            matches!(
+                restrictions.as_slice(),
+                [CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::SpellsCastThisTurn {
+                                scope: CountScope::Controller,
+                                filter: None,
+                            }
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 2 },
+                    }),
+                }]
+            ),
+            "got {restrictions:?}"
         );
     }
 
@@ -902,14 +959,20 @@ mod tests {
         ] {
             let restrictions =
                 parse_casting_restriction_line(text).expect("restrictions should parse");
-            assert_eq!(
-                restrictions,
-                vec![CastingRestriction::RequiresCondition {
-                    condition: Some(ParsedCondition::Not {
-                        condition: Box::new(ParsedCondition::YouPlayedLandThisTurn),
-                    }),
-                }],
-                "text={text:?}"
+            assert!(
+                matches!(
+                    restrictions.as_slice(),
+                    [CastingRestriction::RequiresCondition {
+                        condition: Some(ParsedCondition::Not { condition }),
+                    }] if matches!(**condition, ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::LandsPlayedThisTurn { .. }
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    })
+                ),
+                "text={text:?} got {restrictions:?}"
             );
         }
     }
@@ -937,14 +1000,20 @@ mod tests {
         )
         .expect("restrictions should parse");
 
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::PlayerCountAtLeast {
-                    filter: PlayerFilter::OpponentLostLife,
-                    minimum: 1,
-                }),
-            }]
+        assert!(
+            matches!(
+                restrictions.as_slice(),
+                [CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::LifeLostThisTurn { .. }
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                }]
+            ),
+            "got {restrictions:?}"
         );
     }
 
@@ -1577,11 +1646,23 @@ mod tests {
                         ref requirement, ..
                     }),
                 condition:
-                    Some(ParsedCondition::YouControlSubtypeCountAtLeast {
-                        ref subtype,
-                        count: 1,
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty:
+                                    QuantityRef::ObjectCount {
+                                        filter: TargetFilter::Typed(ref tf),
+                                    },
+                            },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
                     }),
-            } if subtype == "plains" && requirement.fixed_count() == Some(1) => {}
+            } if requirement.fixed_count() == Some(1)
+                && tf.controller == Some(ControllerRef::You)
+                && tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Plains")) => {}
             other => panic!("expected TapCreatures + Plains-control condition, got {other:?}"),
         }
     }
@@ -1709,22 +1790,59 @@ mod tests {
     }
 
     #[test]
-    fn alt_cost_trailing_if_condition_drops_option_when_predicate_unrecognized() {
-        // Blasphemous Edict — only card in dataset with trailing "if [condition]" suffix.
-        // CR 118.9 + CR 601.3d: when the if-clause predicate cannot be parsed into a
-        // typed `ParsedCondition`, the alt-cost option is dropped entirely so the spell
-        // may only be cast at its printed cost. Strictly-safe degradation: a fail-silent
-        // unconditional alt-cost emission would let the player pay {B} regardless of
-        // the 13-creature threshold — strictly more permissive than the printed text.
-        // The unrecognized predicate is surfaced by the SwallowedClause / Condition_If
-        // detector for the parser gap-finder.
+    fn alt_cost_trailing_if_battlefield_creature_count_condition_binds() {
+        use crate::types::mana::ManaCostShard;
+        // Blasphemous Edict (FDN) — the only dataset card with a trailing
+        // "if there are N or more <type> on the battlefield" alt-cost gate.
+        // CR 118.9 + CR 601.3: the {B} alternative cost is offered only when the
+        // shared, controller-agnostic battlefield creature count reaches 13.
+        // Before the `parse_type_count_on_battlefield` arm this predicate was
+        // unrecognized and the WHOLE option was fail-closed dropped (this test
+        // historically asserted `is_none()`); recognizing it flips the option to
+        // Some — the on-resolution bogus `Effect::PayCost` ability disappears as a
+        // side effect. Revert-probe: remove the `parse_type_count_on_battlefield`
+        // arm → the option returns to `None`.
         let option = parse_spell_casting_option_line(
             "You may pay {B} rather than pay this spell's mana cost if there are thirteen or more creatures on the battlefield.",
             "Blasphemous Edict",
+        )
+        .expect("recognized battlefield-count if-clause must bind the alt-cost option");
+        // The condition MUST be the runtime-supported `QuantityComparison{ObjectCount}`
+        // (battlefield-aware, any controller), NOT `ZoneCoreTypeCardCountAtLeast`
+        // (whose evaluator is battlefield-blind and would silently brick the gate).
+        let SpellCastingOption {
+            kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+            cost: Some(AbilityCost::Mana { cost }),
+            condition:
+                Some(ParsedCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 13 },
+                }),
+        } = option
+        else {
+            panic!(
+                "expected AlternativeCost(Mana {{B}}) gated on ObjectCount >= 13, got {option:?}"
+            );
+        };
+        assert_eq!(
+            cost,
+            ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Black],
+            },
+            "the alternative cost must be exactly {{B}}"
         );
+        let TargetFilter::Typed(typed) = &filter else {
+            panic!("expected a Typed creature filter, got {filter:?}");
+        };
         assert!(
-            option.is_none(),
-            "unrecognized if-clause must drop the alt-cost option entirely, got: {option:?}"
+            typed.type_filters.contains(&TypeFilter::Creature),
+            "the counted objects must be creatures (any controller), got {:?}",
+            typed.type_filters
         );
     }
 

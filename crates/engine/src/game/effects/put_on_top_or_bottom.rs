@@ -33,6 +33,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     // CR 400.5: The order of objects in a library can't be changed except when effects allow it.

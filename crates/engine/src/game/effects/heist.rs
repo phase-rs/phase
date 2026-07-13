@@ -101,6 +101,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Heist,
             source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -132,6 +133,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Heist,
         source_id,
+        subject: None,
     });
 
     Ok(())
@@ -229,6 +231,7 @@ pub fn resolve_exile(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::HeistExile,
         source_id,
+        subject: None,
     });
 
     Ok(())

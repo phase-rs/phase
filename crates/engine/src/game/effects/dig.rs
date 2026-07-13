@@ -127,6 +127,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -157,6 +158,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -240,6 +242,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -280,6 +283,7 @@ fn resolve_from_prior_look(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Dig,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -300,6 +304,7 @@ fn resolve_from_prior_look(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Dig,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -330,6 +335,7 @@ fn resolve_from_prior_look(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Dig,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -358,6 +364,7 @@ fn resolve_from_prior_look(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Dig,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -452,6 +459,7 @@ fn resolve_mass_put_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 }
 

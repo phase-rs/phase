@@ -64,6 +64,7 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
         | CounterType::Fade
         | CounterType::Age
         | CounterType::Shield
+        | CounterType::Finality
         | CounterType::Keyword(_)
         | CounterType::Generic(_) => {}
     }
@@ -309,7 +310,11 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
                 }
                 match resolution_event {
                     PendingEffectResolutionEvent::Emit => {
-                        events.push(GameEvent::EffectResolved { kind, source_id });
+                        events.push(GameEvent::EffectResolved {
+                            kind,
+                            source_id,
+                            subject: None,
+                        });
                     }
                     PendingEffectResolutionEvent::Suppress => {}
                 }
@@ -363,7 +368,11 @@ fn apply_pending_counter_post_action(
 ) -> bool {
     match action {
         PendingCounterPostAction::EmitEffectResolved { kind, source_id } => {
-            events.push(GameEvent::EffectResolved { kind, source_id });
+            events.push(GameEvent::EffectResolved {
+                kind,
+                source_id,
+                subject: None,
+            });
             true
         }
         PendingCounterPostAction::RecordPlayerAction { player_id, action } => {
@@ -1136,6 +1145,7 @@ pub(crate) fn drain_pending_counter_moves(state: &mut GameState, events: &mut Ve
             events.push(GameEvent::EffectResolved {
                 kind: queue.effect_kind,
                 source_id: queue.source_id,
+                subject: None,
             });
             continue;
         };
@@ -1229,6 +1239,7 @@ pub fn resolve_add(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -1409,6 +1420,7 @@ pub fn resolve_add_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -1466,6 +1478,7 @@ pub fn resolve_multiply(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -1689,6 +1702,7 @@ pub fn resolve_move(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -1739,6 +1753,7 @@ pub fn resolve_move(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -1788,6 +1803,7 @@ pub fn resolve_move(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -1805,6 +1821,7 @@ fn resolve_move_distribution(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -1822,6 +1839,7 @@ fn resolve_move_distribution(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -1849,6 +1867,7 @@ fn resolve_stack_target_move_distribution(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -1868,6 +1887,7 @@ fn resolve_stack_target_move_distribution(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -2173,6 +2193,7 @@ pub fn resolve_remove(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -2204,6 +2225,7 @@ fn resolve_remove_interactive(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -2233,6 +2255,7 @@ fn resolve_remove_interactive(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -2333,6 +2356,7 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
             events.push(GameEvent::EffectResolved {
                 kind: queue.effect_kind,
                 source_id: queue.source_ability_id,
+                subject: None,
             });
             continue;
         };

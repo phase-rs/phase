@@ -190,6 +190,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -337,6 +338,7 @@ fn drain_copy_token_resolution(
     events.push(GameEvent::EffectResolved {
         kind: pending.effect_kind,
         source_id: pending.source_id,
+        subject: None,
     });
 }
 
@@ -3920,6 +3922,7 @@ mod tests {
                     GameEvent::EffectResolved {
                         kind: EffectKind::CopyTokenOf,
                         source_id: ObjectId(100),
+                        ..
                     }
                 ))
                 .count(),

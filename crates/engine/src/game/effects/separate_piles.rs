@@ -152,6 +152,7 @@ fn resolve_battlefield(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::SeparateIntoPiles,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -202,6 +203,7 @@ fn resolve_revealed_from_library_top(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::SeparateIntoPiles,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -293,6 +295,7 @@ fn resolve_exiled_this_way(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::SeparateIntoPiles,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -382,6 +385,7 @@ pub fn apply_pile_effect(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::SeparateIntoPiles,
         source_id,
+        subject: None,
     });
     Ok(())
 }

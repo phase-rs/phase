@@ -6734,6 +6734,46 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .unwrap_or_default();
     let convoked_creature_count = convoked_creatures.len();
 
+    // CR 601.2a + CR 702.27a + CR 702.51a: capture the object-growth recast snapshot the
+    // PR-7 Phase 4d-ii loop-shortcut hook replays. Gated to a buyback-paid,
+    // permanent-creating (token) spell so the hook's cheap precondition (`last_recast_context
+    // == Some`) is set ~never. Fail-safe note: a spurious capture from buyback + some OTHER
+    // optional cost only makes the clone-drive run — its cover/abort rejects any non-covering
+    // recast, so this can never false-certify. Cleared (set `None`) on any non-matching cast,
+    // so a stale context never lingers. `ability.effect` is read here before `ability` is
+    // moved into `stack_ability` below.
+    {
+        let is_token_creating =
+            matches!(ability.effect, crate::types::ability::Effect::Token { .. });
+        let (has_buyback, convoke) = state.objects.get(&object_id).map_or((false, None), |obj| {
+            let has_buyback = obj
+                .keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Buyback(_)));
+            let convoke = obj
+                .keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Convoke))
+                .then_some(crate::types::game_state::ConvokeMode::Convoke);
+            (has_buyback, convoke)
+        });
+        // #4603 opt-in gate: OFF (`!samples()`) must be byte-identical to pre-PR-7 on the
+        // SERIALIZED surface too — `last_recast_context` is `skip_serializing_if=is_none`, so a
+        // spurious `Some(..)` in OFF mode would appear in a save/replay/scenario. Gate on the
+        // SAME accessor the consuming hook uses (engine.rs:448) so the mode gate has one source.
+        state.last_recast_context = (state.loop_detection.samples()
+            && additional_cost_paid
+            && has_buyback
+            && is_token_creating)
+            .then_some(crate::types::game_state::RecastContext {
+                card_id,
+                controller: player,
+                from_zone: source_zone,
+                uses_buyback: crate::types::game_state::BuybackUsage::Used,
+                convoke,
+            });
+    }
+
     // Determine whether this spell has a meaningful on-resolve ability.
     // Permanent spells with no Spell-kind AbilityDefinition get a placeholder
     // Unimplemented effect through the cost pipeline (from continue_with_no_ability).
@@ -6901,6 +6941,21 @@ fn finalize_cast_with_phyrexian_choices_inner(
             .push((object_id, counter_type, 1));
     }
 
+    // CR 122.1 + CR 614.1c + CR 607.1: the sibling STATIC-permission path — a
+    // `GraveyardCastPermission` / `ExileCastPermission` whose "If you cast a
+    // spell this way, that <permanent> enters with a [counter] counter on it"
+    // rider (Noctis, Prince of Lucis; Intrepid Paleontologist; Leonardo, Sewer
+    // Samurai) is carried on the static's `enters_with_counter` field. The
+    // authorizing source is embedded in `casting_variant`; register the pending
+    // ETB counter on the same object so it enters carrying the counter.
+    let static_perm_etb_counter =
+        super::casting::selected_static_permission_enters_with_counter(state, &casting_variant);
+    if let Some(counter_type) = static_perm_etb_counter {
+        state
+            .pending_etb_counters
+            .push((object_id, counter_type, 1));
+    }
+
     // CR 205.1b + CR 613.1d: A `CastFromZone` grant whose rider was "… is a
     // [type] in addition to its other types" (The Tomb of Aclazotz) records the
     // additive type-changing modifications on the granted `ExileWithAltCost`.
@@ -6939,6 +6994,19 @@ fn finalize_cast_with_phyrexian_choices_inner(
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.cast_variant_paid = Some((
                 crate::types::ability::CastVariantPaid::Impending,
+                state.turn_number,
+            ));
+        }
+    }
+    // CR 702.187b + CR 608.2c: tag the on-stack spell with the mayhem alt-cost
+    // marker so a resolving sorcery's own "if this spell's mayhem cost was paid,
+    // … instead" modal reads it via `ability.source_id`. Sorceries never enter
+    // the battlefield, so the `stack.rs` ETB re-stamp path does not apply — this
+    // finalize-time stamp is authoritative.
+    if casting_variant == CastingVariant::Mayhem {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.cast_variant_paid = Some((
+                crate::types::ability::CastVariantPaid::Mayhem,
                 state.turn_number,
             ));
         }
@@ -11722,6 +11790,152 @@ mod tests {
             payable_spell_alternative_cost(&state, PlayerId(1), opp_zombie),
             None,
             "opponent's Zombie must not receive the controller-You grant"
+        );
+    }
+
+    /// CR 202.3 + CR 601.2f (#5606): the mana-value gate parsed onto a typed
+    /// cost-reduction filter must reach the cost resolver. A permanent granting
+    /// "Instant and sorcery spells you cast with mana value 4 or greater cost {1}
+    /// less to cast" reduces a qualifying instant (MV 5) but NOT a sub-threshold
+    /// instant (MV 3) nor an off-type creature (MV 5). Reverting the parser fix
+    /// (which restored `spell_filter`) makes `effective_spell_cost` reduce all
+    /// three, so this regression flips. Parses the real static line, so it also
+    /// exercises the parser → runtime path end-to-end.
+    #[test]
+    fn mana_value_gated_cost_reduction_reaches_cost_resolver() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            caster,
+            "Cost Reducer".to_string(),
+            Zone::Battlefield,
+        );
+        let static_def = crate::parser::oracle_static::parse_static_line(
+            "Instant and sorcery spells you cast with mana value 4 or greater cost {1} less to cast.",
+        )
+        .expect("cost reduction should parse");
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(static_def);
+
+        let mut add_spell = |id: u64, core: CoreType, mv: u32| -> ObjectId {
+            let obj_id = create_object(
+                &mut state,
+                CardId(id),
+                caster,
+                format!("Spell {id}"),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(core);
+            // Mana value is derived from the printed mana cost.
+            obj.mana_cost = ManaCost::generic(mv);
+            obj_id
+        };
+
+        // Qualifying: instant with mana value 5 (≥ 4).
+        let big_instant = add_spell(11, CoreType::Instant, 5);
+        // Sub-threshold: instant with mana value 3 (< 4) — the Cmc gate excludes it.
+        let small_instant = add_spell(12, CoreType::Instant, 3);
+        // Off-type: creature with mana value 5 — the type restriction excludes it.
+        let big_creature = add_spell(13, CoreType::Creature, 5);
+
+        // `display_spell_cost` is the engine-authoritative post-modifier cost;
+        // it suppresses affordability/timing (the test player has no mana pool)
+        // while still applying every cost-modification static.
+        let cost = |id| crate::game::casting::display_spell_cost(&state, caster, id);
+
+        // CR 601.2f: qualifying instant is reduced by {1} → 5 generic becomes 4.
+        assert_eq!(
+            cost(big_instant),
+            Some(ManaCost::generic(4)),
+            "instant with mana value 5 must receive the {{1}} reduction"
+        );
+        // CR 202.3: the mana-value gate reached the resolver — the sub-threshold
+        // instant is NOT reduced (this flips if the parser fix is reverted).
+        assert_eq!(
+            cost(small_instant),
+            Some(ManaCost::generic(3)),
+            "instant with mana value 3 (< 4) must NOT be reduced"
+        );
+        // The type restriction excludes the creature entirely.
+        assert_eq!(
+            cost(big_creature),
+            Some(ManaCost::generic(5)),
+            "creature must NOT be reduced (type restriction)"
+        );
+    }
+
+    /// CR 202.3 + CR 601.2f (#5606): drive the full cast/payment pipeline. A
+    /// battlefield permanent granting "Instant and sorcery spells you cast with
+    /// mana value 4 or greater cost {1} less to cast" reduces the mana actually
+    /// PAID when the controller casts a qualifying instant, but not a
+    /// sub-threshold one. Each instant is funded to its full printed cost and
+    /// cast through `GameRunner::cast(..).resolve()`; the leftover pool proves the
+    /// reduction reached the payment step, not just the cost-display helper.
+    /// Reverting the parser fix (`spell_filter` → null) reduces the MV-3 spell
+    /// too, so the second assertion flips.
+    #[test]
+    fn mana_value_gated_cost_reduction_through_cast_pipeline() {
+        let caster = PlayerId(0);
+        // Cast an instant of printed mana value `mv` under the reducer, funded to
+        // its full printed cost; return the unspent mana (funded − paid).
+        let leftover_after_casting = |mv: u32| -> u32 {
+            let mut scenario = crate::game::scenario::GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            scenario.add_creature_from_oracle(
+                caster,
+                "Cost Reducer",
+                2,
+                2,
+                "Instant and sorcery spells you cast with mana value 4 or greater cost {1} less to cast.",
+            );
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(caster, "Test Instant", true, "You gain 1 life.")
+                .with_mana_cost(ManaCost::generic(mv))
+                .id();
+            scenario.with_mana_pool(
+                caster,
+                (0..mv)
+                    .map(|_| {
+                        crate::types::mana::ManaUnit::new(
+                            crate::types::mana::ManaType::Colorless,
+                            ObjectId(9999),
+                            false,
+                            vec![],
+                        )
+                    })
+                    .collect(),
+            );
+            let mut runner = scenario.build();
+            let outcome = runner.cast(spell).resolve();
+            outcome
+                .state()
+                .players
+                .iter()
+                .find(|p| p.id == caster)
+                .map(|p| p.mana_pool.total() as u32)
+                .unwrap_or(0)
+        };
+
+        // CR 202.3: MV 5 (≥ 4) instant pays {4} of {5} funded → 1 mana left.
+        assert_eq!(
+            leftover_after_casting(5),
+            1,
+            "MV 5 instant must receive the {{1}} reduction through the cast pipeline"
+        );
+        // CR 202.3: the mana-value gate excludes the MV 3 (< 4) instant → full {3}
+        // paid → 0 left (this flips to 1 if the parser fix is reverted).
+        assert_eq!(
+            leftover_after_casting(3),
+            0,
+            "MV 3 instant must NOT be reduced through the cast pipeline"
         );
     }
 

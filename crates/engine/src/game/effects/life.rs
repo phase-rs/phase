@@ -42,6 +42,7 @@ pub fn resolve_gain(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -52,6 +53,7 @@ pub fn resolve_gain(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -88,7 +90,7 @@ pub fn resolve_gain(
             }
         }
         ReplacementResult::Prevented => {
-            // CR 614.1a + CR 614.12a — Issue #317: Cross-event-type
+            // CR 614.1a + CR 614.6 — Issue #317: Cross-event-type
             // substitution ("If you would gain life, draw that many cards
             // instead" — Lich). The applier returned `Prevented` and stashed
             // the substitute effect (e.g., Draw) as a post-replacement
@@ -107,6 +109,7 @@ pub fn resolve_gain(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -150,7 +153,7 @@ pub fn apply_life_gain(
             Ok(gained)
         }
         ReplacementResult::Prevented => {
-            // CR 614.1a + CR 614.12a — Issue #317: Drain substitute effect
+            // CR 614.1a + CR 614.6 — Issue #317: Drain substitute effect
             // stashed by cross-event-type replacement (Lich-class).
             drain_substitution_continuation(state, events);
             Ok(0)
@@ -164,7 +167,7 @@ pub fn apply_life_gain(
     }
 }
 
-/// CR 614.1a + CR 614.12a — Issue #317: Drain a `post_replacement_continuation`
+/// CR 614.1a + CR 614.6 — Issue #317: Drain a `post_replacement_continuation`
 /// stashed by cross-event-type substitution in a life-gain or life-loss
 /// replacement. Mirrors the drain points in `engine.rs` (land plays) and
 /// `stack.rs` (stack resolution); life-change events have no natural drain
@@ -244,7 +247,7 @@ pub fn apply_damage_life_loss(
             Ok(apply_life_loss_after_replacement(state, event, events))
         }
         ReplacementResult::Prevented => {
-            // CR 614.1a + CR 614.12a — Issue #317: Drain substitute effect
+            // CR 614.1a + CR 614.6 — Issue #317: Drain substitute effect
             // stashed by cross-event-type replacement.
             drain_substitution_continuation(state, events);
             Ok(0)
@@ -417,7 +420,11 @@ fn complete_pending_life_total_assignment(
         );
         match resolution_event {
             PendingEffectResolutionEvent::Emit => {
-                events.push(GameEvent::EffectResolved { kind, source_id });
+                events.push(GameEvent::EffectResolved {
+                    kind,
+                    source_id,
+                    subject: None,
+                });
             }
             PendingEffectResolutionEvent::Suppress => {}
         }
@@ -454,6 +461,7 @@ pub fn resolve_lose(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -488,7 +496,7 @@ pub fn resolve_lose(
             }
         }
         ReplacementResult::Prevented => {
-            // CR 614.1a + CR 614.12a — Issue #317: Drain substitute effect
+            // CR 614.1a + CR 614.6 — Issue #317: Drain substitute effect
             // stashed by cross-event-type replacement.
             drain_substitution_continuation(state, events);
         }
@@ -502,6 +510,7 @@ pub fn resolve_lose(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -626,6 +635,7 @@ pub fn resolve_set_life_total(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -1106,6 +1116,7 @@ mod tests {
             GameEvent::EffectResolved {
                 kind: EffectKind::ExchangeLifeTotals,
                 source_id: ObjectId(100),
+                ..
             }
         )));
     }
@@ -1490,7 +1501,7 @@ mod tests {
     /// Issue #317 (Lich): "If you would gain life, draw that many cards
     /// instead." The replacement substitutes a *different* event type
     /// (`Effect::Draw`) for the original `LifeGain` event. CR 614.1a +
-    /// CR 614.12a: the original event is suppressed, the substitute effect
+    /// CR 614.6: the original event is suppressed, the substitute effect
     /// runs as a post-replacement continuation. `EventContextAmount` in
     /// "draw that many cards" must resolve against the original prevented
     /// gain quantity (via `state.last_effect_count` per the CR 615.5

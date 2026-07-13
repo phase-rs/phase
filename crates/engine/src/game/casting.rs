@@ -2146,6 +2146,68 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_counter(
         })
 }
 
+// CR 122.1 + CR 614.1c + CR 607.1: read the enters-with counter rider carried by
+// the STATIC cast permission (`GraveyardCastPermission` / `ExileCastPermission`)
+// that authorized this cast. The authorizing source is embedded in
+// `casting_variant` (`GraveyardPermission`/`ExilePermission { source }`) rather
+// than re-derivable from zone — by the `finalize_cast` seam the cast object is
+// already on the stack, so the zone-scan resolvers can no longer be called for
+// it. The source permanent never changes zone during the cast, so reading its
+// `active_static_definitions` is safe (CR 607.1: the enters-with rider is linked
+// to the "cast a spell this way" permission on that same object).
+//
+// Assumes at most one counter-bearing cast permission per source — true for every
+// printed card today (Noctis / Intrepid / Leonardo each carry exactly one); if a
+// future card stacks two, `find_map` takes the first. See the field docs on
+// `StaticMode::{Graveyard,Exile}CastPermission.enters_with_counter`.
+pub(super) fn selected_static_permission_enters_with_counter(
+    state: &GameState,
+    casting_variant: &crate::types::game_state::CastingVariant,
+) -> Option<crate::types::counter::CounterType> {
+    use crate::types::game_state::CastingVariant;
+    let source = match casting_variant {
+        CastingVariant::GraveyardPermission { source, .. }
+        | CastingVariant::ExilePermission { source, .. } => *source,
+        _ => return None,
+    };
+    let source_obj = state.objects.get(&source)?;
+    fn permission_counter(def: &StaticDefinition) -> Option<crate::types::counter::CounterType> {
+        match &def.mode {
+            StaticMode::GraveyardCastPermission {
+                enters_with_counter,
+                ..
+            }
+            | StaticMode::ExileCastPermission {
+                enters_with_counter,
+                ..
+            } => enters_with_counter.clone(),
+            _ => None,
+        }
+    }
+    // Existing path (unchanged for BB3 separate-battlefield-source cards): the
+    // permission still functions in zone on a source that never left the
+    // battlefield during the cast.
+    active_static_definitions(state, source_obj)
+        .find_map(permission_counter)
+        // CR 601.3 + CR 607.1 + CR 113.6b: self-granting-permission fallback.
+        // A self-granting source (Undead Sprinter — Gravecrawler shape) IS the
+        // cast object, now on the Stack, so its Graveyard-scoped permission no
+        // longer "functions in zone" (CR 113.6b) and the primary functioning-
+        // abilities scan yields None. The permission that AUTHORIZED this cast
+        // (CR 601.3, embedded in `casting_variant`) is a committed fact, and its
+        // enters-with rider is CR 607.1-linked to it, so read the rider directly
+        // from the printed definition — bypassing the now-zone-blocked gate.
+        // Additive: fires only when the primary path is None, so BB3 cards
+        // (Noctis / Leonardo / Intrepid) stay byte-identical. (CR 614.1c: the
+        // rider is a replacement effect applied as the object enters.)
+        .or_else(|| {
+            source_obj
+                .static_definitions
+                .iter_all()
+                .find_map(permission_counter)
+        })
+}
+
 // CR 205.1b + CR 613.1d: read the enters-with type-grant rider ("… is a [type]
 // in addition to its other types") from the *consumed* cast-this-way permission
 // only (the one supporting THIS cast), not any permission carrying modifications,
@@ -2725,6 +2787,9 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                     mana_spend_permission,
                     grants_flash,
                     ref extra_cost,
+                    // enters-with counter is read at the finalize_cast seam via
+                    // `selected_static_permission_enters_with_counter`, not here.
+                    ..
                 } => definition
                     .affected
                     .as_ref()
@@ -3038,6 +3103,9 @@ fn graveyard_permission_sources(
                     play_mode,
                     graveyard_destination_replacement,
                     ref extra_cost,
+                    // enters-with counter is read at the finalize_cast seam via
+                    // `selected_static_permission_enters_with_counter`, not here.
+                    ..
                 } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter) => {
                     definition
                         .affected
@@ -9355,6 +9423,38 @@ pub fn handle_cast_spell_with_payment_mode(
                 events,
             );
         }
+    }
+    // CR 601.2a + CR 113.6b: A static `ExileCastPermission` where the exiled card
+    // is the only cast option yields exactly ONE candidate, so
+    // `had_multiple_candidates` is false and the block above is skipped. That
+    // single ExilePermission variant must still be elected — otherwise the cast
+    // falls through to a `Normal` cast that drops the permission's context
+    // (once-per-turn slot tracking, `WithoutPayingManaCost` zeroing, and the
+    // `enters_with_counter` rider). Maralen, Fae Ascendant; Intrepid
+    // Paleontologist; The Matrix of Time.
+    //
+    // ponytail: scoped to `ExilePermission` — the one variant class whose
+    // single-candidate cast currently mis-elects to Normal. The GENERAL rule is
+    // "don't skip single-candidate election when the elected option carries
+    // context a Normal cast would drop" (would also cover a hypothetical single
+    // Flashback/Escape/etc.). Not generalized here because the fall-through below
+    // routes single-candidate Warp/Evoke/Dash hand casts through their own
+    // cost-choice `WaitingFor` handlers; electing them via `continue_cast_with_
+    // variant` would preempt those prompts. Widen to the general predicate only
+    // after auditing those keyword handlers tolerate pre-election.
+    if let Some(option) = variant_choices
+        .options
+        .first()
+        .filter(|option| matches!(option.variant, CastingVariant::ExilePermission { .. }))
+    {
+        return continue_cast_with_variant(
+            state,
+            player,
+            object_id,
+            option.variant,
+            payment_mode,
+            events,
+        );
     }
 
     // Warp: when a hand card has Keyword::Warp and both costs are affordable,
@@ -16165,8 +16265,16 @@ fn apply_static_activated_ability_cost_reduction(
     player: PlayerId,
     source_id: ObjectId,
 ) {
-    // CR 604.1: O(1) presence gate — no ReduceAbilityCost static means no reduction.
-    if !static_kind_present(state, StaticModeKind::ReduceAbilityCost) {
+    // CR 604.1: presence gate — nothing to do unless a printed ReduceAbilityCost
+    // static (CR 611.3) OR a duration-scoped continuous ReduceAbilityCost effect
+    // (CR 611.2 — The Dining Car's transient chaos discount) is present. The O(1)
+    // `static_mode_presence` index covers only battlefield/command-zone printed
+    // statics, so the transient authority needs its own small TCE scan — the same
+    // split gate `visibility::viewer_may_look_at_face_down` uses for the
+    // duration-bound `MayLookAtFaceDown` permission.
+    let has_static = static_kind_present(state, StaticModeKind::ReduceAbilityCost);
+    let has_transient = transient_reduce_ability_cost_present(state);
+    if !has_static && !has_transient {
         return;
     }
     crate::game::perf_counters::record_static_full_scan();
@@ -16193,95 +16301,184 @@ fn apply_static_activated_ability_cost_reduction(
     // `&`) before the loop mutates it.
     let ability_is_loyalty = crate::types::ability::is_loyalty_ability_cost(cost);
 
-    for (static_source, def) in super::functioning_abilities::battlefield_active_statics(state) {
-        let StaticMode::ReduceAbilityCost {
-            mode,
-            keyword,
-            amount,
-            minimum_mana,
-            dynamic_count,
-            exemption,
-            activator,
-        } = &def.mode
-        else {
-            continue;
-        };
-        // CR 601.2f + CR 606.1: match the "activated" blanket arm, a tag-keyed
-        // keyword (power-up, exhaust, …), or the "loyalty" arm against a loyalty
-        // ability's cost.
-        let keyword_matches = keyword == "activated"
-            || Some(keyword.as_str()) == active_keyword
-            || (keyword == "loyalty" && ability_is_loyalty);
-        if !keyword_matches || *amount == 0 {
-            continue;
-        }
-        // CR 605.1a: a mana ability bypasses a "unless they're mana abilities"
-        // adjustment (Suppression Field's tax, Zirda's discount).
-        if *exemption == ActivationExemption::ManaAbilities && ability_is_mana {
-            continue;
-        }
-        // CR 602.2: an activator-scoped static ("abilities you activate" — Zirda,
-        // the Dawnwaker; Fluctuator) keys off WHO is activating the ability,
-        // evaluated relative to the static's controller — NOT who controls the
-        // ability's source. Reuse the activator-permission predicate with the
-        // static's controller as the reference point so "you" resolves to the
-        // static controller. An ability on a permanent this player doesn't control
-        // (activatable via `activator_filter`) is still discounted when they
-        // activate it, and an ability on a permanent they DO control but activated
-        // by someone else is not. `None` leaves the source/global scope untouched.
-        if let Some(activator) = activator {
-            if !player_may_begin_activating(
-                state,
-                player,
-                static_source.controller,
-                Some(activator),
-            ) {
+    // CR 611.3 + CR 601.2f: printed battlefield/command-zone `ReduceAbilityCost`
+    // statics (Training Grounds, Suppression Field, Zirda, Agatha, …). The
+    // presence index avoids scanning all static sources when this activation is
+    // affected only by a duration-scoped continuous reduction.
+    if has_static {
+        for (static_source, def) in super::functioning_abilities::battlefield_active_statics(state)
+        {
+            if !matches!(def.mode, StaticMode::ReduceAbilityCost { .. }) {
                 continue;
             }
-        }
-        if def.affected.as_ref().is_some_and(|filter| {
-            !super::filter::matches_target_filter(
+            // CR 604.1 + CR 109.5: "you control" in the affected filter anchors on the
+            // static's current controller, read live from the battlefield object.
+            let ctx = super::filter::FilterContext::from_source(state, static_source.id);
+            apply_one_reduce_ability_cost(
                 state,
+                cost,
                 source_id,
-                filter,
-                &super::filter::FilterContext::from_source(state, static_source.id),
-            )
-        }) {
-            continue;
-        }
-        // CR 601.2f + CR 208.1 + CR 113.7: When `dynamic_count` is present the
-        // per-unit `amount` is multiplied by the resolved quantity (Agatha of
-        // the Vile Cauldron: amount 1 × ~'s power). Resolve against the static's
-        // own source so "~'s power" reads Agatha's post-layer power. Mirrors the
-        // dynamic-count multiply in `keywords::apply_ability_cost_reduction`.
-        let multiplier = dynamic_count.as_ref().map_or(1u32, |qty_ref| {
-            let expr = crate::types::ability::QuantityExpr::Ref {
-                qty: qty_ref.clone(),
-            };
-            super::quantity::resolve_quantity(
-                state,
-                &expr,
-                static_source.controller,
+                player,
+                active_keyword,
+                ability_is_mana,
+                ability_is_loyalty,
+                &def.mode,
+                def.affected.as_ref(),
                 static_source.id,
-            )
-            .max(0) as u32
-        });
-        let effective = amount.saturating_mul(multiplier);
-        // CR 118.7: Apply the adjustment in the static's direction. `Reduce`
-        // subtracts generic mana (honoring the optional one-mana floor);
-        // `Raise` adds generic mana (Skyseer's Chariot). `Minimum` is not
-        // emitted for activated-ability statics and is treated as a no-op.
-        match mode {
-            CostModifyMode::Reduce => {
-                reduce_generic_in_cost_with_minimum_mana(
-                    cost,
-                    effective,
-                    minimum_mana.unwrap_or(0),
-                );
-            }
-            CostModifyMode::Raise => increase_generic_in_cost(cost, effective),
-            CostModifyMode::Minimum => {}
+                static_source.controller,
+                &ctx,
+            );
         }
+    }
+
+    // CR 611.2 + CR 118.7: duration-scoped continuous `ReduceAbilityCost` effects
+    // (The Dining Car's transient "activated abilities of <X> cost {N} less this
+    // turn"). Installed by a resolving ability as a `GenericEffect` and read here,
+    // off the TCE, through the SAME per-static authority as battlefield statics —
+    // there is no parallel reduction pathway. The `UntilEndOfTurn` duration expires
+    // the effect at cleanup (CR 514.2), so no explicit clear is needed. CR 611.2c:
+    // the affected set is dynamic (re-evaluated each activation), so a token
+    // created later this turn is still discounted.
+    for tce in &state.transient_continuous_effects {
+        for modification in &tce.modifications {
+            let ContinuousModification::AddStaticMode {
+                mode: reduce_mode @ StaticMode::ReduceAbilityCost { .. },
+            } = modification
+            else {
+                continue;
+            };
+            // CR 608.2c + CR 109.5: "you control" is latched to the installing
+            // player captured on the TCE, not the source's current controller.
+            let ctx = super::filter::FilterContext::from_source_with_controller(
+                tce.source_id,
+                tce.controller,
+            );
+            apply_one_reduce_ability_cost(
+                state,
+                cost,
+                source_id,
+                player,
+                active_keyword,
+                ability_is_mana,
+                ability_is_loyalty,
+                reduce_mode,
+                Some(&tce.affected),
+                tce.source_id,
+                tce.controller,
+                &ctx,
+            );
+        }
+    }
+}
+
+/// CR 604.1: presence gate for the transient (duration-scoped) `ReduceAbilityCost`
+/// authority. The O(1) `static_mode_presence` index tracks only battlefield /
+/// command-zone printed statics, never TCE-borne `AddStaticMode` modes, so this
+/// small scan of `transient_continuous_effects` is the gate for the transient
+/// side — mirroring the split presence gate in
+/// `visibility::viewer_may_look_at_face_down`.
+fn transient_reduce_ability_cost_present(state: &GameState) -> bool {
+    state.transient_continuous_effects.iter().any(|tce| {
+        tce.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::ReduceAbilityCost { .. },
+                }
+            )
+        })
+    })
+}
+
+/// CR 601.2f + CR 118.7 + CR 605.1a + CR 606.1: Apply ONE `ReduceAbilityCost`
+/// static to the activating ability's `cost`. The single authority for both a
+/// printed battlefield static (Training Grounds) and a duration-scoped continuous
+/// effect (The Dining Car's transient chaos discount), so both apply through
+/// identical keyword-match, mana-exemption, activator-scope, source-filter, and
+/// dynamic-count logic. `reduce_mode` must be a `StaticMode::ReduceAbilityCost`;
+/// `affected` is its source-scope filter (evaluated against the ability's SOURCE
+/// permanent via `filter_ctx`); `static_source_id`/`static_controller` anchor the
+/// dynamic-count resolution and the activator-permission check.
+#[allow(clippy::too_many_arguments)]
+fn apply_one_reduce_ability_cost(
+    state: &GameState,
+    cost: &mut AbilityCost,
+    ability_source_id: ObjectId,
+    player: PlayerId,
+    active_keyword: Option<&'static str>,
+    ability_is_mana: bool,
+    ability_is_loyalty: bool,
+    reduce_mode: &StaticMode,
+    affected: Option<&TargetFilter>,
+    static_source_id: ObjectId,
+    static_controller: PlayerId,
+    filter_ctx: &super::filter::FilterContext,
+) {
+    let StaticMode::ReduceAbilityCost {
+        mode,
+        keyword,
+        amount,
+        minimum_mana,
+        dynamic_count,
+        exemption,
+        activator,
+    } = reduce_mode
+    else {
+        return;
+    };
+    // CR 601.2f + CR 606.1: match the "activated" blanket arm, a tag-keyed keyword
+    // (power-up, exhaust, …), or the "loyalty" arm against a loyalty ability's cost.
+    let keyword_matches = keyword == "activated"
+        || Some(keyword.as_str()) == active_keyword
+        || (keyword == "loyalty" && ability_is_loyalty);
+    if !keyword_matches || *amount == 0 {
+        return;
+    }
+    // CR 605.1a: a mana ability bypasses a "unless they're mana abilities"
+    // adjustment (Suppression Field's tax, Zirda's discount).
+    if *exemption == ActivationExemption::ManaAbilities && ability_is_mana {
+        return;
+    }
+    // CR 602.2: an activator-scoped static ("abilities you activate" — Zirda, the
+    // Dawnwaker; Fluctuator) keys off WHO is activating the ability, evaluated
+    // relative to the static's controller — NOT who controls the ability's source.
+    // Reuse the activator-permission predicate with the static's controller as the
+    // reference point so "you" resolves to the static controller. `None` leaves the
+    // source/global scope untouched.
+    if let Some(activator) = activator {
+        if !player_may_begin_activating(state, player, static_controller, Some(activator)) {
+            return;
+        }
+    }
+    // CR 602.2: scope by the source filter against the ability's SOURCE permanent.
+    if affected.is_some_and(|filter| {
+        !super::filter::matches_target_filter(state, ability_source_id, filter, filter_ctx)
+    }) {
+        return;
+    }
+    // CR 601.2f + CR 208.1 + CR 113.7: When `dynamic_count` is present the per-unit
+    // `amount` is multiplied by the resolved quantity (Agatha of the Vile Cauldron:
+    // amount 1 × ~'s power). Resolve against the static's own source so "~'s power"
+    // reads the source's post-layer power. Mirrors the dynamic-count multiply in
+    // `keywords::apply_ability_cost_reduction`.
+    let multiplier = dynamic_count.as_ref().map_or(1u32, |qty_ref| {
+        let expr = crate::types::ability::QuantityExpr::Ref {
+            qty: qty_ref.clone(),
+        };
+        super::quantity::resolve_quantity(state, &expr, static_controller, static_source_id).max(0)
+            as u32
+    });
+    let effective = amount.saturating_mul(multiplier);
+    // CR 118.7: Apply the adjustment in the static's direction. `Reduce` subtracts
+    // generic mana (honoring the optional one-mana floor); `Raise` adds generic
+    // mana (Skyseer's Chariot). `Minimum` is not emitted for activated-ability
+    // statics and is treated as a no-op.
+    match mode {
+        CostModifyMode::Reduce => {
+            reduce_generic_in_cost_with_minimum_mana(cost, effective, minimum_mana.unwrap_or(0));
+        }
+        CostModifyMode::Raise => increase_generic_in_cost(cost, effective),
+        CostModifyMode::Minimum => {}
     }
 }
 

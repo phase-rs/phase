@@ -53,6 +53,80 @@ fn parse_bare_supertype_spell_filter(base: &str) -> Option<TargetFilter> {
     ])))
 }
 
+/// CR 202.3: Nom parse of a trailing "with/of mana value N or greater/less"
+/// (also "or more"/"or fewer") qualifier — returns the prefix BEFORE the
+/// qualifier plus the `FilterProp::Cmc` it selects. Fails (nom `Err`) when no
+/// mana-value qualifier is present.
+fn parse_cost_mod_mana_value_qualifier(prefix: &str) -> OracleResult<'_, (&str, FilterProp)> {
+    let (rest, before) = alt((
+        take_until::<_, _, OracleError<'_>>(" with mana value "),
+        take_until(" of mana value "),
+    ))
+    .parse(prefix)?;
+    let (rest, _) = alt((tag(" with mana value "), tag(" of mana value "))).parse(rest)?;
+    let (rest, mv) = nom_primitives::parse_number(rest)?;
+    let (rest, comparator) = alt((
+        value(Comparator::GE, alt((tag(" or greater"), tag(" or more")))),
+        value(Comparator::LE, alt((tag(" or less"), tag(" or fewer")))),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        (
+            before,
+            FilterProp::Cmc {
+                comparator,
+                value: QuantityExpr::Fixed { value: mv as i32 },
+            },
+        ),
+    ))
+}
+
+/// CR 202.3 + CR 601.2f: Peel a trailing "with mana value N or greater/less"
+/// spell-selection qualifier off a cost-modifier subject prefix, returning the
+/// prefix WITHOUT the qualifier plus the parsed `FilterProp::Cmc`. The mana-value
+/// gate sits AFTER the "spells you cast" infix ("Instant and sorcery spells you
+/// cast with mana value 4 or greater cost {X} less" — The Scarlet Witch, #5606),
+/// so the caller's "you cast"/"spells" end-trims cannot reach the type words
+/// until this qualifier is peeled. Covers the whole MV-gated cost-modifier class,
+/// not one card.
+fn strip_cost_mod_mana_value_qualifier(prefix: &str) -> (&str, Option<FilterProp>) {
+    match parse_cost_mod_mana_value_qualifier(prefix) {
+        Ok((_, (before, prop))) => (before, Some(prop)),
+        Err(_) => (prefix, None),
+    }
+}
+
+/// Compose an optional mana-value `FilterProp::Cmc` (from
+/// `strip_cost_mod_mana_value_qualifier`) into the cost-modifier spell filter.
+/// A typed filter absorbs the prop directly; an `Or` (or any non-`Typed`)
+/// filter is `And`-wrapped with a card+prop leaf; a bare mana-value gate with no
+/// type restriction ("spells you cast with mana value 4 or greater") becomes a
+/// card filter carrying the prop.
+fn compose_cost_mod_mana_value(
+    filter: Option<TargetFilter>,
+    prop: Option<FilterProp>,
+) -> Option<TargetFilter> {
+    let Some(prop) = prop else {
+        return filter;
+    };
+    match filter {
+        Some(TargetFilter::Typed(mut tf)) => {
+            tf.properties.push(prop);
+            Some(TargetFilter::Typed(tf))
+        }
+        Some(other) => Some(TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(TypedFilter::card().properties(vec![prop])),
+            ],
+        }),
+        None => Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![prop]),
+        )),
+    }
+}
+
 fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
     let base = type_desc.trim();
     let base = tag::<_, _, OracleError<'_>>("each ")
@@ -544,6 +618,12 @@ pub(crate) fn try_parse_cost_modification(
         } else {
             (without_chosen, false)
         };
+        // CR 202.3 + CR 601.2f: Peel a trailing "with mana value N or greater/less"
+        // gate BEFORE the "you cast"/"spells" end-trims. The qualifier sits after
+        // the "spells you cast" infix, so without peeling it the trims never reach
+        // the type words and the whole type+MV restriction is dropped (The Scarlet
+        // Witch reduced EVERY spell, not just instants/sorceries — #5606).
+        let (without_chosen, mana_value_prop) = strip_cost_mod_mana_value_qualifier(without_chosen);
         let type_desc = without_chosen
             .trim_end_matches(" you cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             .trim_end_matches(" your opponents cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
@@ -587,13 +667,15 @@ pub(crate) fn try_parse_cost_modification(
         // Compose chosen-name constraint with the typed prefix (if any). Bare
         // "Spells with the chosen name" → `HasChosenName` alone; typed
         // "<Type> spells with the chosen name" → `And{Typed, HasChosenName}`.
-        match (typed_filter, has_chosen_name) {
+        let base_filter = match (typed_filter, has_chosen_name) {
             (Some(tf), true) => Some(TargetFilter::And {
                 filters: vec![tf, TargetFilter::HasChosenName],
             }),
             (None, true) => Some(TargetFilter::HasChosenName),
             (tf, false) => tf,
-        }
+        };
+        // CR 202.3: fold the peeled mana-value gate back into the spell filter.
+        compose_cost_mod_mana_value(base_filter, mana_value_prop)
     } else {
         None
     };

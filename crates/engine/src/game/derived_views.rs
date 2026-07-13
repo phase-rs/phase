@@ -574,20 +574,17 @@ fn turn_order_views(state: &GameState) -> Vec<TurnOrderSlotView> {
 /// - CR 704.5b: `LibraryDelta(p)` — a mill drives an opponent's library toward the
 ///   empty-draw loss and a self-mill the controller's own; the badge follows `p`.
 ///
+/// - CR 704.5c: `Poison(p)` — a poison ∞ drives the afflicted player toward the
+///   10-poison loss, so the badge belongs on the VICTIM's HUD.
+///
 /// Every aggregate axis carries no victim PlayerId and is attributed to the loop's
 /// `controller` (the player generating the unbounded resource).
-//
-// CR 704.5c: a player with ten or more poison counters loses the game — so the
-// *afflicted* player owns the win condition, and a poison ∞ belongs on the VICTIM's
-// HUD. But `Counter(Poison, ObjectClass::Player)` is AGGREGATE-keyed in ResourceVector
-// (no victim PlayerId; loop_check.rs:239-246 reads the summed (Poison, Player) pair),
-// so it falls into the aggregate `=> controller` arm and is controller-attributed here.
-// This is correct ONLY because no live producer emits a poison axis in PR-6 (the mana
-// toggle is the sole producer). PR-7 MUST NOT wire a live poison loop until the analysis
-// poison axis is re-keyed by victim PlayerId, or ∞ would render on the wrong HUD.
 fn attribution_player(axis: ResourceAxis, controller: PlayerId) -> PlayerId {
     match axis {
-        ResourceAxis::Life(p) | ResourceAxis::DamageDealt(p) | ResourceAxis::LibraryDelta(p) => p,
+        ResourceAxis::Life(p)
+        | ResourceAxis::DamageDealt(p)
+        | ResourceAxis::LibraryDelta(p)
+        | ResourceAxis::Poison(p) => p,
         ResourceAxis::Mana(_)
         | ResourceAxis::Counter(_, _)
         | ResourceAxis::Trigger(_)
@@ -1961,8 +1958,8 @@ mod tests {
     /// victim payload routes to the named victim — while every aggregate axis stays
     /// on the controller.
     ///
-    /// REVERT-PROBE: change the `Life | DamageDealt | LibraryDelta => p` arm to
-    /// `=> controller` → the three victim assertions (`p1` expected) fail.
+    /// REVERT-PROBE: change the `Life | DamageDealt | LibraryDelta | Poison => p` arm to
+    /// `=> controller` → the four victim assertions (`p1` expected) fail.
     #[test]
     fn attribution_player_routes_payload_axes_both_directions() {
         use crate::analysis::resource::{CounterClass, ObjectClass, TriggerKind};
@@ -1980,6 +1977,8 @@ mod tests {
         assert_eq!(attribution_player(ResourceAxis::Life(p1), p0), p1);
         assert_eq!(attribution_player(ResourceAxis::DamageDealt(p1), p0), p1);
         assert_eq!(attribution_player(ResourceAxis::LibraryDelta(p1), p0), p1);
+        // CR 704.5c: a poison ∞ belongs on the afflicted player's HUD, not the controller's.
+        assert_eq!(attribution_player(ResourceAxis::Poison(p1), p0), p1);
 
         // Aggregate axes (no victim PlayerId) attribute to the controller.
         assert_eq!(
@@ -2132,7 +2131,7 @@ mod tests {
     /// projection serializes through `ClientGameStateRef` → JSON → `ClientGameState`
     /// with the externally-tagged `ResourceAxis` shapes the TS mirror depends on
     /// (unit → bare string, single-data → `{"Mana":"Red"}`, PlayerId transparent
-    /// `{"Life":1}`, tuple → `{"Counter":["Poison","Player"]}`), and the empty case
+    /// `{"Life":1}` / `{"Poison":1}`, tuple → `{"Counter":["Energy","Player"]}`), and the empty case
     /// omits the key. Exercises the `Serialize`/`Deserialize` derives added to
     /// `ResourceAxis`/`CounterClass`/`ObjectClass`/`TriggerKind`.
     ///
@@ -2149,7 +2148,10 @@ mod tests {
             &[
                 ResourceAxis::Mana(ManaType::Red),
                 ResourceAxis::Life(PlayerId(1)),
-                ResourceAxis::Counter(CounterClass::Poison, ObjectClass::Player),
+                // Victim-keyed poison axis (PlayerId-transparent wire shape).
+                ResourceAxis::Poison(PlayerId(1)),
+                // A non-poison Counter keeps the tuple externally-tagged wire shape covered.
+                ResourceAxis::Counter(CounterClass::Energy, ObjectClass::Player),
                 ResourceAxis::Trigger(TriggerKind::Proliferate),
                 ResourceAxis::TokensCreated,
             ],
@@ -2161,7 +2163,11 @@ mod tests {
         assert!(json.contains(r#"{"Mana":"Red"}"#), "single-data axis shape");
         assert!(json.contains(r#"{"Life":1}"#), "PlayerId transparent shape");
         assert!(
-            json.contains(r#"{"Counter":["Poison","Player"]}"#),
+            json.contains(r#"{"Poison":1}"#),
+            "poison PlayerId-transparent wire shape"
+        );
+        assert!(
+            json.contains(r#"{"Counter":["Energy","Player"]}"#),
             "tuple axis shape"
         );
         assert!(
@@ -2171,10 +2177,12 @@ mod tests {
 
         let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
         let rows = &round.derived.unbounded_resources;
-        assert_eq!(rows.len(), 5, "all five axis rows survive the round-trip");
-        // Aggregate poison axis attributes to the controller P0 (see attribution_player).
-        assert!(rows.iter().any(|r| r.player == PlayerId(0)
-            && r.axis == ResourceAxis::Counter(CounterClass::Poison, ObjectClass::Player)));
+        assert_eq!(rows.len(), 6, "all six axis rows survive the round-trip");
+        // CR 704.5c: the victim-keyed poison axis attributes to the afflicted P1, NOT the
+        // controller P0 (the re-key discharge — see attribution_player).
+        assert!(rows
+            .iter()
+            .any(|r| r.player == PlayerId(1) && r.axis == ResourceAxis::Poison(PlayerId(1))));
         // Victim-keyed life axis attributes to P1.
         assert!(rows
             .iter()

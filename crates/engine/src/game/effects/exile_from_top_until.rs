@@ -32,7 +32,11 @@ use crate::types::zones::Zone;
 ///
 /// * If the library is exhausted without satisfying the predicate, every card
 ///   in the library is exiled and the loop terminates naturally. For
-///   `NextMatches`, the sub_ability chain is skipped (no hit to inject). For
+///   `NextMatches`, the "cast that card" link is skipped (no hit to inject) —
+///   but any exile-cleanup link that references `ExiledBySource` (Jodah, the
+///   Unifier's "put the rest on the bottom") STILL runs, so the exiled pile is
+///   never stranded (CR 608.2c + CR 701.13a; Jodah ruling: with no hit, all
+///   exiled cards are put on the bottom in a random order). For
 ///   `CumulativeThreshold`, the sub_ability chain still runs because the
 ///   per-resolution exile links are independently meaningful.
 ///
@@ -146,6 +150,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ExileFromTopUntil,
         source_id: ability.source_id,
+        subject: None,
     });
 
     // CR 400.7: An object that moves from one zone to another becomes a new
@@ -153,7 +158,10 @@ pub fn resolve(
     //
     // * NextMatches: inject the hit card as the sub-ability's target so
     //   "cast that card" / "you may put it onto the battlefield" address the
-    //   right object. If no hit was found, the sub_ability is skipped.
+    //   right object. If no hit was found, the "cast that card" link is
+    //   skipped, but any downstream exile-cleanup link that references
+    //   `ExiledBySource` (Jodah's "put the rest on the bottom") still runs so
+    //   the exiled pile is not stranded (CR 608.2c + CR 701.13a).
     //
     // * CumulativeThreshold: there is no single hit card. The sub_ability
     //   chain (if any) reads from `TargetFilter::ExiledBySource` to address
@@ -187,6 +195,25 @@ pub fn resolve(
                     }
                     sub_clone.context = ability.context.clone();
                     super::resolve_ability_chain(state, &sub_clone, events, 1)?;
+                } else if let Some(cleanup) = first_exiled_by_source_link(sub.as_ref()) {
+                    // CR 608.2c + CR 701.13a: Library exhausted with no hit
+                    // (Jodah, the Unifier — no legendary nonland with lesser
+                    // mana value). The "cast that card" link has nothing to
+                    // address and is skipped, but the exile-cleanup link that
+                    // references `ExiledBySource` ("put the rest on the bottom
+                    // of your library in a random order") MUST still run — its
+                    // pool is every card this ability exiled. Without this the
+                    // whole exiled pile is stranded in exile and the acting
+                    // player is decked out by the engine (issue #5277).
+                    //
+                    // Jodah ruling: with no hit, all exiled cards return. The
+                    // cleanup's `DistinctFrom { ParentTarget }` leg fails open
+                    // when there are no object targets, so clearing `targets`
+                    // here lets every exiled card be swept to the bottom.
+                    let mut cleanup_clone = cleanup.clone();
+                    cleanup_clone.targets = vec![];
+                    cleanup_clone.context = ability.context.clone();
+                    super::resolve_ability_chain(state, &cleanup_clone, events, 1)?;
                 }
             }
             UntilCondition::CumulativeThreshold { .. } => {
@@ -209,6 +236,42 @@ fn sub_effect_references_exiled_by_source(sub: &ResolvedAbility) -> bool {
     crate::game::triggers::extract_target_filter_from_effect(&sub.effect)
         .map(crate::types::ability::TargetFilter::references_exiled_by_source)
         .unwrap_or(false)
+}
+
+/// CR 608.2c + CR 701.13a: True when an effect's RAW target filter references
+/// `ExiledBySource`. Distinct from [`sub_effect_references_exiled_by_source`],
+/// which routes through `extract_target_filter_from_effect` — that accessor
+/// strips context refs (and `ExiledBySource` IS a context ref via
+/// `is_context_ref`), so it returns `None` for the very cleanup this walk is
+/// looking for. Read the un-stripped `Effect::target_filter` instead.
+fn effect_target_references_exiled_by_source(sub: &ResolvedAbility) -> bool {
+    sub.effect
+        .target_filter()
+        .is_some_and(crate::types::ability::TargetFilter::references_exiled_by_source)
+}
+
+/// CR 608.2c + CR 701.13a: Walk a `NextMatches` sub-chain for the FIRST link
+/// whose effect references `ExiledBySource` — the exile-cleanup ("put the rest
+/// on the bottom") that must still run when the library was exhausted with no
+/// hit. The cast link (Jodah's "cast that card" via `ParentTarget`) is skipped
+/// because it references no exiled-set channel; its cleanup lives one link
+/// deeper as its `sub_ability` (mainline chain) or `else_ability` (the declined
+/// path the parser also wires). Descends both edges so either wiring is found.
+fn first_exiled_by_source_link(sub: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    if effect_target_references_exiled_by_source(sub) {
+        return Some(sub);
+    }
+    if let Some(next) = sub.sub_ability.as_deref() {
+        if let Some(found) = first_exiled_by_source_link(next) {
+            return Some(found);
+        }
+    }
+    if let Some(alt) = sub.else_ability.as_deref() {
+        if let Some(found) = first_exiled_by_source_link(alt) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// CR 202.3 / CR 208 / CR 209: Look up the requested measurable property of an
@@ -239,12 +302,13 @@ mod tests {
     use crate::game::engine::apply;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, Comparator, ControllerRef,
-        LibraryPosition, PlayerFilter, QuantityExpr, ReplacementDefinition, ResolvedAbility,
-        TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, CardPlayMode, CastFromZoneDriver, CastingPermission,
+        Comparator, ControllerRef, FilterProp, LibraryPosition, PlayerFilter, QuantityExpr,
+        ReplacementDefinition, ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
+        TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
-    use crate::types::card_type::CoreType;
+    use crate::types::card_type::{CoreType, Supertype};
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -1212,6 +1276,367 @@ mod tests {
         assert!(
             sub_kinds.contains(&EffectKind::Scry),
             "sub_ability (Scry) must run for CumulativeThreshold even though no hit card was injected; got events kinds {sub_kinds:?}"
+        );
+    }
+
+    // --- Jodah, the Unifier (#5277 + #5292) ---------------------------------
+
+    /// A legendary-supertype nonland filter — the simplified `NextMatches`
+    /// predicate the hand-built Jodah fixtures use (the real card additionally
+    /// requires `mana value < CostPaidObject`, threaded only through the full
+    /// trigger; the shape assertion in `jodah_parse_lowers_the_rest_cleanup`
+    /// pins the verbatim parse so these fixtures cannot drift).
+    fn legendary_nonland_filter() -> TargetFilter {
+        TargetFilter::And {
+            filters: vec![
+                nonland_filter(),
+                TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    },
+                ])),
+            ],
+        }
+    }
+
+    /// The normalized "put the rest on the bottom" cleanup target: every card
+    /// this ability exiled EXCEPT the ParentTarget hit (declined hit stays in
+    /// exile). Mirrors `normalize_exile_until_cast_bottom_cleanup`.
+    fn jodah_rest_cleanup_target() -> TargetFilter {
+        TargetFilter::And {
+            filters: vec![
+                TargetFilter::ExiledBySource,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::DistinctFrom {
+                        reference: Box::new(TargetFilter::ParentTarget),
+                    },
+                ])),
+            ],
+        }
+    }
+
+    /// Build a Jodah trigger chain in the NORMALIZED parser shape:
+    /// `ExileFromTopUntil { NextMatches(legendary nonland) }`
+    ///   → optional `CastFromZone { ParentTarget, DuringResolution }`
+    ///       sub = cleanup, else = cleanup (both "put the rest on the bottom").
+    fn jodah_chain(source: ObjectId) -> ResolvedAbility {
+        let cleanup = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: jodah_rest_cleanup_target(),
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Bottom,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut cast = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        cast.optional = true;
+        cast.sub_link = SubAbilityLink::SequentialSibling;
+        cast.sub_ability = Some(Box::new(cleanup.clone()));
+        cast.else_ability = Some(Box::new(cleanup));
+
+        let mut head = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until: UntilCondition::NextMatches {
+                    filter: legendary_nonland_filter(),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        head.sub_ability = Some(Box::new(cast));
+        head
+    }
+
+    fn add_legendary_library_card(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+        let id = add_library_card(state, owner, name, false);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(Supertype::Legendary);
+        id
+    }
+
+    /// (a) #5277 — no hit: the library holds only nonmatching cards. The loop
+    /// exhausts the library, no legendary is exiled, and the "cast that card"
+    /// link is skipped — but the "put the rest on the bottom" cleanup MUST still
+    /// run so every exiled card returns to the library. Pre-fix the whole pile
+    /// was stranded in exile and the player decked out.
+    ///
+    /// Discriminating assertion: `library.len() == N` after resolution. Revert
+    /// the runtime no-hit branch and all N cards stay in `Zone::Exile`.
+    #[test]
+    fn jodah_no_hit_returns_all_exiled_cards_to_library() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Jodah, the Unifier".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Four nonlegendary creatures — none satisfy the legendary predicate.
+        let c1 = add_library_card(&mut state, PlayerId(0), "Bear One", false);
+        let c2 = add_library_card(&mut state, PlayerId(0), "Bear Two", false);
+        let c3 = add_library_card(&mut state, PlayerId(0), "Bear Three", false);
+        let c4 = add_library_card(&mut state, PlayerId(0), "Bear Four", false);
+        let all = [c1, c2, c3, c4];
+        state.players[0].library = crate::im::vector![c1, c2, c3, c4];
+
+        let ability = jodah_chain(source);
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Reach-guard: the exile-until loop genuinely ran (no early
+        // short-circuit) — every card left the library at least momentarily and
+        // no legendary hit was recorded.
+        assert!(
+            state.stack.is_empty(),
+            "no hit means nothing should be cast onto the stack"
+        );
+
+        // Discriminating: every exiled card is back in the library, none stranded.
+        for &id in &all {
+            assert_eq!(
+                state.objects.get(&id).unwrap().zone,
+                Zone::Library,
+                "no-hit cleanup must return {id:?} to the library, not strand it in exile"
+            );
+        }
+        assert_eq!(
+            state.players[0].library.len(),
+            all.len(),
+            "the entire library must be reconstituted (bottom-in-random-order into empty library)"
+        );
+        for &id in &all {
+            assert!(
+                state.players[0].library.contains(&id),
+                "library membership must include {id:?}"
+            );
+        }
+        assert!(
+            !state.exile.contains(&c1) && !state.exile.contains(&c4),
+            "no exiled card may remain stranded in the exile zone"
+        );
+    }
+
+    /// (b) Hit + accept: library = [miss, miss, legendary hit, unreached]. The
+    /// loop stops at the legendary hit. Accepting casts it during resolution;
+    /// the misses go to the bottom and the unreached card is untouched.
+    #[test]
+    fn jodah_hit_accept_casts_hit_and_returns_misses() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Jodah, the Unifier".to_string(),
+            Zone::Battlefield,
+        );
+
+        let miss_a = add_library_card(&mut state, PlayerId(0), "Bear A", false);
+        let miss_b = add_library_card(&mut state, PlayerId(0), "Bear B", false);
+        let hit = add_legendary_library_card(&mut state, PlayerId(0), "Legendary Hit");
+        let unreached = add_library_card(&mut state, PlayerId(0), "Unreached", false);
+        state.players[0].library = crate::im::vector![miss_a, miss_b, hit, unreached];
+
+        let ability = jodah_chain(source);
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert!(
+            matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "the hit must offer an optional cast prompt; got {:?}",
+            state.waiting_for
+        );
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        // The accepted hit is cast during resolution — it is on the stack.
+        assert_eq!(
+            state.objects[&hit].zone,
+            Zone::Stack,
+            "accepting the free cast must put the legendary hit on the stack; zone={:?}",
+            state.objects[&hit].zone
+        );
+        // Misses returned to the library bottom.
+        assert_eq!(state.objects[&miss_a].zone, Zone::Library);
+        assert_eq!(state.objects[&miss_b].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&miss_a));
+        assert!(state.players[0].library.contains(&miss_b));
+        // Unreached card never left the library.
+        assert_eq!(state.objects[&unreached].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&unreached));
+    }
+
+    /// (c) Hit + decline (the discriminating Jodah-vs-Chaos-Wand case): the
+    /// declined legendary hit REMAINS IN EXILE (Scryfall ruling), while the
+    /// misses are put on the bottom. The `DistinctFrom { ParentTarget }` leg of
+    /// the cleanup excludes the declined hit from the sweep.
+    ///
+    /// Discriminating assertion: `hit.zone == Zone::Exile` after decline. Revert
+    /// the `filter_refs_parent_target` extension (so the decline branch stops
+    /// inheriting the hit target) and the hit is swept back to the library.
+    #[test]
+    fn jodah_hit_decline_leaves_hit_in_exile_returns_misses() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Jodah, the Unifier".to_string(),
+            Zone::Battlefield,
+        );
+
+        let miss = add_library_card(&mut state, PlayerId(0), "Bear Miss", false);
+        let hit = add_legendary_library_card(&mut state, PlayerId(0), "Legendary Hit");
+        let unreached = add_library_card(&mut state, PlayerId(0), "Unreached", false);
+        state.players[0].library = crate::im::vector![miss, hit, unreached];
+
+        let ability = jodah_chain(source);
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+
+        // Discriminating: the declined hit stays in exile.
+        assert_eq!(
+            state.objects[&hit].zone,
+            Zone::Exile,
+            "a declined Jodah hit must REMAIN in exile (ruling), not return to the library"
+        );
+        assert!(
+            !state.players[0].library.contains(&hit),
+            "the declined hit must not be swept to the library bottom"
+        );
+        // The miss is returned to the library bottom.
+        assert_eq!(state.objects[&miss].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&miss));
+        // Unreached card untouched.
+        assert_eq!(state.objects[&unreached].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&unreached));
+    }
+
+    /// (d) Parser shape: Jodah's verbatim Oracle text lowers to the normalized
+    /// chain — the cast's cleanup (both `sub_ability` and `else_ability`)
+    /// targets `And { ExiledBySource, DistinctFrom { ParentTarget } }` with
+    /// position Bottom. Positive reach-guard: zero `Unimplemented` effects in the
+    /// parsed trigger chain. Pins the hand-built fixtures above against drift.
+    #[test]
+    fn jodah_parse_lowers_the_rest_cleanup() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Legendary creatures you control get +X/+X, where X is the number of legendary creatures you control.\n\
+             Whenever you cast a legendary spell from your hand, exile cards from the top of your library until you exile a legendary nonland card with lesser mana value. You may cast that card without paying its mana cost. Put the rest on the bottom of your library in a random order.",
+            "Jodah, the Unifier",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &[],
+        );
+
+        let exec = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_ref())
+            .filter(|e| matches!(&*e.effect, Effect::ExileFromTopUntil { .. }))
+            .expect("Jodah exile-from-top-until trigger must parse");
+
+        // head → cast → cleanup.
+        assert!(
+            matches!(
+                &*exec.effect,
+                Effect::ExileFromTopUntil {
+                    until: UntilCondition::NextMatches { .. },
+                    ..
+                }
+            ),
+            "head must be ExileFromTopUntil {{ NextMatches }}"
+        );
+        let cast = exec.sub_ability.as_deref().expect("cast sub-ability");
+        assert!(cast.optional, "the cast must be optional (you MAY cast)");
+        assert!(
+            matches!(
+                &*cast.effect,
+                Effect::CastFromZone {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "cast must target the ParentTarget hit, got {:?}",
+            cast.effect
+        );
+
+        // Both the mainline cleanup and the decline else must be the normalized
+        // "put the rest on the bottom" form.
+        let expect_rest_cleanup = |ab: &AbilityDefinition, label: &str| {
+            let Effect::PutAtLibraryPosition {
+                target, position, ..
+            } = &*ab.effect
+            else {
+                panic!("{label} must be PutAtLibraryPosition, got {:?}", ab.effect);
+            };
+            assert!(
+                matches!(position, LibraryPosition::Bottom),
+                "{label} must place on the bottom"
+            );
+            assert_eq!(
+                target,
+                &jodah_rest_cleanup_target(),
+                "{label} target must be And {{ ExiledBySource, DistinctFrom {{ ParentTarget }} }}"
+            );
+        };
+        expect_rest_cleanup(
+            cast.sub_ability.as_deref().expect("cleanup sub-ability"),
+            "cleanup sub_ability",
+        );
+        expect_rest_cleanup(
+            cast.else_ability
+                .as_deref()
+                .expect("cleanup wired as else_ability for the decline path"),
+            "cleanup else_ability",
+        );
+
+        // Positive reach-guard: no Unimplemented anywhere in the trigger chain.
+        fn has_unimplemented(ab: &AbilityDefinition) -> bool {
+            matches!(&*ab.effect, Effect::Unimplemented { .. })
+                || ab.sub_ability.as_deref().is_some_and(has_unimplemented)
+                || ab.else_ability.as_deref().is_some_and(has_unimplemented)
+        }
+        assert!(
+            !has_unimplemented(exec),
+            "the Jodah trigger chain must contain no Unimplemented effects"
         );
     }
 }

@@ -3003,6 +3003,36 @@ pub fn candidate_actions_broad_with_probe(
             ));
             v
         }
+        // CR 732.2a: proposing a shortcut is optional. Offer both legal actions so the
+        // policy/search layer, rather than the candidate generator, decides whether an AI
+        // proposer declares or returns to ordinary priority.
+        WaitingFor::LoopShortcut { proposer, .. } => vec![
+            candidate(
+                GameAction::DeclareShortcut {
+                    count: crate::analysis::decision_template::IterationCount::UntilLethal,
+                    template: None,
+                },
+                TacticalClass::Utility,
+                Some(*proposer),
+            ),
+            candidate(
+                GameAction::DeclineShortcut,
+                TacticalClass::Pass,
+                Some(*proposer),
+            ),
+        ],
+        // CR 732.2b/c: an opponent answers a loop-shortcut offer. PR-7 Phase 4c (LOW-2):
+        // self-preservation via the single-authority `smart_shortcut_response` — Shorten
+        // when the polled player has a meaningful way to break the loop, else Accept.
+        WaitingFor::RespondToShortcut { player, .. } => {
+            vec![candidate(
+                GameAction::RespondToShortcut {
+                    response: crate::ai_support::smart_shortcut_response(state, *player),
+                },
+                TacticalClass::Utility,
+                Some(*player),
+            )]
+        }
     };
 
     actions
@@ -4890,6 +4920,45 @@ mod tests {
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::zones::Zone;
+
+    /// CR 732.2a: an AI-controlled priority holder receives both legal shortcut choices.
+    /// The `legal_actions` assertion reaches the simulation-filtered surface used by AI search;
+    /// reverting the DeclineShortcut candidate leaves that surface declaration-only.
+    #[test]
+    fn loop_shortcut_candidates_include_decline() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: PlayerId(1),
+            predicted_winner: Some(PlayerId(0)),
+            certificate: crate::analysis::loop_check::LoopCertificate {
+                unbounded: vec![],
+                win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+                mandatory: false,
+                residual_board_delta: crate::analysis::resource::BoardDelta::default(),
+            },
+            schema: crate::analysis::decision_template::ShortcutDecisionSchema::default(),
+        };
+
+        let candidates = candidate_actions(&state);
+        assert!(
+            candidates.iter().any(|candidate| {
+                candidate.action == GameAction::DeclineShortcut
+                    && candidate.metadata.actor == Some(PlayerId(1))
+            }),
+            "the priority holder's DeclineShortcut must be an AI candidate"
+        );
+        assert!(candidates.iter().any(|candidate| {
+            matches!(candidate.action, GameAction::DeclareShortcut { .. })
+                && candidate.metadata.actor == Some(PlayerId(1))
+        }));
+
+        assert!(
+            crate::ai_support::legal_actions(&state)
+                .iter()
+                .any(|action| matches!(action, GameAction::DeclineShortcut)),
+            "the simulation-filtered AI action surface must retain DeclineShortcut"
+        );
+    }
 
     fn prepare_back_face_with_cost(mana_cost: ManaCost) -> crate::game::game_object::BackFaceData {
         let mut card_types = crate::types::card_type::CardType::default();
