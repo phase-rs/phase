@@ -6814,10 +6814,12 @@ fn jhoira_exile_cost_activation_suspends_the_exiled_card() {
 /// "Then target opponent does the same" is also a documented strict-failure
 /// (no opponent exile happens) pending cross-cutting engine targeting work.
 #[test]
-fn wedding_of_river_song_exiles_card_and_draws_two() {
+fn wedding_of_river_song_exiles_and_opponent_does_the_same() {
     use super::super::engine::apply_as_current;
     use crate::game::keywords::object_has_effective_keyword_kind;
     use crate::game::scenario::GameScenario;
+    use crate::types::ability::TargetRef;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::{CastPaymentMode, WaitingFor};
     use crate::types::identifiers::ObjectId;
     use crate::types::keywords::KeywordKind;
@@ -6825,6 +6827,7 @@ fn wedding_of_river_song_exiles_card_and_draws_two() {
     use crate::types::phase::Phase;
 
     let p0 = PlayerId(0);
+    let p1 = PlayerId(1);
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -6842,6 +6845,8 @@ fn wedding_of_river_song_exiles_card_and_draws_two() {
 
     // Controller's nonland card to exile (mana value 2 → 2 time counters).
     let p0_card = scenario.add_card_to_hand(p0, "Controller Nonland");
+    // The targeted opponent's nonland card (mana value 3 → 3 time counters).
+    let p1_card = scenario.add_card_to_hand(p1, "Opponent Nonland");
     // P0 needs cards available to draw two.
     scenario.with_library_top(p0, &["Top A", "Top B", "Top C"]);
     // Mana for {2}{W}.
@@ -6861,6 +6866,12 @@ fn wedding_of_river_song_exiles_card_and_draws_two() {
         .get_mut(&p0_card)
         .unwrap()
         .mana_cost = ManaCost::generic(2);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&p1_card)
+        .unwrap()
+        .mana_cost = ManaCost::generic(3);
 
     let library_before = runner
         .state()
@@ -6883,13 +6894,24 @@ fn wedding_of_river_song_exiles_card_and_draws_two() {
     )
     .expect("casting The Wedding of River Song must enter the pipeline");
 
-    // Manual driver: pass priority to resolve, and exile the controller's
-    // nonland card at the resolution-time hand-exile choice.
-    for _ in 0..80 {
+    // Manual driver: choose the opponent target, accept both optional exiles
+    // (each routed to the correct player), and pick each player's hand card.
+    // `apply_as_current` submits as the authorized player for each prompt, so a
+    // `player: p1` OptionalEffectChoice / EffectZoneChoice is answered by p1.
+    for _ in 0..120 {
         match runner.state().waiting_for.clone() {
             WaitingFor::ManaPayment { .. } => {
                 apply_as_current(runner.state_mut(), GameAction::PassPriority)
                     .expect("finalizing auto mana payment must succeed");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                apply_as_current(
+                    runner.state_mut(),
+                    GameAction::SelectTargets {
+                        targets: vec![TargetRef::Player(p1)],
+                    },
+                )
+                .expect("selecting the target opponent must succeed");
             }
             WaitingFor::Priority { .. } => {
                 if runner.state().stack.is_empty() {
@@ -6906,9 +6928,12 @@ fn wedding_of_river_song_exiles_card_and_draws_two() {
                 )
                 .expect("accepting the optional exile must succeed");
             }
-            WaitingFor::EffectZoneChoice { cards, .. } => {
-                let selection = if cards.contains(&p0_card) {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                // Each player's from-hand pick offers only their own hand cards.
+                let selection = if player == p0 && cards.contains(&p0_card) {
                     vec![p0_card]
+                } else if player == p1 && cards.contains(&p1_card) {
+                    vec![p1_card]
                 } else {
                     Vec::new()
                 };
@@ -6922,7 +6947,7 @@ fn wedding_of_river_song_exiles_card_and_draws_two() {
                 super::super::triggers::drain_order_triggers_with_identity(runner.state_mut());
             }
             // Time travel's add/remove-counter choice (or any later prompt) —
-            // the exile and the suspend grant have already resolved.
+            // the exiles and the suspend grants have already resolved.
             _ => break,
         }
     }
@@ -6943,18 +6968,49 @@ fn wedding_of_river_song_exiles_card_and_draws_two() {
         "the controller must draw two cards"
     );
 
-    // (b) The controller's nonland card was exiled.
+    // (b) The controller's nonland card was exiled from its OWN hand (owner p0),
+    // not misrouted to the opponent.
     assert_eq!(state.objects[&p0_card].zone, Zone::Exile);
+    assert_eq!(state.objects[&p0_card].owner, p0);
 
-    // (c) The "that don't have suspend" restrictive clause is a documented
-    // strict-failure: the exiled card must NOT gain suspend (the grant
-    // produces Unimplemented, not GenericEffect{AddKeyword(Suspend)}).
-    // This assertion locks in the strict-failure boundary so we notice if
-    // the overgrant is accidentally reintroduced.
+    // (c) Seam A: the controller's exiled card gained suspend (filtered
+    // tracked-set grant materialized over the exile-zone member) and entered
+    // with Time counters equal to its OWN mana value (2). Asserting both this
+    // (2) and the opponent's card (3) proves each object resolves its own mana
+    // value through the recipient-scoped `enter_with_counters_for_object` path,
+    // not a shared/first value.
+    assert_eq!(
+        state.objects[&p0_card]
+            .counters
+            .get(&CounterType::Time)
+            .copied()
+            .unwrap_or(0),
+        2,
+        "the controller's exiled card must enter with time counters equal to its mana value"
+    );
     assert!(
-        !object_has_effective_keyword_kind(state, p0_card, KeywordKind::Suspend),
-        "the exiled card must NOT gain suspend: the 'that don't have' clause \
-             is a strict-failure until object-scoped condition support exists"
+        object_has_effective_keyword_kind(state, p0_card, KeywordKind::Suspend),
+        "the controller's exiled card must gain suspend"
+    );
+
+    // (d) Seam B: "target opponent does the same" — the opponent's nonland card
+    // was exiled from the OPPONENT's hand (owner p1) with Time counters equal to
+    // its mana value (3), and also gained suspend (tracked-set extension + Seam A
+    // over both cards).
+    assert_eq!(state.objects[&p1_card].zone, Zone::Exile);
+    assert_eq!(state.objects[&p1_card].owner, p1);
+    assert_eq!(
+        state.objects[&p1_card]
+            .counters
+            .get(&CounterType::Time)
+            .copied()
+            .unwrap_or(0),
+        3,
+        "the opponent's exiled card must enter with time counters equal to its mana value"
+    );
+    assert!(
+        object_has_effective_keyword_kind(state, p1_card, KeywordKind::Suspend),
+        "the opponent's exiled card must also gain suspend"
     );
 }
 

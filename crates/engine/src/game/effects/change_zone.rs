@@ -313,19 +313,34 @@ pub fn resolve(
             enters_modified_if,
             ..
         } => {
-            // CR 122.1 + CR 614.1c: Resolve `QuantityExpr` counts to concrete
-            // u32 values up front so the zone-move pipeline carries fully-
-            // resolved counts (matches the Token resolver pattern at
+            // CR 122.1 + CR 614.1c: Resolve static `QuantityExpr` counts to
+            // concrete u32 values up front so the zone-move pipeline carries
+            // fully-resolved counts (matches the Token resolver pattern at
             // `effects/token.rs:400`).
-            let resolved_counters: Vec<(CounterType, u32)> = enter_with_counters
-                .iter()
-                .map(|(ct, qty)| {
+            //
+            // CR 122.1 + CR 608.2c: A count scoped to the RECIPIENT object ("time
+            // counters equal to ITS mana value" — The Wedding of River Song) can
+            // only be resolved once the specific object is known. For a from-hand
+            // exile the recipient is chosen at resolution (`EffectZoneChoice`), so
+            // resolving `ObjectManaValue(Recipient)` up front binds nothing and
+            // yields 0. Defer any recipient-scoped count to the per-object path via
+            // a match-all conditional entry, which `enter_with_counters_for_object`
+            // resolves against each selected object.
+            let mut resolved_counters: Vec<(CounterType, u32)> = Vec::new();
+            let mut recipient_scoped_counters: Vec<(TargetFilter, CounterType, QuantityExpr)> =
+                Vec::new();
+            for (ct, qty) in enter_with_counters {
+                if crate::game::quantity::quantity_expr_uses_recipient(qty) {
+                    recipient_scoped_counters.push((TargetFilter::Any, ct.clone(), qty.clone()));
+                } else {
                     let n =
                         crate::game::quantity::resolve_quantity_with_targets(state, qty, ability)
                             .max(0) as u32;
-                    (ct.clone(), n)
-                })
-                .collect();
+                    resolved_counters.push((ct.clone(), n));
+                }
+            }
+            let mut merged_conditional = conditional_enter_with_counters.clone();
+            merged_conditional.extend(recipient_scoped_counters);
             // CR 110.2a: Resolve the controller-override `ControllerRef` to a
             // concrete `PlayerId` exactly once at resolver entry, then carry
             // the resolved `Option<PlayerId>` through the iteration ctx and
@@ -347,7 +362,7 @@ pub fn resolve(
                 *enters_attacking,
                 *up_to,
                 resolved_counters,
-                conditional_enter_with_counters.clone(),
+                merged_conditional,
                 face_down_profile.clone(),
                 enters_modified_if.clone(),
             )
@@ -1030,8 +1045,18 @@ pub(crate) fn enter_with_counters_for_object(
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
     for (filter, counter_type, count) in conditional {
         if crate::game::filter::matches_target_filter(state, obj_id, filter, &ctx) {
-            let n = crate::game::quantity::resolve_quantity_with_targets(state, count, ability)
-                .max(0) as u32;
+            // CR 122.1 + CR 608.2c: bind the per-object recipient so a
+            // recipient-scoped count ("equal to its mana value") resolves against
+            // THIS entering object, not the ability source. Non-recipient exprs are
+            // unaffected (the binding is only consulted for `Recipient`-scoped refs).
+            let n = crate::game::quantity::resolve_quantity_with_recipient(
+                state,
+                count,
+                ability.controller,
+                ability.source_id,
+                obj_id,
+            )
+            .max(0) as u32;
             counters.push((counter_type.clone(), n));
         }
     }

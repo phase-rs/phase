@@ -7507,21 +7507,17 @@ pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Ke
 
 /// CR 608.2c + CR 601.2c: Parse "[then] target opponent does the same / does so."
 /// — an effect-replication directive (The Wedding of River Song). The clause has
-/// no effect of its own; it *would* replicate the immediately-preceding sibling
-/// clause for a targeted opponent. NOT YET IMPLEMENTED: there is no
-/// `DoesTheSame` clause disposition and no antecedent-cloning lowering. The
-/// chunk loop instead emits a *documented* `Effect::Unimplemented` (keyed by
-/// `does_the_same_unimplemented_name`) for a recognized match — a typed
-/// strict-failure, never a silent misparse. The future fix (a `DoesTheSame`
-/// disposition whose lowering clones the antecedent action and retargets it
-/// onto the opponent's own objects, CR 608.2d) is tracked as backlog work; the
-/// typed `DoesTheSameSubject` return is preserved so it can slot in cleanly.
+/// no effect of its own; it replicates the immediately-preceding sibling clause
+/// for a targeted opponent. The chunk loop lowers a recognized match to a
+/// `TargetOnly { Opponent }` slot whose `sub_ability` is a verbatim clone of the
+/// antecedent action (CR 608.2d — the opponent performs the same action, choosing
+/// for their own objects). The typed `DoesTheSameSubject` return keeps the
+/// deferred "each opponent … does the same" player-set fanout a clean sibling.
 ///
 /// Combinators only — `opt`/`value`/`tag`/`alt`. The whole chunk must be consumed
 /// (modulo a trailing period) so unrelated phrases ("… at the same time", "does
 /// the same for enchantment cards") fall through to normal dispatch rather than
-/// being silently swallowed. The "each opponent … does the same" player-set
-/// fanout is a deferred sibling of `DoesTheSameSubject` (see its doc comment).
+/// being silently swallowed.
 pub(super) fn try_parse_does_the_same_clause(text: &str) -> Option<DoesTheSameSubject> {
     let lower = text.to_lowercase();
     let (subject, rest) = nom_on_lower(text, &lower, |i| {
@@ -7539,17 +7535,6 @@ pub(super) fn try_parse_does_the_same_clause(text: &str) -> Option<DoesTheSameSu
         Some(subject)
     } else {
         None
-    }
-}
-
-/// Stable `Effect::Unimplemented` name for a recognized-but-deferred "does the
-/// same" subject. The replication's runtime needs cross-cutting engine targeting
-/// work (mid-chain `TargetOnly` slot collection + opponent-choice routing), so
-/// the clause is emitted as a *documented* strict-failure keyed on the typed
-/// subject — never a silently-degenerate misparse.
-pub(super) fn does_the_same_unimplemented_name(subject: DoesTheSameSubject) -> String {
-    match subject {
-        DoesTheSameSubject::TargetOpponent => "target_opponent_does_the_same".to_string(),
     }
 }
 

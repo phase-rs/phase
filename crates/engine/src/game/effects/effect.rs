@@ -304,6 +304,17 @@ fn register_transient_effect(
     let direct_binding_uses_targets = target_filter.is_some()
         || application_filter.is_some_and(generic_effect_affected_uses_inherited_targets)
         || inherited_object_target;
+    // CR 608.2c + CR 611.2c: A grant whose application filter names a tracked set
+    // (`TrackedSet` / `TrackedSetFiltered`) binds off the SET's members, never off
+    // `ability.targets`. A "cards exiled this way …" grant chained under a
+    // targeted "does the same" clause (The Wedding of River Song) inherits that
+    // clause's player target via chain propagation; without this exclusion the
+    // targeted-binding gate below would bind the grant to the opponent player
+    // instead of the exiled cards. Route it to the tracked-set match arm below.
+    let application_is_tracked_set = matches!(
+        application_filter,
+        Some(TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. })
+    );
 
     // CR 611.1 + CR 611.2c + CR 115.1: Targeted effects — register one transient
     // continuous effect per target. `TargetRef::Object` binds to
@@ -320,6 +331,7 @@ fn register_transient_effect(
     if !ability.targets.is_empty()
         && direct_binding_uses_targets
         && !static_affected_references_target_player
+        && !application_is_tracked_set
     {
         let skip_companion_player_target = target_filter
             .is_some_and(crate::game::ability_utils::filter_references_target_player)
@@ -485,6 +497,38 @@ fn register_transient_effect(
                     modifications.clone(),
                     static_def.condition.clone(),
                 );
+            }
+        }
+        // CR 611.2a + CR 608.2c: A grant onto a (filtered) tracked set materializes
+        // over the SET's members regardless of zone — the exiled-this-way cards are
+        // in exile, so the battlefield-scan broadcast below cannot reach them.
+        // Resolve the `TrackedSetId(0)` sentinel to the chain set, then bind one
+        // `SpecificObject` transient per member that satisfies the inner filter
+        // (e.g. `WithoutKeywordKind(Suspend)` for The Wedding of River Song). The
+        // "that don't have <kw>" test is applied once, here, at resolution — a
+        // one-shot partition (CR 611.2a: no-duration continuous effect), not a
+        // self-negating continuous condition.
+        Some(
+            set_filter
+            @ (TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }),
+        ) => {
+            let resolved =
+                crate::game::targeting::resolve_tracked_set_sentinel(state, set_filter.clone());
+            let members = crate::game::targeting::resolve_tracked_set_id(state)
+                .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+                .unwrap_or_default();
+            let ctx = filter::FilterContext::from_ability(ability);
+            for obj_id in members {
+                if filter::matches_target_filter(state, obj_id, &resolved, &ctx) {
+                    state.add_transient_continuous_effect(
+                        ability.source_id,
+                        ability.controller,
+                        duration.clone(),
+                        TargetFilter::SpecificObject { id: obj_id },
+                        modifications.clone(),
+                        static_def.condition.clone(),
+                    );
+                }
             }
         }
         Some(filter) => {

@@ -2351,6 +2351,8 @@ fn collect_target_slots(
             && !sub_ability_inherits_parent_creature_target_only(ability, sub_ability)
         {
             collect_target_slots(state, sub_ability, acc)?;
+        } else if let Some(hoisted) = deferred_sequential_target_only_continuation(sub_ability) {
+            collect_target_slots(state, hoisted, acc)?;
         }
     }
     Ok(())
@@ -4037,6 +4039,8 @@ fn collect_target_slot_specs(
             && !sub_ability_inherits_parent_creature_target_only(ability, sub_ability)
         {
             collect_target_slot_specs(state, sub_ability, specs, next_instance);
+        } else if let Some(hoisted) = deferred_sequential_target_only_continuation(sub_ability) {
+            collect_target_slot_specs(state, hoisted, specs, next_instance);
         }
     }
 }
@@ -4931,6 +4935,25 @@ fn defers_sub_ability_target_selection(effect: &Effect) -> bool {
             | Effect::RevealHand { .. }
             | Effect::Choose { .. }
     )
+}
+
+/// CR 601.2c: A sub-ability that defers its OWN target selection (optional /
+/// resolution-time from-hand choice — e.g. "you may exile a card from your hand")
+/// does NOT defer a later INDEPENDENT instruction's cast-time target. When such a
+/// deferring sub is immediately followed by a `SequentialSibling` `TargetOnly`
+/// continuation ("Then target opponent does the same" — The Wedding of River
+/// Song), that `TargetOnly`'s "target" is still announced as the spell is cast.
+/// Returns the hoisted continuation so the collection / assignment / count walks
+/// recurse into it past the deferring sub. Scoped narrowly to a `TargetOnly`
+/// grandchild so no other chain shape is affected.
+fn deferred_sequential_target_only_continuation(sub: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    if !defers_conditional_target_selection(sub) {
+        return None;
+    }
+    let grandchild = sub.sub_ability.as_deref()?;
+    (grandchild.sub_link == SubAbilityLink::SequentialSibling
+        && matches!(grandchild.effect, Effect::TargetOnly { .. }))
+    .then_some(grandchild)
 }
 
 fn skips_stack_targets_after_deferred_effect(effect: &Effect) -> bool {
@@ -5836,6 +5859,13 @@ fn assign_targets_recursive(
     });
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         if defers_conditional_target_selection(sub_ability) {
+            // CR 601.2c: bind a hoisted SequentialSibling `TargetOnly`
+            // continuation's cast-time target past the deferring sub.
+            if deferred_sequential_target_only_continuation(sub_ability).is_some() {
+                if let Some(hoisted) = sub_ability.sub_ability.as_deref_mut() {
+                    assign_targets_recursive(state, hoisted, targets, next_target)?;
+                }
+            }
             return Ok(());
         }
         if inherits_parent_creature_target {
@@ -6161,6 +6191,13 @@ fn assign_selected_slots_recursive(
     });
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         if defers_conditional_target_selection(sub_ability) {
+            // CR 601.2c: bind a hoisted SequentialSibling `TargetOnly`
+            // continuation's cast-time target past the deferring sub.
+            if deferred_sequential_target_only_continuation(sub_ability).is_some() {
+                if let Some(hoisted) = sub_ability.sub_ability.as_deref_mut() {
+                    assign_selected_slots_recursive(state, hoisted, selected_slots, next_slot)?;
+                }
+            }
             return Ok(());
         }
         if inherits_parent_creature_target {

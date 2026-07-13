@@ -5205,6 +5205,26 @@ fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> Playe
         }
     }
 
+    // CR 601.2c + CR 608.2d: "target opponent does the same" (The Wedding of River
+    // Song) — the replicated from-hand action's "you may" belongs to the TARGETED
+    // player (the opponent performing the same action), not the spell's caster.
+    // When a ChangeZone's relative "you"/your-zone filter is bound to a chosen
+    // player target (and no per-player scope is active), route the optional prompt
+    // to that target, mirroring `controller_for_relative_filter` for the same
+    // shape so the opponent — not the caster — decides whether to exile.
+    if ability.scoped_player.is_none() {
+        if let Effect::ChangeZone { target, .. } = &ability.effect {
+            if filter_uses_relative_controller_you(target)
+                && ability
+                    .targets
+                    .iter()
+                    .any(|t| matches!(t, TargetRef::Player(_)))
+            {
+                return ability.target_player();
+            }
+        }
+    }
+
     ability.controller
 }
 

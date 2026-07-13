@@ -25133,9 +25133,12 @@ pub(crate) fn parse_effect_chain_ir(
         // "If it doesn't have suspend, it gains suspend" keyword grant (Jhoira of
         // the Ghitu, The Tenth Doctor). Emits a `GenericEffect` keyword grant
         // bound to the chain's exiled-card tracked set via `ParentTarget`.
-        // NOTE: The "that don't have <kw>" restrictive clause form strict-fails
-        // (returns None here) — a correct per-card exclusion requires an
-        // object-scoped condition that does not yet exist in the engine. See
+        // NOTE: The "that don't have <kw>" restrictive clause form (CR 702.62a —
+        // The Wedding of River Song) is also handled here: the grant is rewritten
+        // to bind against the `TrackedSetFiltered` intersection of the chain's
+        // exiled-card set with `FilterProp::WithoutKeywordKind` (CR 611.2a: the
+        // "that don't have" test is applied once at resolution as a one-shot
+        // partition, not a continuous condition). See
         // `try_parse_exiled_this_way_keyword_grant` for the full explanation.
         // Requires a prior exile clause to publish the tracked set it broadcasts
         // to.
@@ -25197,33 +25200,70 @@ pub(crate) fn parse_effect_chain_ir(
 
         // CR 608.2c + CR 601.2c: "[then] target opponent does the same / does
         // so." — replicate the immediately-preceding sibling effect for a
-        // targeted opponent (The Wedding of River Song). A correct runtime needs
-        // (a) the mid-chain `TargetOnly { Opponent }` to be collected as a
-        // cast-time target slot and (b) the opponent's resolution-time choice to
-        // route to the targeted player across the `EffectZoneChoice` continuation
-        // — cross-cutting engine targeting/continuation work tracked in the
-        // set-audit backlog. Until that lands, emit a *documented* strict-failure
-        // (`Unimplemented`) rather than a silently-degenerate exile-nothing
-        // misparse: a flagged gap beats a wrong parse (CLAUDE.md #1 hard rule).
-        // The `DoesTheSameSubject` typing is preserved so the eventual fix and
-        // the deferred "each opponent … does the same" fanout slot in cleanly.
+        // targeted opponent (The Wedding of River Song). Lowers to a mid-chain
+        // `TargetOnly { Opponent }` (a genuine cast-time target slot, CR 115.1)
+        // whose `sub_ability` is a verbatim clone of the antecedent action. At
+        // resolution the `TargetOnly` is a no-op; the cloned action inherits the
+        // chosen opponent player target via chain propagation, and
+        // `controller_for_relative_filter` routes its `controller: You` from-hand
+        // filter to that opponent (CR 608.2d — the opponent performs the same
+        // action, announcing their own hand choice). The clone's `optional` flag
+        // is preserved so the opponent may decline, and its from-hand pick stays
+        // a resolution-time `EffectZoneChoice`. Placed after the player-SCOPED
+        // fan-out above so the two disjoint subjects ("each …" vs "target …")
+        // never collide.
         if !builder.is_empty() {
             if let Some(subject) = sequence::try_parse_does_the_same_clause(normalized_text) {
-                builder
-                    .clause(
-                        normalized_text,
-                        parsed_clause(Effect::unimplemented(
-                            sequence::does_the_same_unimplemented_name(subject),
-                            normalized_text.to_string(),
-                        )),
-                        chunk.boundary_after,
-                        ClauseDisposition::Emit {
-                            followup: None,
-                            intrinsic: None,
-                        },
-                    )
-                    .push();
-                continue;
+                // allow-noncombinator: Iterator::find over the emitted ClauseIr
+                // list (structural selection of the antecedent clause), NOT string
+                // dispatch — mirrors the scoped "does the same" antecedent grab above.
+                if let Some((antecedent_effect, antecedent_optional)) = builder
+                    .clauses()
+                    .iter()
+                    .rev()
+                    .find(|clause| {
+                        !matches!(clause.disposition, ClauseDisposition::Continue { .. })
+                    })
+                    .map(|clause| (clause.parsed.effect.clone(), clause.is_optional))
+                {
+                    match subject {
+                        crate::parser::oracle_ir::effect_chain::DoesTheSameSubject::TargetOpponent => {
+                            // CR 601.2c + CR 115.1: the opponent is a cast-time
+                            // target introduced by the `TargetOnly` slot.
+                            let opponent_target = TargetFilter::Typed(
+                                TypedFilter::default().controller(ControllerRef::Opponent),
+                            );
+                            // CR 608.2d: the cloned antecedent is the opponent's
+                            // "same action". Resolution-time from-hand timing and
+                            // the preserved `optional` flag route the choice to the
+                            // opponent.
+                            let mut cloned = AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                antecedent_effect,
+                            );
+                            cloned.optional = antecedent_optional;
+                            cloned.target_choice_timing =
+                                crate::types::ability::TargetChoiceTiming::Resolution;
+                            cloned.sub_link = SubAbilityLink::ContinuationStep;
+                            let mut parsed = parsed_clause(Effect::TargetOnly {
+                                target: opponent_target,
+                            });
+                            parsed.sub_ability = Some(Box::new(cloned));
+                            builder
+                                .clause(
+                                    normalized_text,
+                                    parsed,
+                                    chunk.boundary_after,
+                                    ClauseDisposition::Emit {
+                                        followup: None,
+                                        intrinsic: None,
+                                    },
+                                )
+                                .push();
+                            continue;
+                        }
+                    }
+                }
             }
         }
 
