@@ -3155,6 +3155,9 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::IsCommander
+        // CR 205.3m + CR 903.3: reads commander designation + the candidate's own
+        // creature types — a board/object read, no player resource.
+        | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Other { .. } => Axes::NONE,
 
         // --- QuantityExpr-bearing: recurse so `Ref(LifeTotal)` / `PlayerCounter`

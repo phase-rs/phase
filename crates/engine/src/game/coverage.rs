@@ -901,6 +901,10 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::NotHistoric => parts.push("nonhistoric".into()),
             // CR 903.3d
             FilterProp::IsCommander => parts.push("commander".into()),
+            // CR 205.3m + CR 903.3: Path of Ancestry's relational predicate.
+            FilterProp::SharesCreatureTypeWithCommander => {
+                parts.push("that shares a creature type with your commander".into())
+            }
             FilterProp::ToughnessGTPower => parts.push("toughness > power".into()),
             FilterProp::PowerExceedsBase => parts.push("power > base power".into()),
             FilterProp::DifferentNameFrom { .. } => parts.push("different name".into()),

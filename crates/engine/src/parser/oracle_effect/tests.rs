@@ -10313,6 +10313,19 @@ fn copy_retarget_walk_effect(
         Effect::CreateDelayedTrigger { effect: inner, .. } => {
             copy_retarget_walk_def(inner, retargets, orphaned)
         }
+        // CR 106.6 + CR 603.3: a copy made by a mana-spend trigger lives inside the
+        // produced mana's GRANT (Pyromancer's Goggles, Primal Wellspring), not in the
+        // def's own effect tree. Without this arm the walker reports `retargets: []`
+        // for those cards and a test could "pass" its orphan check while the copy it
+        // is supposed to be checking is invisible — the walker must reach every place
+        // a `CopySpell` can hide, or it is measuring the wrong thing.
+        Effect::Mana { grants, .. } => {
+            for grant in grants {
+                if let crate::types::mana::ManaSpellGrant::TriggerOnSpend { ability, .. } = grant {
+                    copy_retarget_walk_def(ability, retargets, orphaned);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -10483,6 +10496,61 @@ fn effect_next_cast_copy_lowers_in_possessive_word_order_twinferno() {
         retargets.contains(&CopyRetargetPermission::MayChooseNewTargets),
         "the delayed-trigger CopySpell must carry MayChooseNewTargets, got {retargets:?}"
     );
+}
+
+/// CR 106.6 + CR 603.3 + CR 707.10c: Pyromancer's Goggles — the copy is made by a
+/// MANA-SPEND trigger riding the produced mana, and the retarget sentence must reach
+/// it.
+///
+/// Two things had to be true for this to work, and the second is the subtle one.
+/// FIRST, the copy has to be LOWERED at all — `parse_mana_spend_trigger`'s effect
+/// allowlist had to admit `Effect::CopySpell`. SECOND, the retarget sentence has to
+/// BIND to it, and it cannot do so on the ordinary clause-streaming path — not by
+/// accident, but by construction: the spend-trigger fold is a POST-pass, so when the
+/// continuation recognizer went looking for the sentence's antecedent the `CopySpell`
+/// did not exist yet. The sentence is instead reclaimed from its honest
+/// `orphaned_copy_retarget` residual by the fold itself.
+///
+/// Before the fix the card had NO copy at all and an orphaned residual. A half-fix
+/// (the first without the second) leaves the copy modeled but permanently
+/// un-retargetable, which is why `orphaned == 0` is asserted and not merely the
+/// presence of a copy.
+#[test]
+fn effect_mana_spend_trigger_copy_binds_retarget_pyromancers_goggles() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "{T}: Add {R}. When that mana is spent to cast a red instant or sorcery spell, \
+         copy that spell and you may choose new targets for the copy.",
+        "Pyromancer's Goggles",
+        &["Artifact"],
+        &[],
+    );
+    assert_eq!(
+        orphaned, 0,
+        "the retarget sentence must bind to the copy the spend-trigger makes, \
+         not survive as an orphaned residual"
+    );
+    assert_eq!(
+        retargets,
+        vec![CopyRetargetPermission::MayChooseNewTargets],
+        "the mana-spend trigger's CopySpell must carry MayChooseNewTargets (CR 707.10c)"
+    );
+}
+
+/// CR 106.6 + CR 603.3 + CR 707.10c: Primal Wellspring — the any-color sibling of
+/// Pyromancer's Goggles, whose filter is the uncolored "an instant or sorcery spell".
+/// Pins that the shared type-phrase delegation covers the class, not just the one
+/// card with a color word in it.
+#[test]
+fn effect_mana_spend_trigger_copy_binds_retarget_primal_wellspring() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "{T}: Add one mana of any color. When that mana is spent to cast an instant or \
+         sorcery spell, copy that spell and you may choose new targets for the copy.",
+        "Primal Wellspring",
+        &["Land"],
+        &[],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert_eq!(retargets, vec![CopyRetargetPermission::MayChooseNewTargets]);
 }
 
 /// CR 707.10c: COVERAGE HONESTY — a "you may choose new targets for the copy"

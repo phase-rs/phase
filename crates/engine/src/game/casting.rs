@@ -13664,44 +13664,29 @@ fn apply_mana_spell_grants(
     // target/mode setup stay under the trigger dispatcher.
     for unit in spent_units {
         for grant in &unit.grants {
-            let ManaSpellGrant::TriggerOnSpend {
-                restriction,
-                ability,
-            } = grant
-            else {
+            let ManaSpellGrant::TriggerOnSpend { filter, ability } = grant else {
                 continue;
             };
-            // CR 106.6: Gate the reflexive trigger on the spend filter. Most
-            // restrictions are evaluated purely from `SpellMeta` via
-            // `allows_spell`; the commander-relational filter
-            // (`SharesCreatureTypeWithCommander`) needs game state and is
-            // evaluated here, the single authoritative spend-check site.
-            let passes = match restriction.as_ref() {
-                None => true,
-                Some(crate::types::mana::ManaRestriction::SharesCreatureTypeWithCommander) => {
-                    spell_meta.as_ref().is_some_and(|meta| {
-                        // CR 205.3m + CR 903.3: the spell must be a creature AND
-                        // share at least one creature type with the controller's
-                        // commander(s).
-                        let is_creature = meta
-                            .types
-                            .iter()
-                            .any(|t| t.eq_ignore_ascii_case("Creature"));
-                        if !is_creature {
-                            return false;
-                        }
-                        let commander_types =
-                            super::commander::commander_creature_types(state, caster);
-                        meta.subtypes
-                            .iter()
-                            .any(|s| commander_types.iter().any(|c| c.eq_ignore_ascii_case(s)))
-                    })
-                }
-                Some(restriction) => spell_meta
-                    .as_ref()
-                    .is_some_and(|meta| restriction.allows_spell(meta)),
+            // CR 603.3: Gate the reflexive trigger on its EVENT filter — "which spell,
+            // cast with this mana, makes it fire". The filter is a `TargetFilter`, so it
+            // is evaluated by the one filter authority against the spell object itself
+            // (live in `state.objects` here — this fn already read its controller from
+            // it), rather than by a bespoke per-restriction ladder over `SpellMeta`.
+            //
+            // The commander-relational case keeps its exact pre-retype semantics: its
+            // `FilterProp::SharesCreatureTypeWithCommander` arm calls the SAME
+            // `commander::commander_creature_types` authority this site used to call
+            // inline (deck-pool-first, object-scan-fallback). That is deliberate — a
+            // `SharesQuality` reference filter would have resolved via an object scan
+            // only and could miss a registered-but-uninstantiated commander.
+            let filter_ctx = crate::game::filter::FilterContext {
+                source_id: unit.source_id,
+                source_controller: Some(caster),
+                ability: None,
+                recipient_id: None,
+                scoped_iteration_player: None,
             };
-            if !passes {
+            if !crate::game::filter::matches_target_filter(state, spell_id, filter, &filter_ctx) {
                 continue;
             }
             let timestamp = state.next_timestamp() as u32;

@@ -10,8 +10,9 @@ use nom::Parser;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
-    AbilityKind, AbilityTag, Comparator, Duration, Effect, LinkedExileScope, ManaContribution,
-    ManaProduction, ManaSpendRestriction, ObjectScope, QuantityExpr, QuantityRef,
+    AbilityKind, AbilityTag, Comparator, Duration, Effect, FilterProp, LinkedExileScope,
+    ManaContribution, ManaProduction, ManaSpendRestriction, ObjectScope, QuantityExpr, QuantityRef,
+    TypeFilter, TypedFilter,
 };
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{
@@ -2464,22 +2465,36 @@ pub(crate) fn parse_mana_spend_trigger(lower: &str) -> Option<ManaSpellGrant> {
     )
     .parse(rest)
     .ok()?;
-    let restriction = parse_spend_trigger_filter(filter_part.trim())?;
+    let filter = parse_spend_trigger_filter(filter_part.trim())?;
     let effect_text = after.trim().trim_end_matches('.').trim();
     if effect_text.is_empty() {
         return None;
     }
-    // Parse the reflexive effect (scry N, gain N life, draw a card, …).
+    // Parse the reflexive effect (scry N, gain N life, draw a card, copy that spell…).
     let ability = super::parse_effect_chain(effect_text, AbilityKind::Activated);
-    // First pass: accept only controller-scoped reflexive effects whose parse
-    // fully consumes the clause. Anything else — notably spell-referencing
-    // effects like Jade Orb's "it enters with an additional +1/+1 counter on it",
-    // which `parse_effect_chain` parses *partially* (silently swallowing the
-    // counter clause) — is rejected so the whole clause stays a loud gap rather
-    // than flipping the card to "supported" with a swallowed clause (follow-ups).
+    // COVERAGE-HONESTY ALLOWLIST — what it is actually for (CR 608.2c):
+    // `parse_effect_chain` parses some spell-referencing effects only PARTIALLY and
+    // silently swallows the remainder. Jade Orb of Dragonkind's "it enters with an
+    // additional +1/+1 counter on it AND GAINS HEXPROOF until your next turn" parses
+    // the counter clause and drops the rest. Admitting an effect like that would flip
+    // the card to "supported" while a printed clause quietly vanished, so the gate
+    // keeps the WHOLE clause an honest gap instead. Only effects whose parse provably
+    // consumes the clause are admitted — extend it only when that holds for the new
+    // effect, and say why.
+    //
+    // `CopySpell` qualifies (Primal Wellspring, Pyromancer's Goggles): the
+    // copy-retarget continuation — "…and you may choose new targets for the copy" —
+    // is ABSORBED INTO the `CopySpell` node as its CR 707.10c `retarget` permission
+    // rather than left behind as a trailing sibling, so a full parse leaves nothing
+    // dangling. The `sub_ability` bail below is what CHECKS that this actually held
+    // for a given card; it is a verification, not an assumption. If a future phrasing
+    // parks the retarget in a `sub_ability` instead, the card stays honestly gapped.
     if !matches!(
         *ability.effect,
-        Effect::Scry { .. } | Effect::GainLife { .. } | Effect::Draw { .. }
+        Effect::Scry { .. }
+            | Effect::GainLife { .. }
+            | Effect::Draw { .. }
+            | Effect::CopySpell { .. }
     ) {
         return None;
     }
@@ -2487,25 +2502,48 @@ pub(crate) fn parse_mana_spend_trigger(lower: &str) -> Option<ManaSpellGrant> {
         return None;
     }
     Some(ManaSpellGrant::TriggerOnSpend {
-        restriction: Some(restriction),
+        filter,
         ability: Box::new(ability),
     })
 }
 
-/// Parse the spell-filter portion of a "when you spend this mana to cast …"
-/// clause into a `ManaRestriction`. First pass: mana-value thresholds and
-/// "[subtype] creature spell". Returns `None` for unsupported filters.
-fn parse_spend_trigger_filter(filter: &str) -> Option<ManaRestriction> {
-    // "a spell with mana value N or greater/less" (keeps its article).
+/// CR 603.3: Parse the spell-filter portion of a "when you spend this mana to
+/// cast …" clause into the trigger's EVENT filter — "which spell, cast with this
+/// mana, makes the trigger fire".
+///
+/// This is a [`TargetFilter`], not a `ManaRestriction`: none of these cards
+/// restricts its mana (Pyromancer's Goggles' {R} may be spent on anything), so a
+/// CR 106.6 spend restriction was never the right type — see
+/// [`ManaSpellGrant::TriggerOnSpend`].
+///
+/// The type/color phrase is DELEGATED to `oracle_target::parse_type_phrase`, the
+/// engine's single authority for phrases like "red instant or sorcery". One call
+/// therefore covers the whole type × color class ("an instant or sorcery spell",
+/// "a red instant or sorcery spell", "a Dragon creature spell") instead of the
+/// bespoke shape list this replaces. Two arms stay dedicated because they are
+/// predicates ON the spell rather than part of its type phrase: the CR 202.3
+/// mana-value threshold and the CR 205.3m commander-relational check.
+///
+/// Returns `None` for an unrecognized filter, so the clause stays a loud gap.
+fn parse_spend_trigger_filter(filter: &str) -> Option<TargetFilter> {
+    // CR 202.3: "a spell with mana value N or greater/less" — a post-`spell`
+    // threshold, not a type phrase (the helper keeps the article).
     if let Some((comparator, value)) = parse_mana_value_threshold(filter) {
-        return Some(ManaRestriction::OnlyForSpellWithManaValue { comparator, value });
+        return Some(TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::Cmc {
+                comparator,
+                value: QuantityExpr::Fixed {
+                    value: value as i32,
+                },
+            }],
+            ..TypedFilter::default()
+        }));
     }
-    // CR 205.3m: "[a|an] creature spell that shares a creature type with your
-    // commander" — a relational filter resolved against live commander state at
-    // the spend site. `all_consuming` rejects any trailing text so the whole
-    // clause stays a loud gap if the phrasing drifts.
+    // CR 205.3m + CR 903.3: "[a|an] creature spell that shares a creature type with
+    // your commander" (Path of Ancestry). `all_consuming` rejects trailing text, so
+    // the clause stays a loud gap if the phrasing drifts.
     if all_consuming(value(
-        ManaRestriction::SharesCreatureTypeWithCommander,
+        (),
         (
             opt(alt((
                 tag::<_, _, OracleError<'_>>("a "),
@@ -2519,27 +2557,34 @@ fn parse_spend_trigger_filter(filter: &str) -> Option<ManaRestriction> {
     .parse(filter)
     .is_ok()
     {
-        return Some(ManaRestriction::SharesCreatureTypeWithCommander);
+        let mut typed = TypedFilter::new(TypeFilter::Creature);
+        typed
+            .properties
+            .push(FilterProp::SharesCreatureTypeWithCommander);
+        return Some(TargetFilter::Typed(typed));
     }
-    // "[a|an] [subtype] creature spell".
+    // "[a|an] <type-phrase> spell" — everything else. Mirrors
+    // `oracle_effect::extract_when_next_spell_filter`: isolate the phrase before
+    // " spell", hand it to the shared type-phrase parser, and refuse anything that
+    // does not fully consume (a partial parse would silently narrow the filter).
     let (rest, _) = opt(alt((
         tag::<_, _, OracleError<'_>>("a "),
         tag::<_, _, OracleError<'_>>("an "),
     )))
     .parse(filter)
     .ok()?;
-    let (rest, subtype) = terminated(
-        take_until::<_, _, OracleError<'_>>(" creature spell"),
-        tag::<_, _, OracleError<'_>>(" creature spell"),
-    )
-    .parse(rest)
-    .ok()?;
-    if !rest.trim().is_empty() || subtype.trim().is_empty() {
+    let (pre, post) = match nom_primitives::split_once_on(rest, " spell") {
+        Ok((_, (pre, post))) => (pre.trim(), post.trim()),
+        Err(_) => return None,
+    };
+    if !post.is_empty() || pre.is_empty() {
         return None;
     }
-    Some(ManaRestriction::OnlyForCreatureType(super::capitalize(
-        subtype.trim(),
-    )))
+    let (parsed, remainder) = parse_type_phrase(pre);
+    if !remainder.trim().is_empty() || matches!(parsed, TargetFilter::Any) {
+        return None;
+    }
+    Some(parsed)
 }
 
 /// CR 106.6: Extract trailing spell grants from a mana restriction clause.
@@ -3767,14 +3812,17 @@ mod tests {
         )
         .expect("Path of Ancestry spend trigger must parse");
         match grant {
-            ManaSpellGrant::TriggerOnSpend {
-                restriction,
-                ability,
-            } => {
-                assert_eq!(
-                    restriction,
-                    Some(ManaRestriction::SharesCreatureTypeWithCommander)
-                );
+            ManaSpellGrant::TriggerOnSpend { filter, ability } => {
+                // CR 205.3m + CR 903.3: the commander-relational predicate is an OBJECT
+                // filter (which spell fires the trigger), not a CR 106.6 spend
+                // restriction — Path of Ancestry's mana may be spent on anything.
+                let TargetFilter::Typed(typed) = &filter else {
+                    panic!("expected a Typed spell filter, got {filter:?}");
+                };
+                assert!(typed.type_filters.contains(&TypeFilter::Creature));
+                assert!(typed
+                    .properties
+                    .contains(&FilterProp::SharesCreatureTypeWithCommander));
                 assert!(matches!(*ability.effect, Effect::Scry { .. }));
             }
             other => panic!("expected TriggerOnSpend, got {other:?}"),
@@ -3789,13 +3837,15 @@ mod tests {
             "when you spend this mana to cast a creature spell that shares a creature type with your commander, scry 1",
         )
         .expect("active-voice equivalent must parse");
-        assert!(matches!(
-            grant,
-            ManaSpellGrant::TriggerOnSpend {
-                restriction: Some(ManaRestriction::SharesCreatureTypeWithCommander),
-                ..
-            }
-        ));
+        let ManaSpellGrant::TriggerOnSpend { filter, .. } = grant else {
+            panic!("expected TriggerOnSpend");
+        };
+        let TargetFilter::Typed(typed) = &filter else {
+            panic!("expected a Typed spell filter, got {filter:?}");
+        };
+        assert!(typed
+            .properties
+            .contains(&FilterProp::SharesCreatureTypeWithCommander));
     }
 
     /// A malformed relational filter must decline so the clause stays a loud gap

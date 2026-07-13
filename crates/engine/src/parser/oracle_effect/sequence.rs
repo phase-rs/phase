@@ -3432,6 +3432,35 @@ fn set_copy_retarget_in_ability(
     patched_here || patched_sub
 }
 
+/// CR 707.10c: Absorb an ORPHANED copy-retarget clause into a `CopySpell` the caller
+/// has just brought into existence. Returns true if a copy was found and patched.
+///
+/// Exists for the mana-spend trigger fold (`oracle::extract_mana_spend_trigger_from_chain`),
+/// which is a POST-PASS: "When that mana is spent to cast …, copy that spell" first
+/// lowers to an `Unimplemented` gap node and is only re-parsed into a
+/// `ManaSpellGrant::TriggerOnSpend` afterwards. So when the clause-streaming
+/// continuation recognizer looked for the retarget sentence's antecedent, the
+/// `CopySpell` DID NOT EXIST YET — the ordinary binding path cannot work here, by
+/// construction, and the sentence necessarily fell through to an honest
+/// `orphaned_copy_retarget` residual. This lets the fold reclaim it once the copy is
+/// real (Pyromancer's Goggles, Primal Wellspring).
+///
+/// Declines (returns false) when the text is not a retarget clause or when no
+/// `CopySpell` is reachable, so it can never strip an unrelated gap node.
+pub(crate) fn absorb_orphaned_copy_retarget(
+    ability: &mut AbilityDefinition,
+    clause_lower: &str,
+) -> bool {
+    let Some(all_copies) = copy_retarget_clause_all_copies(clause_lower) else {
+        return false;
+    };
+    set_copy_retarget_in_ability(
+        ability,
+        &CopyRetargetPermission::MayChooseNewTargets,
+        all_copies,
+    )
+}
+
 /// Membership mirror for `AntecedentRole::CopySpellBearer` (CR 707.10c) — does this
 /// def's effect TREE bear a `CopySpell` that `set_copy_retarget_in_ability` can reach?
 ///
@@ -3460,6 +3489,11 @@ pub(super) fn def_bears_retargetable_copy(def: &AbilityDefinition) -> bool {
 }
 
 /// The effect half of `def_bears_retargetable_copy` — mirrors `set_copy_retarget`.
+///
+/// Every arm here MUST have a counterpart there and vice versa. A predicate WIDER
+/// than its mutator is the dangerous direction: `LastWithRole` stops the walk at the
+/// node it binds, so claiming membership for a def the mutator cannot patch would
+/// swallow the retarget instead of reaching the real copy further back.
 fn effect_bears_retargetable_copy(effect: &Effect) -> bool {
     match effect {
         Effect::CopySpell { .. } => true,
@@ -6242,6 +6276,13 @@ pub(super) fn parse_followup_continuation_ast(
         // CopySpell — directly, or wrapped in a CreateDelayedTrigger ("When you
         // next cast ..., copy that spell"). The guard re-confirms the wrapper
         // actually contains a CopySpell.
+        //
+        // NOT the mana-spend-trigger shape (Pyromancer's Goggles, Primal Wellspring):
+        // there the `CopySpell` is created by a POST-pass fold
+        // (`oracle::extract_mana_spend_trigger_from_chain`), so it does not exist yet
+        // when this recognizer runs and no arm here could bind it. That sentence is
+        // reclaimed from its honest `orphaned_copy_retarget` residual by the fold
+        // itself, via `absorb_orphaned_copy_retarget`.
         Effect::CopySpell { .. } | Effect::CreateDelayedTrigger { .. }
             if effect_wraps_copy_spell(previous_effect)
                 && recognize_copy_retarget_clause(&lower) =>
