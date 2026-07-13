@@ -3170,6 +3170,33 @@ pub(super) fn effect_wraps_copy_spell(effect: &Effect) -> bool {
     }
 }
 
+/// CR 608.2c: A `Destroy`/`DestroyAll` may be the chain's effect directly, or
+/// nested inside a `CreateDelayedTrigger` wrapper ("When Merieke Ri Berit
+/// leaves the battlefield or becomes untapped, destroy that creature.").
+/// Mirrors `effect_wraps_copy_spell`'s descent through the same wrapper.
+pub(super) fn effect_wraps_destroy_like(effect: &Effect) -> bool {
+    match effect {
+        Effect::Destroy { .. } | Effect::DestroyAll { .. } => true,
+        Effect::CreateDelayedTrigger { effect: inner, .. } => {
+            effect_wraps_destroy_like(&inner.effect)
+        }
+        _ => false,
+    }
+}
+
+/// Mutable counterpart to `effect_wraps_destroy_like` — the effect to patch
+/// when a "can't be regenerated" rider binds to the `DestroyLike` role,
+/// unwrapping the same `CreateDelayedTrigger` wrapper.
+pub(super) fn destroy_like_effect_mut(effect: &mut Effect) -> Option<&mut Effect> {
+    match effect {
+        Effect::Destroy { .. } | Effect::DestroyAll { .. } => Some(effect),
+        Effect::CreateDelayedTrigger { effect: inner, .. } => {
+            destroy_like_effect_mut(&mut inner.effect)
+        }
+        _ => None,
+    }
+}
+
 /// CR 701.8 + CR 608.2c: nom recognizer for the "if a permanent's ability is
 /// countered this way, destroy that permanent" continuation clause (Teferi's
 /// Response, Green Slime). Operates on lowercased text; tolerates a trailing
@@ -3575,13 +3602,17 @@ pub(super) fn apply_clause_continuation(
             );
             if let Some(bound_index) = bound {
                 let def = &mut defs[bound_index];
-                match &mut *def.effect {
-                    Effect::Destroy {
+                // CR 608.2c: the DestroyLike antecedent may be nested inside a
+                // CreateDelayedTrigger wrapper (Merieke Ri Berit), so descend
+                // through it via destroy_like_effect_mut rather than matching
+                // def.effect directly — the registry now includes wrapped nodes.
+                match destroy_like_effect_mut(&mut def.effect) {
+                    Some(Effect::Destroy {
                         cant_regenerate, ..
-                    }
-                    | Effect::DestroyAll {
+                    })
+                    | Some(Effect::DestroyAll {
                         cant_regenerate, ..
-                    } => {
+                    }) => {
                         *cant_regenerate = true;
                     }
                     _ => unreachable!(),
@@ -6379,10 +6410,17 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::SuspectLastCreated)
         }
         // CR 701.19c + CR 608.2c: "It can't be regenerated" prevents regeneration shields;
-        // later text modifies the preceding Destroy instruction per CR 608.2c.
-        Effect::Destroy { .. } | Effect::DestroyAll { .. }
-            if nom_primitives::scan_contains(&lower, "can't be regenerated")
-                || nom_primitives::scan_contains(&lower, "cannot be regenerated") =>
+        // later text modifies the preceding Destroy instruction per CR 608.2c. The
+        // antecedent may be nested inside a CreateDelayedTrigger wrapper (Merieke Ri
+        // Berit's "When ~ leaves the battlefield or becomes untapped, destroy that
+        // creature. It can't be regenerated.") — mirrors the CopySpell arm above.
+        // Ordered after the CopySpell arm (whose guard fails for a destroy-wrapping
+        // trigger), so a CreateDelayedTrigger that wraps a Destroy falls through to
+        // here rather than being intercepted.
+        Effect::Destroy { .. } | Effect::DestroyAll { .. } | Effect::CreateDelayedTrigger { .. }
+            if effect_wraps_destroy_like(previous_effect)
+                && (nom_primitives::scan_contains(&lower, "can't be regenerated")
+                    || nom_primitives::scan_contains(&lower, "cannot be regenerated")) =>
         {
             Some(ContinuationAst::CantRegenerate)
         }

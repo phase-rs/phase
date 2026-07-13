@@ -18406,6 +18406,176 @@ fn cant_regenerate_destroyed_this_way_simple() {
     );
 }
 
+/// Recursively collect references to every `Effect` in an ability tree,
+/// descending `sub_ability`, `else_ability`, `mode_abilities`, and the inner
+/// definition of a `CreateDelayedTrigger` wrapper. Used by the Merieke Ri Berit
+/// regeneration tests to inspect the Destroy nested inside a delayed trigger.
+fn collect_all_effects<'a>(ad: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+    out.push(&ad.effect);
+    if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*ad.effect {
+        collect_all_effects(inner, out);
+    }
+    if let Some(sub) = ad.sub_ability.as_deref() {
+        collect_all_effects(sub, out);
+    }
+    if let Some(els) = ad.else_ability.as_deref() {
+        collect_all_effects(els, out);
+    }
+    for m in &ad.mode_abilities {
+        collect_all_effects(m, out);
+    }
+}
+
+fn has_cant_be_regenerated_grant(effects: &[&Effect]) -> bool {
+    effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::GenericEffect { static_abilities, .. }
+                if static_abilities
+                    .iter()
+                    .any(|s| s.mode == StaticMode::CantBeRegenerated)
+        )
+    })
+}
+
+/// Merieke Ri Berit's `{T}` ability: the "It can't be regenerated" rider must
+/// bind to the `Destroy` nested inside the "When ~ leaves the battlefield or
+/// becomes untapped, destroy that creature" delayed trigger — flipping its
+/// `cant_regenerate` to true — and must NOT spawn a spurious standalone
+/// `CantBeRegenerated` grant.
+#[test]
+fn merieke_style_delayed_trigger_destroy_binds_cant_regenerate() {
+    let def = parse_effect_chain(
+        "Gain control of target creature for as long as you control Merieke Ri Berit. \
+         When Merieke Ri Berit leaves the battlefield or becomes untapped, destroy that creature. \
+         It can't be regenerated.",
+        AbilityKind::Activated,
+    );
+    let mut effects = Vec::new();
+    collect_all_effects(&def, &mut effects);
+
+    // Reach-guard: no Unimplemented anywhere, so the negative assertion below
+    // cannot pass vacuously via an upstream parse failure.
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "unexpected Unimplemented in parsed tree: {effects:#?}"
+    );
+
+    // Reach-guard: the delayed-trigger-nested Destroy really exists.
+    let destroy = effects
+        .iter()
+        .find(|e| matches!(e, Effect::Destroy { .. }))
+        .unwrap_or_else(|| panic!("expected a nested Destroy effect: {effects:#?}"));
+    assert!(
+        matches!(
+            destroy,
+            Effect::Destroy {
+                cant_regenerate: true,
+                ..
+            }
+        ),
+        "expected nested Destroy {{ cant_regenerate: true }}, got {destroy:?}"
+    );
+
+    // No spurious standalone CantBeRegenerated grant anywhere in the chain — the
+    // rider bound to the Destroy, it did NOT fall through to the standalone handler.
+    assert!(
+        !has_cant_be_regenerated_grant(&effects),
+        "spurious CantBeRegenerated grant should not exist after the fix: {effects:#?}"
+    );
+}
+
+/// True-negative sibling: Gravebind's `CreateDelayedTrigger` wraps a `Draw`, not
+/// a `Destroy`, so `effect_wraps_destroy_like` returns false and its standalone
+/// "can't be regenerated this turn" grant must survive unchanged.
+#[test]
+fn gravebind_standalone_cant_regenerate_grant_unaffected() {
+    let parsed = parse_oracle_text(
+        "Target creature can't be regenerated this turn.\n\
+         Draw a card at the beginning of the next turn's upkeep.",
+        "Gravebind",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let mut effects = Vec::new();
+    for ability in &parsed.abilities {
+        collect_all_effects(ability, &mut effects);
+    }
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "unexpected Unimplemented in Gravebind tree: {effects:#?}"
+    );
+    assert!(
+        has_cant_be_regenerated_grant(&effects),
+        "Gravebind's standalone CantBeRegenerated grant must survive the fix: {effects:#?}"
+    );
+    // The fix must not synthesize a Destroy where none exists.
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Destroy { .. } | Effect::DestroyAll { .. })),
+        "Gravebind has no Destroy; the fix must not synthesize one: {effects:#?}"
+    );
+}
+
+/// True-negative sibling: Whippoorwill's `CreateDelayedTrigger` wraps a
+/// `ChangeZone`→Exile, not a `Destroy`, so its standalone "can't be regenerated
+/// this turn" grant must survive unchanged.
+#[test]
+fn whippoorwill_standalone_cant_regenerate_grant_unaffected() {
+    let parsed = parse_oracle_text(
+        "{G}{G}, {T}: Target creature can't be regenerated this turn. \
+         Damage that would be dealt to that creature this turn can't be prevented or dealt \
+         instead to another permanent or player. When the creature dies this turn, exile the creature.",
+        "Whippoorwill",
+        &[],
+        &["Creature".to_string()],
+        &["Bird".to_string()],
+    );
+    let mut effects = Vec::new();
+    for ability in &parsed.abilities {
+        collect_all_effects(ability, &mut effects);
+    }
+    assert!(
+        has_cant_be_regenerated_grant(&effects),
+        "Whippoorwill's standalone CantBeRegenerated grant must survive the fix: {effects:#?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Destroy { .. } | Effect::DestroyAll { .. })),
+        "Whippoorwill has no Destroy; the fix must not synthesize one: {effects:#?}"
+    );
+}
+
+/// Top-level (non-nested) Destroy antecedent — Terror / Nekrataal class — must
+/// still bind `cant_regenerate: true` unchanged by the delayed-trigger fix.
+#[test]
+fn top_level_destroy_cant_regenerate_unaffected() {
+    for text in [
+        "Destroy target nonartifact, nonblack creature. It can't be regenerated.",
+        "Destroy target nonartifact, nonblack creature. That creature can't be regenerated.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Destroy {
+                    cant_regenerate: true,
+                    ..
+                }
+            ),
+            "expected top-level Destroy {{ cant_regenerate: true }} for {text:?}, got {:?}",
+            def.effect
+        );
+    }
+}
+
 // -----------------------------------------------------------------------
 // Item 2: Restriction predicates
 // -----------------------------------------------------------------------

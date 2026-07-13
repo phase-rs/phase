@@ -516,7 +516,9 @@ pub(super) struct AssemblyEnv {
     search_destination_nodes: Vec<usize>,
     /// Every `Dig`/`RevealUntil` node (the `RestDestination` patchable set).
     dig_or_reveal_until_nodes: Vec<usize>,
-    /// Every `Destroy`/`DestroyAll` node (the can't-be-regenerated antecedent set).
+    /// Every `Destroy`/`DestroyAll` node — including those nested inside a
+    /// `CreateDelayedTrigger` wrapper (Merieke Ri Berit) — that forms the
+    /// can't-be-regenerated antecedent set (see `effect_wraps_destroy_like`).
     destroy_like_nodes: Vec<usize>,
     /// Every node already carrying a face-down profile (CR 708.2a spec antecedent).
     face_down_profile_nodes: Vec<usize>,
@@ -570,7 +572,9 @@ pub(super) enum AntecedentRole {
     /// to. Deliberately a DIFFERENT set from `DigOrMill`.
     DigOrRevealUntil,
     /// A `Destroy` or `DestroyAll` — the antecedent of a "can't be regenerated"
-    /// rider, which may be non-adjacent (Kirtar's Wrath puts a Token between them).
+    /// rider, which may be non-adjacent (Kirtar's Wrath puts a Token between them)
+    /// and may be nested inside a `CreateDelayedTrigger` wrapper (Merieke Ri
+    /// Berit's leaves-battlefield/becomes-untapped delayed destroy).
     DestroyLike,
     /// A move/manifest/turn-face-down node that ALREADY carries a face-down
     /// profile — the antecedent a "They're N/M ... creatures." spec refines
@@ -811,10 +815,10 @@ impl AssemblyEnv {
             ) {
                 self.dig_or_reveal_until_nodes.push(index);
             }
-            if matches!(
-                &*def.effect,
-                Effect::Destroy { .. } | Effect::DestroyAll { .. }
-            ) {
+            // CR 608.2c: include delayed-trigger-wrapped Destroy/DestroyAll
+            // (Merieke Ri Berit) in the can't-be-regenerated antecedent set, not
+            // just top-level ones — descends via effect_wraps_destroy_like.
+            if super::sequence::effect_wraps_destroy_like(&def.effect) {
                 self.destroy_like_nodes.push(index);
             }
             if matches!(
