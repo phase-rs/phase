@@ -141,6 +141,14 @@ STRING_LIT = re.compile(
     r"|'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{1,6}\}|.)|[^'\\])'"
 )
 
+# The BODY of a non-raw string, from just past its opening quote through its
+# closing quote. Escapes are honoured -- `\"` is content, `\\` is a spent backslash
+# -- and a line that ends in a backslash matches NOTHING here, which is precisely
+# the Rust rule: a `\` immediately before the newline escapes it and the literal
+# RUNS ON to the next line (Reference, STRING_CONTINUE). So a non-match is not a
+# syntax error to guess around; it is the signal to carry the string.
+STRING_BODY = re.compile(r'(?:\\.|[^"\\])*"')
+
 # A raw-string opener: `r"`, `r#"`, `r##"`, and the byte/C-string forms `br#"` /
 # `cr#"`. Rust raw strings do NOT nest and honour NO escapes, so the `#` count is
 # the only thing that closes one -- and the only thing we have to carry.
@@ -183,19 +191,26 @@ IDENT_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012
 _find_candidate = CANDIDATE.search
 _match_raw_open = RAW_OPEN.match
 _match_string_lit = STRING_LIT.match
+_match_string_body = STRING_BODY.match
 
 
 class ScanState(NamedTuple):
     """Lexer state carried BETWEEN lines.
 
-    Both constructs that can span a line boundary need a count, not a flag:
-    block comments nest (`/* /* */ */`) and a raw string is closed only by its
-    own `#` count. The two are mutually exclusive -- a raw string opened inside a
-    block comment is comment text, and a `/*` inside a raw string is data.
+    THREE constructs span a line boundary, and each needs its own carrier:
+
+        block comments   nest, so they need a DEPTH (`/* /* */ */`)
+        raw strings      close only on their own `#` count, so they need that COUNT
+        non-raw strings  continue on a trailing `\\`, which is all-or-nothing: a FLAG
+
+    They are mutually exclusive by construction. A raw string opened inside a block
+    comment is comment text; a `/*` inside either kind of string is data; a `\\` is
+    inert inside a raw string, which honours no escapes at all.
     """
 
     block_depth: int = 0
     raw_hashes: int | None = None  # `#` count of the raw string we are inside
+    in_string: bool = False  # inside a non-raw string continued from the line above
 
 
 class CensusError(Exception):
@@ -223,6 +238,21 @@ def _consume_raw(line: str, i: int, hashes: int) -> tuple[int, bool]:
     return end + len(close), True
 
 
+def _consume_string(line: str, i: int) -> tuple[int, bool]:
+    """Consume non-raw string body from `i` (just past the opening `"`).
+
+    Returns (next_index, closed_on_this_line). A non-raw string is closed by the
+    first unescaped `"`; if there is none, the line ends in a `\\` that escapes the
+    newline and the literal continues onto the next line -- Rust's STRING_CONTINUE,
+    and the ONLY way a non-raw string spans a line break (an unescaped newline
+    inside one is a compile error, so there is no third case to guess at).
+    """
+    m = _match_string_body(line, i)
+    if m is None:
+        return len(line), False
+    return m.end(), True
+
+
 def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
     """Return (code, state_for_the_next_line).
 
@@ -232,18 +262,26 @@ def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
     the mod's closing brace and silently swallow the production code that
     follows.
 
-    Raw strings are the reason this is a state machine rather than a regex. Their
-    contents are arbitrary bytes -- `//`, `/*`, `{`, `"`, and `#[cfg(test)]` all
-    appear inside them as DATA (see any `format!(r#"{{...}}"#)` JSON fixture) --
-    and they run across lines. A scanner that mishandles one does not just miss a
-    hit: it starts a comment that eats the file, or a skip region that eats the
+    Multi-line literals are the reason this is a state machine rather than a regex.
+    A raw string's contents are arbitrary bytes -- `//`, `/*`, `{`, `"`, and
+    `#[cfg(test)]` all appear inside them as DATA (see any `format!(r#"{{...}}"#)`
+    JSON fixture) -- and an ORDINARY string carries the same data across the same
+    line break whenever it ends in a `\\` (Rust's STRING_CONTINUE), which is how
+    every wrapped `assert!` message in the tree is written. A scanner that
+    mishandles either does not just miss a hit: it starts a comment that eats the
+    file, leaks a brace into the counter, or opens a skip region that eats the
     production code after it.
     """
     # Fast path. 4 lines in 5 hold no comment and no literal, and for those the
     # scanner has nothing to do -- so it should ALLOCATE nothing: no char list,
     # no join, no fresh ScanState. Doing the work anyway is most of what made the
     # per-character version too slow to run on the tree it was written to sweep.
-    if state.block_depth == 0 and state.raw_hashes is None and _find_candidate(line) is None:
+    if (
+        state.block_depth == 0
+        and state.raw_hashes is None
+        and not state.in_string
+        and _find_candidate(line) is None
+    ):
         return line, state
 
     out: list[str] = []
@@ -251,6 +289,7 @@ def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
     n = len(line)
     block_depth = state.block_depth
     raw_hashes = state.raw_hashes
+    in_string = state.in_string
     append = out.append
 
     while i < n:
@@ -258,6 +297,14 @@ def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
             i, closed = _consume_raw(line, i, raw_hashes)
             if closed:
                 raw_hashes = None
+            continue
+
+        if in_string:
+            # A continued non-raw string. Its body is data exactly like a raw
+            # string's -- and unlike a raw string's, it honours escapes, so the
+            # closing quote is the first UNESCAPED one.
+            i, closed = _consume_string(line, i)
+            in_string = not closed
             continue
 
         if block_depth:
@@ -321,13 +368,32 @@ def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
                 i = m.end()
                 continue
 
+            # No closing quote on this line. For a `"` -- with or without its `b`/`c`
+            # prefix -- that is not a syntax error and not a false candidate: Rust
+            # closes a non-raw string with an unescaped quote or CONTINUES it past a
+            # trailing `\`, and nothing else is legal. So the literal is open, and it
+            # is open ACROSS the line boundary. Carry it, and the body it holds --
+            # braces, `//`, `add_to_zone(` and all -- is data on every line it spans.
+            # (A `'` that reaches here is a lifetime or a loop label, which no second
+            # quote closes; it opens nothing and falls through to the code stream.)
+            if ch == '"':
+                quote = i + 1
+            elif ch in ("b", "c") and line[i + 1 : i + 2] == '"':
+                quote = i + 2
+            else:
+                quote = None
+            if quote is not None:
+                i, closed = _consume_string(line, quote)
+                in_string = not closed
+                continue
+
         # A false candidate: an `r`/`b`/`c` that opens nothing, or a `'` that opens
         # a lifetime rather than a literal. Either way it is ordinary code: emit the
         # one character and let the next slice pick up the rest of the token.
         append(ch)
         i += 1
 
-    return "".join(out), ScanState(block_depth, raw_hashes)
+    return "".join(out), ScanState(block_depth, raw_hashes, in_string)
 
 
 def annotation_reason(line: str) -> str | None:
