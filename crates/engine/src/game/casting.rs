@@ -12633,6 +12633,45 @@ fn can_cast_prepared_now_with_probe(
         }
     }
 
+    // CR 118.3 + CR 601.2f-h: A mandatory choice of additional costs is
+    // castable only when at least one branch can be paid with the spell's full
+    // mana cost. Reuse the declaration-time authority so discard/life,
+    // sacrifice/mana, and other choice shapes cannot reach target selection
+    // and then fail during payment after the cast has been announced.
+    if let Some(AdditionalCost::Choice(preferred, fallback)) = state
+        .objects
+        .get(&prepared.object_id)
+        .and_then(|o| o.additional_cost.as_ref())
+    {
+        let resolved = prepared.ability_def.as_ref().map_or_else(
+            || ResolvedAbility::new(Effect::NoOp, Vec::new(), prepared.object_id, player),
+            |def| build_resolved_from_def(def, prepared.object_id, player),
+        );
+        let mut pending = PendingCast::new(
+            prepared.object_id,
+            prepared.card_id,
+            resolved,
+            prepared.mana_cost.clone(),
+        );
+        pending.base_cost = Some(prepared.base_mana_cost.clone());
+        pending.casting_variant = prepared.casting_variant;
+        pending.cast_timing_permission = prepared.cast_timing_permission;
+        pending.origin_zone = prepared.origin_zone;
+        pending.payment_mode = prepared.payment_mode;
+        let branch_is_offerable = |cost: &AbilityCost| {
+            casting_costs::additional_cost_declaration_is_offerable(
+                state,
+                player,
+                &pending,
+                cost.clone(),
+            )
+            .unwrap_or(false)
+        };
+        if !branch_is_offerable(preferred) && !branch_is_offerable(fallback) {
+            return false;
+        }
+    }
+
     // CR 702.172: Spree spells must afford at least one mode to be castable.
     // CR 117.1d + CR 601.2g: Use the feasibility predicate so non-tap mana
     // abilities (Sacrifice / Discard / PayLife) the controller could activate

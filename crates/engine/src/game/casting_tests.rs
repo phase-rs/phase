@@ -12475,6 +12475,91 @@ fn hand_spell_alternative_pay_life_cost_replaces_mana_cost() {
 }
 
 #[test]
+fn choice_additional_cost_filters_unpayable_casts() {
+    let mut state = setup_game_at_main_phase();
+    state.players[0].life = 2;
+
+    let spell_id = create_instant_in_hand(&mut state, PlayerId(0));
+    {
+        let spell = state.objects.get_mut(&spell_id).unwrap();
+        spell.name = "Bitter Triumph Stand-In".to_string();
+        spell.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 1,
+        };
+        spell.additional_cost = Some(AdditionalCost::Choice(
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            },
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+            },
+        ));
+        let abilities = Arc::make_mut(&mut spell.abilities);
+        abilities.clear();
+        abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        ));
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+    let target = create_object(
+        &mut state,
+        CardId(11),
+        PlayerId(1),
+        "Target Creature".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&target)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+
+    assert!(
+        !can_cast_object_now(&state, PlayerId(0), spell_id),
+        "a spell with no payable additional-cost branch must not be castable"
+    );
+    assert!(
+        !crate::ai_support::candidate_actions(&state)
+            .iter()
+            .any(|candidate| matches!(
+                candidate.action,
+                GameAction::CastSpell { object_id, .. } if object_id == spell_id
+            )),
+        "an unpayable discard-or-life spell must not be offered to search"
+    );
+
+    state.players[0].life = 3;
+    assert!(
+        can_cast_object_now(&state, PlayerId(0), spell_id),
+        "the life branch should make the same spell castable"
+    );
+
+    state.players[0].life = 2;
+    create_object(
+        &mut state,
+        CardId(12),
+        PlayerId(0),
+        "Discardable Card".to_string(),
+        Zone::Hand,
+    );
+    assert!(
+        can_cast_object_now(&state, PlayerId(0), spell_id),
+        "the discard branch should make the same spell castable"
+    );
+}
+
+#[test]
 fn cast_without_mana_cost_option_checks_commander_control() {
     let mut state = setup_game_at_main_phase();
 
