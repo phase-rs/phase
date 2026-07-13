@@ -1617,13 +1617,15 @@ fn pending_next_spell_cant_be_countered_stamped_on_stack() {
             source_id: None,
         });
     super::apply_pending_next_spell_stack_grants(&mut state, PlayerId(0), spell_id);
-    assert!(state
-        .objects
-        .get(&spell_id)
-        .unwrap()
-        .static_definitions
-        .iter_all()
-        .any(|sd| sd.mode == StaticMode::CantBeCountered));
+    assert!(
+        state
+            .objects
+            .get(&spell_id)
+            .unwrap()
+            .static_definitions
+            .iter_all()
+            .any(|sd| sd.mode == StaticMode::CantBeCountered)
+    );
     super::consume_pending_next_spell_modifiers(&mut state, PlayerId(0), spell_id);
     assert!(state.pending_next_spell_modifiers.is_empty());
 }
@@ -2778,10 +2780,11 @@ fn spell_meta_includes_supertypes_for_restricted_mana() {
 
     let meta = build_spell_meta(&state, PlayerId(0), commander_id).unwrap();
 
-    assert!(meta
-        .types
-        .iter()
-        .any(|type_name| type_name.eq_ignore_ascii_case("Legendary")));
+    assert!(
+        meta.types
+            .iter()
+            .any(|type_name| type_name.eq_ignore_ascii_case("Legendary"))
+    );
     assert!(ManaRestriction::OnlyForSpellType("Legendary".to_string()).allows_spell(&meta));
 }
 
@@ -5964,7 +5967,11 @@ fn jabari_influence_casts_scopes_defender_target_and_lands_chained_counter() {
     .expect("Jabari's Influence must be castable in the discriminator setup");
     match &state2.waiting_for {
         WaitingFor::TargetSelection { target_slots, .. } => {
-            assert_eq!(target_slots.len(), 1, "GainControl has a single target slot");
+            assert_eq!(
+                target_slots.len(),
+                1,
+                "GainControl has a single target slot"
+            );
             assert!(
                 target_slots[0]
                     .legal_targets
@@ -6700,12 +6707,12 @@ fn kessig_wolf_run_x_pump_grants_dynamic_power_and_trample() {
         obj.card_types.core_types.push(CoreType::Land);
         obj.base_card_types = obj.card_types.clone();
         let parsed = parse_oracle_text(
-                "{T}: Add {C}.\n{X}{R}{G}, {T}: Target creature gets +X/+0 and gains trample until end of turn.",
-                "Kessig Wolf Run",
-                &[],
-                &[String::from("Land")],
-                &[],
-            );
+            "{T}: Add {C}.\n{X}{R}{G}, {T}: Target creature gets +X/+0 and gains trample until end of turn.",
+            "Kessig Wolf Run",
+            &[],
+            &[String::from("Land")],
+            &[],
+        );
         Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
     }
 
@@ -7386,12 +7393,12 @@ fn grim_lavamancer_targets_before_graveyard_exile_cost() {
         obj.entered_battlefield_turn = Some(1);
         obj.summoning_sick = false;
         let parsed = crate::parser::oracle::parse_oracle_text(
-                "{R}, {T}, Exile two cards from your graveyard: This creature deals 2 damage to any target.",
-                "Grim Lavamancer",
-                &[],
-                &[String::from("Creature")],
-                &[String::from("Human"), String::from("Wizard")],
-            );
+            "{R}, {T}, Exile two cards from your graveyard: This creature deals 2 damage to any target.",
+            "Grim Lavamancer",
+            &[],
+            &[String::from("Creature")],
+            &[String::from("Human"), String::from("Wizard")],
+        );
         Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
     }
     add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
@@ -9231,6 +9238,43 @@ fn play_from_exile_cast_cost_raise_increases_generic() {
     );
 }
 
+#[test]
+fn gobakhan_play_from_exile_cost_raise_adds_two_generic() {
+    let mut state = setup_game_at_main_phase();
+    let obj_id = create_black_sorcery_with_keywords(
+        &mut state,
+        16014,
+        "Gobakhan Exiled Spell",
+        1,
+        Vec::new(),
+    );
+    let obj = state.objects.get_mut(&obj_id).unwrap();
+    obj.zone = Zone::Exile;
+    obj.casting_permissions.push(play_from_exile_raise(
+        PlayerId(0),
+        Some(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        }),
+    ));
+
+    let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
+    super::super::casting::apply_non_floor_cost_modifiers(
+        &state,
+        PlayerId(0),
+        obj_id,
+        &mut mana_cost,
+        None,
+    );
+    assert_eq!(
+        mana_cost,
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 3,
+        }
+    );
+}
+
 /// CR 601.2f + CR 611.2a: The raise is scoped to the grantee — a permission
 /// granted to a different player must not tax P0's cast.
 #[test]
@@ -9391,13 +9435,13 @@ fn drag_to_the_underworld_devotion_cost_reduction_applies_from_hand() {
 
     let mut state = setup_game_at_main_phase();
     let parsed = crate::parser::oracle::parse_oracle_text(
-            "This spell costs {X} less to cast, where X is your devotion to black. (Each {B} in the mana costs of permanents you control counts toward your devotion to black.)\n\
+        "This spell costs {X} less to cast, where X is your devotion to black. (Each {B} in the mana costs of permanents you control counts toward your devotion to black.)\n\
              Destroy target creature.",
-            "Drag to the Underworld",
-            &[],
-            &[String::from("Instant")],
-            &[],
-        );
+        "Drag to the Underworld",
+        &[],
+        &[String::from("Instant")],
+        &[],
+    );
     assert_eq!(
         parsed.statics.len(),
         1,
@@ -10002,11 +10046,13 @@ fn transient_activation_cost_reduction_hits_only_controlled_artifact_tokens() {
         properties: vec![FilterProp::Token],
     });
     let effect = Effect::GenericEffect {
-        static_abilities: vec![StaticDefinition::new(reduce_mode.clone())
-            .affected(source_filter)
-            .modifications(vec![ContinuousModification::AddStaticMode {
-                mode: reduce_mode,
-            }])],
+        static_abilities: vec![
+            StaticDefinition::new(reduce_mode.clone())
+                .affected(source_filter)
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: reduce_mode,
+                }]),
+        ],
         duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
         target: None,
     };
@@ -10819,10 +10865,10 @@ fn x_cost_accounts_for_pending_cost_reduction_in_max() {
 #[test]
 fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
     use super::super::engine::apply_as_current;
+    use crate::types::StaticDefinition;
     use crate::types::ability::{ControllerRef, QuantityRef, TypeFilter, TypedFilter};
     use crate::types::keywords::Keyword;
     use crate::types::statics::StaticMode;
-    use crate::types::StaticDefinition;
 
     // Build a {X}{B}{B} sorcery + a battlefield static granting
     // Affinity(Creature) to the controller's sorceries, with N creatures.
@@ -19646,12 +19692,14 @@ fn cancel_cast_uses_stamped_convoked_creatures_when_pending_snapshot_is_empty() 
     handle_cancel_cast(&mut state, &pending, &mut Vec::new());
 
     assert!(!state.objects.get(&helper).unwrap().tapped);
-    assert!(state
-        .objects
-        .get(&spell)
-        .unwrap()
-        .convoked_creatures
-        .is_empty());
+    assert!(
+        state
+            .objects
+            .get(&spell)
+            .unwrap()
+            .convoked_creatures
+            .is_empty()
+    );
     assert!(state.players[0].mana_pool.mana.is_empty());
 }
 
@@ -19804,15 +19852,17 @@ fn convoke_payment_offers_and_accepts_colored_creature_payment() {
     ));
 
     let (_, _, grouped) = crate::ai_support::legal_actions_full(&state);
-    assert!(grouped
-        .get(&creature)
-        .is_some_and(|actions| actions.iter().any(|action| matches!(
-            action,
-            GameAction::TapForConvoke {
-                object_id,
-                mana_type: ManaType::Green
-            } if *object_id == creature
-        ))));
+    assert!(
+        grouped
+            .get(&creature)
+            .is_some_and(|actions| actions.iter().any(|action| matches!(
+                action,
+                GameAction::TapForConvoke {
+                    object_id,
+                    mana_type: ManaType::Green
+                } if *object_id == creature
+            )))
+    );
     assert!(
         grouped.get(&artifact).is_none_or(|actions| actions
             .iter()
@@ -20153,12 +20203,16 @@ fn emit_targeting_events_own_object_no_crime() {
         PlayerId(0),
         &mut events,
     );
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, GameEvent::BecomesTarget { .. })));
-    assert!(!events
-        .iter()
-        .any(|e| matches!(e, GameEvent::CrimeCommitted { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, GameEvent::BecomesTarget { .. }))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, GameEvent::CrimeCommitted { .. }))
+    );
 }
 
 #[test]
@@ -20966,10 +21020,10 @@ fn first_kicked_spell_reducer_recomputes_after_kicker_declared() {
         panic!("expected ModeChoice, got {:?}", state.waiting_for);
     };
     assert_eq!(
-            pending_cast.cost,
-            ManaCost::generic(0),
-            "CR 601.2f + CR 702.33d: once kicker is declared, the first kicked spell reducer applies before mana payment"
-        );
+        pending_cast.cost,
+        ManaCost::generic(0),
+        "CR 601.2f + CR 702.33d: once kicker is declared, the first kicked spell reducer applies before mana payment"
+    );
 }
 
 #[test]
@@ -21390,15 +21444,21 @@ fn kicker_instead_target_paid_selects_replacement_target_only() {
     };
     assert!(pending_cast.ability.context.additional_cost_paid);
     assert_eq!(target_slots.len(), 1);
-    assert!(!target_slots[0]
-        .legal_targets
-        .contains(&TargetRef::Object(artifact_id)));
-    assert!(target_slots[0]
-        .legal_targets
-        .contains(&TargetRef::Object(creature_id)));
-    assert!(target_slots[0]
-        .legal_targets
-        .contains(&TargetRef::Object(second_creature_id)));
+    assert!(
+        !target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(artifact_id))
+    );
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(creature_id))
+    );
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(second_creature_id))
+    );
 }
 
 #[test]
@@ -21442,15 +21502,21 @@ fn kicked_bloodchiefs_thirst_like_spell_targets_three_mv_creature() {
     };
     assert!(pending_cast.ability.context.additional_cost_paid);
     assert_eq!(target_slots.len(), 1);
-    assert!(target_slots[0]
-        .legal_targets
-        .contains(&TargetRef::Object(two_mv_creature)));
-    assert!(target_slots[0]
-        .legal_targets
-        .contains(&TargetRef::Object(three_mv_creature)));
-    assert!(target_slots[0]
-        .legal_targets
-        .contains(&TargetRef::Object(four_mv_creature)));
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(two_mv_creature))
+    );
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(three_mv_creature))
+    );
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(four_mv_creature))
+    );
 }
 
 #[test]
@@ -21987,12 +22053,16 @@ fn modal_x_target_legality_chooses_x_before_targets() {
             ..
         } => {
             assert_eq!(target_slots.len(), 1);
-            assert!(target_slots[0]
-                .legal_targets
-                .contains(&TargetRef::Object(creature)));
-            assert!(target_slots[0]
-                .legal_targets
-                .contains(&TargetRef::Object(other_creature)));
+            assert!(
+                target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(creature))
+            );
+            assert!(
+                target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(other_creature))
+            );
             // CR 700.2 / CR 601.2c: the deferred-target path must surface the
             // per-mode label for the targeting UI (regression for issue #1543:
             // Kozilek's Command's mode-2 banner went blank after X was chosen
@@ -22208,16 +22278,16 @@ fn modal_x_target_selection_carries_per_mode_labels() {
 /// fresh hand-zone instant with the printed `{X}{C}{C}` cost.
 fn build_kozileks_command(state: &mut GameState, card_id: CardId) -> ObjectId {
     let parsed = crate::parser::oracle::parse_oracle_text(
-            "Choose two —\n\
+        "Choose two —\n\
              • Target player creates X 0/1 colorless Eldrazi Spawn creature tokens with \"Sacrifice this token: Add {C}.\"\n\
              • Target player scries X, then draws a card.\n\
              • Exile target creature with mana value X or less.\n\
              • Exile up to X target cards from graveyards.",
-            "Kozilek's Command",
-            &[],
-            &["Kindred".to_string(), "Instant".to_string()],
-            &["Eldrazi".to_string()],
-        );
+        "Kozilek's Command",
+        &[],
+        &["Kindred".to_string(), "Instant".to_string()],
+        &["Eldrazi".to_string()],
+    );
     assert_eq!(
         parsed.abilities.len(),
         4,
@@ -22313,10 +22383,10 @@ fn kozileks_command_modes_tokens_and_exile_creature_end_to_end() {
         "mode 2 must exile the targeted MV<=2 creature"
     );
     assert_eq!(
-            state.objects[&big].zone,
-            Zone::Battlefield,
-            "the untargeted MV-3 creature must remain on the battlefield (it was never declared as a target)"
-        );
+        state.objects[&big].zone,
+        Zone::Battlefield,
+        "the untargeted MV-3 creature must remain on the battlefield (it was never declared as a target)"
+    );
     // Mode 0: the targeted player (P0) receives exactly X = 2 Eldrazi Spawn
     // tokens, each a 0/1 with a Sacrifice: Add {C} ability.
     let spawns: Vec<ObjectId> = state
@@ -24345,12 +24415,12 @@ fn rowan_scion_of_war_reduces_black_red_spells_by_life_lost() {
 
     // Parse the real activated ability and pull out the GenericEffect clause.
     let parsed = crate::parser::parse_oracle_text(
-            "Menace\n{T}: Spells you cast this turn that are black and/or red cost {X} less to cast, where X is the amount of life you lost this turn. Activate only as a sorcery.",
-            "Rowan, Scion of War",
-            &["Menace".to_string()],
-            &["Legendary".to_string(), "Creature".to_string()],
-            &["Human".to_string()],
-        );
+        "Menace\n{T}: Spells you cast this turn that are black and/or red cost {X} less to cast, where X is the amount of life you lost this turn. Activate only as a sorcery.",
+        "Rowan, Scion of War",
+        &["Menace".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Human".to_string()],
+    );
     let cost_ability = parsed
         .abilities
         .iter()
@@ -24447,12 +24517,12 @@ fn rowan_scion_of_war_zero_life_lost_at_resolution_snapshots_zero() {
     );
 
     let parsed = crate::parser::parse_oracle_text(
-            "Menace\n{T}: Spells you cast this turn that are black and/or red cost {X} less to cast, where X is the amount of life you lost this turn. Activate only as a sorcery.",
-            "Rowan, Scion of War",
-            &["Menace".to_string()],
-            &["Legendary".to_string(), "Creature".to_string()],
-            &["Human".to_string()],
-        );
+        "Menace\n{T}: Spells you cast this turn that are black and/or red cost {X} less to cast, where X is the amount of life you lost this turn. Activate only as a sorcery.",
+        "Rowan, Scion of War",
+        &["Menace".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Human".to_string()],
+    );
     let cost_ability = parsed
         .abilities
         .iter()
@@ -24525,12 +24595,12 @@ fn will_scion_of_peace_reduces_white_blue_spells_by_life_gained() {
     );
 
     let parsed = crate::parser::parse_oracle_text(
-            "Vigilance\n{T}: Spells you cast this turn that are white and/or blue cost {X} less to cast, where X is the amount of life you gained this turn. Activate only as a sorcery.",
-            "Will, Scion of Peace",
-            &["Vigilance".to_string()],
-            &["Legendary".to_string(), "Creature".to_string()],
-            &["Human".to_string()],
-        );
+        "Vigilance\n{T}: Spells you cast this turn that are white and/or blue cost {X} less to cast, where X is the amount of life you gained this turn. Activate only as a sorcery.",
+        "Will, Scion of Peace",
+        &["Vigilance".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Human".to_string()],
+    );
     let cost_ability = parsed
         .abilities
         .iter()
@@ -26016,9 +26086,9 @@ fn opponent_first_noncreature_tax_uses_caster_history() {
     );
 
     assert!(
-            can_cast_object_now(&state, PlayerId(1), spell),
-            "after that opponent has cast a noncreature spell this turn, the first-spell tax should no longer apply"
-        );
+        can_cast_object_now(&state, PlayerId(1), spell),
+        "after that opponent has cast a noncreature spell this turn, the first-spell tax should no longer apply"
+    );
 }
 
 #[test]
@@ -26295,9 +26365,11 @@ fn graveyard_spell_with_flashback_and_retrace_prompts_for_cast_variant() {
             player, options, ..
         } => {
             assert_eq!(player, PlayerId(0));
-            assert!(options
-                .iter()
-                .any(|option| option.variant == CastingVariant::Flashback));
+            assert!(
+                options
+                    .iter()
+                    .any(|option| option.variant == CastingVariant::Flashback)
+            );
             options
                 .iter()
                 .position(|option| option.variant == CastingVariant::Retrace)
@@ -26305,14 +26377,16 @@ fn graveyard_spell_with_flashback_and_retrace_prompts_for_cast_variant() {
         }
         other => panic!("expected CastingVariantChoice, got {other:?}"),
     };
-    assert!(crate::ai_support::legal_actions(&state)
-        .iter()
-        .any(|action| {
-            matches!(
-                action,
-                GameAction::ChooseCastingVariant { index } if *index == retrace_index
-            )
-        }));
+    assert!(
+        crate::ai_support::legal_actions(&state)
+            .iter()
+            .any(|action| {
+                matches!(
+                    action,
+                    GameAction::ChooseCastingVariant { index } if *index == retrace_index
+                )
+            })
+    );
 
     let result = crate::game::engine::apply_as_current(
         &mut state,
@@ -27358,12 +27432,12 @@ fn parsed_static_graveyard_escape_grant_makes_spell_castable() {
         Zone::Battlefield,
     );
     let parsed = crate::parser::oracle::parse_oracle_text(
-            "Each nonland card in your graveyard has escape.\nThe escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
-            "Underworld Breach",
-            &[],
-            &[String::from("Enchantment")],
-            &[],
-        );
+        "Each nonland card in your graveyard has escape.\nThe escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
+        "Underworld Breach",
+        &[],
+        &[String::from("Enchantment")],
+        &[],
+    );
     let source = state.objects.get_mut(&source_id).unwrap();
     source.card_types.core_types.push(CoreType::Enchantment);
     source.base_card_types = source.card_types.clone();
@@ -27599,12 +27673,12 @@ fn granted_escape_requires_exile_cost_payment() {
         Zone::Battlefield,
     );
     let parsed = crate::parser::oracle::parse_oracle_text(
-            "Each nonland card in your graveyard has escape.\nThe escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
-            "Underworld Breach",
-            &[],
-            &[String::from("Enchantment")],
-            &[],
-        );
+        "Each nonland card in your graveyard has escape.\nThe escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
+        "Underworld Breach",
+        &[],
+        &[String::from("Enchantment")],
+        &[],
+    );
     let source = state.objects.get_mut(&source_id).unwrap();
     source.card_types.core_types.push(CoreType::Enchantment);
     source.base_card_types = source.card_types.clone();
@@ -27665,12 +27739,12 @@ fn escape_grant_from_graveyard_source_does_not_apply_to_itself() {
         Zone::Graveyard,
     );
     let parsed = crate::parser::oracle::parse_oracle_text(
-            "Each nonland card in your graveyard has escape.\nThe escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
-            "Underworld Breach",
-            &[],
-            &[String::from("Enchantment")],
-            &[],
-        );
+        "Each nonland card in your graveyard has escape.\nThe escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
+        "Underworld Breach",
+        &[],
+        &[String::from("Enchantment")],
+        &[],
+    );
     let source = state.objects.get_mut(&source_id).unwrap();
     source.card_types.core_types.push(CoreType::Enchantment);
     source.base_card_types = source.card_types.clone();
@@ -27754,12 +27828,12 @@ fn escape_phyrexian_cost_deducts_life_after_exile() {
         Zone::Battlefield,
     );
     let parsed = crate::parser::oracle::parse_oracle_text(
-            "Each nonland card in your graveyard has escape.\nThe escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
-            "Underworld Breach",
-            &[],
-            &[String::from("Enchantment")],
-            &[],
-        );
+        "Each nonland card in your graveyard has escape.\nThe escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
+        "Underworld Breach",
+        &[],
+        &[String::from("Enchantment")],
+        &[],
+    );
     let source = state.objects.get_mut(&source_id).unwrap();
     source.card_types.core_types.push(CoreType::Enchantment);
     source.base_card_types = source.card_types.clone();
@@ -28360,9 +28434,9 @@ fn raise_cost_static_prevents_unaffordable_noncreature_cast() {
 
     // With Thalia's tax, Lightning Bolt costs {1}{R} but player has only 1 Mountain ({R}).
     assert!(
-            !can_cast_object_now(&state, PlayerId(0), bolt),
-            "Lightning Bolt should NOT be castable — Thalia tax makes it {{1}}{{R}} with only 1 Mountain"
-        );
+        !can_cast_object_now(&state, PlayerId(0), bolt),
+        "Lightning Bolt should NOT be castable — Thalia tax makes it {{1}}{{R}} with only 1 Mountain"
+    );
 
     // Must not appear in candidate or legal actions
     let candidates = candidate_actions(&state);
@@ -29331,9 +29405,9 @@ fn phyrexian_spell_prepass_honors_spell_mana_restrictions() {
         WaitingFor::PhyrexianPayment { shards, .. } => {
             assert_eq!(shards.len(), 1);
             assert!(
-                    matches!(shards[0].options, ShardOptions::LifeOnly),
-                    "spell-restricted mana must not create a false mana/life choice for an ineligible spell"
-                );
+                matches!(shards[0].options, ShardOptions::LifeOnly),
+                "spell-restricted mana must not create a false mana/life choice for an ineligible spell"
+            );
         }
         other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
     }
@@ -29385,9 +29459,11 @@ fn phyrexian_multi_shard_all_life_deducts_per_shard() {
     match &result.waiting_for {
         WaitingFor::PhyrexianPayment { shards, .. } => {
             assert_eq!(shards.len(), 2);
-            assert!(shards
-                .iter()
-                .all(|s| matches!(s.options, ShardOptions::LifeOnly)));
+            assert!(
+                shards
+                    .iter()
+                    .all(|s| matches!(s.options, ShardOptions::LifeOnly))
+            );
         }
         other => panic!("expected PhyrexianPayment (two LifeOnly), got {other:?}"),
     }
@@ -29464,8 +29540,8 @@ fn phyrexian_mixed_one_mana_one_life() {
 fn phyrexian_cast_no_pause_when_all_shards_trivial() {
     let mut state = setup_game_at_main_phase();
     state.players[0].life = 1; // Life < 2 → LifeOnly impossible; combined with
-                               // an empty pool, cost becomes unpayable but let's
-                               // give mana so every shard is ManaOnly.
+    // an empty pool, cost becomes unpayable but let's
+    // give mana so every shard is ManaOnly.
     let spell = create_phyrexian_instant_in_hand(
         &mut state,
         PlayerId(0),
@@ -30371,12 +30447,12 @@ mod krrik_life_for_color {
             crate::types::game_state::WaitingFor::PhyrexianPayment { shards, .. } => {
                 assert_eq!(shards.len(), 1);
                 assert!(
-                        matches!(
-                            shards[0].options,
-                            crate::types::game_state::ShardOptions::ManaOrLife
-                        ),
-                        "CR 107.4f: with red mana + life available, hybrid Phyrexian shard must offer both"
-                    );
+                    matches!(
+                        shards[0].options,
+                        crate::types::game_state::ShardOptions::ManaOrLife
+                    ),
+                    "CR 107.4f: with red mana + life available, hybrid Phyrexian shard must offer both"
+                );
             }
             other => panic!("expected PhyrexianPayment for promoted hybrid, got {other:?}"),
         }
@@ -30917,8 +30993,8 @@ mod summoning_sickness_gate {
 mod remove_counter_cost {
     use super::*;
     use crate::types::ability::{
-        CounterCostSelection, TypeFilter, TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
-        REMOVE_COUNTER_COST_X,
+        CounterCostSelection, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X, TypeFilter,
+        TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::CounterCostChoice;
@@ -31295,9 +31371,9 @@ mod remove_counter_cost {
             "choosing X=2 must remove exactly two counters after fixed mana is paid"
         );
         assert!(
-                state.stack.iter().any(|entry| entry.source_id == source),
-                "activated ability should reach the stack after paying the fixed mana and chosen X cost"
-            );
+            state.stack.iter().any(|entry| entry.source_id == source),
+            "activated ability should reach the stack after paying the fixed mana and chosen X cost"
+        );
     }
 
     #[test]
@@ -31446,9 +31522,9 @@ mod remove_counter_cost {
         );
 
         assert!(
-                can_activate_ability_now(&state, PlayerId(0), source, 0),
-                "target legality depending on X must not hide Remove-X-counter activations before X is chosen"
-            );
+            can_activate_ability_now(&state, PlayerId(0), source, 0),
+            "target legality depending on X must not hide Remove-X-counter activations before X is chosen"
+        );
     }
 
     #[test]
@@ -31633,12 +31709,12 @@ mod remove_counter_cost {
         let waiting =
             handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new()).unwrap();
         match &waiting {
-                WaitingFor::ChooseXValue { max, .. } => assert_eq!(
-                    *max, 3,
-                    "targeted X counter costs must cap by the largest single eligible source, not the sum"
-                ),
-                other => panic!("expected ChooseXValue, got {other:?}"),
-            }
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(
+                *max, 3,
+                "targeted X counter costs must cap by the largest single eligible source, not the sum"
+            ),
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        }
         state.waiting_for = waiting;
 
         apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
@@ -31741,9 +31817,9 @@ mod remove_counter_cost {
 
         apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
         assert!(
-                !state.objects[&source].tapped,
-                "targeted X counter-cost detour must not pay the tap component before the counter-source choice"
-            );
+            !state.objects[&source].tapped,
+            "targeted X counter-cost detour must not pay the tap component before the counter-source choice"
+        );
 
         apply_as_current(
             &mut state,
@@ -31883,12 +31959,12 @@ mod remove_counter_cost {
         let waiting =
             handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new()).unwrap();
         match &waiting {
-                WaitingFor::ChooseXValue { max, .. } => assert_eq!(
-                    *max, 2,
-                    "untyped Remove-X-counter costs must cap by the largest concrete counter stack, not the sum across types"
-                ),
-                other => panic!("expected ChooseXValue, got {other:?}"),
-            }
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(
+                *max, 2,
+                "untyped Remove-X-counter costs must cap by the largest concrete counter stack, not the sum across types"
+            ),
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        }
         state.waiting_for = waiting;
 
         apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
@@ -32303,12 +32379,12 @@ mod remove_counter_cost {
 
         apply_as_current(&mut state, GameAction::SelectModes { indices: vec![1] }).unwrap();
         match &state.waiting_for {
-                WaitingFor::ChooseXValue { max, .. } => assert_eq!(
-                    *max, 3,
-                    "literal Remove-X-counter costs must prompt for X even when the selected mode does not use X"
-                ),
-                other => panic!("expected ChooseXValue after non-X mode choice, got {other:?}"),
-            }
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(
+                *max, 3,
+                "literal Remove-X-counter costs must prompt for X even when the selected mode does not use X"
+            ),
+            other => panic!("expected ChooseXValue after non-X mode choice, got {other:?}"),
+        }
 
         apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
 
@@ -33704,9 +33780,9 @@ mod alt_cost_reduction_509 {
         );
 
         assert!(
-                can_cast_object_now(&state, PlayerId(0), emerge),
-                "Emerge must be castable when sacrificing a mana-value-4 creature reduces {{5}}{{U}}{{U}} to payable {{1}}{{U}}{{U}}"
-            );
+            can_cast_object_now(&state, PlayerId(0), emerge),
+            "Emerge must be castable when sacrificing a mana-value-4 creature reduces {{5}}{{U}}{{U}} to payable {{1}}{{U}}{{U}}"
+        );
 
         let mut events = Vec::new();
         let wf = handle_cast_spell(&mut state, PlayerId(0), emerge, CardId(800), &mut events)
@@ -33775,9 +33851,9 @@ mod alt_cost_reduction_509 {
         );
 
         assert!(
-                !can_cast_object_now(&state, PlayerId(0), emerge),
-                "Emerge reduces only generic mana by mana value: {{5}}{{U}}{{U}} minus mana value 4 is {{1}}{{U}}{{U}}, not {{3}}"
-            );
+            !can_cast_object_now(&state, PlayerId(0), emerge),
+            "Emerge reduces only generic mana by mana value: {{5}}{{U}}{{U}} minus mana value 4 is {{1}}{{U}}{{U}}, not {{3}}"
+        );
     }
 
     #[test]
@@ -33801,9 +33877,9 @@ mod alt_cost_reduction_509 {
             create_sacrifice_creature(&mut state, PlayerId(0), 808, ManaCost::generic(5));
 
         assert!(
-                can_cast_object_now(&state, PlayerId(0), emerge),
-                "Emerge under Trinisphere must be affordable only when the post-reduction {{2}}{{U}} floor is payable"
-            );
+            can_cast_object_now(&state, PlayerId(0), emerge),
+            "Emerge under Trinisphere must be affordable only when the post-reduction {{2}}{{U}} floor is payable"
+        );
 
         let mut events = Vec::new();
         let wf = handle_cast_spell(&mut state, PlayerId(0), emerge, CardId(807), &mut events)
@@ -33819,10 +33895,10 @@ mod alt_cost_reduction_509 {
 
         assert_eq!(state.objects[&emerge].zone, Zone::Stack);
         assert_eq!(
-                state.players[0].mana_pool.total(),
-                0,
-                "Trinisphere must floor the post-Emerge-reduction cost to {{2}}{{U}}, not leave it at {{U}}"
-            );
+            state.players[0].mana_pool.total(),
+            0,
+            "Trinisphere must floor the post-Emerge-reduction cost to {{2}}{{U}}, not leave it at {{U}}"
+        );
     }
 
     #[test]
@@ -33844,9 +33920,9 @@ mod alt_cost_reduction_509 {
         create_sacrifice_creature(&mut state, PlayerId(0), 810, ManaCost::generic(5));
 
         assert!(
-                !can_cast_object_now(&state, PlayerId(0), emerge),
-                "Emerge affordability must include the Trinisphere floor after mana-value reduction, so {{U}} alone cannot pay the final {{2}}{{U}} cost"
-            );
+            !can_cast_object_now(&state, PlayerId(0), emerge),
+            "Emerge affordability must include the Trinisphere floor after mana-value reduction, so {{U}} alone cannot pay the final {{2}}{{U}} cost"
+        );
     }
 
     #[test]
@@ -34563,18 +34639,20 @@ mod loyalty_gate {
             let obj = state.objects.get_mut(&eidolon).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.card_types.core_types.push(CoreType::Creature);
-            obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                mode: CostModifyMode::Raise,
-                keyword: "loyalty".to_string(),
-                amount: 1,
-                minimum_mana: None,
-                dynamic_count: None,
-                exemption: ActivationExemption::None,
-                activator: None,
-            })
-            .affected(TargetFilter::Typed(
-                TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
-            ))]
+            obj.static_definitions = vec![
+                StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                    mode: CostModifyMode::Raise,
+                    keyword: "loyalty".to_string(),
+                    amount: 1,
+                    minimum_mana: None,
+                    dynamic_count: None,
+                    exemption: ActivationExemption::None,
+                    activator: None,
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
+                )),
+            ]
             .into();
         }
 
@@ -34629,8 +34707,8 @@ mod loyalty_gate {
                 let obj = state.objects.get_mut(&eidolon).unwrap();
                 obj.card_types.core_types.push(CoreType::Enchantment);
                 obj.card_types.core_types.push(CoreType::Creature);
-                obj.static_definitions =
-                    vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                obj.static_definitions = vec![
+                    StaticDefinition::new(StaticMode::ReduceAbilityCost {
                         mode: CostModifyMode::Raise,
                         keyword: "loyalty".to_string(),
                         amount: 1,
@@ -34642,8 +34720,9 @@ mod loyalty_gate {
                     .affected(TargetFilter::Typed(
                         TypedFilter::new(TypeFilter::Planeswalker)
                             .controller(ControllerRef::Opponent),
-                    ))]
-                    .into();
+                    )),
+                ]
+                .into();
             }
             (state, pw)
         }
@@ -34772,18 +34851,20 @@ mod loyalty_gate {
             let obj = state.objects.get_mut(&eidolon).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.card_types.core_types.push(CoreType::Creature);
-            obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                mode: CostModifyMode::Raise,
-                keyword: "loyalty".to_string(),
-                amount: 1,
-                minimum_mana: None,
-                dynamic_count: None,
-                exemption: ActivationExemption::None,
-                activator: None,
-            })
-            .affected(TargetFilter::Typed(
-                TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
-            ))]
+            obj.static_definitions = vec![
+                StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                    mode: CostModifyMode::Raise,
+                    keyword: "loyalty".to_string(),
+                    amount: 1,
+                    minimum_mana: None,
+                    dynamic_count: None,
+                    exemption: ActivationExemption::None,
+                    activator: None,
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
+                )),
+            ]
             .into();
         }
 
@@ -35444,10 +35525,10 @@ mod top_of_library_cast_permission_runtime {
         let unlimited_src = install_realmwalker_static(&mut state2, player, "Elf");
         let top2 = put_creature_on_top_of_library(&mut state2, player, CardId(907));
         assert_eq!(
-                top_of_library_selected_permission(&state2, player, top2),
-                Some((unlimited_src, CastFrequency::Unlimited)),
-                "Unlimited permission must be selected with Unlimited frequency — never consumes a slot"
-            );
+            top_of_library_selected_permission(&state2, player, top2),
+            Some((unlimited_src, CastFrequency::Unlimited)),
+            "Unlimited permission must be selected with Unlimited frequency — never consumes a slot"
+        );
 
         // Selection only applies to the actual top card. Place a second
         // creature BELOW the top so it is in the library but not on top.
@@ -36601,10 +36682,10 @@ fn bestow_illegal_target_at_resolution_reverts_to_creature() {
     // CR 702.103e: spell resolves as a creature spell.
     let result = state.objects.get(&bestow_id).unwrap();
     assert_eq!(
-            result.zone,
-            Zone::Battlefield,
-            "CR 702.103e: bestow spell with illegal target resolves as a creature on the battlefield (NOT to graveyard)"
-        );
+        result.zone,
+        Zone::Battlefield,
+        "CR 702.103e: bestow spell with illegal target resolves as a creature on the battlefield (NOT to graveyard)"
+    );
     assert!(
         result.card_types.core_types.contains(&CoreType::Creature),
         "CR 702.103e: reverted bestow spell is a Creature"
@@ -39502,9 +39583,9 @@ fn play_from_exile_single_use_tracks_overlapping_sets_from_same_source() {
         "the consumed tracked set must no longer be castable"
     );
     assert!(
-            after.contains(&second),
-            "an overlapping grant from the same source but a different tracked set must remain castable"
-        );
+        after.contains(&second),
+        "an overlapping grant from the same source but a different tracked set must remain castable"
+    );
 }
 
 /// Add a vanilla land card into exile owned by `player`. Mirrors
@@ -40345,14 +40426,14 @@ mod flash_timing_grant_seam {
     /// through the production pipeline (parser → effect.rs::resolve → TCE).
     fn grant_teferi_flash(state: &mut GameState, controller: PlayerId, teferi: ObjectId) {
         let parsed = parse_oracle_text(
-                "Each opponent can cast spells only any time they could cast a sorcery.\n\
+            "Each opponent can cast spells only any time they could cast a sorcery.\n\
                  [+1]: Until your next turn, you may cast sorcery spells as though they had flash.\n\
                  [\u{2212}3]: Return up to one target artifact, creature, or enchantment to its owner's hand. Draw a card.",
-                "Teferi, Time Raveler",
-                &[],
-                &["Planeswalker".to_string()],
-                &["Teferi".to_string()],
-            );
+            "Teferi, Time Raveler",
+            &[],
+            &["Planeswalker".to_string()],
+            &["Teferi".to_string()],
+        );
         // abilities[0] is the +1 GenericEffect grant.
         let ability = ResolvedAbility::new(
             (*parsed.abilities[0].effect).clone(),
@@ -41109,11 +41190,13 @@ fn thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker() {
         let o = state.objects.get_mut(&goblin).unwrap();
         o.card_types.core_types.push(CoreType::Creature);
     }
-    state.attacker_declarations_this_turn = vec![state
-        .objects
-        .get(&goblin)
-        .unwrap()
-        .snapshot_for_attack_declaration(goblin)];
+    state.attacker_declarations_this_turn = vec![
+        state
+            .objects
+            .get(&goblin)
+            .unwrap()
+            .snapshot_for_attack_declaration(goblin),
+    ];
     let mut def_wrong = make_def();
     apply_cost_reduction(&state, &mut def_wrong, PlayerId(0), src);
     assert_eq!(
@@ -41171,11 +41254,13 @@ fn thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker() {
         o.card_types.core_types.push(CoreType::Artifact);
         o.card_types.subtypes.push("Spacecraft".to_string());
     }
-    state_opp.attacker_declarations_this_turn = vec![state_opp
-        .objects
-        .get(&opp_ship)
-        .unwrap()
-        .snapshot_for_attack_declaration(opp_ship)];
+    state_opp.attacker_declarations_this_turn = vec![
+        state_opp
+            .objects
+            .get(&opp_ship)
+            .unwrap()
+            .snapshot_for_attack_declaration(opp_ship),
+    ];
     let mut def_opp = make_def();
     apply_cost_reduction(&state_opp, &mut def_opp, PlayerId(0), src2);
     assert_eq!(
@@ -41225,20 +41310,22 @@ fn boom_scholar_reduces_other_permanents_exhaust_ability_cost() {
         obj.card_types
             .core_types
             .push(crate::types::card_type::CoreType::Creature);
-        obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
-            mode: crate::types::statics::CostModifyMode::Reduce,
-            keyword: "exhaust".to_string(),
-            amount: 2,
-            minimum_mana: None,
-            dynamic_count: None,
-            exemption: crate::types::statics::ActivationExemption::None,
-            activator: None,
-        })
-        .affected(TargetFilter::Typed(
-            TypedFilter::permanent()
-                .controller(ControllerRef::You)
-                .properties(vec![FilterProp::Another]),
-        ))]
+        obj.static_definitions = vec![
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: crate::types::statics::CostModifyMode::Reduce,
+                keyword: "exhaust".to_string(),
+                amount: 2,
+                minimum_mana: None,
+                dynamic_count: None,
+                exemption: crate::types::statics::ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            )),
+        ]
         .into();
     }
 
@@ -41351,16 +41438,18 @@ fn skyseer_increases_chosen_name_activated_ability_cost() {
             .push(crate::types::card_type::CoreType::Artifact);
         obj.chosen_attributes
             .push(ChosenAttribute::CardName("Targeted Source".to_string()));
-        obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
-            mode: CostModifyMode::Raise,
-            keyword: "activated".to_string(),
-            amount: 2,
-            minimum_mana: None,
-            dynamic_count: None,
-            exemption: crate::types::statics::ActivationExemption::None,
-            activator: None,
-        })
-        .affected(TargetFilter::HasChosenName)]
+        obj.static_definitions = vec![
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Raise,
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: None,
+                dynamic_count: None,
+                exemption: crate::types::statics::ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::HasChosenName),
+        ]
         .into();
     }
 
@@ -41477,18 +41566,20 @@ fn eidolon_of_obstruction_taxes_opponent_loyalty_ability() {
         let obj = state.objects.get_mut(&eidolon).unwrap();
         obj.card_types.core_types.push(CoreType::Enchantment);
         obj.card_types.core_types.push(CoreType::Creature);
-        obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
-            mode: CostModifyMode::Raise,
-            keyword: "loyalty".to_string(),
-            amount: 1,
-            minimum_mana: None,
-            dynamic_count: None,
-            exemption: crate::types::statics::ActivationExemption::None,
-            activator: None,
-        })
-        .affected(TargetFilter::Typed(
-            TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
-        ))]
+        obj.static_definitions = vec![
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Raise,
+                keyword: "loyalty".to_string(),
+                amount: 1,
+                minimum_mana: None,
+                dynamic_count: None,
+                exemption: crate::types::statics::ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
+            )),
+        ]
         .into();
     }
 
@@ -41637,20 +41728,22 @@ fn agatha_dynamic_power_reduces_controlled_creature_ability_cost() {
             .push(crate::types::card_type::CoreType::Creature);
         obj.power = Some(3);
         obj.toughness = Some(1);
-        obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
-            mode: CostModifyMode::Reduce,
-            keyword: "activated".to_string(),
-            amount: 1,
-            minimum_mana: Some(1),
-            dynamic_count: Some(QuantityRef::Power {
-                scope: ObjectScope::Source,
-            }),
-            exemption: crate::types::statics::ActivationExemption::None,
-            activator: None,
-        })
-        .affected(TargetFilter::Typed(
-            TypedFilter::creature().controller(ControllerRef::You),
-        ))]
+        obj.static_definitions = vec![
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: "activated".to_string(),
+                amount: 1,
+                minimum_mana: Some(1),
+                dynamic_count: Some(QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                }),
+                exemption: crate::types::statics::ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+        ]
         .into();
     }
 
@@ -41907,20 +42000,22 @@ fn agatha_reduced_creature_ability_activates_via_production_path() {
                 "Agatha of the Vile Cauldron".to_string(),
                 Zone::Battlefield,
             );
-            let statics = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                mode: CostModifyMode::Reduce,
-                keyword: "activated".to_string(),
-                amount: 1,
-                minimum_mana: Some(1),
-                dynamic_count: Some(QuantityRef::Power {
-                    scope: ObjectScope::Source,
-                }),
-                exemption: crate::types::statics::ActivationExemption::None,
-                activator: None,
-            })
-            .affected(TargetFilter::Typed(
-                TypedFilter::creature().controller(ControllerRef::You),
-            ))];
+            let statics = vec![
+                StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                    mode: CostModifyMode::Reduce,
+                    keyword: "activated".to_string(),
+                    amount: 1,
+                    minimum_mana: Some(1),
+                    dynamic_count: Some(QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    }),
+                    exemption: crate::types::statics::ActivationExemption::None,
+                    activator: None,
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                )),
+            ];
             let obj = state.objects.get_mut(&agatha).unwrap();
             obj.card_types
                 .core_types
@@ -42678,16 +42773,18 @@ fn firion_reduces_self_equip_ability_cost() {
             .core_types
             .push(crate::types::card_type::CoreType::Artifact);
         obj.card_types.subtypes.push("Equipment".to_string());
-        obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
-            mode: CostModifyMode::Reduce,
-            keyword: "equip".to_string(),
-            amount: 2,
-            minimum_mana: None,
-            dynamic_count: None,
-            exemption: crate::types::statics::ActivationExemption::None,
-            activator: None,
-        })
-        .affected(TargetFilter::SelfRef)]
+        obj.static_definitions = vec![
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: "equip".to_string(),
+                amount: 2,
+                minimum_mana: None,
+                dynamic_count: None,
+                exemption: crate::types::statics::ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::SelfRef),
+        ]
         .into();
     }
 

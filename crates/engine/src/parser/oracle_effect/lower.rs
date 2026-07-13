@@ -1,9 +1,9 @@
+use nom::Parser;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, verify};
 use nom::sequence::{preceded, terminated};
-use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use super::super::oracle_nom::duration::{
@@ -21,7 +21,7 @@ use super::super::oracle_target::{
     parse_anaphoric_target_ref, parse_target, parse_target_with_ctx, parse_that_clause_suffix,
     parse_type_phrase_with_ctx,
 };
-use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
+use super::super::oracle_util::{TextPair, parse_comparator_prefix, parse_count_expr, strip_after};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -1073,8 +1073,8 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
     true
 }
 
-/// CR 601.2f: Detect the "each spell cast this way costs {N} more to cast"
-/// rider sentence (Lightstall Inquisitor) and return the cost increase. This is
+/// CR 601.2f: Detect an "each/a spell cast this way costs {N} more to cast"
+/// rider sentence (Lightstall Inquisitor, Invasion of Gobakhan) and return the cost increase. This is
 /// a cost-raise scoped to spells cast via the immediately-preceding
 /// `PlayFromExile` grant ("this way" = the just-granted exile play), not a
 /// global static cost increase — so it folds into the grant's `cast_cost_raise`
@@ -1091,7 +1091,11 @@ pub(super) fn cast_cost_raise_rider(clause: &ClauseIr) -> Option<ManaCost> {
         clause.source.fragment().unwrap_or_default().trim(),
         lower.trim(),
         |i| {
-            let (i, _) = tag("each spell cast this way costs ").parse(i)?;
+            let (i, _) = alt((
+                tag("each spell cast this way costs "),
+                tag("a spell cast this way costs "),
+            ))
+            .parse(i)?;
             let (i, cost) = nom_primitives::parse_mana_cost(i)?;
             let (i, _) = tag(" more to cast").parse(i)?;
             let (i, _) = opt(tag(".")).parse(i)?;
@@ -10538,7 +10542,9 @@ mod tests {
             collect(&def, &mut effects);
 
             assert!(
-                effects.iter().any(|e| matches!(e, Effect::ExtraTurn { .. })),
+                effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::ExtraTurn { .. })),
                 "expected an ExtraTurn effect in {text:?}, got {effects:?}"
             );
             let delayed_lose = effects.iter().any(|e| {
@@ -10557,7 +10563,7 @@ mod tests {
             assert!(
                 delayed_lose,
                 "expected a delayed LoseTheGame at the extra turn's end step in {text:?}, got {effects:?}"
-                        );
+            );
         }
     }
 
@@ -11420,15 +11426,17 @@ mod token_anaphor_rewrite_tests {
     #[test]
     fn generic_effect_rewrites_outer_target_without_inner_affected_rewrite() {
         let mut effect = Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::continuous()
-                .affected(TargetFilter::Typed(TypedFilter::creature()))
-                .modifications(vec![ContinuousModification::GrantStaticAbility {
-                    definition: Box::new(
-                        StaticDefinition::continuous()
-                            .affected(TargetFilter::Typed(TypedFilter::creature()))
-                            .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
-                    ),
-                }])],
+            static_abilities: vec![
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(TypedFilter::creature()))
+                    .modifications(vec![ContinuousModification::GrantStaticAbility {
+                        definition: Box::new(
+                            StaticDefinition::continuous()
+                                .affected(TargetFilter::Typed(TypedFilter::creature()))
+                                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                        ),
+                    }]),
+            ],
             duration: None,
             target: Some(TargetFilter::ParentTarget),
         };
