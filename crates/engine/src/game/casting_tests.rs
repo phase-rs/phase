@@ -21341,6 +21341,101 @@ fn modal_kicker_declined_caps_modes_before_mode_choice() {
 }
 
 #[test]
+fn modal_kicker_skips_unpayable_kicker_before_mode_choice() {
+    let mut state = setup_game_at_main_phase();
+    let obj_id = create_kicker_modal_charm(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    let mut events = Vec::new();
+    state.waiting_for =
+        handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
+
+    match &state.waiting_for {
+        WaitingFor::ModeChoice {
+            modal,
+            pending_cast,
+            ..
+        } => {
+            assert_eq!(modal.max_choices, 1);
+            assert!(!pending_cast.ability.context.additional_cost_paid);
+            assert!(pending_cast.ability.context.kickers_paid.is_empty());
+        }
+        other => panic!("an unpayable kicker must not be offered, got {other:?}"),
+    }
+}
+
+#[test]
+fn modal_kicker_skips_only_the_unpayable_and_or_kicker() {
+    let mut state = setup_game_at_main_phase();
+    let obj_id = create_kicker_modal_charm(&mut state, PlayerId(0));
+    state.objects.get_mut(&obj_id).unwrap().additional_cost = Some(AdditionalCost::Kicker {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Green],
+                    generic: 0,
+                },
+            },
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 0,
+                },
+            },
+        ],
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+    });
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 2);
+
+    let mut events = Vec::new();
+    state.waiting_for =
+        handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
+
+    match &state.waiting_for {
+        WaitingFor::OptionalCostChoice {
+            cost: AdditionalCost::Kicker { costs, .. },
+            pending_cast,
+            ..
+        } => {
+            assert_eq!(
+                costs,
+                &vec![AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::Red],
+                        generic: 0,
+                    },
+                }]
+            );
+            assert_eq!(pending_cast.declined_kickers, vec![KickerVariant::First]);
+            assert!(pending_cast.ability.context.kickers_paid.is_empty());
+        }
+        other => panic!("the payable second kicker must remain available, got {other:?}"),
+    }
+}
+
+#[test]
+fn kicked_spell_reducer_makes_kicker_offerable() {
+    let mut state = setup_game_at_main_phase();
+    let obj_id = create_kicker_modal_charm(&mut state, PlayerId(0));
+    state.objects.get_mut(&obj_id).unwrap().mana_cost = ManaCost::generic(1);
+    install_first_kicked_spell_reducer(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+
+    let mut events = Vec::new();
+    state.waiting_for =
+        handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
+
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::OptionalCostChoice {
+            cost: AdditionalCost::Kicker { .. },
+            ..
+        }
+    ));
+    assert!(state.pending_cast.is_none());
+}
+
+#[test]
 fn modal_kicker_paid_allows_extra_modes_and_reaches_stack_context() {
     let mut state = setup_game_at_main_phase();
     let obj_id = create_kicker_modal_charm(&mut state, PlayerId(0));
@@ -21766,6 +21861,7 @@ fn kicker_instead_target_declines_before_base_target_selection() {
     let mut state = setup_game_at_main_phase();
     let (spell_id, artifact_id, _) = create_kicker_instead_target_spell(&mut state);
     add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+    add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
 
     let mut events = Vec::new();

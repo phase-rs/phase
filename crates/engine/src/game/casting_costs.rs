@@ -787,6 +787,46 @@ fn next_kicker_option(
     None
 }
 
+fn next_offerable_kicker_option(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+) -> Result<
+    Option<(
+        KickerVariant,
+        AbilityCost,
+        crate::types::ability::AdditionalCostRepeatability,
+    )>,
+    EngineError,
+> {
+    loop {
+        let Some((variant, cost, repeatability)) = next_kicker_option(state, player, pending) else {
+            return Ok(None);
+        };
+        // CR 601.2f + CR 702.33a: a kicker can only be chosen when the
+        // resulting total cost is payable. Preview the kicked state so reducers
+        // such as Vine Gecko participate, and skip an unavailable and/or
+        // kicker so a later, payable kicker remains selectable.
+        let mut preview = pending.clone();
+        preview.ability.context.additional_cost_paid = true;
+        preview.ability.context.kickers_paid.push(variant);
+        let prior_pending = state.pending_cast.replace(Box::new(preview));
+        let offerable =
+            additional_cost_declaration_is_offerable(state, player, pending, cost.clone());
+        state.pending_cast = prior_pending;
+        if offerable? {
+            return Ok(Some((variant, cost, repeatability)));
+        }
+        if repeatability.is_repeatable() {
+            pending.additional_cost_flow = None;
+            return Ok(None);
+        }
+        if !pending.declined_kickers.contains(&variant) {
+            pending.declined_kickers.push(variant);
+        }
+    }
+}
+
 fn handle_decide_repeatable_additional_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -969,7 +1009,7 @@ fn finish_pending_cost_or_cast(
     ) {
         if pending.deferred_target_selection {
             if let Some((_, current_cost, repeatability)) =
-                next_kicker_option(state, player, &pending)
+                next_offerable_kicker_option(state, player, &mut pending)?
             {
                 // CR 702.33c/d: present the live Kicker cost (not a laundered
                 // Optional) so the frontend can render a kicker-aware modal and
@@ -992,7 +1032,8 @@ fn finish_pending_cost_or_cast(
                 return pay_additional_cost(state, player, cost, pending, events);
             }
         }
-        if let Some((_, current_cost, repeatability)) = next_kicker_option(state, player, &pending)
+        if let Some((_, current_cost, repeatability)) =
+            next_offerable_kicker_option(state, player, &mut pending)?
         {
             // CR 702.33c/d: present the live Kicker cost (not a laundered Optional)
             // so the frontend renders the kicker re-prompt with the running kick count.
@@ -18539,21 +18580,12 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
             .act(GameAction::DecideOptionalCost { pay: true })
             .expect("second kick must be accepted");
 
-        // Re-prompt after two kicks.
-        match runner.state().waiting_for.clone() {
-            WaitingFor::OptionalCostChoice {
-                cost, times_kicked, ..
-            } => {
-                assert!(matches!(cost, AdditionalCost::Kicker { .. }));
-                assert_eq!(times_kicked, 2, "times_kicked must be 2 after two kicks");
-            }
-            other => panic!("expected OptionalCostChoice re-prompt, got {other:?}"),
-        }
-
-        // Decline ("Done") — finish casting; spell resolves.
-        runner
-            .act(GameAction::DecideOptionalCost { pay: false })
-            .expect("declining further kicks must finish the cast");
+        // CR 601.2f: all four mana are committed, so a third kick is not
+        // offerable. The cast must finish without an impossible re-prompt.
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
         runner.advance_until_stack_empty();
 
         assert_eq!(
@@ -18800,7 +18832,7 @@ Flashback {5}{U}{U}";
     fn declined_kicker_completes_cast_with_zero_counters() {
         use crate::types::GameAction;
         let (mut runner, spell_id, card_id) = everflowing_chalice_scenario();
-        // {0} base cost — no extra mana needed.
+        fund_colorless(&mut runner, 2); // Make the first kicker legally offerable.
 
         runner
             .act(GameAction::CastSpell {
@@ -19321,6 +19353,7 @@ its replicate cost was paid.)\nDraw a card.";
     fn cancel_cast_at_first_kicker_prompt_aborts_the_cast() {
         use crate::types::GameAction;
         let (mut runner, spell_id, card_id) = everflowing_chalice_scenario();
+        fund_colorless(&mut runner, 2); // Make the first kicker legally offerable.
 
         runner
             .act(GameAction::CastSpell {
