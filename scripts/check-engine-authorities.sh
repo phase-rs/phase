@@ -157,13 +157,24 @@ fi
 # producers is frozen here. The corpus half of this census needs the generated
 # card-data and therefore runs in the card-data CI job, not this one.
 #
-# SCOPE: three crates — engine, engine-wasm, mtgish-import — of a 13-crate
-# workspace. NOT full-tree, and previously mislabelled as such. The historical
-# blocker (no raw-string branch in `strip_noncode`, which made a workspace-wide
-# scan die on crates/draft-wasm/src/suggest.rs:437) was fixed in #5704; the
-# scope has simply not been widened yet. Widening it changes this gate's frozen
-# producer population, so it is its own unit with its own baseline review — not
-# a drive-by.
+# SCOPE: the whole cargo workspace — every `crates/*/src`, 13 crates today,
+# globbed rather than enumerated so crate #14 is in scope the day it lands. This
+# was 3 hand-named crates until the raw-string branch in `strip_noncode` (#5704)
+# lifted the scanner ceiling a workspace-wide scan used to hit (`CensusError:
+# crates/draft-wasm/src/suggest.rs:437: brace tracking desynced`).
+#
+# Widening surfaced ZERO new producers: `ReplacementEvent::Draw` occurs in exactly
+# two crates (engine, mtgish-import). The other ten are not producer-free merely by
+# assumption — phase-ai builds `ReplacementDefinition`s with the same constructor
+# and struct-literal idioms this census matches, just never with `Draw`. So the
+# frozen population is unchanged at 7 rows, and now covers the surface it always
+# claimed to.
+#
+# Outside the workspace, and NOT scanned: `client/src-tauri` and
+# `lobby-worker/broker-wasm` (Cargo `exclude`; 4 `.rs` files, zero mentions of
+# `ReplacementEvent`). `client/src-tauri` also grows a gitignored `target/` on any
+# local Tauri build, which an rglob would descend into — making the scanned
+# population depend on whether a developer had run one.
 if ! python3 "$(dirname "$0")/draw_replacement_census.py" --producers --check; then
     FAIL=1
 fi
