@@ -1213,6 +1213,23 @@ fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerI
             record,
             ..
         } => can_view_private_for_player(record.owner),
+        // CR 702.143a: foretell exiles a hand card face down. The zone-change
+        // record snapshots its real name, so it is visible only to a viewer
+        // who may look at that face-down exiled card.
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Hand),
+            to: Zone::Exile,
+            ..
+        } => state.objects.get(object_id).is_none_or(|obj| {
+            !obj.face_down
+                || face_down_exile_visible_to_viewer(
+                    state,
+                    *object_id,
+                    obj,
+                    &can_view_private_for_player,
+                )
+        }),
         _ => true,
     }
 }
@@ -1995,6 +2012,50 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn foretold_hand_to_exile_zone_change_is_hidden_from_opponent_and_spectator() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(1);
+        let foretold = create_object(
+            &mut state,
+            CardId(704),
+            owner,
+            "Secret Foretell".to_string(),
+            Zone::Exile,
+        );
+        let obj = state.objects.get_mut(&foretold).unwrap();
+        obj.foretold = true;
+        obj.face_down = true;
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            foretold,
+            Some(Zone::Hand),
+            Zone::Exile,
+        );
+        record.name = "Secret Foretell".to_string();
+        record.owner = owner;
+        let events = vec![
+            GameEvent::ZoneChanged {
+                object_id: foretold,
+                from: Some(Zone::Hand),
+                to: Zone::Exile,
+                record: Box::new(record),
+            },
+            GameEvent::Foretold {
+                player_id: owner,
+                object_id: foretold,
+            },
+        ];
+
+        assert_eq!(filter_events_for_viewer(&events, &state, owner), events);
+        for viewer in [PlayerId(0), PlayerId(u8::MAX)] {
+            let visible = filter_events_for_viewer(&events, &state, viewer);
+            assert!(matches!(
+                visible.as_slice(),
+                [GameEvent::Foretold { object_id, .. }] if *object_id == foretold
+            ));
+        }
     }
 
     #[test]

@@ -898,15 +898,10 @@ fn foretell_special_action_exiles_and_grants_later_turn_permission() {
     let mut state = setup_game_at_main_phase();
     let object_id = add_foretell_sorcery(&mut state);
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+    let mut events = Vec::new();
 
-    let waiting = handle_foretell(
-        &mut state,
-        PlayerId(0),
-        object_id,
-        CardId(143),
-        &mut Vec::new(),
-    )
-    .unwrap();
+    let waiting =
+        handle_foretell(&mut state, PlayerId(0), object_id, CardId(143), &mut events).unwrap();
 
     assert_eq!(
         waiting,
@@ -925,6 +920,17 @@ fn foretell_special_action_exiles_and_grants_later_turn_permission() {
         [CastingPermission::Foretold { cost, turn_foretold }]
             if *cost == foretell_test_cost() && *turn_foretold == state.turn_number
     ));
+    let opponent_events =
+        crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(1));
+    assert!(opponent_events.iter().all(|event| !matches!(
+        event,
+        GameEvent::ZoneChanged {
+            object_id: moved,
+            from: Some(Zone::Hand),
+            to: Zone::Exile,
+            ..
+        } if *moved == object_id
+    )));
 }
 
 #[test]
