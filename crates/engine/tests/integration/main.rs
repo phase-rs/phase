@@ -686,6 +686,7 @@ mod tobita_master_of_winds_flying_grant;
 mod tombstone_stairwell_per_player_tokens;
 mod top_of_library_mixed_permission;
 mod total_war_attacking_player_scope;
+mod tracked_set_anaphor_quantity_binds;
 mod treasured_find_regression;
 mod trespassers_curse_enchanted_player_trigger;
 mod true_conviction_double_keyword_grant;
