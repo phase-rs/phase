@@ -3420,7 +3420,7 @@ impl TrustedGameStateEnvelope {
 #[serde(untagged)]
 pub enum PersistedGameState {
     Raw(GameState),
-    Trusted(TrustedGameStateEnvelope),
+    Trusted(Box<TrustedGameStateEnvelope>),
 }
 
 impl<'de> Deserialize<'de> for PersistedGameState {
@@ -3431,7 +3431,7 @@ impl<'de> Deserialize<'de> for PersistedGameState {
         let value = serde_json::Value::deserialize(deserializer)?;
         if value.get("state").is_some() {
             serde_json::from_value(value)
-                .map(Self::Trusted)
+                .map(|envelope| Self::Trusted(Box::new(envelope)))
                 .map_err(serde::de::Error::custom)
         } else {
             serde_json::from_value(value)
@@ -3444,7 +3444,7 @@ impl<'de> Deserialize<'de> for PersistedGameState {
 impl PersistedGameState {
     /// Captures a current trusted snapshot for a persistence boundary.
     pub fn capture(state: GameState) -> Self {
-        Self::Trusted(TrustedGameStateEnvelope::capture(state))
+        Self::Trusted(Box::new(TrustedGameStateEnvelope::capture(state)))
     }
 
     /// Restores the persisted form through the appropriate trust boundary.
@@ -3455,7 +3455,7 @@ impl PersistedGameState {
                 crate::game::precast_copy_shortcut::normalize_untrusted_restore(&mut state);
                 state
             }
-            Self::Trusted(envelope) => envelope.into_game_state(),
+            Self::Trusted(envelope) => (*envelope).into_game_state(),
         }
     }
 }
