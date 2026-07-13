@@ -27,32 +27,35 @@ use super::{engine::EngineError, turn_control};
 const COPY_COUNT: usize = 3;
 const REPLAY_STEP_CAP: usize = 256;
 
-/// Intercept the first semantic priority window after cast triggers have been
-/// placed. The caller supplies that semantic window rather than deriving it
-/// from `priority_player`, which may be an authorized submitter under turn
-/// control rather than the caster's priority seat.
-pub(super) fn maybe_offer(state: &mut GameState, outgoing: WaitingFor) -> WaitingFor {
-    let WaitingFor::Priority { player: caster } = outgoing else {
+/// Intercept a post-cast-trigger priority window. `outgoing` remains the
+/// ordinary priority result; `caster` is the semantic caster whose exact route
+/// may be offered even when normal priority belongs to the active player.
+pub(super) fn maybe_offer_after_cast_triggers(
+    state: &mut GameState,
+    caster: PlayerId,
+    outgoing: WaitingFor,
+) -> WaitingFor {
+    if !matches!(outgoing, WaitingFor::Priority { .. }) {
         return outgoing;
-    };
+    }
     if state.format_config.topology().has_shared_team_turns()
         || state.precast_shortcut_runtime.materializing
         || state.precast_shortcut_runtime.offer.is_some()
     {
-        return WaitingFor::Priority { player: caster };
+        return outgoing;
     }
 
     let Some(spell_id) = eligible_chain_spell(state, caster) else {
-        return WaitingFor::Priority { player: caster };
+        return outgoing;
     };
     if state.precast_shortcut_runtime.suppressed_cast == Some(spell_id) {
-        return WaitingFor::Priority { player: caster };
+        return outgoing;
     }
     if !has_fixed_magecraft_observer(state, caster) {
-        return WaitingFor::Priority { player: caster };
+        return outgoing;
     }
     if !preflight_route(state, caster, spell_id) {
-        return WaitingFor::Priority { player: caster };
+        return outgoing;
     }
 
     let responders: Vec<PlayerId> = crate::game::players::apnap_order_from(
@@ -237,7 +240,8 @@ pub fn rekey_after_trusted_restore(state: &mut GameState) {
         .max(1);
     state.precast_shortcut_runtime.must_diverge = None;
     if let Some(caster) = reoffer_from {
-        state.waiting_for = maybe_offer(state, priority_for(caster));
+        let waiting_for = maybe_offer_after_cast_triggers(state, caster, priority_for(caster));
+        crate::game::public_state::sync_waiting_for(state, &waiting_for);
     }
 }
 
@@ -250,7 +254,7 @@ pub fn normalize_untrusted_restore(state: &mut GameState) {
         _ => None,
     };
     if let Some(player) = semantic_owner {
-        state.waiting_for = priority_for(player);
+        crate::game::public_state::sync_waiting_for(state, &priority_for(player));
     }
     state.precast_shortcut_runtime = Default::default();
 }
@@ -362,8 +366,7 @@ fn preflight_route(
     trial.precast_shortcut_runtime.materializing = true;
     trial.precast_shortcut_runtime.offer = None;
     trial.precast_shortcut_runtime.suppressed_cast = Some(spell_id);
-    trial.waiting_for = priority_for(caster);
-    trial.priority_player = caster;
+    crate::game::public_state::sync_waiting_for(&mut trial, &priority_for(caster));
     let offer = PrecastShortcutOfferRuntime {
         caster,
         spell_id,
@@ -585,8 +588,7 @@ fn materialize(
     work.precast_shortcut_runtime.materializing = true;
     work.precast_shortcut_runtime.offer = None;
     work.precast_shortcut_runtime.suppressed_cast = Some(offer.spell_id);
-    work.waiting_for = priority_for(offer.caster);
-    work.priority_player = offer.caster;
+    crate::game::public_state::sync_waiting_for(&mut work, &priority_for(offer.caster));
 
     if let Some(breakpoint) = shortened {
         replay_prefix(&mut work, offer, &breakpoint, events)?;

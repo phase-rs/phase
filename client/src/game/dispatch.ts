@@ -327,8 +327,8 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     }
   }
   const newState = snapshotResult.state;
-  const { gameId, adapter } = useGameStore.getState();
-  if (gameId && adapter) void saveAuthoritativeGame(gameId, adapter, newState);
+  const { gameId } = useGameStore.getState();
+  if (gameId) void saveAuthoritativeGame(gameId, adapter, newState);
 
   // 3c. Feed the throughput tracker: count stack entries that left the stack
   //     this action (resolved, countered, or otherwise removed), id-diffed so a

@@ -3419,24 +3419,25 @@ impl TrustedGameStateEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PersistedGameState {
-    Trusted(TrustedGameStateEnvelope),
-    Raw(GameState),
+    Raw(Box<GameState>),
+    Trusted(Box<TrustedGameStateEnvelope>),
 }
 
 impl PersistedGameState {
     /// Captures a current trusted snapshot for a persistence boundary.
     pub fn capture(state: GameState) -> Self {
-        Self::Trusted(TrustedGameStateEnvelope::capture(state))
+        Self::Trusted(Box::new(TrustedGameStateEnvelope::capture(state)))
     }
 
     /// Restores the persisted form through the appropriate trust boundary.
     pub fn into_game_state(self) -> GameState {
         match self {
-            Self::Trusted(envelope) => envelope.into_game_state(),
-            Self::Raw(mut state) => {
+            Self::Raw(state) => {
+                let mut state = *state;
                 crate::game::precast_copy_shortcut::normalize_untrusted_restore(&mut state);
                 state
             }
+            Self::Trusted(envelope) => (*envelope).into_game_state(),
         }
     }
 }

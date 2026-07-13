@@ -167,14 +167,11 @@ fn assert_ordinary_priority_without_offer(runner: &mut GameRunner, chain: Object
 fn assert_noncanonical_chain_is_not_offered(mutator: impl FnOnce(&mut ResolvedAbility)) {
     let (mut runner, chain, _) = setup_shortcut(2);
     cast_to_target_selection(&mut runner, chain);
-    mutator(
-        &mut runner
-            .state_mut()
-            .pending_cast
-            .as_mut()
-            .expect("target selection retains the announced spell")
-            .ability,
-    );
+    let WaitingFor::TargetSelection { pending_cast, .. } = &mut runner.state_mut().waiting_for
+    else {
+        panic!("target selection retains the announced spell");
+    };
+    mutator(&mut pending_cast.ability);
     runner
         .act(GameAction::ChooseTarget {
             target: Some(TargetRef::Player(P0)),
