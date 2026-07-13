@@ -10,6 +10,7 @@ use crate::types::card::CardFace;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use rand::Rng;
 
@@ -44,14 +45,45 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (cards, destination, tapped, library_position) = match &ability.effect {
+    let (cards, destination, tapped, library_position, library_players) = match &ability.effect {
         Effect::Conjure {
             cards,
             destination,
             tapped,
             library_position,
-        } => (cards, *destination, *tapped, library_position.clone()),
+            library_players,
+        } => (
+            cards,
+            *destination,
+            *tapped,
+            library_position.clone(),
+            library_players.clone(),
+        ),
         _ => return Ok(()),
+    };
+
+    // Which players' libraries receive the conjured cards. `None` (every conjure
+    // except the Alchemy "each player's library" fan-out) is the controller only,
+    // preserving the historical single-recipient behavior. `Some(PlayerFilter)`
+    // expands to each affected player, so a card conjured "into … each player's
+    // library" lands one independent copy in every player's own library, owned by
+    // that player (Sandcloud Harbinger). Non-eliminated players only (CR 104.3a).
+    let recipients: Vec<PlayerId> = match &library_players {
+        None => vec![ability.controller],
+        Some(scope) => state
+            .players
+            .iter()
+            .map(|p| p.id)
+            .filter(|&pid| {
+                crate::game::effects::matches_player_scope(
+                    state,
+                    pid,
+                    scope,
+                    ability.controller,
+                    ability.source_id,
+                )
+            })
+            .collect(),
     };
 
     for conjure_card in cards {
@@ -89,104 +121,122 @@ pub fn resolve(
             ConjuredIdentity::Duplicate(values) => values.name.clone(),
         };
 
-        for _ in 0..count {
-            let obj_id = zones::create_object(
-                state,
-                CardId(0),
-                ability.controller,
-                card_name.clone(),
-                destination,
-            );
+        // One independent copy per affected player, each in that player's own
+        // library. For the single-recipient default (`recipients == [controller]`)
+        // this is exactly the historical behavior.
+        for &recipient in &recipients {
+            for _ in 0..count {
+                let obj_id = zones::create_object(
+                    state,
+                    CardId(0),
+                    recipient,
+                    card_name.clone(),
+                    destination,
+                );
 
-            // `create_object` appends a library-bound card to the bottom. When the
-            // conjure carries a positional constraint (the Alchemy "into the top N
-            // cards … at random" arm), move it to the resolved slot instead.
-            if destination == Zone::Library {
-                if let Some(position) = &library_position {
-                    reposition_conjured_in_library(state, ability, obj_id, position);
-                }
-            }
-
-            // CR 613.7d: an object receives a timestamp when it enters a zone.
-            // Stage 2 stamps battlefield entries only, so only draw one when the
-            // conjured card lands on the battlefield. Drawn before the `get_mut`
-            // borrow (`next_timestamp` takes `&mut self`).
-            let entry_timestamp =
-                (destination == Zone::Battlefield).then(|| state.next_timestamp());
-
-            if let Some(obj) = state.objects.get_mut(&obj_id) {
-                // Conjured cards are real cards, not tokens.
-                obj.is_token = false;
-
-                // Apply full card characteristics: the printed face for a named
-                // conjure, or the referenced card's copiable values (CR 707.2) for
-                // a duplicate conjure.
-                match &identity {
-                    ConjuredIdentity::Named {
-                        face: Some(face), ..
-                    } => apply_card_face_to_object(obj, face),
-                    ConjuredIdentity::Named { face: None, .. } => {}
-                    ConjuredIdentity::Duplicate(values) => apply_copiable_values(obj, values),
-                }
-
-                if destination == Zone::Battlefield {
-                    // CR 302.6: A creature entering the battlefield has summoning
-                    // sickness unless its controller has controlled it continuously
-                    // since their most recent turn began. A conjured permanent is a
-                    // brand-new object, so it must run the same entry reset (summoning
-                    // sickness, marked damage, per-turn activation flags) as any other
-                    // battlefield entry — otherwise a conjured creature could attack or
-                    // tap for {T} costs the turn it appears. Delegate to the single
-                    // authority rather than setting flags ad hoc.
-                    obj.reset_for_battlefield_entry(
-                        state.turn_number,
-                        entry_timestamp.expect("battlefield entry draws a timestamp"),
-                    );
-
-                    // Apply tapped state for "onto the battlefield tapped" patterns.
-                    if tapped {
-                        obj.tapped = true;
+                // `create_object` appends a library-bound card to the bottom. When
+                // the conjure carries a positional constraint (the Alchemy "into the
+                // top N cards … at random" arm), move it to the resolved slot within
+                // this recipient's library instead.
+                if destination == Zone::Library {
+                    if let Some(position) = &library_position {
+                        reposition_conjured_in_library(state, ability, recipient, obj_id, position);
                     }
                 }
-            }
 
-            // Record battlefield entry for restriction tracking.
-            if destination == Zone::Battlefield {
-                crate::game::restrictions::record_battlefield_entry(state, obj_id);
-                // Battlefield entry: incremental re-derive candidate for this
-                // conjured object (escalates to Full if it sources effects/etc.).
-                crate::game::layers::mark_layers_entered(state, obj_id);
+                // CR 613.7d: an object receives a timestamp when it enters a zone.
+                // Stage 2 stamps battlefield entries only, so only draw one when the
+                // conjured card lands on the battlefield. Drawn before the `get_mut`
+                // borrow (`next_timestamp` takes `&mut self`).
+                let entry_timestamp =
+                    (destination == Zone::Battlefield).then(|| state.next_timestamp());
 
-                // CR 603.6a: Conjuring places a card from outside the game
-                // directly onto the battlefield — a zone change from `None`.
-                // Emit `ZoneChanged { from: None, to: Battlefield }` (in addition to
-                // `ObjectConjured`, which animation/logging consumers still read) so
-                // every enters-the-battlefield triggered ability fires through the
-                // same matcher path used for normal entries and token creation
-                // (e.g. Verdant Dread's "another Verdant Dread enters" manifest-dread
-                // trigger, Soul Warden, Panharmonicon). Without this the conjured
-                // permanent enters silently and no ETB ability ever triggers.
-                let zone_change_record = state
-                    .objects
-                    .get(&obj_id)
-                    .expect("conjured object was just created")
-                    .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
-                state
-                    .zone_changes_this_turn
-                    .push(zone_change_record.clone());
-                events.push(GameEvent::ZoneChanged {
+                if let Some(obj) = state.objects.get_mut(&obj_id) {
+                    // Conjured cards are real cards, not tokens.
+                    obj.is_token = false;
+
+                    // Apply full card characteristics: the printed face for a named
+                    // conjure, or the referenced card's copiable values (CR 707.2) for
+                    // a duplicate conjure.
+                    match &identity {
+                        ConjuredIdentity::Named {
+                            face: Some(face), ..
+                        } => apply_card_face_to_object(obj, face),
+                        ConjuredIdentity::Named { face: None, .. } => {}
+                        ConjuredIdentity::Duplicate(values) => apply_copiable_values(obj, values),
+                    }
+
+                    if destination == Zone::Battlefield {
+                        // CR 302.6: A creature entering the battlefield has summoning
+                        // sickness unless its controller has controlled it continuously
+                        // since their most recent turn began. A conjured permanent is a
+                        // brand-new object, so it must run the same entry reset (summoning
+                        // sickness, marked damage, per-turn activation flags) as any other
+                        // battlefield entry — otherwise a conjured creature could attack or
+                        // tap for {T} costs the turn it appears. Delegate to the single
+                        // authority rather than setting flags ad hoc.
+                        obj.reset_for_battlefield_entry(
+                            state.turn_number,
+                            entry_timestamp.expect("battlefield entry draws a timestamp"),
+                        );
+
+                        // Apply tapped state for "onto the battlefield tapped" patterns.
+                        if tapped {
+                            obj.tapped = true;
+                        }
+                    }
+                }
+
+                // Record battlefield entry for restriction tracking.
+                if destination == Zone::Battlefield {
+                    crate::game::restrictions::record_battlefield_entry(state, obj_id);
+                    // Battlefield entry: incremental re-derive candidate for this
+                    // conjured object (escalates to Full if it sources effects/etc.).
+                    crate::game::layers::mark_layers_entered(state, obj_id);
+
+                    // CR 603.6a: Conjuring places a card from outside the game
+                    // directly onto the battlefield — a zone change from `None`.
+                    // Emit `ZoneChanged { from: None, to: Battlefield }` (in addition to
+                    // `ObjectConjured`, which animation/logging consumers still read) so
+                    // every enters-the-battlefield triggered ability fires through the
+                    // same matcher path used for normal entries and token creation
+                    // (e.g. Verdant Dread's "another Verdant Dread enters" manifest-dread
+                    // trigger, Soul Warden, Panharmonicon). Without this the conjured
+                    // permanent enters silently and no ETB ability ever triggers.
+                    let zone_change_record = state
+                        .objects
+                        .get(&obj_id)
+                        .expect("conjured object was just created")
+                        .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
+                    state
+                        .zone_changes_this_turn
+                        .push(zone_change_record.clone());
+                    events.push(GameEvent::ZoneChanged {
+                        object_id: obj_id,
+                        from: None,
+                        to: Zone::Battlefield,
+                        record: Box::new(zone_change_record),
+                    });
+                }
+
+                events.push(GameEvent::ObjectConjured {
                     object_id: obj_id,
-                    from: None,
-                    to: Zone::Battlefield,
-                    record: Box::new(zone_change_record),
+                    name: card_name.clone(),
                 });
             }
-
-            events.push(GameEvent::ObjectConjured {
-                object_id: obj_id,
-                name: card_name.clone(),
-            });
         }
+    }
+
+    // A library reorder can change which card is on top of a library. If any
+    // active continuous static is gated on the top card of a library (CR 611.3a:
+    // a `TopOfLibraryMatches` ability such as Vampire Nocturnus, "as long as the
+    // top card of your library is black …"), invalidate the cached layer
+    // derivation so it re-evaluates against the new top — the same invalidation
+    // seam every other top-of-library mutation (draw, mill, shuffle, put-on-top)
+    // routes through. Only the positional-library conjure reorders; other
+    // destinations append and never disturb an existing top card.
+    if destination == Zone::Library && library_position.is_some() {
+        crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -212,18 +262,21 @@ fn resolve_duplicate_reference(
     object_ids.into_iter().next()
 }
 
-/// Reposition a just-conjured card within its owner's library. `create_object`
-/// appended it to the bottom; this moves it to the slot named by `position`.
-/// Only `RandomWithinTop` is produced by the parser today (the Alchemy "into the
-/// top N cards … at random" conjure); the other positions are honored for
-/// completeness so the field composes with any future positional conjure.
+/// Reposition a just-conjured card within `owner`'s library. `create_object`
+/// appended it to the bottom of that player's library; this moves it to the slot
+/// named by `position`. `owner` is the recipient player (the controller for "your
+/// library", or each affected player for the "each player's library" fan-out),
+/// not necessarily the ability's controller. Only `RandomWithinTop` is produced
+/// by the parser today (the Alchemy "into the top N cards … at random" conjure);
+/// the other positions are honored for completeness so the field composes with
+/// any future positional conjure.
 fn reposition_conjured_in_library(
     state: &mut GameState,
     ability: &ResolvedAbility,
+    owner: PlayerId,
     object_id: ObjectId,
     position: &LibraryPosition,
 ) {
-    let owner = ability.controller;
     // Library length excluding the just-appended conjured card, so index math and
     // the random range treat the card as being *inserted* among the existing ones.
     let existing_len = state
@@ -309,6 +362,7 @@ mod tests {
                     library_position: Some(LibraryPosition::RandomWithinTop {
                         n: QuantityExpr::Fixed { value: 5 },
                     }),
+                    library_players: None,
                 },
                 vec![],
                 ObjectId(99),
@@ -352,6 +406,7 @@ mod tests {
                 destination: Zone::Battlefield,
                 tapped: false,
                 library_position: None,
+                library_players: None,
             },
             vec![],
             ObjectId(99),
@@ -420,6 +475,7 @@ mod tests {
                 destination: Zone::Hand,
                 tapped: false,
                 library_position: None,
+                library_players: None,
             },
             vec![TargetRef::Object(referenced)],
             ObjectId(99),
@@ -453,6 +509,178 @@ mod tests {
         assert!(
             !conjured.is_token,
             "conjured cards are real cards, not tokens"
+        );
+    }
+
+    /// Issue #5614 (re-review blocker): "conjure N cards … into the top ten cards
+    /// of EACH player's library at random" (Sandcloud Harbinger) must fan out — one
+    /// independent copy in EVERY player's own library, owned by that player — not
+    /// pile all copies into the controller's library. Asserts each of the two
+    /// players' libraries gains all three copies, owned by and placed among the top
+    /// of that player's own library. Collapsing the scope to the controller (the
+    /// pre-fix behavior) leaves player 1's library empty and fails this test.
+    #[test]
+    fn conjure_each_players_library_fans_out_to_every_player() {
+        use crate::types::ability::{LibraryPosition, PlayerFilter};
+
+        let mut state = GameState::new_two_player(7);
+
+        // Give each player a sizable library so "top ten" is a genuine constraint.
+        for pid in [PlayerId(0), PlayerId(1)] {
+            for i in 0..15 {
+                crate::game::zones::create_object(
+                    &mut state,
+                    CardId(0),
+                    pid,
+                    format!("Filler {i}"),
+                    Zone::Library,
+                );
+            }
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::Conjure {
+                cards: vec![ConjureCard {
+                    source: ConjureSource::Named {
+                        name: "Sunscorched Desert".to_string(),
+                    },
+                    count: QuantityExpr::Fixed { value: 3 },
+                }],
+                destination: Zone::Library,
+                tapped: false,
+                library_position: Some(LibraryPosition::RandomWithinTop {
+                    n: QuantityExpr::Fixed { value: 10 },
+                }),
+                library_players: Some(PlayerFilter::All),
+            },
+            vec![],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        for pid in [PlayerId(0), PlayerId(1)] {
+            let player = state.players.iter().find(|p| p.id == pid).unwrap();
+            let conjured: Vec<ObjectId> = player
+                .library
+                .iter()
+                .copied()
+                .filter(|id| state.objects[id].name == "Sunscorched Desert")
+                .collect();
+            assert_eq!(
+                conjured.len(),
+                3,
+                "each player's library must receive all three conjured copies (player {pid:?})"
+            );
+            for id in &conjured {
+                assert_eq!(
+                    state.objects[id].owner, pid,
+                    "conjured copy must be owned by the recipient player, not the controller"
+                );
+                let index = player.library.iter().position(|x| x == id).unwrap();
+                assert!(
+                    index < 10,
+                    "conjured copy must land among the recipient's top ten, got index {index}"
+                );
+            }
+        }
+    }
+
+    /// Issue #5614 (re-review blocker): repositioning a just-conjured card to the
+    /// top of a library (RandomWithinTop with n=1 forces index 0) must route through
+    /// the shared top-of-library invalidation seam
+    /// (`mark_layers_full_if_top_of_library_static_live`) so a live
+    /// `TopOfLibraryMatches` static (Vampire Nocturnus class) re-evaluates against
+    /// the new top card. Without the seam a cached layer derivation retains the stale
+    /// former top. PRODUCTION PATH: runs the real conjure resolver with NO manual
+    /// `mark_full`, then asserts the conjured card is on top AND layers were dirtied.
+    /// Removing the invalidation call leaves `layers_dirty` clean and fails here.
+    #[test]
+    fn conjure_to_top_of_library_reevaluates_top_of_library_static() {
+        use crate::types::ability::{
+            ContinuousModification, StaticCondition, StaticDefinition, TypeFilter, TypedFilter,
+        };
+        use crate::types::keywords::Keyword;
+        use crate::types::statics::StaticMode;
+        use std::sync::Arc;
+
+        let mut state = GameState::new_two_player(1);
+
+        // A battlefield source carrying a continuous static gated on the top card of
+        // a library (the `TopOfLibraryMatches` class the seam protects).
+        let top_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }])
+            .condition(StaticCondition::TopOfLibraryMatches {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            });
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Nocturnus".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&source).unwrap();
+            o.static_definitions.push(top_static.clone());
+            o.base_static_definitions = Arc::new(vec![top_static]);
+        }
+
+        // Existing library cards, so conjuring to index 0 is a genuine reorder to the
+        // top over a non-empty library.
+        for i in 0..5 {
+            crate::game::zones::create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                format!("Filler {i}"),
+                Zone::Library,
+            );
+        }
+
+        // Clean the layer cache so ONLY the conjure's invalidation can re-dirty it.
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+
+        // n=1 clamps the random range to `0..1`, so the conjured card is placed at
+        // the top deterministically — the case that changes the library-top card.
+        let ability = ResolvedAbility::new(
+            Effect::Conjure {
+                cards: vec![ConjureCard {
+                    source: ConjureSource::Named {
+                        name: "Conjured Top".to_string(),
+                    },
+                    count: QuantityExpr::Fixed { value: 1 },
+                }],
+                destination: Zone::Library,
+                tapped: false,
+                library_position: Some(LibraryPosition::RandomWithinTop {
+                    n: QuantityExpr::Fixed { value: 1 },
+                }),
+                library_players: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[0]
+                .library
+                .front()
+                .and_then(|id| state.objects.get(id))
+                .map(|o| o.name.as_str()),
+            Some("Conjured Top"),
+            "n=1 must place the conjured card on top of the library"
+        );
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "a live TopOfLibraryMatches static must re-evaluate after a conjure reorders the library top"
         );
     }
 }

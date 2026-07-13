@@ -4741,6 +4741,7 @@ fn rw_effect(
             destination,
             tapped: _,
             library_position: _,
+            library_players: _,
         } => {
             let mut p = RwProfile::empty();
             p.writes_external.set(StateKind::SetMembership);

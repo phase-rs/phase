@@ -123,6 +123,7 @@ pub fn complete_draft(
             destination,
             tapped,
             library_position: None,
+            library_players: None,
         },
         Vec::new(),
         source_id,

@@ -9002,7 +9002,8 @@ fn try_parse_conjure_from_spellbook(tp: TextPair) -> Option<Effect> {
     // battlefield. `DraftFromSpellbook` has no positional slot, so an "into the top
     // N … at random" position is not carried (its `random` flag already captures
     // the randomized-draft intent); the destination still collapses to the zone.
-    let (destination, _library_position, zone_rest) = parse_conjure_zone(after_book)?;
+    let (destination, _library_position, _library_players, zone_rest) =
+        parse_conjure_zone(after_book)?;
     let (tail, tapped) = if destination == Zone::Battlefield {
         match tag::<_, _, OracleError<'_>>(" tapped").parse(zone_rest) {
             Ok((tail, _)) => (tail, true),
@@ -9078,7 +9079,8 @@ fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
     };
 
     // Parse destination zone.
-    let (destination, library_position, zone_rest) = parse_conjure_zone(zone_rest)?;
+    let (destination, library_position, library_players, zone_rest) =
+        parse_conjure_zone(zone_rest)?;
 
     // Parse optional "tapped" suffix.
     let tapped = tag::<_, _, OracleError<'_>>(" tapped")
@@ -9090,6 +9092,7 @@ fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
         destination,
         tapped,
         library_position,
+        library_players,
     })
 }
 
@@ -9145,7 +9148,8 @@ fn try_parse_conjure_duplicate(tp: TextPair) -> Option<Effect> {
 
     // Parse destination zone and optional "tapped" suffix, then require the
     // clause to be fully consumed — trailing text would be silently dropped.
-    let (destination, library_position, zone_rest) = parse_conjure_zone(zone_rest)?;
+    let (destination, library_position, library_players, zone_rest) =
+        parse_conjure_zone(zone_rest)?;
     let (zone_rest, tapped) = match tag::<_, _, OracleError<'_>>(" tapped").parse(zone_rest) {
         Ok((after, _)) => (after, true),
         Err(_) => (zone_rest, false),
@@ -9162,6 +9166,7 @@ fn try_parse_conjure_duplicate(tp: TextPair) -> Option<Effect> {
         destination,
         tapped,
         library_position,
+        library_players,
     })
 }
 
@@ -9211,24 +9216,32 @@ fn parse_conjure_card_name(lower: &str) -> Option<(&str, &str)> {
 
 /// Parse the destination zone from conjure text using nom combinators. Returns
 /// the zone, an optional in-library slot (`Some` only for the Alchemy "into the
-/// top N cards … at random" positional destination), and the unconsumed tail.
-fn parse_conjure_zone(lower: &str) -> Option<(Zone, Option<LibraryPosition>, &str)> {
+/// top N cards … at random" positional destination), the player scope whose
+/// libraries receive the cards (`Some(PlayerFilter::All)` only for the "each
+/// player's library" fan-out; `None` = the controller's library), and the
+/// unconsumed tail.
+fn parse_conjure_zone(
+    lower: &str,
+) -> Option<(Zone, Option<LibraryPosition>, Option<PlayerFilter>, &str)> {
     // Digital-only Alchemy: "into the top N cards of {your|each player's} library
     // at random" slots the conjured card into a uniformly random position among
     // the top N cards. Tried before the plain zone arms because it also targets
     // the library. `parse_number` captures the count the card is randomized among
-    // (previously discarded), now threaded into a `RandomWithinTop` position.
-    if let Ok((rest, n)) = preceded(
+    // (previously discarded), now threaded into a `RandomWithinTop` position. The
+    // library phrase also selects WHICH libraries receive cards: "your" is the
+    // controller only; "each player's" fans out to every player (Sandcloud
+    // Harbinger). `pair` keeps the count and the scope from a single match.
+    if let Ok((rest, (n, library_players))) = preceded(
         tag::<_, _, OracleError<'_>>(" into the top "),
-        terminated(
-            nom_primitives::parse_number,
-            preceded(
-                tag(" cards of "),
-                alt((
-                    tag("your library at random"),
+        pair(
+            terminated(nom_primitives::parse_number, tag(" cards of ")),
+            alt((
+                value(None, tag("your library at random")),
+                value(
+                    Some(PlayerFilter::All),
                     tag("each player's library at random"),
-                )),
-            ),
+                ),
+            )),
         ),
     )
     .parse(lower)
@@ -9238,6 +9251,7 @@ fn parse_conjure_zone(lower: &str) -> Option<(Zone, Option<LibraryPosition>, &st
             Some(LibraryPosition::RandomWithinTop {
                 n: QuantityExpr::Fixed { value: n as i32 },
             }),
+            library_players,
             rest,
         ));
     }
@@ -9260,7 +9274,7 @@ fn parse_conjure_zone(lower: &str) -> Option<(Zone, Option<LibraryPosition>, &st
     ))
     .parse(lower)
     .ok()
-    .map(|(rest, zone)| (zone, None, rest))
+    .map(|(rest, zone)| (zone, None, None, rest))
 }
 
 /// CR 611.2: Parse "have [subject] [predicate]" subject redirection.

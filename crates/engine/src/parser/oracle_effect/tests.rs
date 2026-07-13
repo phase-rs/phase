@@ -34219,10 +34219,15 @@ fn conjure_named_into_top_n_library_at_random() {
     );
     match e {
         Effect::Conjure {
-            destination, cards, ..
+            destination,
+            cards,
+            library_players,
+            ..
         } => {
             assert_eq!(destination, Zone::Library);
             assert_eq!(cards.len(), 1);
+            // "your library" targets the controller only — no per-player fan-out.
+            assert_eq!(library_players, None);
         }
         other => panic!("expected Conjure, got: {other:?}"),
     }
@@ -34230,12 +34235,32 @@ fn conjure_named_into_top_n_library_at_random() {
 
 #[test]
 fn conjure_named_into_top_n_each_players_library_at_random() {
-    // "each player's library" (a shared-library slot) also maps to the Library zone.
+    // "each player's library" maps to the Library zone AND carries the per-player
+    // fan-out scope (`PlayerFilter::All`) so the resolver conjures into every
+    // player's own library, not just the controller's (Sandcloud Harbinger,
+    // issue #5614 re-review). The count threads into the `RandomWithinTop` slot.
     let e = parse_effect(
         "conjure three cards named Sunscorched Desert into the top ten cards of each player's library at random",
     );
     match e {
-        Effect::Conjure { destination, .. } => assert_eq!(destination, Zone::Library),
+        Effect::Conjure {
+            destination,
+            library_position,
+            library_players,
+            ..
+        } => {
+            assert_eq!(destination, Zone::Library);
+            assert_eq!(
+                library_position,
+                Some(LibraryPosition::RandomWithinTop {
+                    n: QuantityExpr::Fixed { value: 10 }
+                })
+            );
+            assert_eq!(
+                library_players,
+                Some(crate::types::ability::PlayerFilter::All)
+            );
+        }
         other => panic!("expected Conjure, got: {other:?}"),
     }
 }
