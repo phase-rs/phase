@@ -111,14 +111,20 @@ pub fn harvest_creature_subtypes_from_atomic(atomic: &AtomicCardsFile) -> BTreeS
 /// Parser-authoritative creature subtype set: canonical CardTypes ∪ corroborated
 /// AtomicCards. CardTypes supplies token-only types; AtomicCards supplies newer
 /// card-printed types before CardTypes.json is updated.
+///
+/// `card_types` is **required**, not optional. Token-only subtypes (Army, Servo,
+/// Pentavite, Sculpture, Tentacle, …) are printed on no card face, so they exist
+/// in `CardTypes.json` alone — the AtomicCards harvest cannot corroborate what a
+/// type line never carries. Building this vocabulary without the canonical half
+/// silently drops all 26 of them, and because the result is committed and
+/// `include_str!`d into the parser, the loss degrades every later parse. A caller
+/// that cannot load `CardTypes.json` must fail, never regenerate from a partial
+/// source set. See `atomic_harvest_alone_drops_token_only_subtypes`.
 pub fn build_creature_subtype_vocabulary(
-    card_types: Option<&CardTypesFile>,
+    card_types: &CardTypesFile,
     atomic: &AtomicCardsFile,
 ) -> BTreeSet<String> {
-    let mut subtypes = BTreeSet::new();
-    if let Some(card_types) = card_types {
-        subtypes.extend(canonical_creature_subtypes_from_card_types(card_types));
-    }
+    let mut subtypes = canonical_creature_subtypes_from_card_types(card_types);
     subtypes.extend(harvest_creature_subtypes_from_atomic(atomic));
     subtypes
 }
@@ -267,11 +273,32 @@ mod tests {
             }],
         );
         let atomic = crate::database::mtgjson::AtomicCardsFile { data: atomic_data };
-        let subtypes = build_creature_subtype_vocabulary(Some(&card_types), &atomic);
+        let subtypes = build_creature_subtype_vocabulary(&card_types, &atomic);
         for expected in ["Army", "Germ", "Mammoth"] {
             assert!(
                 subtypes.contains(expected),
                 "{expected} must be in union vocabulary"
+            );
+        }
+
+        // Regression pin: the AtomicCards harvest is corroborated against the
+        // printed type line, so it recovers card-printed subtypes (Mammoth) but
+        // can NEVER recover a token-only subtype — no card face prints "Army".
+        // CardTypes.json is therefore the sole source of that half of the
+        // vocabulary, which is why `build_creature_subtype_vocabulary` takes it
+        // by value rather than as an `Option`: regenerating the committed,
+        // `include_str!`d vocabulary from the harvest alone silently deletes
+        // every token-only subtype and degrades the parser on the next rebuild.
+        let harvested = harvest_creature_subtypes_from_atomic(&atomic);
+        assert!(
+            harvested.contains("Mammoth"),
+            "card-printed subtype must survive the harvest"
+        );
+        for token_only in ["Army", "Germ"] {
+            assert!(
+                !harvested.contains(token_only),
+                "{token_only} is printed on no card face — CardTypes.json is its only source, \
+                 so the harvest alone must not be treated as a complete vocabulary"
             );
         }
     }

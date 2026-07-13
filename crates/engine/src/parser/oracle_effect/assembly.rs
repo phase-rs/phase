@@ -1706,6 +1706,25 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 SubAbilityLink::ContinuationStep
             }
         };
+        // CR 615.5: A "(When|Whenever|If) damage is prevented this way, …" rider
+        // is printed as its own sentence but is not an independent instruction —
+        // its "this way" back-reference binds to the preceding prevention. Detect
+        // it (only when the previous clause is the prevention it references) so the
+        // clause is folded into that prevention rather than dropped as a sibling.
+        let is_prevented_this_way_rider = matches!(
+            defs.last().map(|d| &*d.effect),
+            Some(Effect::PreventDamage { .. })
+        )
+            && crate::parser::oracle_replacement::clause_is_prevented_this_way_rider(
+                clause_ir.source.fragment().unwrap_or_default(),
+            );
+        // The Sentence boundary would mark the rider `SequentialSibling`, which the
+        // prevention resolver never installs as the shield's `runtime_execute` (the
+        // payoff silently does nothing — New Way Forward, Phyrexian Vindicator,
+        // Outfitted Jouster). Force `ContinuationStep` so it rides the shield.
+        if is_prevented_this_way_rider {
+            def.sub_link = SubAbilityLink::ContinuationStep;
+        }
         def.target_choice_timing = target_choice_timing_for_clause(clause_ir);
         // CR 115.1 + CR 701.9b: copy the per-clause selection mode captured by
         // `parse_target_with_ctx` during chunk parse. `Random` flips the engine
@@ -1975,6 +1994,22 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
         for current in &mut current_defs {
             apply_where_x_ability_expression(current, clause_ir.where_x_expression.as_deref());
+        }
+
+        // CR 615.5 + CR 609.7: In a "damage is prevented this way" rider, the
+        // surface phrase "that source's controller" lowers to
+        // `ParentTargetController`, but there is no parent-target slot at runtime —
+        // it refers to the controller of the PREVENTED event's damage source (New
+        // Way Forward: "deals that much damage to that source's controller").
+        // Rewrite it to `PostReplacementSourceController` so the rider resolves
+        // against the shield's event context, mirroring the static-shield
+        // follow-up path in `oracle_replacement`.
+        if is_prevented_this_way_rider {
+            for current in &mut current_defs {
+                crate::parser::oracle_replacement::rewrite_parent_target_controller_to_post_replacement_source(
+                    current,
+                );
+            }
         }
 
         // CR 603.7: Wrap in CreateDelayedTrigger if temporal suffix was found.

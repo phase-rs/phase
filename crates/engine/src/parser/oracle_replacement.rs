@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::{char, multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map_opt, opt, peek, rest, value};
 use nom::multi::separated_list1;
@@ -9042,7 +9042,9 @@ fn parse_damage_recipient_after_prefix(working_lower: &str, prefix: &str) -> Opt
 /// `TargetFilter::ParentTargetController` slot to
 /// `TargetFilter::PostReplacementSourceController`. Invoked at the prevention
 /// follow-up call site only — see the parent comment for rationale.
-fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut AbilityDefinition) {
+pub(crate) fn rewrite_parent_target_controller_to_post_replacement_source(
+    def: &mut AbilityDefinition,
+) {
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
         if matches!(f, TargetFilter::ParentTargetController) {
             *f = TargetFilter::PostReplacementSourceController;
@@ -9316,6 +9318,29 @@ fn extract_prevention_followup(original_text: &str) -> Option<String> {
         return None;
     }
     Some(body.to_string())
+}
+
+/// CR 615.5: True when a clause is introduced by a
+/// `"(When|Whenever|If) damage is prevented this way, …"` prelude. That
+/// back-reference ("this way") can only bind to the prevention printed
+/// immediately before it, so the clause is always a rider on that prevention —
+/// it fires once per prevented event against the amount the shield prevented,
+/// never as an independent following instruction. Effect-chain assembly uses
+/// this to keep such a rider a `ContinuationStep` even when it is printed as its
+/// own sentence, so the prevention resolver installs it as the shield's
+/// `runtime_execute` instead of dropping it (New Way Forward, Phyrexian
+/// Vindicator, Outfitted Jouster).
+pub(crate) fn clause_is_prevented_this_way_rider(fragment: &str) -> bool {
+    preceded(
+        alt((
+            tag_no_case::<_, _, OracleError<'_>>("when "),
+            tag_no_case::<_, _, OracleError<'_>>("whenever "),
+            tag_no_case::<_, _, OracleError<'_>>("if "),
+        )),
+        tag_no_case::<_, _, OracleError<'_>>("damage is prevented this way,"),
+    )
+    .parse(fragment.trim_start())
+    .is_ok()
 }
 
 /// CR 614.1a: Parse event substitution replacement effects.
@@ -11441,6 +11466,69 @@ mod tests {
              When damage is prevented this way, ~ deals 2 damage to any target.",
         );
         assert_eq!(result.as_deref(), Some("~ deals 2 damage to any target."));
+    }
+
+    #[test]
+    fn clause_is_prevented_this_way_rider_matches_the_prelude_forms() {
+        // CR 615.5: the three attested prelude forms (New Way Forward,
+        // Outfitted Jouster / Phyrexian Vindicator "When", the "If" variant).
+        assert!(clause_is_prevented_this_way_rider(
+            "When damage is prevented this way, ~ deals 2 damage to any target."
+        ));
+        assert!(clause_is_prevented_this_way_rider(
+            "Whenever damage is prevented this way, you draw a card."
+        ));
+        assert!(clause_is_prevented_this_way_rider(
+            "If damage is prevented this way, you draw a card."
+        ));
+        // Leading whitespace (chunker hand-off) is tolerated.
+        assert!(clause_is_prevented_this_way_rider(
+            "  When damage is prevented this way, sacrifice an Equipment."
+        ));
+        // The same-sentence "equal to the damage prevented this way" form is NOT a
+        // separate-sentence rider (Swans of Bryn Argoll's working class).
+        assert!(!clause_is_prevented_this_way_rider(
+            "The source's controller draws cards equal to the damage prevented this way."
+        ));
+        // An unrelated following instruction is not a rider.
+        assert!(!clause_is_prevented_this_way_rider("You draw a card."));
+    }
+
+    /// CR 615.5 + CR 609.7 (issue #5658): New Way Forward's separate-sentence
+    /// "When damage is prevented this way, …" rider must fold into the preceding
+    /// prevention as a `ContinuationStep` (so `prevent_damage.rs` installs it as
+    /// the shield's `runtime_execute`), and "that source's controller" must lower
+    /// to `PostReplacementSourceController` — not a dangling `ParentTargetController`.
+    #[test]
+    fn new_way_forward_rider_folds_into_the_prevention_shield() {
+        use crate::types::ability::SubAbilityLink;
+        let parsed = parse_oracle_text(
+            "The next time a source of your choice would deal damage to you this turn, \
+             prevent that damage. When damage is prevented this way, New Way Forward \
+             deals that much damage to that source's controller and you draw that many cards.",
+            "New Way Forward",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let prevent = &parsed.abilities[0];
+        assert!(matches!(*prevent.effect, Effect::PreventDamage { .. }));
+        let rider = prevent
+            .sub_ability
+            .as_ref()
+            .expect("the prevention must carry the rider as a sub-ability");
+        assert_eq!(
+            rider.sub_link,
+            SubAbilityLink::ContinuationStep,
+            "the 'When damage is prevented this way' sentence is a rider, not a sibling"
+        );
+        assert!(matches!(
+            &*rider.effect,
+            Effect::DealDamage {
+                target: TargetFilter::PostReplacementSourceController,
+                ..
+            }
+        ));
     }
 
     #[test]
