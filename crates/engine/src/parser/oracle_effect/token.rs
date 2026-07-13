@@ -712,6 +712,14 @@ fn parse_token_description_with_context(
             // to fabricate is dead at runtime (game/quantity.rs resolves a non-`X`
             // variable name to 0), so the card created ZERO tokens while still
             // reading as supported.
+            // CR 107.3i + CR 601.2h: "equal to the amount of mana [they] paid
+            // this way" (Liege of the Hollows) is the same paid-mana binding as
+            // the "where X is …" token path above — reuse the shared recognizer
+            // so the count collapses to `Variable("X")` and reads the upstream
+            // PayCost loop's accumulated `chosen_x` total. Tried only after the
+            // CDA / event-context recognizers so no existing match changes; it
+            // strictly rescues phrases that previously fell to the dead
+            // raw-string `Variable` node this clause used to fabricate.
             count = crate::parser::oracle_quantity::parse_cda_quantity(&count_expression)
                 .or_else(|| {
                     crate::parser::oracle_quantity::parse_event_context_quantity(&count_expression)

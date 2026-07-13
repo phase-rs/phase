@@ -7618,6 +7618,133 @@ fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) ->
     }
 }
 
+/// CR 608.2c + CR 615.1a + CR 615.4: Collapse the "deal N damage … then prevent X
+/// of that damage" idiom (Power Leak, Errant Minion) into a single computed-amount
+/// `DealDamage` node.
+///
+/// Why collapse rather than reorder: prevention effects must already exist as a
+/// replacement shield *before* the damage event, and cannot retroactively unwind
+/// damage that has already been dealt (CR 615.1a / CR 615.4 — "can't go back in
+/// time"). A `DealDamage` immediately followed by a `SequentialSibling`
+/// `PreventDamage` deals its damage first and leaves a dangling, mistimed shield;
+/// worse, a numeric `PreventionAmount::Next(n)` shield deplete per damage event
+/// (CR 615.7), so any unconsumed capacity leaks onto a later, unrelated damage
+/// event to the same recipient this turn. Folding the arithmetic into the damage
+/// amount up front (max(N − X, 0)) is the only shape that yields the printed net
+/// damage with no residual shield. This mirrors the shipped precedent of folding
+/// "Destroy … It can't be regenerated" into one `Effect::Destroy { cant_regenerate }`
+/// node rather than two effect nodes (CR 608.2c: later text modifies earlier text).
+///
+/// The rewrite fires ONLY on the exact structural shape — all five guards must hold
+/// together, so it is a category rewrite (any "deal N then prevent the paid-mana
+/// amount" card), never a card-name special case:
+/// 1. this node's effect is `DealDamage { amount: Fixed(n), .. }`;
+/// 2. its `sub_ability` is a `SequentialSibling`;
+/// 3. that sub's effect is a blanket where-X prevention shield:
+///    `PreventDamage { target: Any, damage_source_filter: None,
+///    prevention_duration: None, scope: AllDamage, amount_dynamic: Some(expr), .. }`.
+///
+/// On a match the damage amount becomes `max(n − X, 0)` (`ClampMin { Offset {
+/// Multiply(-1, expr), n }, 0 }` — CR 107.1b: a negative computed result uses 0),
+/// the original `target`/`damage_source`/`excess` are preserved unchanged, and the
+/// prevention node is spliced out, promoting anything that followed it (none exists
+/// for Power Leak/Errant Minion today, but a future trailing rider is not dropped).
+/// Recurses so the idiom is folded wherever it sits in the chain (e.g. beneath the
+/// "that player may pay any amount of mana" `PayCost` head for Power Leak).
+pub(super) fn fold_deal_damage_then_prevent_into_computed_amount(def: &mut AbilityDefinition) {
+    // Guard 1: this node deals a fixed amount of damage.
+    let n = match def.effect.as_ref() {
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value },
+            ..
+        } => *value,
+        _ => {
+            recurse_fold_deal_damage_then_prevent(def);
+            return;
+        }
+    };
+
+    // Guards 2 + 3: an immediately-following SequentialSibling that is the exact
+    // blanket where-X prevention shield. Extract its dynamic prevention amount.
+    let folded_expr = match def.sub_ability.as_ref() {
+        Some(next) if next.sub_link == SubAbilityLink::SequentialSibling => {
+            match next.effect.as_ref() {
+                Effect::PreventDamage {
+                    target: TargetFilter::Any,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                    scope: PreventionScope::AllDamage,
+                    amount_dynamic: Some(expr),
+                    ..
+                } => Some(expr.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
+    let Some(expr) = folded_expr else {
+        recurse_fold_deal_damage_then_prevent(def);
+        return;
+    };
+
+    // CR 615.1a + CR 107.1b: net damage is max(n − X, 0). Preserve every other
+    // DealDamage field (target already correctly TriggeringPlayer, plus
+    // damage_source / excess) by mutating only the amount in place.
+    if let Effect::DealDamage { amount, .. } = def.effect.as_mut() {
+        *amount = QuantityExpr::ClampMin {
+            inner: Box::new(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(expr),
+                }),
+                offset: n,
+            }),
+            minimum: 0,
+        };
+    }
+
+    // Splice out the PreventDamage node, promoting whatever followed it (if any).
+    let promoted = def
+        .sub_ability
+        .as_mut()
+        .and_then(|prevent_node| prevent_node.sub_ability.take());
+    def.sub_ability = promoted;
+
+    // Continue walking: the promoted chain (or any nested branch) may itself
+    // contain the idiom.
+    recurse_fold_deal_damage_then_prevent(def);
+}
+
+/// Recurse the fold into a definition's `sub_ability` chain. Kept separate so the
+/// early-return arms above and the post-rewrite tail all share one walk.
+fn recurse_fold_deal_damage_then_prevent(def: &mut AbilityDefinition) {
+    if let Some(sub) = def.sub_ability.as_mut() {
+        fold_deal_damage_then_prevent_into_computed_amount(sub);
+    }
+}
+
+/// CR 601.2h + CR 106.4: Recognize the "the [total ]amount of mana [<payer> ]paid
+/// this way" where-X binding phrase across its known surface variants. Composed
+/// along its grammar axes rather than enumerating one `tag()` literal per card:
+///
+/// - fixed `"the "` lead,
+/// - optional `"total "` qualifier (Join Forces cards),
+/// - fixed `"amount of mana "` head — deliberately mana-scoped so it can never
+///   match the `{E}` (energy) "paid this way" family (CR 106 vs CR 122),
+/// - optional payer-subject clause (`"that player "` / `"they "` / bare),
+/// - fixed `"paid this way"` tail.
+///
+/// Operates on already-lowercased input. Callers require an empty remainder.
+fn parse_amount_of_mana_paid_this_way(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("the ").parse(input)?;
+    let (input, _) = opt(tag("total ")).parse(input)?;
+    let (input, _) = tag("amount of mana ").parse(input)?;
+    let (input, _) = opt(alt((tag("that player "), tag("they ")))).parse(input)?;
+    let (input, _) = tag("paid this way").parse(input)?;
+    Ok((input, ()))
+}
+
 pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
     let expression = where_x_expression.trim().trim_end_matches('.');
     let expression_lower = expression.to_ascii_lowercase();
@@ -7632,9 +7759,20 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     // do the rest — this is also the one-line fix that unblocks Collective
     // Voyage (#131), Alliance of Arms, Shared Trauma, and Mana-Charged
     // Dragon, since all five Join Forces cards share this binding phrase.
-    if tag::<_, _, OracleError<'_>>("the total amount of mana paid this way")
-        .parse(expression_lower.as_str())
-        .is_ok_and(|(rest, _)| rest.is_empty())
+    // CR 601.2h + CR 106.4: The "amount of mana … paid this way" family binds X
+    // to the mana accumulated by the upstream `PayAmountChoice` loop regardless
+    // of the surface phrasing. Rather than one literal per card, compose the
+    // shared structural axes: the fixed "the " lead, an optional "total "
+    // qualifier (Join Forces cards — Alliance of Arms, Collective Voyage,
+    // Mana-Charged Dragon, Minds Aglow, Shared Trauma), the fixed
+    // "amount of mana " head, an optional payer-subject clause ("that player " —
+    // Power Leak / Errant Minion; "they " — Liege of the Hollows; or bare), and
+    // the fixed "paid this way" tail. The head is deliberately kept mana-scoped
+    // ("amount of mana", never a resource-generic capture) so it structurally
+    // cannot match the energy variants ("amount of {E} paid this way" — CR 106
+    // vs CR 122), which are handled elsewhere.
+    if parse_amount_of_mana_paid_this_way(expression_lower.as_str())
+        .is_ok_and(|(rest, ())| rest.is_empty())
     {
         return Some(QuantityExpr::Ref {
             qty: QuantityRef::Variable {
