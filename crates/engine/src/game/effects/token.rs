@@ -2409,7 +2409,7 @@ fn powerstone_ability() -> AbilityDefinition {
             },
             restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                ability: crate::types::mana::AbilityActivationScope::Any,
             }],
             grants: vec![],
             expiry: None,
@@ -4070,7 +4070,19 @@ mod tests {
     fn predefined_powerstone_has_colorless_mana() {
         let abilities = predefined_token_abilities("Powerstone");
         assert_eq!(abilities.len(), 1);
-        assert!(matches!(*abilities[0].effect, Effect::Mana { .. }));
+        assert!(matches!(
+            *abilities[0].effect,
+            Effect::Mana {
+                ref restrictions,
+                ..
+            } if matches!(
+                restrictions.as_slice(),
+                [crate::types::ability::ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type,
+                    ability: crate::types::mana::AbilityActivationScope::Any,
+                }] if spell_type == "Artifact"
+            )
+        ));
     }
 
     #[test]
