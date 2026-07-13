@@ -25,9 +25,15 @@ pub fn resolve_log_entries(events: &[GameEvent], state: &GameState) -> Vec<GameL
 /// Covers hidden-information leaks and low-signal stack bookkeeping.
 fn should_exclude_event(event: &GameEvent, _state: &GameState) -> bool {
     match event {
-        // Individual card draws from library leak card identity — CardsDrawn summary suffices
+        // Library-origin moves and mulligan/tuck moves from hand to library
+        // expose hidden card identity. Public discard/moves remain loggable.
         GameEvent::ZoneChanged {
             from: Some(crate::types::zones::Zone::Library),
+            ..
+        }
+        | GameEvent::ZoneChanged {
+            from: Some(crate::types::zones::Zone::Hand),
+            to: crate::types::zones::Zone::Library,
             ..
         } => true,
         // CardDrawn also reveals which specific card was drawn
@@ -1311,6 +1317,57 @@ mod tests {
             has_card_name,
             "Expected CardName segment with 'Lightning Bolt'"
         );
+    }
+
+    #[test]
+    fn public_log_hides_hand_to_library_but_keeps_public_discard() {
+        use crate::types::game_state::ZoneChangeRecord;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let mulligan = create_object(
+            &mut state,
+            CardId(98),
+            PlayerId(1),
+            "Secret Mulligan Card".to_string(),
+            Zone::Library,
+        );
+        let discarded = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(1),
+            "Public Discard".to_string(),
+            Zone::Graveyard,
+        );
+        let mut mulligan_record =
+            ZoneChangeRecord::test_minimal(mulligan, Some(Zone::Hand), Zone::Library);
+        mulligan_record.name = "Secret Mulligan Card".to_string();
+        let mut discard_record =
+            ZoneChangeRecord::test_minimal(discarded, Some(Zone::Hand), Zone::Graveyard);
+        discard_record.name = "Public Discard".to_string();
+        let events = vec![
+            GameEvent::ZoneChanged {
+                object_id: mulligan,
+                from: Some(Zone::Hand),
+                to: Zone::Library,
+                record: Box::new(mulligan_record),
+            },
+            GameEvent::ZoneChanged {
+                object_id: discarded,
+                from: Some(Zone::Hand),
+                to: Zone::Graveyard,
+                record: Box::new(discard_record),
+            },
+        ];
+
+        let entries = resolve_log_entries(&events, &state);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].segments.iter().any(
+            |segment| matches!(segment, LogSegment::CardName { name, .. } if name == "Public Discard")
+        ));
+        assert!(entries.iter().all(|entry| entry.segments.iter().all(
+            |segment| !matches!(segment, LogSegment::CardName { name, .. } if name == "Secret Mulligan Card")
+        )));
     }
 
     #[test]
