@@ -3609,6 +3609,15 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         Effect::ChangeSpeed { amount, .. } => quantity_hits_tracked(amount),
         Effect::PutCounter { count, .. } => quantity_hits_tracked(count),
         Effect::PutCounterAll { count, .. } => quantity_hits_tracked(count),
+        // CR 608.2c + CR 701.21a: an `ExileTop` whose count reduces the chain
+        // tracked set is a CONSUMER of that set, so the preceding producer must
+        // publish it. Kylox, Visionary Inventor ("sacrifice any number of other
+        // creatures, then exile the top X cards of your library, where X is
+        // their total power") is exactly this shape: without this arm
+        // `next_sub_needs_tracked_set` returned false, the sacrifice never
+        // published its affected ids, and the `TrackedSetAggregate` reduced an
+        // empty set to 0 — a fully-supported-looking card that exiles nothing.
+        Effect::ExileTop { count, .. } => quantity_hits_tracked(count),
         Effect::Token {
             count,
             power,
