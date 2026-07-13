@@ -1686,6 +1686,67 @@ fn b3_materialize_stop_short() {
     );
 }
 
+/// PR-7 DoS cap (CR 732.2a SAFETY LIMIT): a `Fixed` count over `MAX_SHORTCUT_CYCLES` is
+/// handed back to manual play with NO drive. This is the engine-side count cap that stops the
+/// catastrophic 4-byte remote vector — `Fixed(u32)` scalar-encodes ~4.3e9 cycles in ~10 bytes,
+/// sailing through the 8 KB WS frame cap. The count is HARDCODED as `Fixed(u32::MAX)`; the cap
+/// const is private to the engine crate and invisible across this integration-test boundary.
+///
+/// VACUITY TRAP (PR-7): a handback lands on `WaitingFor::Priority`, and so does the cap-ABSENT
+/// stop-short path (a drive commits + stops there too). So `waiting_for` alone is an INVARIANT,
+/// not a discriminator. The DISCRIMINATOR is the observable DRIVE: `life(P1) == l0` proves the
+/// cap fired before any cycle ran. The revert-probe (delete Edit B's guard body) opens APNAP,
+/// Accept drives, and on this life-DRAIN fixture P1 crosses lethal in ~l0/delta cycles (tens —
+/// `materialize_fixed_shortcut`'s CrossLethal arm commits + stops, so `u32::MAX` does NOT hang)
+/// ⇒ `life(P1) ≤ 0` + GameOver ⇒ `assert_eq!(life(P1), l0)` FAILS.
+///
+/// Positive reach-guard: `b3_materialize_stop_short` (n=3) proves the harness DOES drive when
+/// n ≤ cap, so T1's no-drive is the cap firing, not a dead fixture.
+#[test]
+fn over_cap_fixed_count_hands_back_with_no_drive() {
+    let (mut runner, l0, _cleric) = reach_2p_optional_drain_offer();
+
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(u32::MAX),
+            template: None,
+        })
+        .expect("declare Fixed(u32::MAX)");
+
+    // Symmetric-across-revert Accept: with Edit B active the declare hands back immediately
+    // (APNAP never opens), so the Accept would be illegal — issue it ONLY when actually parked
+    // at RespondToShortcut (the cap-absent revert path).
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::RespondToShortcut { .. }
+    ) {
+        runner
+            .act(GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            })
+            .expect("accept");
+    }
+
+    // DRIVE discriminator: the cap fired BEFORE any cycle ran, so P1's life is untouched.
+    assert_eq!(
+        life(&runner, P1),
+        l0,
+        "over-cap Fixed hands back with NO drive — P1 life unchanged (the discriminator)"
+    );
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
+        "no crown — the drive never ran, got {:?}",
+        runner.state().waiting_for
+    );
+    // SANITY CHECK ONLY (not the discriminator — see the vacuity trap in the doc): the handback
+    // lands on the living seat, mirroring the stop-short manual fallback.
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "handback to living_priority_seat (P0)"
+    );
+}
+
 /// B3-materialize-cross-lethal ⭐ (N ≥ cycles-to-lethal, un-clamped per Q2): commits and
 /// stops at a determinate GameOver mid-drive instead of rolling back to manual play.
 /// Revert-failing / discriminating vs stop-short: under a flat "non-Priority ⇒ rollback"

@@ -1639,6 +1639,10 @@ fn transient_granted_spell_keywords_for(
 pub(super) struct GrantedSpellAlternativeCost {
     pub(super) cost: AbilityCost,
     pub(super) timing_permission: Option<CastTimingPermission>,
+    /// CR 118.9 + CR 601.2b: `Some(source_id)` when the grant is `OncePerTurn`
+    /// (As Foretold), so the caller records the per-turn slot at `finalize_cast`.
+    /// `None` for `Unlimited` grants (Fist of Suns, Rooftop Storm, Jodah).
+    pub(super) once_per_turn_source: Option<ObjectId>,
 }
 
 pub(super) fn granted_spell_alternative_cost(
@@ -1667,10 +1671,21 @@ pub(super) fn granted_spell_alternative_cost_for(
         let StaticMode::CastWithAlternativeCost {
             cost,
             timing_permission,
+            frequency,
         } = &def.mode
         else {
             continue;
         };
+
+        // CR 118.9 + CR 601.2b: a once-per-turn grant already applied this turn
+        // offers nothing further (As Foretold's slot is spent for the turn).
+        if *frequency == CastFrequency::OncePerTurn
+            && state
+                .alt_cost_grant_permissions_used
+                .contains(&source_obj.id)
+        {
+            continue;
+        }
 
         let matches = def.affected.as_ref().is_none_or(|filter| {
             super::filter::spell_object_matches_filter_from_state_for(
@@ -1688,6 +1703,8 @@ pub(super) fn granted_spell_alternative_cost_for(
             return Some(GrantedSpellAlternativeCost {
                 cost: cost.clone(),
                 timing_permission: *timing_permission,
+                once_per_turn_source: (*frequency == CastFrequency::OncePerTurn)
+                    .then_some(source_obj.id),
             });
         }
     }

@@ -1286,22 +1286,21 @@ fn target_and_non_same_name_compound_not_intercepted() {
     }
 }
 
-/// As Foretold (WHO/AKH): the once-per-turn "pay {0} rather than pay the mana
-/// cost" free-cast line is correctly UNSUPPORTED. As Foretold places no zone
-/// restriction on which spell the cost applies to, but the engine's
-/// `CastFromHandFree` runtime path only covers hand and command-zone origins
-/// (CR 601.2a). Implementing it correctly requires a general once-per-turn
-/// alternative-cost modifier that composes with every cast-permission origin
-/// (graveyard, exile, etc.) — a cross-cutting runtime refactor. Until that
-/// work lands, the free-cast line must fall to `Effect::Unimplemented` rather
-/// than falsely claiming coverage via the wrong zone-scoped path.
-///
-/// The upkeep time-counter trigger is a separate Oracle line and must still
-/// parse. The swallow auditor is suppressed when any ability is Unimplemented
-/// (architecture rule: explicit Unimplemented beats swallow-detector noise), so
-/// no spurious `Optional_YouMay` warning fires.
+/// As Foretold (WHO/AKH): the "Once each turn, you may pay {0} rather than pay
+/// the mana cost for a spell you cast with mana value X or less, where X is the
+/// number of time counters on ~" line lowers to a once-per-turn
+/// `CastWithAlternativeCost` grant (CR 118.9) with a DYNAMIC mana-value gate
+/// (spell MV ≤ time counters on the source, CR 202.3). The `frequency` axis
+/// (`OncePerTurn`) and the `Cmc { LE, CountersOn{Source, Time} }` gate are the
+/// two class-level generalizations over Fist of Suns / Rooftop Storm / Jodah
+/// (unlimited, no dynamic gate). The upkeep time-counter trigger is a separate
+/// Oracle line and must still parse; nothing may remain `Effect::Unimplemented`,
+/// and no `CastFromHandFree` static (wrong zone scope) may appear.
 #[test]
-fn as_foretold_free_cast_line_is_unsupported() {
+fn as_foretold_once_per_turn_alt_cost_grant() {
+    use crate::types::ability::{Comparator, ObjectScope};
+    use crate::types::statics::CastFrequency;
+
     let r = parse(
             "At the beginning of your upkeep, put a time counter on this enchantment.\nOnce each turn, you may pay {0} rather than pay the mana cost for a spell you cast with mana value X or less, where X is the number of time counters on this enchantment.",
             "As Foretold",
@@ -1310,6 +1309,64 @@ fn as_foretold_free_cast_line_is_unsupported() {
             &[],
         );
 
+    // The free-cast line lowers to exactly one CastWithAlternativeCost grant.
+    let grants: Vec<&StaticDefinition> = r
+        .statics
+        .iter()
+        .filter(|s| matches!(s.mode, StaticMode::CastWithAlternativeCost { .. }))
+        .collect();
+    assert_eq!(
+        grants.len(),
+        1,
+        "exactly one alt-cost grant expected, got {:?}",
+        r.statics
+    );
+    let grant = grants[0];
+
+    let StaticMode::CastWithAlternativeCost {
+        cost,
+        timing_permission,
+        frequency,
+    } = &grant.mode
+    else {
+        unreachable!("filtered above")
+    };
+    assert_eq!(*timing_permission, None, "As Foretold has no timing rider");
+    assert_eq!(
+        *frequency,
+        CastFrequency::OncePerTurn,
+        "As Foretold applies its alternative cost once each turn"
+    );
+    assert!(
+        matches!(cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero()),
+        "alternative cost is {{0}}, got {cost:?}"
+    );
+
+    // The dynamic MV gate compares spell mana value to the time counters ON the
+    // source enchantment (ObjectScope::Source), controller-scoped to You.
+    let TargetFilter::Typed(typed) = grant.affected.as_ref().expect("affected filter present")
+    else {
+        panic!("expected Typed affected filter, got {:?}", grant.affected);
+    };
+    assert_eq!(typed.controller, Some(ControllerRef::You));
+    assert!(
+        typed.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(CounterType::Time),
+                    },
+                },
+            }
+        )),
+        "MV gate must be Cmc {{ LE, CountersOn(Source, Time) }}, got {:?}",
+        typed.properties
+    );
+
+    // Nothing may remain Unimplemented now that the grant is supported.
     fn walk<'a>(ability: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
         out.push(&ability.effect);
         if let Some(sub) = &ability.sub_ability {
@@ -1320,17 +1377,14 @@ fn as_foretold_free_cast_line_is_unsupported() {
     for ability in &r.abilities {
         walk(ability, &mut effects);
     }
-    // The free-cast line is Unimplemented — zone-unrestricted "{0}" alternative
-    // cost cannot be lowered onto CastFromHandFree without misrepresenting scope.
     assert!(
-        effects
+        !effects
             .iter()
             .any(|e| matches!(e, Effect::Unimplemented { .. })),
-        "As Foretold free-cast line must remain Effect::Unimplemented until \
-             a zone-agnostic alternative-cost modifier is implemented; got {effects:#?}"
+        "As Foretold must no longer be Unimplemented, got {effects:#?}"
     );
 
-    // No spurious CastFromHandFree static must appear.
+    // No spurious CastFromHandFree static (wrong zone scope) must appear.
     assert!(
         r.statics
             .iter()
@@ -1347,19 +1401,6 @@ fn as_foretold_free_cast_line_is_unsupported() {
             .any(|t| matches!(t.mode, TriggerMode::Phase)),
         "As Foretold must keep its upkeep Phase trigger, got {:?}",
         r.triggers
-    );
-
-    // Swallow auditor is suppressed when Unimplemented is present, so no
-    // Optional_YouMay warning fires despite "you may" appearing in the oracle text.
-    assert!(
-        !r.parse_warnings.iter().any(|w| matches!(
-            w,
-            OracleDiagnostic::SwallowedClause { detector, .. }
-                if detector == "Optional_YouMay"
-        )),
-        "Optional_YouMay must not fire when Unimplemented suppresses swallow checks; \
-             got {:?}",
-        r.parse_warnings
     );
 }
 

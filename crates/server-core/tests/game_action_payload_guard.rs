@@ -3,7 +3,7 @@
 
 use engine::analysis::decision_template::{
     DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate, IterationCount,
-    MayChoiceOption, PinnedDecision, ReplayMode,
+    MayChoiceOption, PinnedDecision, ReplayMode, TargetPin, TargetSchedule,
 };
 use engine::types::actions::{DebugAction, DebugTokenRequest};
 use engine::types::counter::CounterType;
@@ -249,4 +249,70 @@ fn accepts_within_bound_declare_shortcut_template() {
         template: None,
     })
     .is_ok());
+}
+
+#[test]
+fn rejects_over_cap_fixed_shortcut_count() {
+    // T3a (CR 732.2a): `Fixed(u32::MAX)` is the real Vector-1 count; the WS belt must reject
+    // it. Revert-probe: restore the `..` that discarded `count` ⇒ guard returns Ok ⇒ FAIL.
+    let action = GameAction::DeclareShortcut {
+        count: IterationCount::Fixed(u32::MAX),
+        template: None,
+    };
+    assert!(
+        guard_game_action_payload(&action).is_err(),
+        "an over-cap Fixed shortcut count must be rejected at the wire belt"
+    );
+}
+
+#[test]
+fn accepts_realistic_fixed_shortcut_count() {
+    // T3b: a plausible honest count must pass — proves the bound is real, not vacuous /
+    // wrong-direction. Revert-probe: tighten the threshold to 0 ⇒ Fixed(50) rejects ⇒ FAIL.
+    let action = GameAction::DeclareShortcut {
+        count: IterationCount::Fixed(50),
+        template: None,
+    };
+    assert!(
+        guard_game_action_payload(&action).is_ok(),
+        "a realistically sized Fixed shortcut count must be accepted"
+    );
+}
+
+#[test]
+fn rejects_over_cap_shortcut_schedule() {
+    // T3c (REV-1 nested memory bound): the decision list and the targets list are both under
+    // cap, so ONLY the oversized RoundRobin schedule vec can reject — a discriminating check
+    // of the nested `Scheduled` bound (defense-in-depth for in-process callers past the WS
+    // frame cap). Revert-probe: drop the schedule `bound_list` ⇒ guard returns Ok ⇒ FAIL.
+    let src = YieldTarget::AllCopies {
+        card_id: CardId(1),
+        trigger_description: None,
+    };
+    let slot = DecisionSlot {
+        source: src.clone(),
+        index: 0,
+    };
+    let action = GameAction::DeclareShortcut {
+        count: IterationCount::UntilLethal,
+        template: Some(DecisionTemplate {
+            owner: PlayerId(0),
+            decisions: vec![PinnedDecision::Targets {
+                slot,
+                targets: vec![TargetPin::Scheduled(TargetSchedule::RoundRobin(vec![
+                    src;
+                    MAX_ACTION_LIST_LEN + 1
+                ]))],
+            }],
+            replay: ReplayMode::Static,
+            key: DecisionGroupKey {
+                sources: vec![],
+                kind: DecisionKind::LoopChoice,
+            },
+        }),
+    };
+    assert!(
+        guard_game_action_payload(&action).is_err(),
+        "an over-cap loop-shortcut schedule vec must be rejected (nested memory bound)"
+    );
 }

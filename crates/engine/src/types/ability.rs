@@ -16947,6 +16947,13 @@ pub struct SpellContext {
     /// pay-life alternatives).
     #[serde(default)]
     pub alternative_mana_cost_paid: bool,
+    /// CR 118.9 + CR 601.2b: When a `CastWithAlternativeCost { OncePerTurn }`
+    /// grant's alternative cost was applied to this cast, the granting permanent's
+    /// id — read at `finalize_cast` to consume its per-turn slot in
+    /// `GameState::alt_cost_grant_permissions_used`. `None` for self-options and
+    /// `Unlimited` grants (nothing to consume).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_cost_grant_source: Option<ObjectId>,
     /// CR 601.2b/f/h: Number of non-kicker additional-cost payments declared
     /// while casting this spell. Used by keyword abilities such as Squad
     /// (CR 702.157a), whose repeatable payment count is not a kicker count.

@@ -34,8 +34,8 @@ use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use super::oracle_quantity::capitalize_first;
 use super::oracle_util::{
-    merge_or_filters, parse_subtype, strip_possessive, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
-    SELF_REF_TYPE_PHRASES,
+    merge_or_filters, parse_subtype, strip_possessive, strip_where_x_is_clause, TextPair,
+    SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 
 /// CR 115.1: Whether a parsed target phrase used the "target" keyword
@@ -4964,7 +4964,45 @@ pub(crate) fn parse_mana_value_suffix(
                 after_num,
             )
         };
+    // CR 107.3a + CR 202.3: rebind a bare `X` mana-value gate from a trailing
+    // ", where X is <quantity>" clause (As Foretold). No-op for every other caller.
+    let (prop, after) = rebind_bare_x_mana_value(prop, after);
     Some((prop, text.len() - after.len()))
+}
+
+/// CR 107.3a + CR 202.3: Rebind a bare-`X` mana-value gate from an immediately
+/// following ", where X is <quantity>" clause (As Foretold: "mana value X or
+/// less, where X is the number of time counters on ~"). Only a `Cmc` gate whose
+/// value is exactly the unbound `Variable("X")` and whose trailing clause parses
+/// through `parse_cda_quantity` is rebound; every existing no-binder caller is
+/// returned byte-for-byte unchanged. Input is already lowercase (the whole
+/// suffix parser operates on lowercased Oracle text), so `strip_where_x_is_clause`
+/// matches directly.
+fn rebind_bare_x_mana_value(prop: FilterProp, after: &str) -> (FilterProp, &str) {
+    let FilterProp::Cmc { comparator, value } = &prop else {
+        return (prop, after);
+    };
+    if !matches!(
+        value,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } if name == "X"
+    ) {
+        return (prop, after);
+    }
+    let Some(description) = strip_where_x_is_clause(after.trim_start()) else {
+        return (prop, after);
+    };
+    let Some(bound) = crate::parser::oracle_quantity::parse_cda_quantity(description) else {
+        return (prop, after);
+    };
+    (
+        FilterProp::Cmc {
+            comparator: *comparator,
+            value: bound,
+        },
+        "",
+    )
 }
 
 fn parse_relative_mana_value_suffix(text: &str) -> Option<(FilterProp, &str)> {
@@ -15732,6 +15770,83 @@ mod tests {
             }
             other => panic!("expected Or eligible set, got {other:?}"),
         }
+    }
+
+    /// CR 107.3a + CR 202.3 + CR 122.1: "with mana value X or less, where X is
+    /// the number of time counters on ~" binds the bare `X` gate to a dynamic
+    /// counter quantity on the source (As Foretold). Building-block win: every
+    /// mana-value-suffix consumer inherits "where X is <dynamic>" uniformly.
+    #[test]
+    fn mana_value_suffix_binds_where_x_dynamic_counters() {
+        let mut ctx = ParseContext::default();
+        // Input is lowercased upstream (the whole suffix parser runs on lowercase).
+        let input = "with mana value x or less, where x is the number of time counters on ~";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("dynamic where-X suffix parses");
+        assert_eq!(
+            consumed,
+            input.len(),
+            "must consume the whole suffix including the where-clause"
+        );
+        assert!(
+            matches!(
+                prop,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOn {
+                            scope: ObjectScope::Source,
+                            counter_type: Some(CounterType::Time),
+                        },
+                    },
+                }
+            ),
+            "expected Cmc LE CountersOn(Source, Time), got {prop:?}"
+        );
+    }
+
+    /// CR 202.3: control — a fixed "with mana value 3 or less" gate is unchanged
+    /// by the where-X binder logic (no binder present).
+    #[test]
+    fn mana_value_suffix_fixed_unchanged_by_where_binder() {
+        let mut ctx = ParseContext::default();
+        let input = "with mana value 3 or less";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("fixed suffix parses");
+        assert_eq!(consumed, input.len());
+        assert!(
+            matches!(
+                prop,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }
+            ),
+            "expected Cmc LE Fixed(3), got {prop:?}"
+        );
+    }
+
+    /// CR 107.3a: control — a bare "with mana value X or less" with NO binder
+    /// still yields the unbound `Variable("X")` gate (guard proof: the rebind
+    /// fires only when a parseable where-clause follows).
+    #[test]
+    fn mana_value_suffix_bare_x_without_binder_stays_variable() {
+        let mut ctx = ParseContext::default();
+        let input = "with mana value x or less";
+        let (prop, _consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("bare X suffix parses");
+        assert!(
+            matches!(
+                &prop,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name },
+                    },
+                } if name == "X"
+            ),
+            "expected Cmc LE Variable(X), got {prop:?}"
+        );
     }
 
     #[test]

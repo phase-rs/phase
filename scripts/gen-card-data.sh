@@ -97,7 +97,11 @@ cleanup_tmp() {
   # possibly-empty array under `set -u` (macOS default is bash 3.2).
   local f
   for f in ${PENDING_TMP[@]+"${PENDING_TMP[@]}"}; do
-    [ -e "$f" ] && rm -f "$f"
+    # Bare `rm -f`, never `[ -e "$f" ] && rm -f "$f"`: a false `[ -e ]` on the
+    # final iteration makes the AND-list — and therefore this trap, and
+    # therefore the whole script — exit non-zero after a fully successful run.
+    # `rm -f` already ignores a missing path, so the guard was only a landmine.
+    rm -f "$f"
   done
 }
 trap cleanup_tmp EXIT
@@ -107,18 +111,26 @@ track_tmp() {
   PENDING_TMP+=("$1")
 }
 
-# Atomically rename tmp → final and remove the path from the pending list
-# so the EXIT trap won't touch the now-promoted file.
-promote_tmp() {
+# Drop a path from the pending list. Every caller that disposes of a tracked
+# .tmp itself (promote, or an early `rm` once the file is known redundant) must
+# call this, or the EXIT trap is left holding a path it no longer owns.
+untrack_tmp() {
   local tmp="$1"
-  local final="$2"
-  mv -f "$tmp" "$final"
   local i
   local new=()
   for i in ${PENDING_TMP[@]+"${PENDING_TMP[@]}"}; do
     [ "$i" = "$tmp" ] || new+=("$i")
   done
   PENDING_TMP=(${new[@]+"${new[@]}"})
+}
+
+# Atomically rename tmp → final and remove the path from the pending list
+# so the EXIT trap won't touch the now-promoted file.
+promote_tmp() {
+  local tmp="$1"
+  local final="$2"
+  mv -f "$tmp" "$final"
+  untrack_tmp "$tmp"
 }
 
 run_tool_with_recovery() {
@@ -180,6 +192,7 @@ track_tmp "$TOKENS_TMP"
 # (40-65s) engine recompile via build.rs's rerun-if-changed for nothing.
 if cmp -s "$TOKENS_TMP" "$TOKENS_FILE"; then
   rm -f "$TOKENS_TMP"
+  untrack_tmp "$TOKENS_TMP"
 else
   # promote_tmp, not a bare `mv`: it deregisters the path so the EXIT trap
   # cannot delete the file it was just promoted onto.

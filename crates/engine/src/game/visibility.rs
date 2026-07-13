@@ -1471,6 +1471,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: crate::types::game_state::AssistState::NotOffered,
             activation_residual: crate::types::game_state::ActivationResidual::None,
+            alt_cost_grant_source: None,
         })
     }
 

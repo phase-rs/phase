@@ -25,7 +25,7 @@
 #
 abundance	Draw	Optional	none	Choose	-	IndividualDraw
 alhammarret's archive	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
-archmage ascension	Draw	Mandatory	none	Unimplemented	-	IndividualDraw
+archmage ascension	Draw	Optional	none	SearchLibrary	-	IndividualDraw
 asmodeus the archfiend	Draw	Mandatory	none	ExileTop	-	IndividualDraw
 blood scrivener	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
 breathstealer's crypt	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw

@@ -1095,6 +1095,12 @@ fn until_lethal_fallback(state: &mut GameState, result: &mut ActionResult, commi
 /// player drain pins ALL opponents every cycle (`TargetPin::Player` is constant, period 1). The
 /// seam is built for generality; a multi-cycle aggregation is fail-safe (an object loop reaching
 /// the arm measures 1 cycle, finds no faller, does not crown).
+///
+/// CR 732.2a SAFETY LIMIT: the returned period is clamped to `MAX_SHORTCUT_CYCLES`. Both
+/// consumers derive their `0..period` range from this one helper (`validate_pins` and
+/// `apply_until_lethal_shortcut`), so the clamp bounds validate + drive coherently;
+/// crown-soundness holds — every crownable loop has period 1, so the clamp only truncates a
+/// hostile over-cap schedule into the conservative manual-fallback arm, never a mis-crown.
 fn shortcut_drive_period(
     template: Option<&crate::analysis::decision_template::DecisionTemplate>,
 ) -> crate::analysis::decision_template::IterationIndex {
@@ -1117,7 +1123,16 @@ fn shortcut_drive_period(
         })
         .max()
         .unwrap_or(1)
-        .max(1)
+        // CR 732.2a SAFETY LIMIT: the drive period is STRUCTURALLY unbounded in the engine —
+        // its length is the client template schedule's own length. On the WS transport the
+        // 8 KB inbound-frame cap (phase-server/src/main.rs:409/1420) already bounds a hostile
+        // schedule to a few hundred entries (~1-2 s stall, not a million-cycle remote DoS),
+        // but in-process callers (WASM/Tauri/local) bypass that cap, so clamp here AT THE
+        // SOURCE for every caller. Real schedules rotate over a handful of object sources
+        // (period ≪ cap), so this is invisible to every legitimate loop; a clamped-shorter
+        // drive measures a smaller (more conservative) delta ⇒ FEWER crowns / more manual
+        // fallbacks, never a wrong crown.
+        .clamp(1, MAX_SHORTCUT_CYCLES)
 }
 
 /// PR-7 Combo-UI Stage 2: the typed result of driving ONE whole loop-shortcut cycle on a
@@ -1863,6 +1878,35 @@ fn handle_declare_shortcut(
             }
         }
     }
+    // CR 732.2a SAFETY LIMIT (see MAX_SHORTCUT_CYCLES): reject an over-cap Fixed count at
+    // the single authority — BEFORE the proposal is built — into the same fail-closed
+    // manual-play handback the pin validation above uses. This is THE catastrophic remote
+    // vector: `Fixed(u32)` scalar-encodes up to ~4.3e9 cycles in ~10 bytes, sailing through
+    // the 8 KB WS frame cap → one GameState clone + drive per cycle. Both confirmation paths
+    // (solitaire-immediate below, APNAP Accept) consume this one proposal, and both drive
+    // helpers (materialize_fixed_shortcut / materialize_object_growth_shortcut) read `n` from
+    // it, so this one check bounds every Fixed drive on every transport. The drive helpers do
+    // NOT re-check.
+    // Exhaustive (no wildcard) so a future `IterationCount` variant — e.g. the reserved
+    // `UntilResource`, which would carry its OWN unbounded count — build-breaks HERE and
+    // forces a bound decision rather than silently regressing this cap.
+    match &count {
+        crate::analysis::decision_template::IterationCount::Fixed(n)
+            if *n > MAX_SHORTCUT_CYCLES =>
+        {
+            priority::reset_priority(state);
+            // CR 800.4a: hand priority to the next living seat.
+            state.waiting_for = WaitingFor::Priority {
+                player: living_priority_seat(state),
+            };
+            result.waiting_for = state.waiting_for.clone();
+            return Ok(result);
+        }
+        // Under-cap `Fixed` and `UntilLethal` (period-bounded by `shortcut_drive_period`)
+        // proceed to the proposal.
+        crate::analysis::decision_template::IterationCount::Fixed(_)
+        | crate::analysis::decision_template::IterationCount::UntilLethal => {}
+    }
     let proposal = crate::analysis::loop_check::ShortcutProposal {
         proposer: offer.proposer,
         predicted_winner: offer.predicted_winner,
@@ -2354,6 +2398,17 @@ fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameSt
 
     !finished.is_empty()
 }
+
+// CR 732.2a SAFETY LIMIT: a shortcut is "a loop that repeats a specified number of times";
+// the CR places NO board-relative upper bound, so this is an engine implementation cap
+// against an absurd/hostile count — NOT a rules constraint. It bounds both a `Fixed(n)`
+// cycle count (handle_declare_shortcut) and a template drive period (shortcut_drive_period).
+// Motivating vector: a `u32` count scalar-encodes up to ~4.3e9 cycles in ~10 JSON bytes, so
+// it sails through the 8 KB inbound WS frame cap (phase-server/src/main.rs:409/1420) yet
+// would force ~4.3e9 GameState clones — a byte cap cannot see it, only this count cap can.
+// 1_000 is generous vs any honest Fixed count (~10x KCI-style loops); worst-case bounded
+// cost is 1_000 cycles x <=10_000 beats = 1e7.
+const MAX_SHORTCUT_CYCLES: u32 = 1_000;
 
 fn auto_pass_loop_max_iterations(state: &GameState) -> usize {
     let living_players = state
@@ -9525,5 +9580,16 @@ mod stage2_injector_tests {
             (5, b.clone()),
         ]))]);
         assert_eq!(shortcut_drive_period(Some(&pw)), 2, "Piecewise(2) ⇒ 2");
+
+        // CR 732.2a SAFETY LIMIT: an over-cap schedule clamps to MAX_SHORTCUT_CYCLES.
+        // Revert-probe: restore `.max(1)` (drop the `.clamp`) ⇒ returns MAX+5 (1005) ≠ 1000.
+        let oversized = mk(vec![TargetPin::Scheduled(TargetSchedule::RoundRobin(
+            vec![a.clone(); (MAX_SHORTCUT_CYCLES + 5) as usize],
+        ))]);
+        assert_eq!(
+            shortcut_drive_period(Some(&oversized)),
+            MAX_SHORTCUT_CYCLES,
+            "RoundRobin(MAX+5) clamps to MAX_SHORTCUT_CYCLES"
+        );
     }
 }

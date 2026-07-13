@@ -3202,6 +3202,7 @@ fn alt_cost_primal_prayers_energy_creature_mv_leq_3() {
         StaticMode::CastWithAlternativeCost {
             cost,
             timing_permission,
+            frequency,
         } => {
             assert_eq!(
                 *cost,
@@ -3213,6 +3214,8 @@ fn alt_cost_primal_prayers_energy_creature_mv_leq_3() {
                 *timing_permission,
                 Some(CastTimingPermission::AsThoughHadFlash)
             );
+            // CR 118.9: Primal Prayers has no per-turn frequency limit.
+            assert_eq!(*frequency, crate::types::statics::CastFrequency::Unlimited);
         }
         other => panic!("expected CastWithAlternativeCost, got {other:?}"),
     }
@@ -3237,6 +3240,87 @@ fn alt_cost_primal_prayers_energy_creature_mv_leq_3() {
             );
         }
         other => panic!("expected Typed(creature MV<=3 you cast), got {other:?}"),
+    }
+}
+
+/// CR 118.9 + CR 202.3 + CR 601.2b: As Foretold — "Once each turn, you may pay
+/// {0} rather than pay the mana cost for a spell you cast with mana value X or
+/// less, where X is the number of time counters on ~" lowers to a once-per-turn
+/// grant with a DYNAMIC mana-value gate keyed on counters on the source.
+#[test]
+fn alt_cost_as_foretold_once_per_turn_dynamic_mv() {
+    use crate::types::ability::{Comparator, ObjectScope, QuantityExpr, QuantityRef};
+    use crate::types::counter::CounterType;
+    use crate::types::statics::CastFrequency;
+
+    let def = parse_spells_alternative_cost(
+        "Once each turn, you may pay {0} rather than pay the mana cost for a spell you cast \
+         with mana value X or less, where X is the number of time counters on ~.",
+    )
+    .expect("As Foretold must parse to a CastWithAlternativeCost static");
+
+    match &def.mode {
+        StaticMode::CastWithAlternativeCost {
+            cost,
+            timing_permission,
+            frequency,
+        } => {
+            assert_eq!(
+                *cost,
+                AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::zero()
+                }
+            );
+            assert_eq!(*timing_permission, None);
+            assert_eq!(*frequency, CastFrequency::OncePerTurn);
+        }
+        other => panic!("expected CastWithAlternativeCost, got {other:?}"),
+    }
+
+    // Any spell (bare "a spell") gated on MV ≤ time counters on the source.
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::CountersOn {
+                                scope: ObjectScope::Source,
+                                counter_type: Some(CounterType::Time),
+                            },
+                        },
+                    }
+                )),
+                "expected Cmc LE CountersOn(Source, Time), got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("expected Typed(any spell MV<=counters), got {other:?}"),
+    }
+}
+
+/// CR 118.9: Regression — unlimited alternative-cost grants (Fist of Suns,
+/// Rooftop Storm) must carry `frequency: Unlimited` (the default), so the As
+/// Foretold once-per-turn axis does not perturb the existing class members.
+#[test]
+fn alt_cost_unlimited_grants_keep_default_frequency() {
+    use crate::types::statics::CastFrequency;
+
+    for text in [
+        "You may pay {W}{U}{B}{R}{G} rather than pay the mana cost for spells you cast.",
+        "You may pay {0} rather than pay the mana cost for Zombie creature spells you cast.",
+    ] {
+        let def =
+            parse_spells_alternative_cost(text).unwrap_or_else(|| panic!("must parse: {text}"));
+        match &def.mode {
+            StaticMode::CastWithAlternativeCost { frequency, .. } => {
+                assert_eq!(*frequency, CastFrequency::Unlimited, "for {text}");
+            }
+            other => panic!("expected CastWithAlternativeCost, got {other:?}"),
+        }
     }
 }
 

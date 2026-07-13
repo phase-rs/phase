@@ -111,6 +111,9 @@ pub fn resolve(
                 clear_cast_from_zone_recursive(a);
                 a.context.additional_cost_paid = false;
                 a.context.alternative_mana_cost_paid = false;
+                // CR 707.10: a copy of a spell isn't cast, so it must never
+                // consume a once-per-turn CastWithAlternativeCost grant's slot.
+                a.context.alt_cost_grant_source = None;
                 a.context.additional_cost_payment_count = 0;
                 a.context.kickers_paid.clear();
             }
