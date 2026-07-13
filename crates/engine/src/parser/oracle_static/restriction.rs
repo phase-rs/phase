@@ -385,16 +385,16 @@ pub(crate) fn parse_filter_scoped_cant_be_activated(
         }
     }
 
-    // Otherwise fall back to the type-list + controller-suffix form (Karn, Clarion).
-    // Require the predicate ending "... can't be activated[.]" at the tail.
-    // CR 605.1a: accept both apostrophe glyphs on the type-list predicate too
-    // (Karn, Clarion Conqueror) — same reason as the chosen-name branch above.
-    let predicate_tp = rest_tp
-        .strip_suffix(" can't be activated.") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .or_else(|| rest_tp.strip_suffix(" can\u{2019}t be activated.")) // allow-noncombinator: dual-apostrophe variant of the line above.
-        .or_else(|| rest_tp.strip_suffix(" can't be activated")) // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .or_else(|| rest_tp.strip_suffix(" can\u{2019}t be activated"))?; // allow-noncombinator: dual-apostrophe variant of the line above.
-                                                                          // Extract the type-list + optional controller suffix via the shared helper.
+    // Otherwise fall back to the type-list + controller-suffix form (Karn,
+    // Clarion, Damping Matrix, Sharkey). Split ON the "... can't be activated"
+    // predicate — rather than requiring the line to END there — so an optional
+    // " unless they're mana abilities" carve-out (Damping Matrix: "Activated
+    // abilities of artifacts and creatures can't be activated unless they're mana
+    // abilities") is parsed the same way as the chosen-name branch above.
+    // CR 605.1a: accept both apostrophe glyphs on the type-list predicate too.
+    let (predicate_tp, after_predicate) = rest_tp
+        .split_around(" can't be activated") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        .or_else(|| rest_tp.split_around(" can\u{2019}t be activated"))?; // allow-noncombinator: dual-apostrophe variant of the line above.
                                                                           // `parse_type_phrase` consumes the filter and returns the unconsumed tail —
                                                                           // for this pattern the tail should be empty (the whole predicate IS the filter).
     let (source_filter, tail) = parse_type_phrase(predicate_tp.original);
@@ -406,12 +406,18 @@ pub(crate) fn parse_filter_scoped_cant_be_activated(
     if matches!(source_filter, TargetFilter::SelfRef) {
         return None;
     }
+    // CR 605.1a: optional " unless they're mana abilities" carve-out (Damping
+    // Matrix); the suffix combinator yields `ActivationExemption::None` when it is
+    // absent (Karn, Clarion). Nothing but a trailing period may follow it.
+    let (exempt_tail, exemption) = parse_activation_exemption_suffix(after_predicate.lower).ok()?;
+    if !exempt_tail.trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
     Some(
         StaticDefinition::new(StaticMode::CantBeActivated {
             who: ProhibitionScope::AllPlayers,
             source_filter,
-            // CR 605.1a: Karn/Clarion class — no "unless they're..." suffix.
-            exemption: ActivationExemption::None,
+            exemption,
         })
         .description(text.to_string()),
     )
