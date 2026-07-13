@@ -8869,7 +8869,9 @@ pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, Abilit
         rest,
         AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount,
+                qty: QuantityRef::PreviousEffectAmount {
+                    channel: crate::types::ability::DamageChannel::Total,
+                },
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 1 },

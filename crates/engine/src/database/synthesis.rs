@@ -5871,7 +5871,7 @@ fn is_extort_trigger(t: &TriggerDefinition) -> bool {
                                 &*gain.effect,
                                 Effect::GainLife {
                                     amount: QuantityExpr::Ref {
-                                        qty: QuantityRef::PreviousEffectAmount,
+                                        qty: QuantityRef::PreviousEffectAmount { .. },
                                     },
                                     player: TargetFilter::Controller,
                                 }
@@ -5976,7 +5976,9 @@ fn build_extort_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::GainLife {
             amount: QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount,
+                qty: QuantityRef::PreviousEffectAmount {
+                    channel: crate::types::ability::DamageChannel::Total,
+                },
             },
             player: TargetFilter::Controller,
         },

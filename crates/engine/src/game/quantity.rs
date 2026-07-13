@@ -384,7 +384,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
-        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. }
@@ -654,7 +654,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
-        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
@@ -849,7 +849,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
-        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
@@ -2375,7 +2375,21 @@ fn resolve_ref(
         }
         // CR 608.2c: Numeric result from the preceding effect in a sub_ability chain.
         // The resolver stamps this from the parent effect's semantic event class.
-        QuantityRef::PreviousEffectAmount => state.last_effect_amount.unwrap_or(0),
+        //
+        // CR 120.6 / CR 120.10: `channel` picks WHICH tally the preceding effect
+        // left behind. Both are stamped by the damage effects and cleared at
+        // depth-0, so the two channels are read from the same resolution scope —
+        // this arm only chooses between them. Mirrors the condition peer
+        // `AbilityCondition::PreviousEffectAmount`, which already reads both.
+        QuantityRef::PreviousEffectAmount { channel } => match channel {
+            // CR 120.6: the total amount dealt/lost/removed.
+            DamageChannel::Total => state.last_effect_amount.unwrap_or(0),
+            // CR 120.10: only the damage dealt BEYOND lethal — "the amount of
+            // excess damage dealt to that creature this way" (Goblin
+            // Negotiation, Hell to Pay, Lacerate Flesh), "that excess damage"
+            // (Contest of Claws). 0 when the preceding effect dealt no excess.
+            DamageChannel::Excess => state.last_effect_excess_amount.unwrap_or(0),
+        },
         // CR 608.2c: "for each [thing] this way" — read the most recent tracked set size.
         QuantityRef::TrackedSetSize => state
             .tracked_object_sets

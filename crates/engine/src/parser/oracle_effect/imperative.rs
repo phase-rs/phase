@@ -1778,7 +1778,9 @@ pub(super) fn parse_targeted_action_ast(
                 }
             ) {
                 count = QuantityExpr::Ref {
-                    qty: QuantityRef::PreviousEffectAmount,
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: crate::types::ability::DamageChannel::Total,
+                    },
                 };
             }
             let filter = parse_discard_card_filter(after_discard);
