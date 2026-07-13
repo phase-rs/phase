@@ -265,6 +265,7 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_no_opponent_comparison_conditions,
         parse_triggering_player_has_unattacked_opponent,
         parse_opponent_comparison_conditions,
+        parse_a_graveyard_size_condition,
         parse_life_conditions,
         parse_offered_card_mana_value_comparison,
         parse_quantity_quantity_comparison,
@@ -8430,6 +8431,28 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
         input,
         nom::error::ErrorKind::Fail,
     )))
+}
+
+/// CR 404.1 + CR 608.2c: "a graveyard has N or more cards in it" checks
+/// whether any single player's graveyard reaches the threshold. Jace, the
+/// Perfected Mind evaluates this after milling; summing graveyards would
+/// incorrectly turn two smaller graveyards into a successful check.
+fn parse_a_graveyard_size_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("a graveyard has ").parse(input)?;
+    let (rest, n) = parse_number(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" or more cards in it").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::GraveyardSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+            },
+            n,
+        ),
+    ))
 }
 
 fn parse_opponent_controls_at_least_more_than_you(

@@ -3259,6 +3259,60 @@ fn knight_errant_of_eos_binds_convoke_count_in_reveal_filter() {
 }
 
 #[test]
+fn jace_perfected_mind_draws_three_only_when_a_graveyard_reaches_twenty() {
+    let def = parse_effect_chain(
+        "Target player mills three cards. Then if a graveyard has twenty or more cards in it, you draw three cards. Otherwise, you draw a card.",
+        AbilityKind::Activated,
+    );
+
+    assert!(matches!(
+        def.effect.as_ref(),
+        Effect::Mill {
+            count: QuantityExpr::Fixed { value: 3 },
+            ..
+        }
+    ));
+    let draw_three = def
+        .sub_ability
+        .as_deref()
+        .expect("Jace's mill must chain into the conditional draw");
+    assert!(matches!(
+        draw_three.effect.as_ref(),
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 3 },
+            ..
+        }
+    ));
+    assert!(matches!(
+        draw_three.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::GraveyardSize {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Max,
+                        exclude: None,
+                    },
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 20 },
+        })
+    ));
+    let draw_one = draw_three
+        .else_ability
+        .as_deref()
+        .expect("Jace's otherwise branch must be attached to the conditional draw");
+    assert!(matches!(
+        draw_one.effect.as_ref(),
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            ..
+        }
+    ));
+    assert!(draw_one.sub_ability.is_none());
+}
+
+#[test]
 fn flow_state_conditionally_keeps_two_for_instant_and_sorcery_in_graveyard() {
     let def = parse_effect_chain(
             "Look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order. If there is an instant card and a sorcery card in your graveyard, instead put two of them into your hand and the rest on the bottom of your library in any order.",
