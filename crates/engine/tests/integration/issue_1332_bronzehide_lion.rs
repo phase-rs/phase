@@ -3,8 +3,12 @@
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::triggers::process_triggers;
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
+use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::zones::Zone;
 
 const BRONZEHIDE_LION_ORACLE: &str =
@@ -31,6 +35,19 @@ fn drain_to_priority(runner: &mut engine::game::scenario::GameRunner) {
                 }
             }
         }
+    }
+}
+
+fn add_mana(runner: &mut engine::game::scenario::GameRunner, mana: &[ManaType]) {
+    let pool = &mut runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|player| player.id == P0)
+        .expect("P0 must exist")
+        .mana_pool;
+    for color in mana {
+        pool.add(ManaUnit::new(*color, ObjectId(0), false, vec![]));
     }
 }
 
@@ -61,4 +78,66 @@ fn bronzehide_lion_dies_with_no_creature_you_control_returns_then_graveyards() {
         runner.state().waiting_for,
         WaitingFor::ReturnAsAuraTarget { .. }
     ));
+}
+
+/// #5681: Bronzehide's returned Aura grants an activated ability
+/// whose indestructible effect expires at end of turn. The trailing comma inside
+/// the quoted grant must not erase that duration before the ability reaches the
+/// resolver.
+#[test]
+fn bronzehide_lion_aura_grant_expires_at_end_of_turn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+    let lion_id = scenario
+        .add_creature_from_oracle(P0, "Bronzehide Lion", 3, 3, BRONZEHIDE_LION_ORACLE)
+        .id();
+    let host_id = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), lion_id, Zone::Graveyard, &mut events);
+    process_triggers(runner.state_mut(), &events);
+    drain_to_priority(&mut runner);
+
+    assert_eq!(
+        runner.state().objects[&lion_id].attached_to,
+        Some(host_id.into()),
+        "the returned Aura must attach to the sole legal creature"
+    );
+
+    add_mana(&mut runner, &[ManaType::Green, ManaType::White]);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: lion_id,
+            ability_index: 0,
+        })
+        .expect("the Aura's granted {G}{W} ability must be activatable");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(host_id)),
+            })
+            .expect("choose the enchanted creature if the grant surfaces a target slot");
+    }
+    runner.advance_until_stack_empty();
+
+    assert!(
+        runner.state().objects[&host_id]
+            .keywords
+            .contains(&Keyword::Indestructible),
+        "the granted ability must make the enchanted creature indestructible before end of turn"
+    );
+
+    runner.advance_to_end_step();
+    runner.advance_until_stack_empty();
+
+    assert!(
+        !runner.state().objects[&host_id]
+            .keywords
+            .contains(&Keyword::Indestructible),
+        "the granted indestructible must expire at end of turn rather than remain permanent"
+    );
 }
