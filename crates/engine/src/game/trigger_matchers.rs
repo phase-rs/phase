@@ -2329,34 +2329,11 @@ pub(super) fn match_sacrificed(
     let GameEvent::PermanentSacrificed { object_id, .. } = event else {
         return false;
     };
-    // CR 603.10a: Sacrifice triggers "look back in time." The sacrificed
-    // permanent may already be in the graveyard with its battlefield
-    // characteristics stripped (CR 400.7), or — for a token (CR 111.7) — have
-    // ceased to exist and been removed from `state.objects` by a prior SBA pass.
-    // Match the live object first; when it no longer carries its battlefield
-    // appearance, fall back to the last-known-information snapshot captured on
-    // battlefield exit (`apply_zone_exit_cleanup`, zones.rs). Mirrors the
-    // identical fallback in `exploiter_matches_subject_filter`.
-    if valid_card_matches(trigger, state, *object_id, source_id) {
-        return true;
-    }
-    let Some(filter) = &trigger.valid_card else {
-        // No filter ⇒ `valid_card_matches` already returned true above.
-        return false;
-    };
-    if state
-        .objects
-        .get(object_id)
-        .is_none_or(|o| o.zone != Zone::Battlefield)
-    {
-        if let Some(lki) = state.lki_cache.get(object_id) {
-            let ctx = super::filter::FilterContext::from_source(state, source_id);
-            return super::filter::matches_target_filter_on_lki_snapshot(
-                state, *object_id, lki, filter, &ctx,
-            );
-        }
-    }
-    false
+    // CR 603.10a: Sacrifice triggers "look back in time." The sacrificed permanent may
+    // already be in the graveyard with its granted characteristics pruned (CR 400.7), or
+    // — for a token (CR 111.7) — have ceased to exist and been removed from
+    // `state.objects` by a prior SBA pass.
+    valid_card_matches_with_lki(trigger, state, *object_id, source_id)
 }
 
 pub(super) fn match_destroyed(
@@ -3181,7 +3158,13 @@ pub(super) fn match_connives(
         return false;
     };
     if trigger.valid_card.is_some() {
-        valid_card_matches(trigger, state, *conniver_id, source_id)
+        // CR 603.10a + CR 111.7: Connive triggers look back in time. The conniver is
+        // routinely gone by the time this event is matched — killed in response while the
+        // connive ability was on the stack, so the ability resolved from LKI (CR 608.2)
+        // and emitted this completion event naming an object that has left the
+        // battlefield, or ceased to exist outright if it was a token. Resolving that raw
+        // `ObjectId` against live state silently drops the trigger.
+        valid_card_matches_with_lki(trigger, state, *conniver_id, source_id)
     } else {
         *conniver_id == source_id
     }
@@ -3253,22 +3236,69 @@ fn exploiter_matches_subject_filter(
     filter: &TargetFilter,
     source_id: ObjectId,
 ) -> bool {
-    if target_filter_matches_object(state, exploiter, filter, source_id) {
+    subject_filter_matches_with_lki(state, exploiter, filter, source_id)
+}
+
+/// CR 603.10a + CR 400.7 + CR 111.7: Match a look-back trigger's subject filter against
+/// an object that may no longer carry its battlefield appearance.
+///
+/// "Look back in time" triggers — sacrifice (CR 701.21a), exploit (CR 702.110b), connive
+/// (CR 701.50a) — are matched against an object that may already have left the
+/// battlefield. Two distinct things can go wrong on the live path:
+///
+/// * the object is in the graveyard with its *granted* characteristics pruned (CR 400.7),
+///   so a typed filter that depended on a continuous effect no longer holds; or
+/// * the object was a token, has ceased to exist (CR 111.7), and the SBA purge removed it
+///   from `state.objects` entirely — so `filter_inner` cannot see it at all and returns
+///   `false` for every filter.
+///
+/// Match the live object first; when it no longer carries its battlefield appearance, fall
+/// back to the last-known-information snapshot captured on battlefield exit
+/// (`apply_zone_exit_cleanup`, zones.rs).
+///
+/// Single authority for the three matchers that need this fallback: `match_sacrificed`,
+/// `exploiter_matches_subject_filter`, and `match_connives`.
+///
+/// Note a printed card keeps its `core_types` and `controller` across a zone change, and
+/// `filter_inner` has no zone gate, so the *ceased-to-exist token* is the vector that
+/// actually discriminates this helper from a bare live match — a regression test that
+/// merely moves a printed creature to the graveyard passes either way and proves nothing.
+pub(super) fn subject_filter_matches_with_lki(
+    state: &GameState,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+) -> bool {
+    if target_filter_matches_object(state, object_id, filter, source_id) {
         return true;
     }
     if state
         .objects
-        .get(&exploiter)
+        .get(&object_id)
         .is_none_or(|o| o.zone != Zone::Battlefield)
     {
-        if let Some(lki) = state.lki_cache.get(&exploiter) {
+        if let Some(lki) = state.lki_cache.get(&object_id) {
             let ctx = super::filter::FilterContext::from_source(state, source_id);
             return super::filter::matches_target_filter_on_lki_snapshot(
-                state, exploiter, lki, filter, &ctx,
+                state, object_id, lki, filter, &ctx,
             );
         }
     }
     false
+}
+
+/// [`valid_card_matches`] with the CR 603.10a look-back fallback applied. Use for any
+/// trigger whose subject may have left the battlefield before the event is matched.
+pub(super) fn valid_card_matches_with_lki(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    object_id: ObjectId,
+    source_id: ObjectId,
+) -> bool {
+    match &trigger.valid_card {
+        None => true,
+        Some(filter) => subject_filter_matches_with_lki(state, object_id, filter, source_id),
+    }
 }
 
 /// CR 702.112b: "When [subject] becomes renowned" — fires when Renown
@@ -14576,14 +14606,24 @@ mod tests {
         assert!(match_exploited(&event, &trigger, source, &state));
     }
 
-    /// CR 603.10a + CR 400.7: a creature that exploits ITSELF satisfies a typed
-    /// subject filter ("a creature you control") via its last-known battlefield
-    /// snapshot. Drives the REAL zone-change pipeline (`move_to_zone`) so the
-    /// graveyard object is genuinely stripped (control/types cleared) and
-    /// `lki_cache` is populated exactly as it is in a live game. This flips to
-    /// `false` if the LKI fallback in `exploiter_matches_subject_filter` is
-    /// reverted, because `target_filter_matches_object` reads the stripped
-    /// graveyard object.
+    /// CR 603.10a + CR 400.7 + CR 111.7: a creature that exploits ITSELF satisfies a typed
+    /// subject filter ("a creature you control") via its last-known battlefield snapshot.
+    /// Drives the REAL zone-change pipeline (`move_to_zone`) so `lki_cache` is populated
+    /// exactly as it is in a live game.
+    ///
+    /// The printed-card half of this test is NOT a discriminating guard, contrary to what
+    /// this comment previously claimed: a printed creature card keeps its `core_types` and
+    /// `controller` across a zone change, and `filter_inner` has no zone gate, so the
+    /// graveyard object still satisfies `Typed { Creature, controller: You }` on the live
+    /// path. It passes with the LKI fallback compiled out (verified 2026-07-12).
+    ///
+    /// The vector that WOULD discriminate is a ceased-to-exist token (CR 111.7), purged
+    /// from `state.objects`, which `filter_inner` cannot see at all. That case is covered
+    /// for sacrifice by `sacrifice_artifact_trigger_matches_ceased_to_exist_token_via_lki`
+    /// and for connive by `connives_typed_filter_matches_ceased_to_exist_token_conniver_via_lki`.
+    /// It is NOT covered here: a self-exploiting token is also its own trigger *source*,
+    /// and `FilterContext::from_source` cannot resolve a source that has been purged — a
+    /// separate gap, tracked independently, not papered over by this test.
     #[test]
     fn exploited_typed_filter_matches_self_sacrificed_exploiter_via_lki() {
         let mut state = setup();
@@ -14627,6 +14667,105 @@ mod tests {
         assert!(
             !match_exploited(&event, &opponent, source, &state),
             "an opponent-controlled subject filter must NOT match the controller's own exploiter"
+        );
+    }
+
+    /// CR 603.10a + CR 111.7 + CR 701.50a: a conniving creature TOKEN that has ceased
+    /// to exist must still satisfy the connive trigger's subject filter.
+    ///
+    /// A token killed in response to its own connive trigger is purged from
+    /// `state.objects` by the CR 111.7 SBA before the connive ability resolves. The
+    /// ability still resolves from last-known information (CR 608.2) — the controller
+    /// draws and discards — and pushes `EffectResolved { kind: Connive, source_id:
+    /// <purged token> }`. `match_connives` then resolves that raw `ObjectId` against
+    /// LIVE state, where `filter_inner` finds no object and returns `false`, so
+    /// "Whenever a creature you control connives" silently never fires. That clause is
+    /// the ONLY connive-trigger shape in the pool — Glorious Purpose, Iron Monger, and
+    /// Ultron all parse to the identical `Typed { Creature, controller: You }`.
+    ///
+    /// Same defect class as issue #754 (Crime Novelist / ceased-to-exist Treasure).
+    /// Both sibling matchers — `match_sacrificed` and `exploiter_matches_subject_filter`
+    /// — already carry the live-then-LKI fallback. Connive is the one that does not.
+    ///
+    /// Note the discriminating vector is the CR 111.7 purge, NOT an ordinary trip to
+    /// the graveyard: a printed creature card keeps its `core_types` and `controller`
+    /// on a zone change, so it still satisfies this filter on the live path.
+    ///
+    /// Discriminating guard: RED before the fallback is added to `match_connives`.
+    #[test]
+    fn connives_typed_filter_matches_ceased_to_exist_token_conniver_via_lki() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(0),
+            "Glorious Purpose".to_string(),
+            Zone::Battlefield,
+        );
+
+        // The real Glorious Purpose trigger, parsed from its real Oracle text.
+        let trigger = parse_trigger_line(
+            "Whenever a creature you control connives, put a +1/+1 counter on that creature.",
+            "Glorious Purpose",
+        );
+        assert_eq!(trigger.mode, TriggerMode::Connives);
+        assert!(
+            trigger.valid_card.is_some(),
+            "fixture must exercise the typed-filter LKI path, not the None arm"
+        );
+
+        // A creature TOKEN connives, then is killed in response to its own trigger.
+        let token = create_object(
+            &mut state,
+            CardId(801),
+            PlayerId(0),
+            "Robot Villain Token".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&token) {
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+        }
+
+        // Real zone-change pipeline: snapshots LKI on battlefield exit.
+        crate::game::zones::move_to_zone(&mut state, token, Zone::Graveyard, &mut Vec::new());
+        assert!(state.lki_cache.contains_key(&token));
+        // CR 111.7: the token ceases to exist — purged from `state.objects` before the
+        // connive ability resolves and emits its completion event.
+        state.objects.remove(&token);
+
+        let event = GameEvent::EffectResolved {
+            kind: EffectKind::Connive,
+            source_id: token,
+            subject: None,
+        };
+        assert!(
+            match_connives(&event, &trigger, source, &state),
+            "CR 603.10a: connive trigger must match a ceased-to-exist token conniver via LKI"
+        );
+
+        // Negative: an opponent's conniver must NOT fire "a creature YOU control connives".
+        let opp_token = create_object(
+            &mut state,
+            CardId(802),
+            PlayerId(1),
+            "Robot Villain Token".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&opp_token) {
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+        }
+        crate::game::zones::move_to_zone(&mut state, opp_token, Zone::Graveyard, &mut Vec::new());
+        state.objects.remove(&opp_token);
+        let opp_event = GameEvent::EffectResolved {
+            kind: EffectKind::Connive,
+            source_id: opp_token,
+            subject: None,
+        };
+        assert!(
+            !match_connives(&opp_event, &trigger, source, &state),
+            "an opponent's conniver must NOT fire the controller's 'creature you control' trigger via LKI"
         );
     }
 
