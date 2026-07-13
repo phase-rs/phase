@@ -182,9 +182,17 @@ fi
 
 track_tmp "$OUTPUT_TMP"
 track_tmp "$NAMES_OUTPUT_TMP"
+# `--write-subtypes` refreshes the committed creature-subtype vocabulary
+# (crates/engine/data/oracle-subtypes.json, `include_str!`d by the parser).
+# This script is the only caller that may pass it: it is the only one that
+# downloads CardTypes.json above, and CardTypes.json is the sole source of the
+# token-only subtypes (Army, Servo, Pentavite, …). oracle-gen hard-fails under
+# this flag if that sidecar is missing, rather than regenerating a vocabulary
+# with all 26 of them silently deleted. Every other caller (CI, ai-gate, a bare
+# `cargo export-cards`) omits the flag and leaves the tracked file untouched.
 run_tool_with_recovery \
   "$OUTPUT_TMP" \
-  "$TOOL_BIN/oracle-gen" "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT_TMP" --sidecar-dir "$OUTPUT_DIR"
+  "$TOOL_BIN/oracle-gen" "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT_TMP" --sidecar-dir "$OUTPUT_DIR" --write-subtypes
 # Cheap presence guard only. The full JSON/object/non-empty/integrity
 # validation is done by card-data-validate below (CardDatabase::from_export),
 # which is strictly stronger than a jq shape check — so an extra jq parse of

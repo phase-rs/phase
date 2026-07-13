@@ -256,6 +256,28 @@ jobs:
         run: |
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
+      - name: Card export must not mutate the tracked parser vocabulary
+        # Regression guard: the export is a PURE READ of the tracked tree.
+        #
+        # It used to rewrite crates/engine/data/oracle-subtypes.json on every run,
+        # from CardTypes.json ∪ the AtomicCards harvest — but this job downloads
+        # only AtomicCards.json (see the mtgjson cache above), so CardTypes.json
+        # was always absent and the regeneration silently fell back to the harvest
+        # alone. That deletes the 26 token-only creature subtypes (Army, Servo,
+        # Pentavite, Sculpture, Tentacle, …) which are printed on no card face and
+        # so live in CardTypes.json alone. Because the engine `include_str!`s that
+        # file, the rewrite bumped its mtime and rebuilt the engine right here —
+        # leaving validate, coverage, and semantic-audit below to run against a
+        # parser whose subtype vocabulary was missing all 26.
+        #
+        # The refresh now lives behind `--write-subtypes`, passed only by
+        # scripts/gen-card-data.sh (the one caller that fetches the sidecar, and
+        # which hard-fails without it). This asserts the export stays a pure read.
+        # Scoped to the same condition as the generate step so it is never
+        # vacuous: it runs exactly when an export ran.
+        if: steps.cardgen-cache.outputs.cache-hit != 'true'
+        run: git diff --exit-code -- crates/engine/data/oracle-subtypes.json
+
       - name: Validate card-data against engine schema
         # PR-time gate — the same parse the WASM does at runtime, run against
         # the freshly produced card-data. If a parser/schema change makes the
@@ -265,11 +287,11 @@ jobs:
         # passed. card-data.json is byte-identical either way, restored from
         # cardgen or regenerated above.
         # Same [tool, cli] fingerprint as card-gen above → engine cache hit. That
-        # hit is only real because `oracle-gen` rewrites
-        # crates/engine/data/oracle-subtypes.json solely when its bytes change:
-        # the engine lib pulls that file in via `include_str!`, so an
-        # unconditional write would bump its mtime, dirty the crate's dep-info
-        # fingerprint, and force a full engine recompile right here.
+        # hit is real because the export never writes to crates/engine/data: the
+        # engine lib pulls oracle-subtypes.json in via `include_str!`, so any
+        # write would bump its mtime, dirty the crate's dep-info fingerprint, and
+        # force a full engine recompile right here — against a vocabulary this job
+        # has no CardTypes.json to regenerate correctly. The step above pins that.
         if: steps.gates-cache.outputs.cache-hit != 'true'
         run: cargo run --profile tool --features cli --bin card-data-validate -- data/card-data.json
 
