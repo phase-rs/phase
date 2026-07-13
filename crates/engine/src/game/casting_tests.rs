@@ -492,6 +492,97 @@ fn add_activation_only_colorless_source(
 }
 
 #[test]
+fn x_spell_cap_excludes_mana_restricted_to_activated_abilities() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_instant_in_hand(&mut state, PlayerId(0));
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::X, ManaCostShard::White],
+        generic: 0,
+    };
+    create_tap_mana_source(
+        &mut state,
+        "Meticulous Archive Stand-In",
+        ManaProduction::Fixed {
+            colors: vec![ManaColor::White],
+            contribution: ManaContribution::Base,
+        },
+    );
+    create_tap_mana_source(
+        &mut state,
+        "Island Stand-In",
+        ManaProduction::Fixed {
+            colors: vec![ManaColor::Blue],
+            contribution: ManaContribution::Base,
+        },
+    );
+    let citadel = create_object(
+        &mut state,
+        CardId(9_017),
+        PlayerId(0),
+        "Sunken Citadel Stand-In".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&citadel).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        let abilities = Arc::make_mut(&mut obj.abilities);
+        abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::White],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 2 },
+                        color_options: vec![ManaColor::White],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![ManaSpendRestriction::ActivateOnly],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+    }
+
+    let card_id = state.objects[&spell].card_id;
+    let waiting = handle_cast_spell(&mut state, PlayerId(0), spell, card_id, &mut Vec::new())
+        .expect("the X spell should begin casting");
+    state.waiting_for = waiting;
+    let waiting = apply_as_current(
+        &mut state,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(PlayerId(1))],
+        },
+    )
+    .expect("the target should be selected before X")
+    .waiting_for;
+    match waiting {
+        WaitingFor::ChooseXValue { max, .. } => assert_eq!(
+            max, 2,
+            "three spell-usable mana sources must cap {{X}}{{W}} at X=2"
+        ),
+        other => panic!("expected ChooseXValue, got {other:?}"),
+    }
+}
+
+#[test]
 fn ability_condition_currently_met_gates_on_board_relative_quantity() {
     let mut state = GameState::new_two_player(42);
     // Hideaway-shaped source: a {T}-cost ability gated by "creatures you

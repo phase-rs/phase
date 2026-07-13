@@ -9887,6 +9887,11 @@ pub(super) fn max_x_value_excluding(
 
     let tap_payment_mode =
         object_id.and_then(|oid| super::casting::spell_tap_payment_mode(state, player, oid));
+    // CR 106.6 + CR 601.2f: The X cap is a spell-payment preview. Restricted
+    // mana (for example, Sunken Citadel's two mana usable only for land
+    // abilities) must be evaluated against the spell being announced.
+    let spell_meta = object_id.and_then(|oid| super::casting::build_spell_meta(state, player, oid));
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
 
     // CR 702.126a / 702.51a: tap-payment keywords (Improvise/Convoke/Waterbend)
     // let the caster pay generic mana by tapping permanents. The eligibility
@@ -9925,7 +9930,7 @@ pub(super) fn max_x_value_excluding(
         .iter()
         .filter(|id| !excluded_sources.contains(id))
         .map(|&id| {
-            let mana = mana_sources::feasible_mana_capacity(state, id, player, None);
+            let mana = mana_sources::feasible_mana_capacity(state, id, player, spell_ctx.as_ref());
             let tap = pred
                 .filter(|p| state.objects.get(&id).is_some_and(|o| p(o, player)))
                 .map_or(0, |_| 1);
