@@ -129,7 +129,6 @@ fn parse_shared_restriction_condition(text: &str) -> SharedRestrictionParse {
 /// A parser that exists merely because the shared grammar spells the phrase differently
 /// is NOT justified — teach `parse_inner_condition` the phrasing instead (that is where
 /// every static ability with the same words already looks).
-
 fn parse_restriction_only_condition(text: &str) -> Option<ParsedCondition> {
     // JUSTIFICATION 1 — restriction-context referent (CR 601.3d).
     //
