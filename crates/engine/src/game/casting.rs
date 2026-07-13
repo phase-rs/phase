@@ -12222,6 +12222,36 @@ pub fn can_cast_adventure_face_now(
     can_cast_object_now(&sim, player, object_id)
 }
 
+/// CR 709.3 + CR 712.11c: Test one split-card or spell//spell MDFC face
+/// without letting the other face make this choice appear affordable. This
+/// keeps an unaffordable half from entering its target-selection prompt. Land
+/// faces reach this prompt only after a legal play-land action and remain
+/// selectable without a mana-cost check.
+pub fn can_cast_modal_face_now(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    back_face: bool,
+) -> bool {
+    let mut sim = state.clone();
+    let Some(obj) = sim.objects.get_mut(&object_id) else {
+        return false;
+    };
+    if back_face {
+        simulate_chosen_split_spell_back_face(obj);
+    } else if let Some(back) = obj.back_face.as_mut() {
+        back.layout_kind = None;
+    }
+    if obj
+        .card_types
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Land)
+    {
+        return true;
+    }
+    can_cast_object_now(&sim, player, object_id)
+}
+
 pub fn can_cast_object_now_with_probe(
     state: &GameState,
     player: PlayerId,
