@@ -133,7 +133,7 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
         // CR 608.2c + CR 702.34 (Flashback) + CR 702.143 (Foretell): "If you
         // cast it from [zone], [do A]. Otherwise, [do B]." — self-referential
         // check on the resolving spell's `cast_from_zone`. Maps the zone-bound
-        // `Spells` predicates onto `AbilityCondition::CastFromZone { zone }`.
+        // `Spells` predicates onto `AbilityCondition::WasCast { zone: Some(zone) }`.
         // Non-zone predicates (`AlternateCostWasPaid`, `WasKicked`, `WasForetold`,
         // `WasBargained`, etc.) need separate engine slots and strict-fail.
         Condition::CastSpellPassesFilter(spells) => spells_to_cast_zone_ability(spells)?,
@@ -165,7 +165,7 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
 }
 
 /// CR 608.2c + CR 702.34 + CR 702.143: Map a `Spells` predicate that gates
-/// the resolving spell's effect onto `AbilityCondition::CastFromZone`. Only
+/// the resolving spell's effect onto `AbilityCondition::WasCast`. Only
 /// zone-axis predicates translate today — the engine's per-spell context
 /// stores `cast_from_zone` (a `Zone`) but no kicker/foretell/bargain-paid
 /// flags reachable from `AbilityCondition`. Player-scoped variants
@@ -180,9 +180,9 @@ fn spells_to_cast_zone_ability(spells: &Spells) -> ConvResult<AbilityCondition> 
             Players::AnyPlayer => Zone::Graveyard,
             other => {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
-                    engine_type: "AbilityCondition::CastFromZone",
+                    engine_type: "AbilityCondition::WasCast",
                     needed_variant: format!(
-                        "CastFromZone with player-scoped graveyard: {}",
+                        "WasCast with player-scoped graveyard: {}",
                         players_variant_tag(other)
                     ),
                 });
@@ -198,8 +198,8 @@ fn spells_to_cast_zone_ability(spells: &Spells) -> ConvResult<AbilityCondition> 
             Player::You => Zone::Hand,
             other => {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
-                    engine_type: "AbilityCondition::CastFromZone",
-                    needed_variant: format!("CastFromZone with non-You hand axis: {other:?}"),
+                    engine_type: "AbilityCondition::WasCast",
+                    needed_variant: format!("WasCast with non-You hand axis: {other:?}"),
                 });
             }
         },
@@ -207,7 +207,7 @@ fn spells_to_cast_zone_ability(spells: &Spells) -> ConvResult<AbilityCondition> 
         Spells::WasCastFromTheirLibrary => Zone::Library,
         other => {
             return Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "AbilityCondition::CastFromZone",
+                engine_type: "AbilityCondition::WasCast",
                 needed_variant: format!(
                     "CastSpellPassesFilter with non-zone predicate: {}",
                     spells_variant_tag(other)
@@ -215,7 +215,7 @@ fn spells_to_cast_zone_ability(spells: &Spells) -> ConvResult<AbilityCondition> 
             });
         }
     };
-    Ok(AbilityCondition::CastFromZone { zone })
+    Ok(AbilityCondition::WasCast { zone: Some(zone) })
 }
 
 /// CR 608.2c: Convert a condition for use as the negated form on

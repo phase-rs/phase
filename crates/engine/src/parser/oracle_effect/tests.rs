@@ -3053,9 +3053,11 @@ fn approach_of_the_second_sun_parses_compound_condition_and_otherwise_branch() {
     assert!(
         matches!(
             &conditions[0],
-            AbilityCondition::CastFromZone { zone: Zone::Hand }
+            AbilityCondition::WasCast {
+                zone: Some(Zone::Hand)
+            }
         ),
-        "first conjunct must be CastFromZone(Hand), got: {:?}",
+        "first conjunct must be WasCast(Hand), got: {:?}",
         conditions[0]
     );
     match &conditions[1] {
@@ -5838,7 +5840,7 @@ fn effect_counter_ability_with_source_static_absorption() {
         "sub_ability should be absorbed"
     );
     if let Effect::Counter { source_rider, .. } = &*ability.effect {
-        let CounterSourceRider::LosesAbilities { static_def } = source_rider
+        let CounterSourceRider::LosesAbilities { static_def, .. } = source_rider
             .as_ref()
             .expect("should have a LosesAbilities source_rider")
         else {
@@ -10416,6 +10418,41 @@ fn effect_copy_retarget_binds_across_wither_rider_spinerock_tyrant() {
     );
 }
 
+/// CR 707.10c + CR 603.12: Spider-Verse — the retarget grant is printed as the
+/// CONSEQUENT of a reflexive gate ("you may copy it. IF YOU DO, you may choose new
+/// targets for the copy.") rather than as its own sentence. It must still bind to
+/// the copy.
+///
+/// This is the class boundary against Spinerock Tyrant (tested above), which prints
+/// the identical grant as a standalone sentence and always worked. Before the fix the
+/// gated form reached the continuation recognizer still wearing its "if you do, "
+/// prefix, failed to match, and fell through to an honest `orphaned_copy_retarget` —
+/// so the copy existed but could never be retargeted.
+///
+/// Folding the gate away is sound because it is AFFIRMATIVE and the copy is already
+/// optional: "if you do" means "if you made the copy", and a retarget permission on a
+/// copy that was never made is unreachable.
+#[test]
+fn effect_copy_retarget_binds_through_if_you_do_gate_spider_verse() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "The \"legend rule\" doesn't apply to Spiders you control.\n\
+         Whenever you cast a spell from anywhere other than your hand, you may copy it. \
+         If you do, you may choose new targets for the copy. If the copy is a permanent \
+         spell, it gains haste. Do this only once each turn.",
+        "Spider-Verse",
+        &["Enchantment"],
+        &[],
+    );
+    assert_eq!(
+        orphaned, 0,
+        "the gated retarget clause must bind, not survive as an orphaned residual"
+    );
+    assert!(
+        retargets.contains(&CopyRetargetPermission::MayChooseNewTargets),
+        "the copy must carry MayChooseNewTargets (CR 707.10c), got {retargets:?}"
+    );
+}
+
 /// CR 707.10c: COVERAGE HONESTY — a "you may choose new targets for the copy"
 /// sentence with NO preceding `CopySpell` anywhere in the chain must stay an
 /// honest `orphaned_copy_retarget` residual, never a silently-wrong retarget.
@@ -10435,6 +10472,163 @@ fn effect_copy_retarget_with_no_preceding_copy_stays_orphaned() {
     assert_eq!(
         orphaned, 1,
         "the retarget clause must remain an honest orphaned residual"
+    );
+}
+
+// ── CR 707.10c: the PLURAL clause scopes over the SELECTOR, not just the
+// mutation ────────────────────────────────────────────────────────────────────
+//
+// `Increasing Vengeance` (above) pins the case where both copies live in ONE
+// def's sub-ability chain. The four tests below pin the case the point binding
+// could not reach: a card whose copies land in SIBLING defs. Before
+// `AllWithRole`, a `LastWithRole` binding patched only the LAST copy-bearing def
+// and every earlier copy silently kept its original targets — measured on the
+// full pool as `[KeepOriginalTargets, MayChooseNewTargets]` on each of these
+// four faces.
+
+/// CR 707.10c: Banish into Fable — TWO conditional copies emitted as SIBLING
+/// defs ("copy it if you control an artifact, THEN copy it if you control an
+/// enchantment"). The plural "the copies" must reach both, not just the second.
+#[test]
+fn effect_copy_retarget_plural_reaches_sibling_defs_banish_into_fable() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "When you cast this spell from your hand, copy it if you control an artifact, \
+         then copy it if you control an enchantment. You may choose new targets for the copies.\n\
+         Return target nonland permanent to its owner's hand. You create a 2/2 white Knight \
+         creature token with vigilance.",
+        "Banish into Fable",
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert_eq!(
+        retargets.len(),
+        2,
+        "both conditional copies must be present, got {retargets:?}"
+    );
+    assert!(
+        retargets
+            .iter()
+            .all(|r| *r == CopyRetargetPermission::MayChooseNewTargets),
+        "the plural clause must retarget EVERY sibling copy, not just the last, \
+         got {retargets:?}"
+    );
+}
+
+/// CR 707.10c: Ulalek, Fused Atrocity — copies all spells, THEN all other
+/// activated and triggered abilities: two sibling copy defs under one trigger.
+#[test]
+fn effect_copy_retarget_plural_reaches_sibling_defs_ulalek() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "Devoid (This card has no color.)\n\
+         Whenever you cast an Eldrazi spell, you may pay {C}{C}. If you do, copy all spells \
+         you control, then copy all other activated and triggered abilities you control. \
+         You may choose new targets for the copies. (Mana abilities can't be copied.)",
+        "Ulalek, Fused Atrocity",
+        &["Creature"],
+        &["Eldrazi"],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert!(
+        retargets.len() >= 2,
+        "both the spell-copy and the ability-copy must be present, got {retargets:?}"
+    );
+    assert!(
+        retargets
+            .iter()
+            .all(|r| *r == CopyRetargetPermission::MayChooseNewTargets),
+        "the plural clause must retarget EVERY sibling copy, got {retargets:?}"
+    );
+}
+
+/// CR 707.10c: Sea Gate Stormcaller — the delayed-trigger copy and the
+/// conditional "copy that spell twice instead" land in sibling defs (unlike
+/// Increasing Vengeance, whose second copy nests as a sub-ability), so the
+/// plural clause must fan out across defs to reach the first one.
+#[test]
+fn effect_copy_retarget_plural_reaches_sibling_defs_sea_gate_stormcaller() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "Kicker {4}{U}\n\
+         When this creature enters, copy the next instant or sorcery spell with mana value 2 \
+         or less you cast this turn when you cast it. If this creature was kicked, copy that \
+         spell twice instead. You may choose new targets for the copies.",
+        "Sea Gate Stormcaller",
+        &["Creature"],
+        &["Human", "Wizard"],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert!(
+        retargets.len() >= 2,
+        "both the base copy and the kicked 'twice instead' copy must be present, \
+         got {retargets:?}"
+    );
+    assert!(
+        retargets
+            .iter()
+            .all(|r| *r == CopyRetargetPermission::MayChooseNewTargets),
+        "the plural clause must retarget EVERY sibling copy, got {retargets:?}"
+    );
+}
+
+/// CR 707.10c: Tomb of Horrors Adventurer — same sibling-def shape as Sea Gate
+/// Stormcaller ("copy it. If you've completed a dungeon, copy that spell twice
+/// instead. You may choose new targets for the copies.").
+#[test]
+fn effect_copy_retarget_plural_reaches_sibling_defs_tomb_of_horrors_adventurer() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "When this creature enters, you take the initiative.\n\
+         Whenever you cast your second spell each turn, copy it. If you've completed a dungeon, \
+         copy that spell twice instead. You may choose new targets for the copies. \
+         (A copy of a permanent spell becomes a token.)",
+        "Tomb of Horrors Adventurer",
+        &["Creature"],
+        &["Elf", "Monk"],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert!(
+        retargets.len() >= 2,
+        "both the base copy and the dungeon 'twice instead' copy must be present, \
+         got {retargets:?}"
+    );
+    assert!(
+        retargets
+            .iter()
+            .all(|r| *r == CopyRetargetPermission::MayChooseNewTargets),
+        "the plural clause must retarget EVERY sibling copy, got {retargets:?}"
+    );
+}
+
+/// CR 707.10c: OVER-PATCH GUARD — the mirror risk a fan-out selector introduces.
+///
+/// Choreographed Sparks' mode 1 carries a retarget sentence; mode 2 ("Copy target
+/// creature spell you control. The copy gains haste ...") deliberately does NOT.
+/// A retarget clause may only reach copies STATED BEFORE it, which holds because
+/// continuations are applied in source order — so mode 2's copy must survive with
+/// `KeepOriginalTargets`. If a future change makes the fan-out reach forward (or
+/// widens `CopySpellBearer` membership), this test goes red instead of silently
+/// granting a retarget the card never printed.
+#[test]
+fn effect_copy_retarget_singular_does_not_leak_to_later_mode_choreographed_sparks() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "This spell can't be copied.\n\
+         Choose one or both —\n\
+         • Copy target instant or sorcery spell you control. You may choose new targets for \
+         the copy.\n\
+         • Copy target creature spell you control. The copy gains haste and \"At the beginning \
+         of the end step, sacrifice this token.\"",
+        "Choreographed Sparks",
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert!(
+        retargets.contains(&CopyRetargetPermission::KeepOriginalTargets),
+        "mode 2 prints no retarget sentence and must keep its original targets, \
+         got {retargets:?}"
+    );
+    assert!(
+        retargets.contains(&CopyRetargetPermission::MayChooseNewTargets),
+        "mode 1 prints a retarget sentence and must carry it, got {retargets:?}"
     );
 }
 
@@ -28270,7 +28464,7 @@ fn effect_from_the_rubble_chosen_type_graveyard_target() {
             }
             assert!(enter_with_counters
                 .iter()
-                .any(|(ct, _)| { matches!(ct, CounterType::Generic(name) if name == "finality") }));
+                .any(|(ct, _)| { matches!(ct, CounterType::Finality) }));
         }
         other => panic!("expected Effect::ChangeZone, got {other:?}"),
     }
@@ -29081,6 +29275,40 @@ fn craterhoof_where_x_binds_dynamic_pump_to_object_count() {
                 }
             ),
             "X must bind to ObjectCount(creatures you control), got {value:?}"
+        );
+    }
+}
+
+/// CR 107.3c: "where X is …" DEFINES X in the ability's text — the controller
+/// does not choose it, and the parser must bind it to a typed quantity. Bishop
+/// of Binding ("target Vampire gets +X/+X until end of turn, where X is the
+/// power of the exiled card") and Redemptor Dreadnought share this binding.
+///
+/// Regression pin: the binding previously degraded to the lossy
+/// `PtValue::Variable("<raw oracle text>")` fallback, which `resolve_variable_pt`
+/// (game/effects/pump.rs) resolves to `None` — so the pump silently applied
+/// NOTHING. `QuantityRef::ExiledCardPower` is the typed home for this quantity.
+#[test]
+fn where_x_power_of_the_exiled_card_binds_exiled_card_power() {
+    let def = parse_effect_chain(
+        "target Vampire gets +X/+X until end of turn, where X is the power of the exiled card",
+        AbilityKind::Spell,
+    );
+    let Effect::Pump {
+        power, toughness, ..
+    } = &*def.effect
+    else {
+        panic!("expected Pump, got {:?}", def.effect);
+    };
+    let expected = QuantityExpr::Ref {
+        qty: QuantityRef::ExiledCardPower { index: 0 },
+    };
+    for (stat, value) in [("power", power), ("toughness", toughness)] {
+        assert_eq!(
+            value,
+            &PtValue::Quantity(expected.clone()),
+            "X must bind to ExiledCardPower in {stat}; an unbound PtValue::Variable \
+             resolves to no modification at all (silent no-op), got {value:?}"
         );
     }
 }
@@ -39148,10 +39376,7 @@ fn put_zone_change_lifts_transformed_and_finality_counter_suffix() {
             assert_eq!(enters_under, None);
             assert_eq!(
                 enter_with_counters,
-                vec![(
-                    CounterType::Generic("finality".to_string()),
-                    QuantityExpr::Fixed { value: 1 },
-                )]
+                vec![(CounterType::Finality, QuantityExpr::Fixed { value: 1 },)]
             );
         }
         other => panic!("expected ChangeZone, got {other:?}"),
@@ -39175,7 +39400,7 @@ fn put_zone_change_lifts_transformed_and_finality_counter_suffix() {
 #[test]
 fn cast_this_way_enters_with_finality_counter_rider_parses() {
     let finality = || Effect::AddPendingETBCounters {
-        counter_type: CounterType::Generic("finality".to_string()),
+        counter_type: CounterType::Finality,
         count: QuantityExpr::Fixed { value: 1 },
     };
     // Bare-counter riders: parse to the counter effect with NO sub-ability.
@@ -39280,9 +39505,9 @@ fn osteomancer_adept_finality_rider_parses_through_card() {
         matches!(
             &*rider.effect,
             Effect::AddPendingETBCounters {
-                counter_type: CounterType::Generic(s),
+                counter_type: CounterType::Finality,
                 ..
-            } if s == "finality"
+            }
         ),
         "rider should be AddPendingETBCounters(finality), got {:?}",
         rider.effect
@@ -39330,9 +39555,9 @@ fn tomb_aclazotz_counter_plus_type_tail_parses() {
         tomb_effects.iter().any(|e| matches!(
             e,
             Effect::AddPendingETBCounters {
-                counter_type: CounterType::Generic(s),
+                counter_type: CounterType::Finality,
                 ..
-            } if s == "finality"
+            }
         )),
         "the combined sentence must still yield the finality counter rider; \
              got {tomb_effects:?}"
@@ -39373,9 +39598,9 @@ fn tomb_aclazotz_counter_plus_type_tail_parses() {
         no_tail_effects.iter().any(|e| matches!(
             e,
             Effect::AddPendingETBCounters {
-                counter_type: CounterType::Generic(s),
+                counter_type: CounterType::Finality,
                 ..
-            } if s == "finality"
+            }
         )),
         "the bare-counter clause (no type tail) must still parse to the \
              AddPendingETBCounters(finality) rider; got {no_tail_effects:?}"
@@ -44398,7 +44623,7 @@ fn optional_sacrifice_if_you_do_return_keeps_graveyard_filter() {
     );
     assert!(
         enter_with_counters.iter().any(|(counter, count)| {
-            matches!(counter, CounterType::Generic(name) if name == "finality")
+            matches!(counter, CounterType::Finality)
                 && matches!(count, QuantityExpr::Fixed { value: 1 })
         }),
         "return must carry a finality counter, got {enter_with_counters:?}"
@@ -44772,4 +44997,121 @@ fn drawn_this_turn_followup_overwrites_prior_life_payment() {
         "the follow-up clause must emit no def of its own, got {:?}",
         root.sub_ability
     );
+}
+
+/// CR 611.2 + CR 601.2f + CR 118.7: The Dining Car's chaos body — "activated
+/// abilities of artifact tokens you control cost {2} less to activate" — parses
+/// to a `GenericEffect` that installs a `Duration::UntilEndOfTurn`
+/// `StaticMode::ReduceAbilityCost` (the SAME static Training Grounds prints),
+/// carried as an `AddStaticMode` modification with the source filter in
+/// `affected` so the cost hook reads it off the TCE. `FilterProp::Token` is
+/// load-bearing (the discount hits only tokens) and asserted on `affected`.
+#[test]
+fn dining_car_chaos_body_parses_reduce_activated_ability_cost() {
+    use crate::types::ability::{ContinuousModification, Duration};
+    use crate::types::statics::StaticMode;
+    let effect = parse_effect(
+        "activated abilities of artifact tokens you control cost {2} less to activate",
+    );
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target,
+    } = &effect
+    else {
+        panic!("expected GenericEffect, got {effect:?}");
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(*target, None);
+    assert_eq!(
+        static_abilities.len(),
+        1,
+        "exactly one ReduceAbilityCost static, got {static_abilities:?}"
+    );
+    let def = &static_abilities[0];
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                amount: 2,
+                ref keyword,
+                ..
+            } if keyword == "activated"
+        ),
+        "expected ReduceAbilityCost(Reduce, 2, \"activated\"), got {:?}",
+        def.mode
+    );
+    // The reduction rides as an `AddStaticMode` modification so it survives into
+    // the TCE and is read off it by the cost hook (mirrors MayLookAtFaceDown).
+    assert!(
+        def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::ReduceAbilityCost { amount: 2, .. },
+            }
+        )),
+        "reduction must ride as an AddStaticMode modification, got {:?}",
+        def.modifications
+    );
+    // The source filter (artifact TOKENS you control) lives in `affected`.
+    let Some(TargetFilter::Typed(tf)) = def.affected.as_ref() else {
+        panic!("expected a Typed affected filter, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Artifact),
+        "affected filter must be an artifact filter, got {tf:?}"
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::Token),
+        "the discount must hit only artifact TOKENS, got {tf:?}"
+    );
+}
+
+/// The transient effect arm is textually indiscriminate BY DESIGN: when
+/// `parse_imperative_effect` is reached directly with a standalone reducer line,
+/// it emits the `GenericEffect` carrying a `ReduceAbilityCost`. The static
+/// (Training Grounds) vs. transient (The Dining Car) separation is enforced
+/// upstream at the dispatch site — a printed static line is claimed by
+/// `parse_static_line` before this parser runs (see
+/// `training_grounds_standalone_line_stays_static_no_transient_effect` in the
+/// static tests). This test locks the arm's intended behavior so a future
+/// maintainer cannot "fix" the helper to reject it and silently break the Dining
+/// Car path.
+#[test]
+fn imperative_effect_arm_fires_when_reached_directly() {
+    use crate::types::statics::StaticMode;
+    let effect =
+        parse_effect("activated abilities of creatures you control cost {2} less to activate");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &effect
+    else {
+        panic!("reached directly, the transient arm should fire a GenericEffect; got {effect:?}");
+    };
+    assert!(
+        static_abilities
+            .iter()
+            .any(|def| matches!(def.mode, StaticMode::ReduceAbilityCost { amount: 2, .. })),
+        "expected a ReduceAbilityCost(2) static, got {static_abilities:?}"
+    );
+}
+
+/// The transient arm is deliberately narrow: only fixed-amount, `Reduce`,
+/// `"activated"` wordings emit an effect. Loyalty / `Raise` / variable-`{X}`
+/// transient wordings have no driver today and stay honestly `Unimplemented`
+/// rather than emitting a speculative parse.
+#[test]
+fn transient_cost_reduction_arm_rejects_unsupported_shapes() {
+    // Raise direction — no transient driver.
+    assert!(matches!(
+        parse_effect("activated abilities of creatures you control cost {2} more to activate"),
+        Effect::Unimplemented { .. }
+    ));
+    // Loyalty keyword — no transient driver.
+    assert!(matches!(
+        parse_effect("loyalty abilities of creatures you control cost {2} less to activate"),
+        Effect::Unimplemented { .. }
+    ));
 }

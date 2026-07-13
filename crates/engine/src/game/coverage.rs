@@ -3667,7 +3667,10 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
             CoinFlipResult::Lost => "you lost the flip".into(),
         },
         AbilityCondition::WhenYouDo => "when you do".into(),
-        AbilityCondition::CastFromZone { zone } => format!("cast from {}", fmt_zone(zone)),
+        AbilityCondition::WasCast { zone } => match zone {
+            Some(z) => format!("cast from {}", fmt_zone(z)),
+            None => "was cast".into(),
+        },
         AbilityCondition::CastDuringPhase { phases } => {
             let parts: Vec<&str> = phases.iter().map(fmt_phase).collect();
             format!("cast during {}", parts.join(" or "))
@@ -3822,6 +3825,9 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
             format!("dealt damage this turn by {}", fmt_target(source))
         }
         TC::FirstTimeObjectTappedThisTurn => "first time tapped this turn".into(),
+        TC::FirstTimeObjectCountersAddedThisTurn => {
+            "first time counters put on it this turn".into()
+        }
         TC::WasType { card_type } => format!("was a {}", fmt_core_type(card_type)),
         TC::LifeTotalGE { minimum } => format!("life ≥ {minimum}"),
         TC::ControlCount { minimum, filter } => {
@@ -7057,7 +7063,10 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::CoinFlipOutcome { .. } => ("CoinFlipOutcome", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
-        AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
+        // ponytail: coverage tag key intentionally stays "CastFromZone" (decoupled
+        // from the renamed variant) to keep coverage-data byte-stable across the
+        // BB-FU4 WasCast rename — the string is a report key, not the variant name.
+        AbilityCondition::WasCast { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
         AbilityCondition::ObjectsShareQuality { .. } => ("ObjectsShareQuality", Handled),
         AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. } => {
@@ -7612,6 +7621,7 @@ fn oracle_line_mentions_counter_type(lower: &str, counter_type: &CounterType) ->
         | CounterType::Fade
         | CounterType::Age
         | CounterType::Shield
+        | CounterType::Finality
         | CounterType::Generic(_) => {
             let needle = format!("{} counter", counter_type.as_str()).to_lowercase();
             lower.contains(&needle)

@@ -69,8 +69,9 @@
 //!   * a tag only discriminates if the variant NAME is unique across every tagged enum in
 //!     the tree. It is not.
 //!
-//! For `QuantityRef` alone — 84 variants, against the 91 `#[serde(tag = "type")]` enums in
-//! `types/` — 10 names are shared:
+//! For `QuantityRef` alone — 84 variants, against the 161 `tag = "type"` enums in `types/`
+//! (the true population; an earlier count of 91 was short, which is how the `FilterProp`
+//! collision below went unlisted until it suppressed Siren's Call) — 10 names are shared:
 //!
 //! ```text
 //! QuantityRef ∩ AbilityCondition         = {PreviousEffectAmount}
@@ -123,32 +124,91 @@
 //! it. **Anchoring fails LOUD** (a missing key over-reports, and the full-pool delta shows it);
 //! **an unanchored probe fails QUIET** (it under-reports, and nothing shows it).
 //!
-//! RESIDUAL RISK — MEASURED, NOT ASSUMED, AND IT IS NOT ZERO. 15 other types are still probed
-//! unanchored in `swallow_check.rs`. The tempting claim is that they are safe because each
-//! matches a *specific* variant rather than `|_| true`. That claim was tested against the
-//! collision map above and it is FALSE: **13 unanchored predicates match a variant name that
-//! is shared with another tagged enum**, and 8 of those are UNIT variants — no required
-//! fields, so the deserialize succeeds on the tag alone, which is the widest possible surface:
+//! # The collision map, and the per-site verdicts (task #51)
+//!
+//! POPULATION FIRST, because the earlier version of this table was wrong by omission: it was
+//! computed against **91** enums and therefore reported 13 colliding predicates. Regenerated
+//! against the true population — **162** tagged enums in `types/` (93 internally tagged
+//! `tag = "type"`, 69 adjacently tagged `tag = "type", content = "data"`), 1,475 variant names,
+//! of which **200 are shared by more than one enum** — the same probes yield **19** colliding
+//! (site, variant) pairs across 10 sites. All 13 previously listed reproduce; 6 were missed.
+//! A collision table is a claim about a population: if the population is short, the table's
+//! ABSENCES are worthless. Regenerate it, do not trust it.
+//!
+//! The generator is ~40 lines of python over `types/*.rs`: parse every `tag = "type"` enum's
+//! variants, record unit-vs-struct AND internal-vs-adjacent, invert to `name -> [owning enums]`,
+//! keep the names owned by more than one enum, then intersect with the variants each
+//! `evidence.any::<T>()` predicate actually matches. Re-run it whenever a probe or an enum
+//! changes: these numbers are a measurement, not a constant (they moved by one enum between
+//! the audit and the rebase, without changing any verdict).
+//!
+//! Two mechanisms, and they are NOT the same:
+//!   * **internally tagged** — a UNIT variant matches on the `type` field alone and serde drops
+//!     unknown sibling fields, so any node bearing that tag deserializes. Widest surface.
+//!   * **adjacently tagged** — the payload sits under `data`, so a struct variant will not
+//!     deserialize without it. Narrower, but NOT safe: two adjacently tagged enums sharing a
+//!     variant name AND a payload shape are freely interchangeable (see
+//!     [`ACTIVATION_RESTRICTION_KEYS`]).
+//!
+//! **A struct variant is not automatically safe.** `Effect::CastFromZone` has nine fields and
+//! every one carries `#[serde(default)]`, so serde matches it on the tag alone — it is a unit
+//! variant in effect. Always check for a REQUIRED field before believing "struct, so it can't
+//! collide".
+//!
+//! ## ANCHORED — the collision changes the detector's ANSWER
 //!
 //! ```text
-//! any::<ManaCost>         SelfManaValue               (unit)   also: QuantityRef
-//! any::<TriggerCondition> AttackedThisTurn            (unit)   also: FilterProp, QuantityRef
-//! any::<TriggerCondition> CounterAddedThisTurn        (unit)   also: QuantityRef
-//! any::<TriggerCondition> SourceEnteredThisTurn       (unit)   also: Static/Ability/ParsedCondition
-//! any::<FilterProp>       EnteredThisTurn             (unit)   also: QuantityRef
-//! any::<FilterProp>       AttackedThisTurn            (struct) also: QuantityRef, TriggerCondition
-//! any::<StaticCondition>  SourceEnteredThisTurn       (unit)   also: Ability/Parsed/TriggerCondition
-//! any::<AbilityCondition> SourceEnteredThisTurn       (unit)   also: Static/Parsed/TriggerCondition
-//! any::<Effect>           CastFromZone                (struct) also: Ability/ReplacementCondition
-//! …and 4 more (SpellCastWithVariantThisTurn ×3, DealtDamageThisTurnBySource)
+//! any::<Effect>                CastFromZone       also: AbilityCondition, ReplacementCondition
+//! any::<ActivationRestriction> RequiresCondition  also: CastingRestriction (field-identical)
 //! ```
 //!
-//! A collision is only a DEFECT where the two readings give different answers, and that has
-//! not been adjudicated per site — so these are UNPROVEN, not proven-safe. They are NOT
-//! touched here: each needs its own variant-level ruling and its own full-pool delta, because
-//! anchoring one blind can *remove* evidence that was accidentally load-bearing (that is not
-//! hypothetical — anchoring the quantity probes did exactly that to `ManaProduction`, and the
-//! fact had to be restored as a typed leg). Tracked as its own unit. Do not "tidy" them.
+//! Both are now key-anchored ([`EFFECT_KEYS`], [`ACTIVATION_RESTRICTION_KEYS`]) and both are
+//! pinned by a differential guard test that was observed RED before it was made green.
+//!
+//! MEASURED over the full 35,396-face pool: the collision surface is POPULATED — 36
+//! `CastFromZone` nodes sit under non-effect keys (`condition` ×25, `inner` ×9, `conditions`
+//! ×2) and 34 `RequiresCondition` nodes sit under `casting_restrictions`. Every one of those 70
+//! nodes was being accepted by the unanchored probe as the WRONG enum. The swallow delta is
+//! nevertheless **0 gains / 0 losses**, because both are currently MASKED by an upstream text
+//! gate, not by any property of the probe:
+//!   * 32 of the 35 `CastFromZone` cards contain no "this turn" at all, so the detector never
+//!     reaches the probe; the other 3 are dissolved by an earlier leg either way;
+//!   * the activation gate demands that EVERY "this turn" occurrence sit on an "activate only"
+//!     line, and a card carrying a *casting* restriction ("cast only if ...") does not say
+//!     "activate only" — so the gate rejects it before the probe runs.
+//!
+//! That is luck, not safety: it holds only while no printed card pairs a cast-zone CONDITION
+//! with a dropped "this turn", or an "activate only ... this turn" with a casting restriction.
+//! Anchoring makes the answer correct by construction and costs nothing (byte-identical export).
+//!
+//! ## ANSWER-EQUIVALENT — left unanchored, with the reason each is collision-INVARIANT
+//!
+//! 8 sites / 17 pairs remain probed unanchored. Each is safe for a stated, CHECKABLE reason —
+//! not a vibe, and not "it's a specific variant so it must be fine" (that claim is false, see
+//! above). Anchoring them would be WRONG: it would risk removing evidence that is accidentally
+//! load-bearing (exactly what anchoring the quantity probes did to `ManaProduction`, which then
+//! had to be restored as a typed leg).
+//!
+//! **(a) The turn-scope disjunction** — sites probing `ParsedCondition`, `StaticCondition`,
+//! `AbilityCondition`, `TriggerCondition`, `FilterProp` inside the `Duration_ThisTurn` detector
+//! (14 of the 17 pairs). The detector asks ONE existential question — *does this unit carry any
+//! turn-scoped carrier?* — as a disjunction across seven enums. **Every variant it matches has
+//! `ThisTurn` in its name**, and a collision is by definition NAME IDENTITY, so whichever enum a
+//! colliding node is read as, it still bears a `ThisTurn` name and is still a turn-scoped
+//! carrier. The disjunction is CLOSED under its own collision set, so the answer cannot change.
+//! Checkable in one grep: every variant named by those five `matches!` arms contains `ThisTurn`.
+//!
+//! **(b) `any::<ManaCost>` / `SelfManaValue`** (also `QuantityRef::SelfManaValue`). The question
+//! is "is there a value derived from the card's OWN mana cost rather than a fixed amount?"
+//! (CR 106.1). Both readings are exactly that — a self-referential dynamic value — so the
+//! answer is identical under either.
+//!
+//! **(c) `any::<AbilityCondition>` / `any::<StaticCondition>` on `Not`.** The two are already
+//! OR'd together at the call site, so those two readings are answer-identical BY CONSTRUCTION.
+//! `Not` is also a variant of `FilterProp` and `TargetFilter`, but those are
+//! `Not { prop }` / `Not { filter }` — the field NAME differs from `Not { condition }`, so
+//! neither can deserialize as a condition. The collision is structurally impossible, not merely
+//! unlikely.
 //!
 //! The collision that motivated this module — `ConditionMet` vs `SolveConditionMet` —
 //! is NOT in any table above, because the names differ. That is precisely the property a
@@ -284,6 +344,60 @@ const QUANTITY_KEYS: &[&str] = &[
     "threshold",
     "total_power_cap",
     "value",
+];
+
+/// Every JSON key at which an `Effect`-typed field is serialized.
+///
+/// ```text
+/// $ rg '(\w+): (Option<)?(Box<)?(Vec<)?Effect\b' crates/engine/src/types/   # comments stripped
+///   AbilityDefinition.effect                  Box<Effect>   <- the definition's own slot
+///   Effect::<nested>.effect                   Box<Effect>
+///   ReplacementDefinition.replacement_effect  Box<Effect>   <- NOT named `effect`
+/// ```
+///
+/// There is no `Vec<Effect>` anywhere: an effect CHAIN nests through `AbilityDefinition`, whose
+/// own `effect` field re-anchors the inner `Effect`. So the set is closed at two keys.
+///
+/// Anchoring `Effect` is **mandatory**, and the reason is sharper than for [`QUANTITY_KEYS`].
+/// `Effect::CastFromZone`'s NINE fields ALL carry `#[serde(default)]`, so the variant
+/// deserializes from the `type` tag ALONE — to serde it is a UNIT variant despite being written
+/// as a struct variant, which is the widest possible match surface. Both
+/// `AbilityCondition::CastFromZone { zone }` (CR 601.2a: "if you cast this spell from your
+/// graveyard") and `ReplacementCondition::CastFromZone { zone }` therefore deserialize CLEANLY
+/// as an `Effect::CastFromZone`, with `zone` silently dropped as an unknown field.
+///
+/// MEASURED, not assumed: unanchored, the `Duration_ThisTurn` detector read those CONDITION
+/// nodes as proof that a one-shot cast-permission EFFECT owns the card's "this turn" (CR 601.2
+/// — a cast permission carries no duration slot), and suppressed the swallow warning on cards
+/// whose "this turn" is genuinely dropped. Same defect shape as Boing! (#50).
+///
+/// A struct variant is only safe unanchored if some field is REQUIRED. Check for
+/// `#[serde(default)]` on every field before trusting "it's a struct variant, so it can't
+/// collide".
+const EFFECT_KEYS: &[&str] = &["effect", "replacement_effect"];
+
+/// Every JSON key at which an `ActivationRestriction`-typed field is serialized.
+///
+/// ```text
+/// $ rg '(\w+): (Option<)?(Box<)?(Vec<)?ActivationRestriction\b' crates/engine/src/types/
+///   activation_restrictions   Vec<ActivationRestriction>          (×2)
+///   restrictions              Vec<ActivationRestriction>
+///   cap                       Option<ActivationRestriction>
+///   once_per_turn             Option<Box<ActivationRestriction>>  (keywords.rs)
+/// ```
+///
+/// `ActivationRestriction::RequiresCondition { condition: Option<ParsedCondition> }` and
+/// `CastingRestriction::RequiresCondition { condition: Option<ParsedCondition> }` are
+/// FIELD-IDENTICAL, so each deserializes cleanly as the other — the tag discriminates nothing.
+/// These are different rules: CR 602.5 (a player can't begin to activate a prohibited ability)
+/// vs CR 601.2 (casting). `CastingRestriction` is carried at exactly one key —
+/// `ParsedAbilities.casting_restrictions` — which is DISJOINT from the set below, so anchoring
+/// eliminates the collision by construction rather than by argument.
+const ACTIVATION_RESTRICTION_KEYS: &[&str] = &[
+    "activation_restrictions",
+    "restrictions",
+    "cap",
+    "once_per_turn",
 ];
 
 /// One audit unit's lowered definitions, as a walkable tree with the prose removed.
@@ -429,6 +543,28 @@ impl UnitEvidence {
         self.any_at(QUANTITY_KEYS, pred)
     }
 
+    /// Does any `Effect` carrier satisfy `pred`? Key-anchored per [`EFFECT_KEYS`].
+    ///
+    /// Never probe `Effect` unanchored. `Effect::CastFromZone` has nine fields and every one is
+    /// `#[serde(default)]`, so it matches on the `type` tag alone — and `CastFromZone` is also a
+    /// variant name of `AbilityCondition` and `ReplacementCondition`. See [`EFFECT_KEYS`].
+    pub(super) fn any_effect(&self, pred: impl Fn(&crate::types::ability::Effect) -> bool) -> bool {
+        self.any_at(EFFECT_KEYS, pred)
+    }
+
+    /// Does any `ActivationRestriction` carrier satisfy `pred`? Key-anchored per
+    /// [`ACTIVATION_RESTRICTION_KEYS`].
+    ///
+    /// Never probe `ActivationRestriction` unanchored: its `RequiresCondition` variant is
+    /// field-identical to `CastingRestriction::RequiresCondition`, so the two deserialize as
+    /// each other (CR 602.5 activation vs CR 601.2 casting — different rules).
+    pub(super) fn any_activation_restriction(
+        &self,
+        pred: impl Fn(&crate::types::ability::ActivationRestriction) -> bool,
+    ) -> bool {
+        self.any_at(ACTIVATION_RESTRICTION_KEYS, pred)
+    }
+
     /// Does any `StaticMode` carrier satisfy `pred`? Key-anchored per [`STATIC_MODE_KEYS`].
     pub(super) fn any_static_mode(
         &self,
@@ -442,8 +578,8 @@ impl UnitEvidence {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Duration, Effect, PlayerScope, QuantityExpr, QuantityRef,
-        TargetFilter,
+        AbilityDefinition, AbilityKind, ActivationRestriction, Duration, Effect, PlayerScope,
+        QuantityExpr, QuantityRef, TargetFilter,
     };
 
     fn parsed_with(def: AbilityDefinition) -> ParsedAbilities {
@@ -575,6 +711,83 @@ mod tests {
         assert!(
             evidence.any_quantity_ref(|q| matches!(q, QuantityRef::BasicLandTypeCount { .. })),
             "a real QuantityRef under the `quantity` key must still be evidence"
+        );
+    }
+
+    /// PROVEN COLLISION (task #51). A struct variant is NOT automatically safe unanchored:
+    /// `Effect::CastFromZone`'s nine fields ALL carry `#[serde(default)]`, so serde matches it
+    /// on the `type` tag ALONE — it is a unit variant in every way that matters here, and
+    /// unknown sibling fields are silently dropped.
+    ///
+    /// `AbilityCondition::CastFromZone { zone }` is CR 601.2a's "if you cast this spell from
+    /// your graveyard" — a CONDITION. It carries no effect and no lifetime. Unanchored, the
+    /// `Duration_ThisTurn` detector read it as an `Effect::CastFromZone`, i.e. as a one-shot
+    /// cast permission whose "this turn" is intrinsic, and dissolved the swallow warning on
+    /// cards whose "this turn" is in fact dropped. This is the Boing! defect (#50) in a second
+    /// enum.
+    #[test]
+    fn effect_probe_is_key_anchored_not_tag_matched() {
+        // The verbatim shape the parser lowers a cast-zone CONDITION to: an AbilityCondition
+        // sitting under the key `condition`, carrying a `zone` that `Effect` does not have.
+        let evidence = UnitEvidence::from_json_for_test(
+            r#"{"abilities":[{"condition":{"type":"CastFromZone","zone":"Graveyard"}}]}"#,
+        );
+
+        assert!(
+            evidence.any::<Effect>(|e| matches!(e, Effect::CastFromZone { .. })),
+            "unanchored: the AbilityCondition IS accepted as an Effect — the hazard being guarded"
+        );
+        assert!(
+            !evidence.any_effect(|e| matches!(e, Effect::CastFromZone { .. })),
+            "key-anchored: a condition under `condition` is NOT an Effect carrier"
+        );
+    }
+
+    /// The anchored `Effect` probe must still see a REAL effect — otherwise the fix would blind
+    /// every detector that asks "does this unit carry effect E?". Built from a real
+    /// `ParsedAbilities` (not a hand-written fixture) so it pins the production key spelling.
+    #[test]
+    fn a_real_effect_under_the_effect_key_is_still_evidence() {
+        let def = AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented("x", "y"));
+        let evidence = UnitEvidence::of(&parsed_with(def));
+
+        assert!(
+            evidence.any_effect(|e| matches!(e, Effect::Unimplemented { .. })),
+            "a real `AbilityDefinition.effect` carrier must remain visible to the anchored probe"
+        );
+    }
+
+    /// PROVEN COLLISION (task #51). `ActivationRestriction::RequiresCondition` and
+    /// `CastingRestriction::RequiresCondition` are FIELD-IDENTICAL
+    /// (`{ condition: Option<ParsedCondition> }`), so the `type` tag discriminates nothing and
+    /// each deserializes cleanly as the other. They are different rules — CR 602.5 (activation
+    /// prohibited) vs CR 601.2 (casting) — and the `Duration_ThisTurn` detector uses the
+    /// ACTIVATION one as proof that an "activate only ... this turn" clause was represented.
+    /// A casting restriction is not that proof.
+    ///
+    /// Both enums are ADJACENTLY tagged (`tag = "type", content = "data"`), so their nodes are
+    /// `{"type":X,"data":{..}}` — the payload lives under `data`, and a struct variant will NOT
+    /// deserialize without it. That is why the fixture below carries a `data` wrapper: an
+    /// internally-tagged shape would not be a valid node for either enum, and the test would
+    /// prove nothing.
+    #[test]
+    fn activation_restriction_probe_is_key_anchored_not_tag_matched() {
+        // A CastingRestriction, in its real home: `ParsedAbilities.casting_restrictions`.
+        let evidence = UnitEvidence::from_json_for_test(
+            r#"{"casting_restrictions":[{"type":"RequiresCondition","data":{"condition":null}}]}"#,
+        );
+
+        assert!(
+            evidence.any::<ActivationRestriction>(
+                |r| matches!(r, ActivationRestriction::RequiresCondition { .. })
+            ),
+            "unanchored: the CastingRestriction IS accepted as an ActivationRestriction — the hazard"
+        );
+        assert!(
+            !evidence.any_activation_restriction(
+                |r| matches!(r, ActivationRestriction::RequiresCondition { .. })
+            ),
+            "key-anchored: a restriction under `casting_restrictions` is not an ACTIVATION restriction"
         );
     }
 

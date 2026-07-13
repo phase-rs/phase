@@ -71,11 +71,28 @@ pub fn resolve(
     // CR 608.2c: `effect_object_targets` forwards `ability.targets` verbatim
     // for non-slot filters. A dig hand-keep binds `ParentTarget` on the exile
     // tail but must not pre-fill a `TrackedSet` bottom pick with the kept card.
+    //
+    // CR 701.13a: A filter that references `ExiledBySource` — the bare Chaos
+    // Wand form or Jodah's `And { ExiledBySource, DistinctFrom { ParentTarget }
+    // }` — is a resolution-time EXILE-ZONE SCAN, not a pre-chosen target. On the
+    // accept/decline path the cleanup INHERITS the cast's `ability.targets` (the
+    // hit, so `DistinctFrom { ParentTarget }` can exclude it). Forwarding that
+    // inherited hit through `effect_object_targets` would place the hit itself,
+    // bypassing both the exile scan and the exclusion. Force the scan branch
+    // below to run by starting empty, exactly like the tracked-set forms.
     let mut collected_targets = match &target_filter {
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => Vec::new(),
+        f if f.references_exiled_by_source() => Vec::new(),
         _ => crate::game::effects::effect_object_targets(&target_filter, &effective_targets),
     };
-    if collected_targets.is_empty() && matches!(target_filter, TargetFilter::ExiledBySource) {
+    // CR 701.13a + CR 608.2c: Any filter that references `ExiledBySource` — the
+    // bare form (Chaos Wand's "put the rest on the bottom") or an `And`-composed
+    // form (Jodah's "put the rest" = `And { ExiledBySource, DistinctFrom
+    // { ParentTarget } }`, which excludes a declined-and-still-exiled hit) —
+    // scans the exile zone. `matches_target_filter` evaluates the full filter,
+    // so every `And` leg (`ExiledBySource` membership + `DistinctFrom` exclusion)
+    // is applied together.
+    if collected_targets.is_empty() && target_filter.references_exiled_by_source() {
         let ctx = crate::game::filter::FilterContext::from_ability(ability);
         collected_targets = state
             .objects
@@ -165,6 +182,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::PutAtLibraryPosition,
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -188,6 +206,7 @@ pub fn resolve(
                     events.push(GameEvent::EffectResolved {
                         kind: EffectKind::PutAtLibraryPosition,
                         source_id: ability.source_id,
+                        subject: None,
                     });
                     return Ok(());
                 }
@@ -230,6 +249,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::PutAtLibraryPosition,
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -274,8 +294,13 @@ pub fn resolve(
     // order" effects; linked-exile bottom cleanup randomizes separately below.
     let mut randomized_targets;
     let to_place = if expected == 0 {
+        // CR 701.13a: Both the bare (`ExiledBySource`) and And-composed (Jodah's
+        // `And { ExiledBySource, DistinctFrom { ParentTarget } }`) "put the rest
+        // on the bottom" cleanups place their whole pool at once. Jodah's ruling
+        // requires a RANDOM order; the bare Chaos Wand form is likewise
+        // randomized. Detect either via `references_exiled_by_source`.
         if matches!(position, LibraryPosition::Bottom)
-            && matches!(target_filter, TargetFilter::ExiledBySource)
+            && target_filter.references_exiled_by_source()
         {
             randomized_targets = collected_targets.clone();
             randomized_targets.shuffle(&mut state.rng);
@@ -316,7 +341,9 @@ pub fn resolve(
             }
         }
     }
-    if matches!(target_filter, TargetFilter::ExiledBySource) {
+    // CR 406.6: The exiled cards left the exile zone — drop their source links
+    // for both the bare and And-composed `ExiledBySource` cleanup forms.
+    if target_filter.references_exiled_by_source() {
         state.exile_links.retain(|link| {
             link.source_id != ability.source_id || !to_place.contains(&link.exiled_id)
         });
@@ -325,6 +352,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::PutAtLibraryPosition,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -616,7 +644,8 @@ mod tests {
             events.as_slice(),
             [GameEvent::EffectResolved {
                 kind: EffectKind::PutAtLibraryPosition,
-                source_id: ObjectId(100)
+                source_id: ObjectId(100),
+                ..
             }]
         ));
     }

@@ -28,6 +28,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::SetClassLevel,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())

@@ -1421,6 +1421,38 @@ fn filter_carries_same_name_as_parent_target(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 611.2b + CR 110.5: Recognize a trailing "for as long as &lt;target
+/// anaphor&gt; remains tapped" duration on a `CantBeActivated` grant (Braided
+/// Net: "Its activated abilities can't be activated for as long as it remains
+/// tapped."). The anaphoric subject ("it" / "that creature" / …) co-refers with
+/// the grant's target, which the arm binds to `ParentTarget`, so the tapped
+/// gate is `IsTapped { scope: Target }` — NOT the standalone duration
+/// combinator's source-scoped `SourceIsTapped`
+/// (`oracle_nom::duration::parse_remains_tapped`), which has no clause subject
+/// to disambiguate and defaults to the source. Returns the tapped-bound
+/// `Duration` when the clause is present, `None` otherwise (caller keeps the
+/// default `UntilEndOfTurn`, so suffix-free prohibitions are unchanged).
+fn tapped_bound_prohibition_duration(lower: &str) -> Option<Duration> {
+    nom_primitives::scan_at_word_boundaries(lower, |input: &str| {
+        let (input, _) = tag::<_, _, OracleError<'_>>("for as long as ").parse(input)?;
+        let (input, _) = alt((
+            tag("it"),
+            tag("that creature"),
+            tag("that permanent"),
+            tag("that artifact"),
+            tag("~"),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" remains tapped").parse(input)?;
+        Ok((input, ()))
+    })
+    .map(|()| Duration::ForAsLongAs {
+        condition: StaticCondition::IsTapped {
+            scope: crate::types::ability::ObjectScope::Target,
+        },
+    })
+}
+
 fn try_parse_subject_restriction_clause(
     text: &str,
     ctx: &mut ParseContext,
@@ -1613,6 +1645,10 @@ fn try_parse_subject_restriction_clause(
         let affected = static_affected_for_application(&application);
         // CR 605.1a: "unless they're mana abilities" exemption rides on the mode.
         let exemption = parse_cant_be_activated_exemption_in_text(&lower);
+        // CR 611.2b + CR 110.5: "for as long as it remains tapped" (Braided Net)
+        // ties the prohibition to the target's tap state; without the suffix
+        // (Dovin Baan, Xathrid Gorgon) it keeps the default end-of-turn duration.
+        let duration = tapped_bound_prohibition_duration(&lower).or(Some(Duration::UntilEndOfTurn));
         let mode = StaticMode::CantBeActivated {
             who: ProhibitionScope::AllPlayers,
             source_filter: TargetFilter::SelfRef,
@@ -1623,12 +1659,12 @@ fn try_parse_subject_restriction_clause(
                 static_abilities: vec![StaticDefinition::new(mode.clone())
                     .affected(affected)
                     .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
-                duration: Some(Duration::UntilEndOfTurn),
+                duration: duration.clone(),
                 target: application.target,
             },
             distribute: None,
             multi_target: None,
-            duration: Some(Duration::UntilEndOfTurn),
+            duration,
             sub_ability: None,
             condition: None,
             optional: false,

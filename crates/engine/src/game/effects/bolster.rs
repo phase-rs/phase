@@ -84,6 +84,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Bolster,
             source_id,
+            subject: None,
         });
     } else {
         // CR 701.39a: Multiple creatures tied — controller chooses.
@@ -114,6 +115,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Bolster,
             source_id,
+            subject: None,
         });
     }
 

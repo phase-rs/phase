@@ -16,6 +16,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::VentureIntoDungeon,
         source_id: ability.source_id,
+        subject: None,
     });
     resolve_venture_for_player(state, ability.controller, VentureSource::Normal, events)
 }
@@ -30,6 +31,7 @@ pub fn resolve_venture_into(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::VentureInto,
         source_id: ability.source_id,
+        subject: None,
     });
     resolve_venture_for_player(
         state,
@@ -57,6 +59,7 @@ pub fn resolve_take_initiative(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::TakeTheInitiative,
         source_id: ability.source_id,
+        subject: None,
     });
 
     // CR 726.2: "Whenever a player takes the initiative, that player ventures into Undercity."

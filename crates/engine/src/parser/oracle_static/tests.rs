@@ -12918,6 +12918,7 @@ fn exile_cast_permission_maralen_fae_ascendant() {
             mana_spend_permission: None,
             grants_flash: false,
             extra_cost: None,
+            enters_with_counter: None,
         },
         "expected ExileCastPermission, got {:?}",
         def.mode
@@ -13021,6 +13022,7 @@ fn persistent_exile_play_permission_matrix_form() {
             mana_spend_permission: None,
             grants_flash: false,
             extra_cost: None,
+            enters_with_counter: None,
         },
         "expected persistent your-turn Play permission, got {:?}",
         def.mode
@@ -13052,6 +13054,7 @@ fn persistent_exile_play_permission_evendo_sacrificed_permanent_gate() {
             mana_spend_permission: None,
             grants_flash: false,
             extra_cost: None,
+            enters_with_counter: None,
         },
         "expected persistent your-turn Play permission, got {:?}",
         def.mode
@@ -13129,6 +13132,7 @@ fn persistent_exile_play_permission_look_at_variant() {
             mana_spend_permission: None,
             grants_flash: false,
             extra_cost: None,
+            enters_with_counter: None,
         },
         "expected persistent any-time Play permission, got {:?}",
         def.mode
@@ -13156,6 +13160,7 @@ fn persistent_exile_cast_permission_azula_flash_and_any_mana() {
             mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor),
             grants_flash: true,
             extra_cost: None,
+            enters_with_counter: None,
         },
         "expected persistent Cast permission with flash + any-mana, got {:?}",
         def.mode
@@ -13227,6 +13232,7 @@ fn persistent_exile_play_permission_valgavoth_alternative_pay_life() {
                 },
                 mode: CastCostMode::Alternative,
             }),
+            enters_with_counter: None,
         },
         "expected persistent Play permission with an alternative pay-life cost, got {:?}",
         def.mode
@@ -13305,6 +13311,7 @@ fn exile_cast_permission_soul_jar_persistent_creature_pool() {
             mana_spend_permission: None,
             grants_flash: false,
             extra_cost: None,
+            enters_with_counter: None,
         },
         "expected persistent ExileCastPermission, got {:?}",
         def.mode
@@ -28501,6 +28508,63 @@ fn rayami_flying_grant_is_conditional_on_matching_exiled_card() {
     assert!(
         !runner.state().objects[&rayami_id].has_keyword(&Keyword::Vigilance),
         "Rayami must not gain vigilance — no exiled card has vigilance"
+    );
+}
+
+/// DISPATCH-SITE INVARIANT (pipeline-level): a standalone printed reducer line
+/// (Training Grounds) is claimed by `parse_static_line` as a `ReduceAbilityCost`
+/// static BEFORE `parse_imperative_effect` ever runs. Training Grounds' text and
+/// The Dining Car's chaos body are textually identical at the shared grammar head
+/// (`parse_activated_ability_cost_head`); the ONLY discriminator is the dispatch
+/// site. This test drives the real pipeline (not `parse_imperative_effect` in
+/// isolation) to prove the printed line stays a static and emits NO transient
+/// activation-cost-reduction effect.
+#[test]
+fn training_grounds_standalone_line_stays_static_no_transient_effect() {
+    // 1. The bare line is claimed by the static classifier.
+    let def = parse_static_line(
+        "Activated abilities of creatures you control cost {2} less to activate.",
+    )
+    .expect("standalone reducer line must parse as a static");
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                ref keyword,
+                mode: CostModifyMode::Reduce,
+                amount: 2,
+                ..
+            } if keyword == "activated"
+        ),
+        "expected a ReduceAbilityCost static, got {:?}",
+        def.mode
+    );
+
+    // 2. A full-card parse of Training Grounds yields the ReduceAbilityCost static
+    //    and NO transient effect (no abilities/triggers).
+    let parsed = crate::parser::parse_oracle_text(
+        "Activated abilities of creatures you control cost {2} less to activate.",
+        "Training Grounds",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.statics.len(),
+        1,
+        "Training Grounds should parse to exactly one static, got {:?}",
+        parsed.statics
+    );
+    assert!(matches!(
+        parsed.statics[0].mode,
+        StaticMode::ReduceAbilityCost { .. }
+    ));
+    assert!(
+        parsed.abilities.is_empty() && parsed.triggers.is_empty(),
+        "the printed reducer line is a static, never a transient effect; got \
+         abilities={:?} triggers={:?}",
+        parsed.abilities,
+        parsed.triggers,
     );
 }
 

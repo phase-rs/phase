@@ -625,6 +625,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -5806,6 +5807,7 @@ mod tests {
                     GameEvent::EffectResolved {
                         kind: EffectKind::Token,
                         source_id: ObjectId(100),
+                        ..
                     }
                 ))
                 .count(),

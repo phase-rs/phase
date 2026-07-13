@@ -87,6 +87,7 @@ pub fn resolve_become_blocked(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::BecomeBlocked,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }

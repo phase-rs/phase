@@ -1709,22 +1709,59 @@ mod tests {
     }
 
     #[test]
-    fn alt_cost_trailing_if_condition_drops_option_when_predicate_unrecognized() {
-        // Blasphemous Edict — only card in dataset with trailing "if [condition]" suffix.
-        // CR 118.9 + CR 601.3d: when the if-clause predicate cannot be parsed into a
-        // typed `ParsedCondition`, the alt-cost option is dropped entirely so the spell
-        // may only be cast at its printed cost. Strictly-safe degradation: a fail-silent
-        // unconditional alt-cost emission would let the player pay {B} regardless of
-        // the 13-creature threshold — strictly more permissive than the printed text.
-        // The unrecognized predicate is surfaced by the SwallowedClause / Condition_If
-        // detector for the parser gap-finder.
+    fn alt_cost_trailing_if_battlefield_creature_count_condition_binds() {
+        use crate::types::mana::ManaCostShard;
+        // Blasphemous Edict (FDN) — the only dataset card with a trailing
+        // "if there are N or more <type> on the battlefield" alt-cost gate.
+        // CR 118.9 + CR 601.3: the {B} alternative cost is offered only when the
+        // shared, controller-agnostic battlefield creature count reaches 13.
+        // Before the `parse_type_count_on_battlefield` arm this predicate was
+        // unrecognized and the WHOLE option was fail-closed dropped (this test
+        // historically asserted `is_none()`); recognizing it flips the option to
+        // Some — the on-resolution bogus `Effect::PayCost` ability disappears as a
+        // side effect. Revert-probe: remove the `parse_type_count_on_battlefield`
+        // arm → the option returns to `None`.
         let option = parse_spell_casting_option_line(
             "You may pay {B} rather than pay this spell's mana cost if there are thirteen or more creatures on the battlefield.",
             "Blasphemous Edict",
+        )
+        .expect("recognized battlefield-count if-clause must bind the alt-cost option");
+        // The condition MUST be the runtime-supported `QuantityComparison{ObjectCount}`
+        // (battlefield-aware, any controller), NOT `ZoneCoreTypeCardCountAtLeast`
+        // (whose evaluator is battlefield-blind and would silently brick the gate).
+        let SpellCastingOption {
+            kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+            cost: Some(AbilityCost::Mana { cost }),
+            condition:
+                Some(ParsedCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 13 },
+                }),
+        } = option
+        else {
+            panic!(
+                "expected AlternativeCost(Mana {{B}}) gated on ObjectCount >= 13, got {option:?}"
+            );
+        };
+        assert_eq!(
+            cost,
+            ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Black],
+            },
+            "the alternative cost must be exactly {{B}}"
         );
+        let TargetFilter::Typed(typed) = &filter else {
+            panic!("expected a Typed creature filter, got {filter:?}");
+        };
         assert!(
-            option.is_none(),
-            "unrecognized if-clause must drop the alt-cost option entirely, got: {option:?}"
+            typed.type_filters.contains(&TypeFilter::Creature),
+            "the counted objects must be creatures (any controller), got {:?}",
+            typed.type_filters
         );
     }
 

@@ -103,6 +103,7 @@ fn guard_counter_type_payload(field: &str, counter_type: &CounterType) -> Result
         | CounterType::Fade
         | CounterType::Age
         | CounterType::Shield
+        | CounterType::Finality
         | CounterType::Keyword(_) => {}
     }
     Ok(())

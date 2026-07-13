@@ -163,6 +163,7 @@ pub(crate) fn finalize_amass(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Amass,
         source_id: ability.source_id,
+        subject: None,
     });
 }
 

@@ -3766,10 +3766,18 @@ pub(crate) fn gather_transient_continuous_effects(
             // opponent's face-down creature. Skip it here, mirroring the printed
             // `MayLookAtFaceDown` static (built with empty `modifications`, read
             // by mode in `battlefield_active_statics`).
+            //
+            // CR 118.7 + CR 611.2c: A `ReduceAbilityCost` reduction (The Dining
+            // Car's transient "activated abilities of <X> cost {N} less this
+            // turn") is likewise a cost-hook static read DIRECTLY off the TCE by
+            // `casting::reduce_activated_ability_cost`, not a per-object
+            // characteristic. Grafting it onto each affected object would let
+            // `battlefield_active_statics` see it too and double-apply the
+            // discount, so skip it here for the same reason.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MayLookAtFaceDown,
+                    mode: StaticMode::MayLookAtFaceDown | StaticMode::ReduceAbilityCost { .. },
                 }
             ) {
                 continue;

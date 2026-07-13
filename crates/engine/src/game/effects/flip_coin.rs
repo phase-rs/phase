@@ -159,6 +159,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::FlipCoin,
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -204,6 +205,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::FlipCoin,
             source_id: ability.source_id,
+            subject: None,
         });
     }
 
@@ -292,6 +294,7 @@ pub fn resolve_flip_coins(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::FlipCoins,
             source_id: ability.source_id,
+            subject: None,
         });
     }
 
@@ -412,6 +415,7 @@ fn finish_until_lose(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::FlipCoinUntilLose,
             source_id,
+            subject: None,
         });
     }
 
@@ -491,6 +495,7 @@ pub fn resume_after_keep(
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
                 source_id,
+                subject: None,
             });
             Ok(None)
         }
@@ -540,6 +545,7 @@ pub fn resume_after_keep(
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
                 source_id,
+                subject: None,
             });
             Ok(None)
         }

@@ -56,6 +56,11 @@ const COMPLEATED_LOYALTY_INDEX: usize = usize::MAX - 3;
 /// `source` `ObjectId`). It is armed by `GameState::combat_phase_skip_next_turn`
 /// being `Active` for the active player on a combat phase.
 const TURN_SCOPED_COMBAT_SKIP_INDEX: usize = usize::MAX - 4;
+/// CR 122.1h: Finality-counter redirect — a virtual `ZoneChange{BF→GY}`
+/// replacement keyed on the dying permanent. Intrinsic to the counter (persists
+/// past cleanup, like shield counters), so a reserved candidate id lets the
+/// CR 616 ordering pipeline own its choice/application.
+const FINALITY_COUNTER_INDEX: usize = usize::MAX - 5;
 
 /// CR 109.4 + CR 108.4a: Cards outside the battlefield/stack have no
 /// controller; if an effect asks for a card's controller, use its owner
@@ -142,6 +147,27 @@ fn object_has_shield_counter(state: &GameState, object_id: ObjectId) -> bool {
         .objects
         .get(&object_id)
         .and_then(|obj| obj.counters.get(&CounterType::Shield))
+        .is_some_and(|count| *count > 0)
+}
+
+fn finality_counter_replacement_id(object_id: ObjectId) -> ReplacementId {
+    ReplacementId {
+        source: object_id,
+        index: FINALITY_COUNTER_INDEX,
+    }
+}
+
+fn is_finality_counter_replacement(rid: ReplacementId) -> bool {
+    rid.index == FINALITY_COUNTER_INDEX
+}
+
+/// CR 122.1h: A permanent has the finality death→exile redirect while it carries
+/// one or more finality counters.
+fn object_has_finality_counter(state: &GameState, object_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.counters.get(&CounterType::Finality))
         .is_some_and(|count| *count > 0)
 }
 
@@ -700,6 +726,9 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
 fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> String {
     if is_compleated_replacement(rid) {
         return "Compleated: enter with fewer loyalty counters".to_string();
+    }
+    if is_finality_counter_replacement(rid) {
+        return "Exile it instead".to_string();
     }
     if is_turn_scoped_combat_skip_replacement(rid) {
         // CR 614.10: mandatory skip — static label, never offered as a choice.
@@ -1772,6 +1801,52 @@ fn apply_shield_counter_replacement(
         }
         (_, other) => Ok(other),
     }
+}
+
+/// CR 122.1h + CR 614.6: redirect the battlefield→graveyard move to exile. The
+/// modified event occurs instead (CR 614.6); the counter is NOT consumed
+/// (persistent redirect, unlike shield CR 122.1c which removes a counter). The
+/// redirect rides the `Ok(event)` arm — never `Err(Modified)` — matching the
+/// shield non-consumed path; delivery is handled by the existing zone-pipeline
+/// tail.
+#[allow(clippy::result_large_err)]
+fn apply_finality_counter_replacement(
+    state: &GameState,
+    mut event: ProposedEvent,
+    rid: ReplacementId,
+    events: &mut Vec<GameEvent>,
+) -> Result<ProposedEvent, ApplyResult> {
+    if let ProposedEvent::ZoneChange {
+        object_id,
+        from,
+        to,
+        applied,
+        ..
+    } = &mut event
+    {
+        // Re-confirm the selected virtual source is still a live permanent with
+        // finality at application time. A parked CR 616 choice can resume after
+        // another replacement has changed the event or source.
+        if *object_id == rid.source
+            && *from == Zone::Battlefield
+            && *to == Zone::Graveyard
+            && state.objects.get(&rid.source).is_some_and(|obj| {
+                obj.zone == Zone::Battlefield
+                    && obj
+                        .counters
+                        .get(&CounterType::Finality)
+                        .is_some_and(|count| *count > 0)
+            })
+        {
+            *to = Zone::Exile;
+            applied.insert(AppliedReplacementKey::object(rid.source, rid.index));
+            events.push(GameEvent::ReplacementApplied {
+                source_id: rid.source,
+                event_type: ReplacementEvent::Moved.to_string(),
+            });
+        }
+    }
+    Ok(event)
 }
 
 /// CR 702.89a: Umbra armor — "If enchanted permanent would be destroyed, instead
@@ -5327,6 +5402,23 @@ pub fn find_applicable_replacements(
                 candidates.push(rid);
             }
         }
+        // CR 122.1h + CR 700.4: a finality counter redirects the "dies" zone
+        // change (battlefield→graveyard) to exile. One virtual candidate on the
+        // shared ZoneChange{BF→GY} event catches every death path (destroy,
+        // sacrifice, SBA lethal damage, SBA 0-toughness). from:Battlefield is
+        // REQUIRED — a milled or discarded finality card (→graveyard from
+        // library/hand) is NOT exiled.
+        ProposedEvent::ZoneChange {
+            object_id,
+            from: Zone::Battlefield,
+            to: Zone::Graveyard,
+            ..
+        } if object_has_finality_counter(state, *object_id) => {
+            let rid = finality_counter_replacement_id(*object_id);
+            if !event.already_applied(&rid) {
+                candidates.push(rid);
+            }
+        }
         _ => {}
     }
 
@@ -6058,6 +6150,10 @@ fn apply_single_replacement(
         return apply_shield_counter_replacement(state, proposed, rid, kind, events);
     }
 
+    if is_finality_counter_replacement(rid) {
+        return apply_finality_counter_replacement(state, proposed, rid, events);
+    }
+
     if is_umbra_armor_replacement(rid) {
         return apply_umbra_armor_replacement(state, proposed, rid, events);
     }
@@ -6700,6 +6796,14 @@ fn candidate_materiality(
             }
         }
         None => {}
+    }
+
+    // CR 122.1h + CR 616.1: finality redirects the graveyard move to exile — an
+    // unconditional zone-redirect shape, exactly like the shield-counter destroy,
+    // umbra armor, and stored ChangeZone (Rest in Peace) redirects. Two co-firing
+    // zone redirects on one event force the CR 616.1e player ordering choice.
+    if is_finality_counter_replacement(rid) {
+        return CandidateMateriality::Unconditional;
     }
 
     // CR 702.89a: Umbra armor fully replaces the destruction (prevents it), so it
@@ -10485,6 +10589,187 @@ mod tests {
             matches!(final_result, ReplacementResult::Execute(_)),
             "pipeline should finish after resolving the replacement choice, got {final_result:?}"
         );
+    }
+
+    #[test]
+    fn finality_redirect_is_battlefield_only_and_preserves_event_contract() {
+        let finality_id = ObjectId(10);
+        let cause = ObjectId(99);
+        let mut battlefield = test_state_with_object(finality_id, Zone::Battlefield, vec![]);
+        battlefield
+            .objects
+            .get_mut(&finality_id)
+            .expect("finality permanent exists")
+            .counters
+            .insert(CounterType::Finality, 1);
+        let mut events = Vec::new();
+
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange {
+            from,
+            to,
+            cause: actual_cause,
+            applied,
+            ..
+        }) = replace_event(
+            &mut battlefield,
+            ProposedEvent::zone_change(
+                finality_id,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Some(cause),
+            ),
+            &mut events,
+        )
+        else {
+            panic!("a battlefield finality permanent must redirect its graveyard move");
+        };
+        assert_eq!(from, Zone::Battlefield);
+        assert_eq!(to, Zone::Exile, "CR 122.1h redirects only this move");
+        assert_eq!(
+            actual_cause,
+            Some(cause),
+            "the move cause must survive replacement"
+        );
+        assert!(
+            applied.contains(&AppliedReplacementKey::object(
+                finality_id,
+                FINALITY_COUNTER_INDEX
+            )),
+            "the virtual finality replacement must be marked applied"
+        );
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ReplacementApplied {
+                    source_id,
+                    event_type,
+                } if *source_id == finality_id && event_type == "Moved"
+            )
+        }));
+        assert!(
+            !events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::CounterRemoved {
+                        counter_type: CounterType::Finality,
+                        ..
+                    }
+                )
+            }),
+            "CR 122.1h never removes the finality counter"
+        );
+
+        let mut stale_source = test_state_with_object(finality_id, Zone::Exile, vec![]);
+        stale_source
+            .objects
+            .get_mut(&finality_id)
+            .expect("test card exists")
+            .counters
+            .insert(CounterType::Finality, 1);
+        let mut stale_events = Vec::new();
+        let unchanged = apply_finality_counter_replacement(
+            &stale_source,
+            ProposedEvent::zone_change(finality_id, Zone::Battlefield, Zone::Graveyard, None),
+            finality_counter_replacement_id(finality_id),
+            &mut stale_events,
+        )
+        .expect("an invalidated virtual candidate must leave the event unchanged");
+        assert!(matches!(
+            unchanged,
+            ProposedEvent::ZoneChange {
+                to: Zone::Graveyard,
+                ..
+            }
+        ));
+        assert!(stale_events.is_empty());
+
+        for origin in [Zone::Hand, Zone::Library] {
+            let mut nonbattlefield = test_state_with_object(finality_id, origin, vec![]);
+            nonbattlefield
+                .objects
+                .get_mut(&finality_id)
+                .expect("test card exists")
+                .counters
+                .insert(CounterType::Finality, 1);
+            let mut events = Vec::new();
+            let ReplacementResult::Execute(ProposedEvent::ZoneChange { to, .. }) = replace_event(
+                &mut nonbattlefield,
+                ProposedEvent::zone_change(finality_id, origin, Zone::Graveyard, None),
+                &mut events,
+            ) else {
+                panic!("{origin:?} to graveyard must not park a finality replacement");
+            };
+            assert_eq!(
+                to,
+                Zone::Graveyard,
+                "a finality counter does not redirect a {origin:?} to graveyard move"
+            );
+            assert!(events.is_empty());
+        }
+    }
+
+    #[test]
+    fn finality_competes_by_identity_and_resumes_through_the_cr_616_choice() {
+        let finality_id = ObjectId(10);
+        let redirect_source = ObjectId(20);
+        let mut state = test_state_with_object(finality_id, Zone::Battlefield, vec![]);
+        state
+            .objects
+            .get_mut(&finality_id)
+            .expect("finality permanent exists")
+            .counters
+            .insert(CounterType::Finality, 1);
+        let mut competing_source = GameObject::new(
+            redirect_source,
+            CardId(2),
+            PlayerId(0),
+            "Competing redirect".to_string(),
+            Zone::Battlefield,
+        );
+        competing_source.replacement_definitions =
+            vec![redirect_repl(Zone::Library).destination_zone(Zone::Graveyard)].into();
+        state.objects.insert(redirect_source, competing_source);
+        state.battlefield.push_back(redirect_source);
+        let mut events = Vec::new();
+
+        let result = replace_event(
+            &mut state,
+            ProposedEvent::zone_change(finality_id, Zone::Battlefield, Zone::Graveyard, None),
+            &mut events,
+        );
+        let ReplacementResult::NeedsChoice(PlayerId(0)) = result else {
+            panic!("competing finality and graveyard redirects must prompt under CR 616.1");
+        };
+        let WaitingFor::ReplacementChoice { candidates, .. } =
+            replacement_choice_waiting_for(PlayerId(0), &state)
+        else {
+            panic!("the CR 616 choice must expose its candidates");
+        };
+        let finality_index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == finality_id)
+            .expect("the finality virtual replacement must retain its source identity");
+        assert_eq!(candidates[finality_index].description, "Exile it instead");
+
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange { to, applied, .. }) =
+            continue_replacement(&mut state, finality_index, &mut events)
+        else {
+            panic!("choosing finality must resume the parked zone change");
+        };
+        assert_eq!(to, Zone::Exile);
+        assert!(applied.contains(&AppliedReplacementKey::object(
+            finality_id,
+            FINALITY_COUNTER_INDEX
+        )));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ReplacementApplied {
+                    source_id,
+                    event_type,
+                } if *source_id == finality_id && event_type == "Moved"
+            )
+        }));
     }
 
     #[test]

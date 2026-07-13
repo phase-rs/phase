@@ -1226,7 +1226,8 @@ fn classify_generic_counter_growth(
                 | CounterType::Time
                 | CounterType::Fade
                 | CounterType::Age
-                | CounterType::Shield => false,
+                | CounterType::Shield
+                | CounterType::Finality => false,
             };
             if !growable {
                 continue;

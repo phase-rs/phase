@@ -2920,31 +2920,12 @@ pub(crate) fn parse_static_line_inner(
     // either the chosen-name source phrase (→ HasChosenName) or a type phrase.
     if let Some(((amount_n, is_x, mode, subject_filter, dynamic_count, keyword), _)) =
         nom_on_lower(tp.original, tp.lower, |i| {
-            let (i, keyword) = alt((
-                value("activated", tag("activated abilities of ")),
-                value("loyalty", tag("loyalty abilities of ")),
-            ))
-            .parse(i)?;
-            let (i, subject) = take_until(" cost ").parse(i)?;
-            let (i, _) = tag(" cost ").parse(i)?;
-            // CR 107.3 + CR 601.2f: the amount is a fixed `{N}` (Training Grounds)
-            // or the variable `{X}` (Agatha), whose value is supplied by the
-            // trailing "where X is …" referent parsed below.
-            let (i, (amount_n, is_x)) = nom::sequence::delimited(
-                tag("{"),
-                alt((
-                    map(nom_primitives::parse_number, |n| (n, false)),
-                    value((0u32, true), tag("x")),
-                )),
-                tag("}"),
-            )
-            .parse(i)?;
-            let (i, _) = tag(" ").parse(i)?;
-            let (i, mode) = alt((
-                value(CostModifyMode::Reduce, tag("less to activate")),
-                value(CostModifyMode::Raise, tag("more to activate")),
-            ))
-            .parse(i)?;
+            // CR 601.2f + CR 606.1: shared grammar head (also used by the transient
+            // this-turn form, which lowers to a `GenericEffect` carrying this same
+            // `ReduceAbilityCost` static) — "<activated|loyalty> abilities of
+            // <subject> cost {N|X} <less|more> to activate".
+            let (i, (keyword, subject, amount_n, is_x, mode)) =
+                super::cost_mod::parse_activated_ability_cost_head(i)?;
             // CR 208.1 + CR 113.7: optional dynamic referent for `{X}`
             // ("where X is ~'s power", Agatha).
             let (i, dynamic_count) = opt(parse_where_x_is_self_stat).parse(i)?;

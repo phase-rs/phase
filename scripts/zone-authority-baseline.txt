@@ -20,7 +20,6 @@
 crates/engine/src/analysis/resource.rs	eq_except_growable	exempt	2
 crates/engine/src/game/archenemy.rs	set_in_motion	container	1
 crates/engine/src/game/archenemy.rs	turn_face_down_to_bottom_of_scheme_deck	container	1
-crates/engine/src/game/augment.rs	check_standalone_augment_permanents	mover	1
 crates/engine/src/game/augment.rs	combine_card_with_host	mover	1
 crates/engine/src/game/augment.rs	combine_card_with_host	zone-assign	1
 crates/engine/src/game/casting.rs	handle_cancel_cast	mover	1

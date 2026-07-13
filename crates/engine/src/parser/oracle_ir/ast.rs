@@ -449,7 +449,17 @@ pub(crate) enum ContinuationAst {
     /// flow, then chains a `HideawayConceal` sub-ability to turn the chosen card
     /// face down and link it to the source. Gated on the exile-the-dug-card
     /// continuation, so genuine pure-peek Digs (Delver of Secrets) are untouched.
-    ExileOneOfThemFaceDown,
+    ExileOneOfThemFaceDown {
+        /// CR 122.1: A "... face down with <count> <type> counter(s) on it"
+        /// rider (The Dragon-Kami Reborn: "Exile one of them face down with a
+        /// hatching counter on it"). Threaded into the fused exile as a
+        /// `PutCounter { target: ParentTarget }` sub-ability chain appended
+        /// after the conceal, so the player-selected dug card — NOT the trigger
+        /// source — receives the counters. Empty for the bare "exile one of
+        /// them face down" form (Gonti, Lord of Luxury).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+    },
     /// CR 608.2c + CR 701.21a: absorbs the explicit/bare sacrifice-rest clause
     /// following a choose-and-sacrifice-rest effect, optionally narrowing the
     /// final sacrifice sweep ("all other nonland permanents they control").

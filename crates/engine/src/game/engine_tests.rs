@@ -9199,6 +9199,7 @@ fn grant_graveyard_creature_cast_and_bury(
                 play_mode: crate::types::ability::CardPlayMode::Cast,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                enters_with_counter: None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),

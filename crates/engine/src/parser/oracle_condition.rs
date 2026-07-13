@@ -311,7 +311,85 @@ fn static_condition_to_restriction_condition(
         // The `Not` recursion arm above yields `Not(IsYourTurn)` for
         // "it's not your turn".
         StaticCondition::DuringYourTurn => Some(ParsedCondition::IsYourTurn),
+        // CR 122.1: source-counter activation gate — "Activate only if it has no
+        // time counters on it" (Temple of Cyclical Time) and the counter-
+        // threshold restriction class generally. Bridge `HasCounters` to a
+        // `QuantityComparison` over `CountersOn { Source }`, mapping the
+        // (minimum, maximum) range onto a comparator exactly as
+        // `oracle_effect::conditions::counter_threshold_to_condition` does for
+        // the `AbilityCondition` peer, so both paths agree.
+        StaticCondition::HasCounters {
+            counters,
+            minimum,
+            maximum,
+        } => {
+            let qty = QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: crate::types::ability::ObjectScope::Source,
+                    counter_type: match counters {
+                        crate::types::counter::CounterMatch::OfType(ct) => Some(ct),
+                        crate::types::counter::CounterMatch::Any => None,
+                    },
+                },
+            };
+            Some(counters_threshold_to_parsed_condition(
+                qty, minimum, maximum,
+            ))
+        }
         _ => None,
+    }
+}
+
+/// CR 122.1: Map a counter (minimum, maximum) range onto a `ParsedCondition`
+/// comparison over a counter-count quantity. The restriction-side peer of
+/// `oracle_effect::conditions::counter_threshold_to_condition` (which produces
+/// the `AbilityCondition` form): both must agree on the (min,max)→comparator
+/// lowering. A bounded range decomposes into `And[GE n, LE m]`.
+fn counters_threshold_to_parsed_condition(
+    qty: QuantityExpr,
+    minimum: u32,
+    maximum: Option<u32>,
+) -> ParsedCondition {
+    match (minimum, maximum) {
+        // "no counters" — exactly zero.
+        (0, Some(0)) => ParsedCondition::QuantityComparison {
+            lhs: qty,
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        },
+        // "exactly N counters".
+        (n, Some(m)) if n == m => ParsedCondition::QuantityComparison {
+            lhs: qty,
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+        // "N or fewer counters".
+        (0, Some(n)) => ParsedCondition::QuantityComparison {
+            lhs: qty,
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+        // "N or more counters" / "a counter" (1+).
+        (n, None) => ParsedCondition::QuantityComparison {
+            lhs: qty,
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+        // Bounded range "between N and M counters".
+        (n, Some(m)) => ParsedCondition::And {
+            conditions: vec![
+                ParsedCondition::QuantityComparison {
+                    lhs: qty.clone(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: n as i32 },
+                },
+                ParsedCondition::QuantityComparison {
+                    lhs: qty,
+                    comparator: Comparator::LE,
+                    rhs: QuantityExpr::Fixed { value: m as i32 },
+                },
+            ],
+        },
     }
 }
 

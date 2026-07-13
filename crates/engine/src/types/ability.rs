@@ -1472,13 +1472,35 @@ pub enum CounterMoveSelection {
 /// countered ability's source permanent" — so they live on a single enum rather
 /// than as sibling `Option` fields on `Effect::Counter` (parameterize, don't
 /// proliferate).
+/// serde default for `CounterSourceRider::LosesAbilities::duration` — keeps
+/// card-data serialized before the field was added deserializing correctly
+/// (CR 611.2a: the loses-abilities effect lasts until the counter source leaves
+/// the battlefield).
+fn duration_until_host_leaves_play() -> Box<Duration> {
+    Box::new(Duration::UntilHostLeavesPlay)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CounterSourceRider {
     /// CR 611.2: "that permanent loses all abilities ..." — applies a static
     /// definition to the countered ability's source permanent
     /// (Tishana's Tidebinder).
-    LosesAbilities { static_def: Box<StaticDefinition> },
+    ///
+    /// CR 611.2a: `duration` is the continuous effect's lifetime — Tishana's
+    /// "for as long as this creature remains on the battlefield" is
+    /// `Duration::UntilHostLeavesPlay`. Surfaced as an explicit field (rather
+    /// than hard-coded in the resolver) so the "as long as" clause is visible
+    /// in the serialized AST and threaded to the transient continuous effect.
+    LosesAbilities {
+        static_def: Box<StaticDefinition>,
+        // Boxed: `Duration` is a large enum, and this rider is embedded in the
+        // frequently-constructed `ZoneCounterImperativeAst`/`Effect::Counter`
+        // holders — boxing keeps `CounterSourceRider` small (clippy
+        // large_enum_variant).
+        #[serde(default = "duration_until_host_leaves_play")]
+        duration: Box<Duration>,
+    },
     /// CR 701.8: "destroy that permanent" — destroys the countered ability's
     /// source permanent (Teferi's Response, Green Slime).
     Destroy,
@@ -2485,8 +2507,9 @@ pub enum CastingPermission {
         /// enters with a [counter] counter on it." When `Some(ct)`, the granted
         /// cast finalization registers a pending ETB counter of type `ct` on the
         /// cast object so it enters the battlefield carrying that counter
-        /// (CR 122.1h: a finality counter is the keyword counter that exiles the
-        /// permanent instead of letting it die). `None` for every other
+        /// (CR 122.1h: a finality counter intrinsically creates the replacement
+        /// effect that exiles the permanent instead of letting it go to a
+        /// graveyard). `None` for every other
         /// `CastFromZone` grant. Typed `Option<CounterType>` rather than a bool so
         /// the rider covers any counter the cast-this-way creature enters with.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7269,6 +7292,12 @@ pub enum CastVariantPaid {
     /// Full Bore. The warp permanent is exiled at the next end step (same turn),
     /// so the per-object marker only ever needs to be read on its cast turn.
     Warp,
+    /// CR 702.187b + CR 608.2c: Mayhem alternative cast cost was paid (the card
+    /// was cast from a graveyard for its mayhem cost after being discarded this
+    /// turn). Read by the "if this spell's mayhem cost was paid, … instead"
+    /// modal (Sandman's Quicksand); the on-stack marker is stamped at cast
+    /// finalize because a resolving sorcery never enters the battlefield.
+    Mayhem,
 }
 
 /// CR 601.3b + CR 702.8a: A timing permission actually used to cast a spell.
@@ -16314,9 +16343,22 @@ pub enum AbilityCondition {
     /// the reflexive sub-ability is skipped — `evaluate_condition` gates on
     /// `cost_payment_failed_flag` for that case (mirrors `IfYouDo`).
     WhenYouDo,
-    /// CR 603.4: "If you cast it from [zone]" — sub_ability executes only if the spell
-    /// was cast from the specified zone. Evaluated against SpellContext.cast_from_zone.
-    CastFromZone { zone: Zone },
+    /// CR 601.2a + CR 707.10: "if [this spell] was cast from [zone]" — sub_ability
+    /// executes only if the spell was cast. `zone: None` = cast from any origin;
+    /// `Some(z)` = cast specifically from zone `z`. Evaluated against
+    /// `SpellContext.cast_from_zone`. A copy (CR 707.10: a copy of a spell isn't
+    /// cast) or a put-into-play object (CR 400.7: a new object has no cast
+    /// provenance) has `cast_from_zone == None`, so the zoneless `None` form is
+    /// false for it — this is what distinguishes the positive-cast presupposition
+    /// "was cast from anywhere other than X" (`And[WasCast{None}, Not(WasCast{Some(X)})]`)
+    /// from the bare "you didn't cast it from X". Mirrors `StaticCondition::WasCast`
+    /// / `TriggerCondition::WasCast`; `#[serde(alias)]` keeps pre-rename
+    /// `"CastFromZone"` payloads deserializable.
+    #[serde(alias = "CastFromZone")]
+    WasCast {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zone: Option<Zone>,
+    },
     /// CR 207.2c + CR 601.2: "if you cast this spell during your [phase/step]".
     /// `phases` is parameterized so grouped phrases like "main phase" can map to
     /// both concrete main phases without proliferating condition variants.
@@ -17168,6 +17210,19 @@ pub enum TriggerCondition {
     /// the tapped object's id. Per CR 603.4 it is checked at both trigger time and
     /// resolution; the count model lets the resolution-time re-check stay correct.
     FirstTimeObjectTappedThisTurn,
+
+    /// CR 122.1 + CR 603.4: True iff the triggering object (the permanent that
+    /// received one or more counters) has had counters put on it exactly once so
+    /// far this turn — i.e. this is the first time. Read from
+    /// `GameState.counter_added_this_turn` by counting records whose `object_id`
+    /// matches the object carried by the `CounterAdded` event (per-OBJECT, NOT the
+    /// per-controller predicate of the sibling `CounterAddedThisTurn`). Per CR
+    /// 603.4 it is checked at both trigger time and resolution; the count model
+    /// keeps the resolution-time re-check correct and blocks self-retrigger (a
+    /// payload +1/+1 raises the count past 1). Shape-sibling of
+    /// `FirstTimeObjectTappedThisTurn`, but it reads the counter board ledger, so
+    /// its fail-open walker classifications mirror `CounterAddedThisTurn`.
+    FirstTimeObjectCountersAddedThisTurn,
 
     /// CR 400.7 + CR 603.10: "if it was a [type]" — true when the trigger source's
     /// last known information includes the specified core type. Used by the Glimmer cycle

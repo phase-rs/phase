@@ -778,7 +778,7 @@ fn equipped_effect_fires_on_resolution_event_not_announcement() {
             GameEvent::EffectResolved {
                 kind: crate::types::ability::EffectKind::Equip,
                 source_id,
-            } if *source_id == equipment_id
+            ..} if *source_id == equipment_id
         )),
         "CR 702.6a: Equip resolution event fires when the ability resolves"
     );

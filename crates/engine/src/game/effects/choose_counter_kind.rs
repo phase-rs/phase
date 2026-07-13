@@ -72,6 +72,7 @@ pub fn resolve(
     let resolved = || GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     };
 
     // CR 608.2d: no counters on the object → nothing to choose → no-op.

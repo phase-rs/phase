@@ -1385,6 +1385,33 @@ fn observe_object_taps(state: &mut GameState, events: &[GameEvent]) {
     }
 }
 
+/// CR 122.1 + CR 603.4: Increment the per-object "counters placed this turn"
+/// OCCURRENCE count for each object that received one or more `CounterAdded`
+/// events in this batch. Unlike taps (one tap = one event), a single
+/// counter-placement event may emit multiple `CounterAdded` events for one object
+/// (one per counter KIND, plus one per distinct-type apply-call), so this DEDUPS
+/// per object per batch: each distinct object is bumped exactly ONCE regardless
+/// of how many `CounterAdded` events it produced. A value of 1 therefore means
+/// this batch is that object's first counter-placement occurrence of the turn.
+/// This is the one deliberate divergence from `observe_object_taps`, which counts
+/// every event. Cleared at turn start (turns.rs). Like the tap sibling, this runs
+/// from the single `collect_pending_triggers` chokepoint, so it cannot
+/// double-count under re-entrant collection (the drain path stashes
+/// already-collected contexts, not raw events).
+fn observe_object_counter_placements(state: &mut GameState, events: &[GameEvent]) {
+    let mut bumped: HashSet<ObjectId> = HashSet::new();
+    for event in events {
+        if let GameEvent::CounterAdded { object_id, .. } = event {
+            if bumped.insert(*object_id) {
+                *state
+                    .object_counter_placement_count_this_turn
+                    .entry(*object_id)
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+}
+
 fn collect_pending_triggers(
     state: &mut GameState,
     events: &[GameEvent],
@@ -1406,6 +1433,13 @@ fn collect_pending_triggers(
     // funnels through (combat declaration, mana taps, cost taps, crew), so combat +
     // effect + crew taps all count here regardless of which producer emitted them.
     observe_object_taps(state, events);
+    // CR 122.1 + CR 603.4: Bump the per-object counter-placement OCCURRENCE ledger
+    // for this batch (deduped across a multi-KIND placement) BEFORE any trigger
+    // condition is checked, so a "first time counters have been put on it this
+    // turn" intervening-if (`FirstTimeObjectCountersAddedThisTurn`) reads
+    // occurrence-count == 1 for the placement that just fired. Same chokepoint as
+    // the tap ledger, so effect, ETB, and ability counter placements all count.
+    observe_object_counter_placements(state, events);
     let mut pending: Vec<PendingTriggerContext> = Vec::new();
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
@@ -6834,6 +6868,31 @@ pub(crate) fn check_trigger_condition(
                 _ => None,
             })
             .is_some_and(|id| state.object_tap_count_this_turn.get(&id).copied() == Some(1)),
+        // CR 122.1 + CR 603.4: "if it's the first time counters have been put on
+        // that creature this turn" — the intervening-if subject is the object
+        // carried by the `CounterAdded` event (the creature that just received
+        // counters), NOT the trigger source. The per-object OCCURRENCE ledger is
+        // bumped once per put-event in `observe_object_counter_placements` (deduped
+        // across a multi-KIND batch) BEFORE this check, so exactly-one prior
+        // occurrence reads count == 1 — a multi-KIND first placement (which pushes
+        // 2+ records/events for one object) still counts as ONE occurrence and
+        // fires. Checked at both trigger time and resolution (CR 603.4); a later
+        // placement on the same object this turn advances the count past 1 and the
+        // re-check fizzles — this also blocks the payload +1/+1 from
+        // self-retriggering (loop-safe). Mirrors the tap sibling
+        // `FirstTimeObjectTappedThisTurn`.
+        TriggerCondition::FirstTimeObjectCountersAddedThisTurn => trigger_event
+            .and_then(|e| match e {
+                GameEvent::CounterAdded { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .is_some_and(|id| {
+                state
+                    .object_counter_placement_count_this_turn
+                    .get(&id)
+                    .copied()
+                    == Some(1)
+            }),
         // CR 400.7 + CR 603.10: "if it was a [type]" — check LKI for the source's
         // core types at the time it left the battlefield.
         TriggerCondition::WasType { card_type } => source_id

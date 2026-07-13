@@ -42,6 +42,7 @@ pub fn resolve_gain(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -52,6 +53,7 @@ pub fn resolve_gain(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -107,6 +109,7 @@ pub fn resolve_gain(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -417,7 +420,11 @@ fn complete_pending_life_total_assignment(
         );
         match resolution_event {
             PendingEffectResolutionEvent::Emit => {
-                events.push(GameEvent::EffectResolved { kind, source_id });
+                events.push(GameEvent::EffectResolved {
+                    kind,
+                    source_id,
+                    subject: None,
+                });
             }
             PendingEffectResolutionEvent::Suppress => {}
         }
@@ -454,6 +461,7 @@ pub fn resolve_lose(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -502,6 +510,7 @@ pub fn resolve_lose(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -626,6 +635,7 @@ pub fn resolve_set_life_total(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -1106,6 +1116,7 @@ mod tests {
             GameEvent::EffectResolved {
                 kind: EffectKind::ExchangeLifeTotals,
                 source_id: ObjectId(100),
+                ..
             }
         )));
     }

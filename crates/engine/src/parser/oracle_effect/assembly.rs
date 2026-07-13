@@ -35,10 +35,11 @@ use super::lower::{
     extract_verb_up_to_multi_target, fold_copy_spell_gains_haste_and_quoted_grant,
     fold_enters_this_way_counter_rider, fold_search_choose_type_conditional_destination,
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
-    gate_reflexive_rider_on_declined_optional_target, is_land_enters_tapped_rider,
-    is_linked_exile_cast_bottom_cleanup, is_spend_mana_as_any_color_rider, is_stable_branch_amount,
+    gate_reflexive_rider_on_declined_optional_target, is_exile_until_cast_bottom_cleanup,
+    is_land_enters_tapped_rider, is_linked_exile_cast_bottom_cleanup,
+    is_spend_mana_as_any_color_rider, is_stable_branch_amount,
     nest_whenever_this_turn_token_cleanup_delayed_trigger,
-    normalize_linked_exile_cast_bottom_cleanup,
+    normalize_exile_until_cast_bottom_cleanup, normalize_linked_exile_cast_bottom_cleanup,
     parse_controlled_by_different_players_target_constraint,
     parse_same_zone_owner_target_constraint, parse_total_mana_value_target_constraint,
     patch_choose_from_zone_counter_continuation_target, patch_population_head_tap_anaphor,
@@ -50,7 +51,7 @@ use super::lower::{
     rewrite_two_target_counter_chain, target_choice_timing_for_clause,
     thread_chosen_damage_source_into_oneshot_effects,
 };
-use super::sequence::apply_clause_continuation;
+use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
 use super::{
     append_to_deepest_sub_ability, apply_player_scope_rewrites,
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
@@ -536,6 +537,33 @@ pub(super) enum AntecedentSelector {
     /// The most recent node registered under a role, walking back past any
     /// candidate that fails the guard.
     LastWithRole(AntecedentRole),
+    /// **EVERY node registered under a role** — the one FAN-OUT binding in the
+    /// assembler. Bound with [`AssemblyEnv::resolve_all`]; [`AssemblyEnv::resolve`]
+    /// rejects it, because a point binding cannot express it.
+    ///
+    /// Grammatical class, not a card: a PLURAL quantifier ("you may choose new
+    /// targets for the copIES") scopes over the SELECTOR, not merely over the
+    /// mutation the selected node undergoes. When the things it quantifies over land
+    /// in SIBLING defs — Banish into Fable's two conditional copies, Ulalek's
+    /// spells-then-abilities pair — a `LastWithRole` binding reaches only the last of
+    /// them and every earlier one silently keeps its original targets (CR 707.10c).
+    ///
+    /// Membership is the SAME predicate/registry split as `LastWithRole` (see
+    /// `live_role_predicate`) — this selector changes only how many candidates are
+    /// taken, never which nodes qualify. That is deliberate: a fan-out whose
+    /// membership drifted from the point selector's would be a second, undeclared
+    /// role.
+    ///
+    /// Note the SWALLOW trap that haunts `LastWithRole` does NOT apply here, and the
+    /// direction is worth stating: `LastWithRole` STOPS the walk at the node it binds,
+    /// so an over-generous role hides a real antecedent further back. A fan-out never
+    /// stops, so an extra member cannot hide an earlier one. The exposure is the
+    /// MIRROR risk — patching a node that should have been left alone — which is why
+    /// the plural clause must only be bound to defs emitted BEFORE it. That holds by
+    /// construction: continuations are applied in SOURCE ORDER as clauses stream, so
+    /// `defs` at binding time contains exactly the copies already stated (a later
+    /// mode's copy — Choreographed Sparks' retarget-less mode 2 — does not exist yet).
+    AllWithRole(AntecedentRole),
     /// A node pushed by a continuation rather than a clause body — it has NO
     /// `ClauseId` (audit §2), so it can only be named by role + provenance.
     ContinuationProduct(ContinuationRole),
@@ -632,6 +660,33 @@ pub(super) enum AntecedentRole {
     /// old scans never reached. Same trap, mirrored, as narrowing `GenericEffectHead`
     /// to "has a static".
     DigLook,
+    /// A def whose effect TREE bears a `CopySpell` — the antecedent a "you may choose
+    /// new targets for the copy/copies" sentence binds back to (CR 707.10c). A clause
+    /// that resolves between the copy and the sentence may sit in between (Narset's
+    /// Reversal's bounce, Spinerock Tyrant's wither rider), which is why this is a
+    /// role and not `LastEmitted`.
+    ///
+    /// The FIRST TREE-RECURSIVE role. Every role above is a property of a def's own
+    /// top-level effect (`DamageDealer` already peeks one level, through a `TargetOnly`
+    /// head); this one is a property of the def's whole effect SUBTREE, because the
+    /// `CopySpell` it names can be nested arbitrarily deep — under a
+    /// `CreateDelayedTrigger` wrapper (Galvanic Iteration) or down the `sub_ability`
+    /// chain (the Chain cycle nests the optional copy under the parent discard).
+    ///
+    /// This does NOT breach the "no recursive inspection of the output" rule. That rule
+    /// forbids a handler from walking the output GRAPH — sideways across `defs`, or
+    /// through parent/sibling links — to discover WHICH node is its antecedent. Here the
+    /// search across `defs` is exactly the declared `LastWithRole` walk, and membership
+    /// of each candidate is a property of that candidate ALONE, computed from its own
+    /// subtree. Node-local, just deeper than one level.
+    ///
+    /// Membership mirrors the mutator's descent EXACTLY — see
+    /// `sequence::def_bears_retargetable_copy`. Widening it (e.g. descending
+    /// `else_ability`, which the mutator does not) would bind a def the mutator cannot
+    /// patch, and because the walk STOPS at the bound node the retarget would be
+    /// silently dropped instead of reaching the real copy further back. Same trap as
+    /// narrowing `GenericEffectHead`, in the opposite direction.
+    CopySpellBearer,
 }
 
 /// Membership predicates for the roles whose candidacy is **live** — recomputed
@@ -673,6 +728,14 @@ fn live_role_predicate(role: AntecedentRole) -> Option<fn(&AbilityDefinition) ->
         // to stay correct for THIS role today is luck, not design. Cached membership is
         // stale by construction here, so it is not offered.
         AntecedentRole::DamageDealer => Some(def_is_damage_dealer),
+        // LIVE — and this role could not be cached even in principle. Its membership is
+        // a property of a def's whole effect SUBTREE, and the assembler moves effects
+        // INTO subtrees without touching `defs.len()`: nesting a `sub_ability` in place
+        // can make a def that was NOT a copy-bearer into one (the Chain cycle hangs the
+        // optional `CopySpell` under the parent discard). `observe` only refreshes where
+        // the length changes, so a registry would miss that node's birth entirely — not
+        // merely go stale on a rewrite, but never see it. Live, the role IS the scan.
+        AntecedentRole::CopySpellBearer => Some(def_bears_retargetable_copy),
         AntecedentRole::Conditional
         | AntecedentRole::OptionalHead
         | AntecedentRole::DigOrRevealUntil
@@ -880,40 +943,131 @@ impl AssemblyEnv {
         guard: Option<BindGuard>,
         on_miss: OnMiss,
     ) -> Option<usize> {
-        let passes = |index: usize| -> bool {
-            match guard {
-                None => true,
-                Some(BindGuard::NoSubAbility) => defs[index].sub_ability.is_none(),
-                Some(BindGuard::EffectShape(EffectClass::PermanentCreator)) => matches!(
-                    &*defs[index].effect,
-                    Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::ChangeZone { .. }
-                ),
-                Some(BindGuard::EffectShape(EffectClass::DrawnThisTurnChoice)) => matches!(
-                    &*defs[index].effect,
-                    Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
-                ),
-                Some(BindGuard::DigLookbackTransparentCost) => {
-                    let d = &defs[index];
-                    d.optional
-                        && super::sequence::clause_is_dig_lookback_transparent(&d.effect)
-                        && matches!(
-                            &*d.effect,
-                            Effect::Sacrifice { .. } | Effect::PayCost { .. }
-                        )
-                }
+        debug_assert!(
+            !matches!(selector, AntecedentSelector::AllWithRole(_)),
+            "`AllWithRole` is a FAN-OUT selector — bind it with `resolve_all`. Taking one \
+             node from it would silently drop every other member, which is the exact \
+             CR 707.10c defect the selector exists to fix."
+        );
+        let hit = self.point_hit(defs, selector, guard);
+        match hit {
+            Some(i) => Some(i),
+            None => match on_miss {
+                OnMiss::Ignore => None,
+            },
+        }
+    }
+
+    /// The FAN-OUT counterpart of [`Self::resolve`] — every bound node's CURRENT
+    /// index in `defs`, in emission order. Empty on a miss.
+    ///
+    /// Only [`AntecedentSelector::AllWithRole`] can bind more than one node; every
+    /// other selector is a point binding and yields 0 or 1 index here, with exactly
+    /// the semantics it has in `resolve` (including `Between`'s forward-first walk).
+    /// Both entry points therefore share ONE guard evaluator and ONE membership
+    /// authority, so a fan-out can never disagree with the point binding about which
+    /// nodes qualify.
+    pub(super) fn resolve_all(
+        &self,
+        defs: &[AbilityDefinition],
+        selector: AntecedentSelector,
+        guard: Option<BindGuard>,
+        on_miss: OnMiss,
+    ) -> Vec<usize> {
+        let hits: Vec<usize> = match selector {
+            AntecedentSelector::AllWithRole(role) => self.role_members(defs, role, guard),
+            point => self.point_hit(defs, point, guard).into_iter().collect(),
+        };
+        if hits.is_empty() {
+            return match on_miss {
+                OnMiss::Ignore => Vec::new(),
+            };
+        }
+        hits
+    }
+
+    /// Does the node at `index` satisfy the binding guard? Guards are evaluated
+    /// against the bound node ALONE — never by walking the output tree.
+    fn guard_passes(
+        &self,
+        defs: &[AbilityDefinition],
+        index: usize,
+        guard: Option<BindGuard>,
+    ) -> bool {
+        match guard {
+            None => true,
+            Some(BindGuard::NoSubAbility) => defs[index].sub_ability.is_none(),
+            Some(BindGuard::EffectShape(EffectClass::PermanentCreator)) => matches!(
+                &*defs[index].effect,
+                Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::ChangeZone { .. }
+            ),
+            Some(BindGuard::EffectShape(EffectClass::DrawnThisTurnChoice)) => matches!(
+                &*defs[index].effect,
+                Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+            ),
+            Some(BindGuard::DigLookbackTransparentCost) => {
+                let d = &defs[index];
+                d.optional
+                    && super::sequence::clause_is_dig_lookback_transparent(&d.effect)
+                    && matches!(
+                        &*d.effect,
+                        Effect::Sacrifice { .. } | Effect::PayCost { .. }
+                    )
             }
+        }
+    }
+
+    /// EVERY index carrying `role` whose guard also holds, in emission order.
+    ///
+    /// The single membership authority. `role_members(..).last()` is by construction
+    /// what `LastWithRole` binds, so the point selector and the fan-out cannot drift:
+    /// the live-predicate / cached-registry split below is the one in
+    /// `live_role_predicate`, not a copy of it.
+    fn role_members(
+        &self,
+        defs: &[AbilityDefinition],
+        role: AntecedentRole,
+        guard: Option<BindGuard>,
+    ) -> Vec<usize> {
+        let members: Vec<usize> = match live_role_predicate(role) {
+            Some(is_member) => (0..defs.len()).filter(|i| is_member(&defs[*i])).collect(),
+            None => match role {
+                AntecedentRole::Conditional => self.conditional_nodes.clone(),
+                AntecedentRole::OptionalHead => self.optional_head_nodes.clone(),
+                AntecedentRole::DigOrRevealUntil => self.dig_or_reveal_until_nodes.clone(),
+                AntecedentRole::DestroyLike => self.destroy_like_nodes.clone(),
+                AntecedentRole::FaceDownProfileHolder => self.face_down_profile_nodes.clone(),
+                // `live_role_predicate` returned `Some` for these, so this arm is
+                // unreachable — but it is spelled out rather than wildcarded so a
+                // NEW role cannot be added without choosing a side.
+                AntecedentRole::GenericEffectHead
+                | AntecedentRole::KeywordCounterPlacement
+                | AntecedentRole::DigOrMill
+                | AntecedentRole::DigLook
+                | AntecedentRole::DamageDealer
+                | AntecedentRole::CopySpellBearer => Vec::new(),
+            },
         };
-        // The most recent index (in `defs` order) whose membership AND guard hold.
-        let last_live = |is_member: fn(&AbilityDefinition) -> bool| -> Option<usize> {
-            (0..defs.len())
-                .rev()
-                .find(|i| is_member(&defs[*i]) && passes(*i))
-        };
+        members
+            .into_iter()
+            .filter(|i| self.guard_passes(defs, *i, guard))
+            .collect()
+    }
+
+    /// The single node a POINT selector binds, or `None`. Shared by `resolve` and
+    /// `resolve_all`; `AllWithRole` is not a point selector and never reaches here.
+    fn point_hit(
+        &self,
+        defs: &[AbilityDefinition],
+        selector: AntecedentSelector,
+        guard: Option<BindGuard>,
+    ) -> Option<usize> {
+        let passes = |index: usize| -> bool { self.guard_passes(defs, index, guard) };
         // The most recent candidate from a `refresh`-maintained emission-ordered list.
         let last_cached =
             |list: &[usize]| -> Option<usize> { list.iter().rev().copied().find(|i| passes(*i)) };
 
-        let hit: Option<usize> = match selector {
+        match selector {
             AntecedentSelector::LastEmitted => defs.len().checked_sub(1).filter(|i| passes(*i)),
             AntecedentSelector::FirstEmitted => {
                 (!defs.is_empty()).then_some(0).filter(|i| passes(*i))
@@ -927,37 +1081,14 @@ impl AssemblyEnv {
                 let anchor_pos = self.arena.order.iter().position(|id| *id == anchor);
                 anchor_pos.and_then(|a| ((a + 1)..defs.len()).find(|i| passes(*i)))
             }
-            // Roles split by HOW membership is determined — live predicate over
-            // `defs` (U6-C5) vs. emission-ordered registry (U6-C2/C3). The split and
-            // its rationale live in `live_role_predicate`.
-            AntecedentSelector::LastWithRole(role) => match live_role_predicate(role) {
-                Some(is_member) => last_live(is_member),
-                None => match role {
-                    AntecedentRole::Conditional => last_cached(&self.conditional_nodes),
-                    AntecedentRole::OptionalHead => last_cached(&self.optional_head_nodes),
-                    AntecedentRole::DigOrRevealUntil => {
-                        last_cached(&self.dig_or_reveal_until_nodes)
-                    }
-                    AntecedentRole::DestroyLike => last_cached(&self.destroy_like_nodes),
-                    AntecedentRole::FaceDownProfileHolder => {
-                        last_cached(&self.face_down_profile_nodes)
-                    }
-                    // `live_role_predicate` returned `Some` for these, so this arm is
-                    // unreachable — but it is spelled out rather than wildcarded so a
-                    // NEW role cannot be added without choosing a side.
-                    AntecedentRole::GenericEffectHead
-                    | AntecedentRole::KeywordCounterPlacement
-                    | AntecedentRole::DigOrMill
-                    | AntecedentRole::DigLook
-                    | AntecedentRole::DamageDealer => None,
-                },
-            },
-        };
-        match hit {
-            Some(i) => Some(i),
-            None => match on_miss {
-                OnMiss::Ignore => None,
-            },
+            // "The most recent node with the role" IS the last member of the same
+            // membership set the fan-out enumerates — one authority, two arities.
+            AntecedentSelector::LastWithRole(role) => {
+                self.role_members(defs, role, guard).last().copied()
+            }
+            // Unreachable: `resolve` debug_asserts it away and `resolve_all` handles
+            // it before calling here. Spelled out so the match stays exhaustive.
+            AntecedentSelector::AllWithRole(_) => None,
         }
     }
 }
@@ -2285,6 +2416,23 @@ fn normalize_linked_exile_cast_pair(
         normalize_linked_exile_cast_bottom_cleanup(&mut chain.effect);
         prev.else_ability = Some(Box::new(chain.clone()));
         return true;
+    }
+    // CR 608.2c + CR 701.13a: Jodah, the Unifier — the head-aware companion
+    // gate. `prev` is `ExileFromTopUntil { NextMatches }`; `chain` is its
+    // optional `CastFromZone { ParentTarget }` with the bottom cleanup already
+    // nested beneath it. Rewrite that cleanup to the linked exile set and make
+    // it the decline branch, preserving the hit in exile when the cast is
+    // declined.
+    if chain.optional {
+        if let Some(cleanup) = chain.sub_ability.as_deref().cloned() {
+            if is_exile_until_cast_bottom_cleanup(&prev.effect, &chain.effect, &cleanup.effect) {
+                if let Some(cleanup_mut) = chain.sub_ability.as_deref_mut() {
+                    normalize_exile_until_cast_bottom_cleanup(&mut cleanup_mut.effect);
+                    chain.else_ability = Some(Box::new(cleanup_mut.clone()));
+                    return true;
+                }
+            }
+        }
     }
     false
 }

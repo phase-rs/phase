@@ -133,6 +133,7 @@ fn resolve_single(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -263,6 +264,7 @@ fn prompt_resolution_tap_untap_choice(
                 events.push(GameEvent::EffectResolved {
                     kind: effect_kind,
                     source_id: ability.source_id,
+                    subject: None,
                 });
                 return true;
             }
@@ -274,6 +276,7 @@ fn prompt_resolution_tap_untap_choice(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return true;
     }
@@ -344,6 +347,7 @@ fn resolve_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())

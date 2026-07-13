@@ -2177,7 +2177,7 @@ fn scan_ability_condition(x: &AbilityCondition) -> Axes {
         AbilityCondition::EventOutcomeWon => Axes::NONE,
         AbilityCondition::CoinFlipOutcome { result: _ } => Axes::NONE,
         AbilityCondition::WhenYouDo => Axes::NONE,
-        AbilityCondition::CastFromZone { zone: _ } => Axes::NONE,
+        AbilityCondition::WasCast { zone: _ } => Axes::NONE,
         AbilityCondition::CastDuringPhase { phases: _ } => Axes::NONE,
         AbilityCondition::CurrentPhaseIs { phases: _ } => Axes::NONE,
         AbilityCondition::CastTimingPermission { permission: _ } => Axes::NONE,
@@ -2740,6 +2740,15 @@ fn scan_trigger_condition(x: &TriggerCondition) -> Axes {
         TriggerCondition::SourceIsFaceDown => Axes::NONE,
         TriggerCondition::SourceInZone { zone: _ } => Axes::NONE,
         TriggerCondition::CounterAddedThisTurn => Axes {
+            event: false,
+            sibling: false,
+            projected: true,
+        },
+        // CR 603.3b: Mirrors `CounterAddedThisTurn` (same `counter_added_this_turn`
+        // board ledger) — `projected: true`. NOT the tapped sibling's `Axes::NONE`;
+        // this condition reads the counter journal, so the coverability/ordering
+        // detector must see the projected read (fail-open otherwise).
+        TriggerCondition::FirstTimeObjectCountersAddedThisTurn => Axes {
             event: false,
             sibling: false,
             projected: true,
