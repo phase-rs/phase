@@ -290,7 +290,7 @@ pub(super) fn handle_replacement_choice(
                             events,
                         ) {
                             state.pending_liminal_entry_resume =
-                                Some(crate::types::game_state::PendingLiminalEntryResume {
+                                Some(crate::types::game_state::PendingLiminalEntryResume::Token {
                                     source_id: entry_ref,
                                     player: waiting_for
                                         .acting_player()
@@ -1154,7 +1154,17 @@ pub(super) fn handle_copy_target_choice(
                 "Missing liminal entry resume".to_string(),
             ));
         };
-        if resume.source_id != source_id || resume.player != player {
+        let (resume_source_id, resume_player) = match &resume {
+            crate::types::game_state::PendingLiminalEntryResume::Token {
+                source_id,
+                player,
+                ..
+            }
+            | crate::types::game_state::PendingLiminalEntryResume::Meld {
+                source_id, player, ..
+            } => (*source_id, *player),
+        };
+        if resume_source_id != source_id || resume_player != player {
             return Err(EngineError::InvalidAction(
                 "Mismatched liminal entry resume".to_string(),
             ));
@@ -1182,6 +1192,53 @@ pub(super) fn handle_copy_target_choice(
                     player,
                 )
             });
+        if let crate::types::game_state::PendingLiminalEntryResume::Meld { context, .. } = resume {
+            // The empty batch record only carried `MeldEntry` across the copy
+            // choice. The typed liminal resume now owns completion, including a
+            // possible counter-replacement pause, so remove that superseded
+            // record before the generic copy finisher tries to drain it.
+            if state
+                .pending_batch_deliveries
+                .as_ref()
+                .is_some_and(|pending| {
+                    pending.remaining.is_empty()
+                        && matches!(
+                            &pending.completion,
+                            Some(crate::types::game_state::BatchCompletion::MeldEntry { .. })
+                        )
+                })
+            {
+                state.pending_batch_deliveries = None;
+            }
+            if !crate::game::meld::commit_meld_battlefield(state, &context) {
+                crate::game::meld::finish_deferred_meld_resolution(state, source_id, events);
+                return Ok(state.waiting_for.clone());
+            }
+            // CR 707.9: the copy effect is installed after the meld result's
+            // layer-1 identity, so its later timestamp determines the entering
+            // permanent's copiable values.
+            let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+            let post_actions = vec![PendingCounterPostAction::FinishMeldEntry {
+                context: context.clone(),
+            }];
+            if let Some(waiting_for) =
+                finish_copy_target_choice_entry(state, source_id, events, post_actions, false)?
+            {
+                if state.pending_counter_additions.is_none() {
+                    crate::game::meld::finish_deferred_meld_entry(state, context, events);
+                }
+                return Ok(waiting_for);
+            }
+            crate::game::meld::finish_deferred_meld_entry(state, context, events);
+            return Ok(state.waiting_for.clone());
+        }
+        let crate::types::game_state::PendingLiminalEntryResume::Token {
+            event: resume_event,
+            ..
+        } = resume
+        else {
+            unreachable!("meld resume returned above")
+        };
         let entry_events = state
             .liminal_entries
             .get(&source_id)
@@ -1239,7 +1296,7 @@ pub(super) fn handle_copy_target_choice(
         }
         if !super::effects::token::commit_liminal_token_entry_with_event_emission(
             state,
-            resume.event,
+            resume_event,
             events,
             TokenEntryEventEmission::Suppress,
         ) {
@@ -1271,9 +1328,13 @@ pub(super) fn handle_copy_target_choice(
                 remaining_count,
             });
         }
-        if let Some(waiting_for) =
-            finish_copy_target_choice_entry(state, source_id, events, counter_pause_post_actions)?
-        {
+        if let Some(waiting_for) = finish_copy_target_choice_entry(
+            state,
+            source_id,
+            events,
+            counter_pause_post_actions,
+            true,
+        )? {
             return Ok(waiting_for);
         }
         if let Some((name, event_source_id)) = entry_events {
@@ -1347,7 +1408,7 @@ pub(super) fn handle_copy_target_choice(
         });
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
     if let Some(waiting_for) =
-        finish_copy_target_choice_entry(state, source_id, events, Vec::new())?
+        finish_copy_target_choice_entry(state, source_id, events, Vec::new(), true)?
     {
         return Ok(waiting_for);
     }
@@ -1361,6 +1422,7 @@ fn finish_copy_target_choice_entry(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
     counter_pause_post_actions: Vec<PendingCounterPostAction>,
+    replay_entry_events: bool,
 ) -> Result<Option<WaitingFor>, EngineError> {
     // Force a full layer pass after the copy chain so the realized
     // characteristics below (enter-tapped, ETB counters) read post-copy state.
@@ -1395,13 +1457,15 @@ fn finish_copy_target_choice_entry(
     // on the battlefield — concede / error / chained-replacement paths can
     // leave a stale event in the vec, and we discard rather than fire a
     // phantom entry trigger.
-    if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
-        return Ok(Some(waiting_for));
+    if replay_entry_events {
+        if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
+            return Ok(Some(waiting_for));
+        }
     }
     // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
     // while paused on `CopyTargetChoice` must run combat placement after the copy
     // resolves (mirrors the `ReturnAsAuraTarget` batch drain in engine.rs).
-    if state.pending_batch_deliveries.is_some() {
+    if replay_entry_events && state.pending_batch_deliveries.is_some() {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return Ok(Some(state.waiting_for.clone()));
@@ -1798,7 +1862,7 @@ fn is_enters_counter_choice(branches: &[AbilityDefinition]) -> bool {
 fn capture_deferred_entry_events_if_mid_entry_choice(
     state: &mut GameState,
     waiting_for: Option<&WaitingFor>,
-    events: &[GameEvent],
+    events: &mut Vec<GameEvent>,
 ) {
     let source_id = match waiting_for {
         Some(WaitingFor::CopyTargetChoice { source_id, .. }) => *source_id,
@@ -1831,7 +1895,7 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
     // events. This already affects CopyTargetChoice today, is unreachable in real
     // cards, and is the CR 614.12b simultaneous-entry boundary.
     state.deferred_entry_events.clear();
-    for event in events {
+    for event in events.iter() {
         if matches!(
             event,
             GameEvent::ZoneChanged { object_id, to, .. }
@@ -1839,6 +1903,27 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
         ) {
             state.deferred_entry_events.push(event.clone());
         }
+    }
+    let is_meld_entry = state.liminal_entries.get(&source_id).is_some_and(|entry| {
+        matches!(
+            entry.kind,
+            crate::types::game_state::LiminalEntryKind::Meld { .. }
+        )
+    });
+    if is_meld_entry {
+        // The final copy characteristics and CR 508.4 combat status are not
+        // known yet. Unlike ordinary copy entry animation, emit this meld entry
+        // only after its final snapshot has been refreshed.
+        events.retain(|event| {
+            !matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == source_id
+            )
+        });
     }
 }
 

@@ -8,7 +8,7 @@ use crate::types::ability::{
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, MeldPairRecord};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -1382,6 +1382,9 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
 
 /// Populate Conjure registry and card-name validation lists on first rehydrate.
 fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
+    if state.meld_pair_registry.is_empty() {
+        state.meld_pair_registry = Arc::new(build_meld_pair_registry(db));
+    }
     // Populate the Conjure card-face registry (used by the Conjure effect
     // handler). Scoped to exactly the faces reachable as Conjure targets so we
     // never clone the entire database into per-game state. Decks with no
@@ -1463,6 +1466,107 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
         }
         state.momir_pool = pool;
         state.momir_pool_faces = std::sync::Arc::new(faces);
+    }
+}
+
+/// CR 701.42b + CR 712.4: derive the physical meld-pair authority from card
+/// database layout metadata and the parsed meld instruction. A forged effect
+/// whose three named faces are not all database-backed meld faces is excluded.
+fn build_meld_pair_registry(db: &CardDatabase) -> HashMap<String, MeldPairRecord> {
+    let mut registry = HashMap::new();
+    for (_, face) in db.face_iter() {
+        let mut effects = Vec::new();
+        collect_meld_effects_from_face(face, &mut effects);
+        for (source, partner, result) in effects {
+            if !meld_front_maps_to_result(db, source, result)
+                || !meld_front_maps_to_result(db, partner, result)
+            {
+                continue;
+            }
+            let key = meld_pair_key(source, partner);
+            registry.insert(
+                key,
+                MeldPairRecord {
+                    source: source.clone(),
+                    partner: partner.clone(),
+                    result: result.clone(),
+                },
+            );
+        }
+    }
+    registry
+}
+
+fn meld_pair_key(source: &str, partner: &str) -> String {
+    format!("{}\0{}", source.to_lowercase(), partner.to_lowercase())
+}
+
+fn meld_front_maps_to_result(db: &CardDatabase, front: &str, result: &str) -> bool {
+    let mtgjson_layout_matches = db.get_by_name(front).is_some_and(|rules| {
+        matches!(
+            &rules.layout,
+            CardLayout::Meld(printed_front, combined_back)
+                if printed_front.name.eq_ignore_ascii_case(front)
+                    && combined_back.name.eq_ignore_ascii_case(result)
+        )
+    });
+    if mtgjson_layout_matches {
+        return true;
+    }
+
+    // The production card-data export intentionally stores faces rather than
+    // reconstructed `CardRules`. Recover the same exact front -> combined-back
+    // relation from the shared oracle id and layout discriminant; checking only
+    // `LayoutKind::Meld` would admit a forged result from a different meld pair.
+    let Some(front_face) = db.get_face_by_name(front) else {
+        return false;
+    };
+    let Some(printed_ref) = printed_ref_from_face(front_face) else {
+        return false;
+    };
+    matches!(
+        db.get_layout_kind(&printed_ref.oracle_id),
+        Some(LayoutKind::Meld)
+    ) && db
+        .get_other_face_by_printed_ref(&printed_ref)
+        .is_some_and(|combined_back| combined_back.name.eq_ignore_ascii_case(result))
+}
+
+fn collect_meld_effects_from_face<'a>(
+    face: &'a CardFace,
+    out: &mut Vec<(&'a String, &'a String, &'a String)>,
+) {
+    for ability in &face.abilities {
+        collect_meld_effects_from_ability(ability, out);
+    }
+    for trigger in &face.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            collect_meld_effects_from_ability(execute, out);
+        }
+    }
+}
+
+fn collect_meld_effects_from_ability<'a>(
+    ability: &'a AbilityDefinition,
+    out: &mut Vec<(&'a String, &'a String, &'a String)>,
+) {
+    if let Effect::Meld {
+        source,
+        partner,
+        result,
+        ..
+    } = ability.effect.as_ref()
+    {
+        out.push((source, partner, result));
+    }
+    if let Some(sub) = ability.sub_ability.as_deref() {
+        collect_meld_effects_from_ability(sub, out);
+    }
+    if let Some(otherwise) = ability.else_ability.as_deref() {
+        collect_meld_effects_from_ability(otherwise, out);
+    }
+    for mode in &ability.mode_abilities {
+        collect_meld_effects_from_ability(mode, out);
     }
 }
 
@@ -2643,6 +2747,117 @@ mod tests {
         }
         let json = serde_json::Value::Object(map).to_string();
         CardDatabase::from_json_str(&json).expect("export db should parse")
+    }
+
+    /// CR 701.42b + CR 712.4: the production JSON loader's layout metadata,
+    /// not arbitrary effect text, is the authority for canonical meld pairs.
+    #[test]
+    fn real_card_database_builds_only_canonical_meld_pair_registry_entries() {
+        let source_name = "Registry Meld Source";
+        let partner_name = "Registry Meld Partner";
+        let result_name = "Registry Meld Result";
+        let forged_result_name = "Ordinary Forged Result";
+        let cross_pair_result_name = "Other Pair Meld Result";
+        let mut source = test_face(
+            source_name,
+            "registry-meld-source-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        for result in [result_name, forged_result_name, cross_pair_result_name] {
+            source.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Meld {
+                    source: source_name.to_string(),
+                    partner: partner_name.to_string(),
+                    result: result.to_string(),
+                    source_filter: TargetFilter::SelfRef,
+                    partner_filter: TargetFilter::Any,
+                    entry: crate::types::ability::PermanentEntryMode::Normal,
+                },
+            ));
+        }
+        let partner = test_face(
+            partner_name,
+            "registry-meld-partner-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let result_for_source = test_face(
+            result_name,
+            "registry-meld-source-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let result_for_partner = test_face(
+            result_name,
+            "registry-meld-partner-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let other_front = test_face(
+            "Other Pair Meld Front",
+            "other-pair-meld-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let cross_pair_result = test_face(
+            cross_pair_result_name,
+            "other-pair-meld-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let forged = test_face(
+            forged_result_name,
+            "ordinary-forged-result-oracle",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+
+        let mut export = serde_json::Map::new();
+        for (key, face, layout) in [
+            (source.name.to_lowercase(), &source, "meld"),
+            (
+                result_for_source.name.to_lowercase(),
+                &result_for_source,
+                "meld",
+            ),
+            (partner.name.to_lowercase(), &partner, "meld"),
+            (
+                "hidden partner meld result".to_string(),
+                &result_for_partner,
+                "meld",
+            ),
+            (other_front.name.to_lowercase(), &other_front, "meld"),
+            (
+                cross_pair_result.name.to_lowercase(),
+                &cross_pair_result,
+                "meld",
+            ),
+            (forged.name.to_lowercase(), &forged, "normal"),
+        ] {
+            let mut json = serde_json::to_value(face).unwrap();
+            json["layout"] = serde_json::json!(layout);
+            export.insert(key, json);
+        }
+        let db = CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
+            .expect("production CardDatabase export should parse");
+
+        let registry = build_meld_pair_registry(&db);
+        let key = meld_pair_key(source_name, partner_name);
+        assert_eq!(registry.len(), 1, "non-meld result faces are rejected");
+        assert_eq!(
+            registry.get(&key),
+            Some(&MeldPairRecord {
+                source: source_name.to_string(),
+                partner: partner_name.to_string(),
+                result: result_name.to_string(),
+            })
+        );
+
+        let mut state = GameState::new_two_player(42);
+        rehydrate_game_from_card_db(&mut state, &db);
+        assert_eq!(state.meld_pair_registry.as_ref(), &registry);
     }
 
     fn conjure_ability(target_name: &str, destination: Zone) -> AbilityDefinition {

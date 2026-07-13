@@ -485,6 +485,8 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::RippleChoice { .. }
         | GameAction::FreeCastWindowChoice { .. }
         | GameAction::ChooseTopOrBottom { .. }
+        | GameAction::ChooseMeldPair { .. }
+        | GameAction::ChooseEntryAttackTarget { .. }
         // CR 702.140c: mutate merge side carries a single typed enum — nothing
         // client-controlled to bound.
         | GameAction::ChooseMutateMergeSide { .. }
@@ -517,4 +519,26 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::Concede { .. } => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::game::combat::AttackTarget;
+    use engine::types::identifiers::ObjectId;
+
+    #[test]
+    fn bounded_meld_actions_are_accepted() {
+        for action in [
+            GameAction::ChooseMeldPair {
+                source_id: ObjectId(1),
+                partner_id: ObjectId(2),
+            },
+            GameAction::ChooseEntryAttackTarget {
+                target: AttackTarget::Planeswalker(ObjectId(3)),
+            },
+        ] {
+            assert_eq!(guard_game_action_payload(&action), Ok(()));
+        }
+    }
 }

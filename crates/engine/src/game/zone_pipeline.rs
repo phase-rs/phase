@@ -15,8 +15,9 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    BatchCompletion, ExileLinkKind, GameState, MergedCardComponentRoute, PendingBatchDeliveries,
-    PendingCounterPostAction, PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
+    BatchCompletion, ExileLinkKind, GameState, LiminalEntryKind, MergedCardComponentRoute,
+    PendingBatchDeliveries, PendingCounterPostAction, PendingLiminalEntryResume,
+    PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
 };
 use std::collections::HashSet;
 
@@ -179,6 +180,9 @@ pub struct ZoneMoveRequest {
     pub placement: Option<LibraryPosition>,
     /// Exile-link context (duration-bound returns + exiled-by-source tracking).
     pub exile_links: ExileLinkSpec,
+    /// CR 614.5: replacement definitions already applied to the event or
+    /// modified event from which this physical-card move was derived.
+    pub replacement_applied: HashSet<AppliedReplacementKey>,
 }
 
 impl ZoneMoveRequest {
@@ -191,6 +195,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -203,6 +208,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -219,6 +225,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -247,10 +254,13 @@ impl ZoneMoveRequest {
         Self {
             object_id,
             to: Zone::Hand,
-            cause: ZoneChangeCause::Draw { seed_applied },
+            cause: ZoneChangeCause::Draw {
+                seed_applied: seed_applied.clone(),
+            },
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: seed_applied,
         }
     }
 
@@ -264,6 +274,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -279,6 +290,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -292,6 +304,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -304,6 +317,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -350,6 +364,13 @@ impl ZoneMoveRequest {
     /// `NthFromTop`). Only meaningful when `to == Zone::Library`.
     pub fn at_library_position(mut self, position: LibraryPosition) -> Self {
         self.placement = Some(position);
+        self
+    }
+
+    /// CR 614.5: seed a child/modified move with the replacements already
+    /// applied to its originating event.
+    pub fn with_replacement_applied(mut self, applied: HashSet<AppliedReplacementKey>) -> Self {
+        self.replacement_applied = applied;
         self
     }
 
@@ -609,8 +630,11 @@ pub(crate) fn move_object(
                 return ZoneMoveResult::Done;
             }
             let source_id = req.source();
-            let proposed =
+            let mut proposed =
                 ProposedEvent::zone_change(req.object_id, from_zone, Zone::Library, source_id);
+            if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
+                *applied = req.replacement_applied.clone();
+            }
             return match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
                     match deliver_replaced_zone_change(
@@ -677,7 +701,8 @@ pub(crate) fn move_object(
     if let ZoneChangeCause::Draw { seed_applied } = req.cause {
         let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
         if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
-            *applied = seed_applied;
+            *applied = req.replacement_applied;
+            applied.extend(seed_applied);
         }
         return match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => match deliver_replaced_zone_change(
@@ -745,6 +770,7 @@ pub(crate) fn move_object(
             controller_override,
             enter_with_counters,
             face_down_profile,
+            applied,
             ..
         } = &mut proposed
         {
@@ -755,6 +781,7 @@ pub(crate) fn move_object(
             *controller_override = req.mods.controller_override;
             enter_with_counters.extend(req.mods.enter_with_counters.iter().cloned());
             *face_down_profile = req.mods.face_down_profile.clone().map(Box::new);
+            *applied = req.replacement_applied;
         }
         let approved = ApprovedZoneChange::seal(proposed);
         return match deliver(
@@ -776,7 +803,7 @@ pub(crate) fn move_object(
         };
     }
 
-    execute_zone_move(
+    execute_zone_move_with_applied(
         state,
         req.object_id,
         from_zone,
@@ -794,6 +821,7 @@ pub(crate) fn move_object(
         track_exiled_by_source,
         None,
         None,
+        req.replacement_applied,
         events,
     )
 }
@@ -919,6 +947,7 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
             exile_tracking: ZoneDeliveryExileTracking::None,
             library_placement: None,
             completion: None,
+            replacement_applied: HashSet::new(),
         })
 }
 
@@ -1005,6 +1034,7 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
     let enter_tapped = first.mods.enter_tapped;
     let exile_tracking = first.exile_links.tracking;
     let library_placement = first.placement.clone();
+    let replacement_applied = first.replacement_applied.clone();
     state.pending_batch_deliveries = Some(PendingBatchDeliveries {
         remaining: tail.into_iter().map(|r| r.object_id).collect(),
         destination,
@@ -1012,6 +1042,7 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
         enter_tapped,
         exile_tracking,
         library_placement,
+        replacement_applied,
         // The post-loop cleanup (if any) is attached by the batch caller after
         // it observes the `NeedsChoice`; `move_objects_simultaneously` itself
         // has no completion to stash.
@@ -1067,6 +1098,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 if let Some(position) = pending.library_placement.clone() {
                     req = req.at_library_position(position);
                 }
+                req.replacement_applied = pending.replacement_applied.clone();
                 req
             })
             .collect();
@@ -1305,6 +1337,25 @@ pub(crate) fn apply_zone_delivery_tail(
         );
         if let Some(wf) = waiting_for {
             if !matches!(wf, WaitingFor::Priority { .. }) {
+                if matches!(wf, WaitingFor::CopyTargetChoice { .. }) {
+                    if let Some(LiminalEntryKind::Meld {
+                        context,
+                        attack_target,
+                        ..
+                    }) = state
+                        .liminal_entries
+                        .get(&object_id)
+                        .map(|entry| entry.kind.clone())
+                    {
+                        state.pending_liminal_entry_resume =
+                            Some(PendingLiminalEntryResume::Meld {
+                                source_id: object_id,
+                                player: wf.acting_player().unwrap_or(state.active_player),
+                                context,
+                                attack_target,
+                            });
+                    }
+                }
                 state.waiting_for = wf;
                 return replacement_pause_delivery_result(state);
             }
@@ -1618,9 +1669,13 @@ pub(crate) fn deliver_replaced_zone_change(
         enter_with_counters,
         controller_override: ctrl_override,
         face_down_profile,
+        applied,
         ..
     } = event
     {
+        if let Some(entry) = state.liminal_entries.get_mut(&object_id) {
+            entry.replacement_applied = applied;
+        }
         let exile_tracking = if track_exiled_by_source {
             ZoneDeliveryExileTracking::TrackBySource
         } else {
@@ -2038,7 +2093,49 @@ pub(crate) fn execute_zone_move(
     enter_attached_to: Option<AttachTarget>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
+    execute_zone_move_with_applied(
+        state,
+        obj_id,
+        from_zone,
+        dest_zone,
+        source_id,
+        duration,
+        enter_transformed,
+        enter_tapped,
+        controller_override,
+        effect_enter_with_counters,
+        face_down_profile,
+        track_exiled_by_source,
+        library_placement,
+        enter_attached_to,
+        HashSet::new(),
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_zone_move_with_applied(
+    state: &mut GameState,
+    obj_id: ObjectId,
+    from_zone: Zone,
+    dest_zone: Zone,
+    source_id: ObjectId,
+    duration: Option<&Duration>,
+    enter_transformed: bool,
+    enter_tapped: EtbTapState,
+    controller_override: Option<PlayerId>,
+    effect_enter_with_counters: &[(CounterType, u32)],
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    track_exiled_by_source: bool,
+    library_placement: Option<LibraryPosition>,
+    enter_attached_to: Option<AttachTarget>,
+    replacement_applied: HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveResult {
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
+    if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
+        *applied = replacement_applied;
+    }
 
     // CR 712.14a: Set enter_transformed on the proposed event so replacement effects
     // preserve it through the pipeline.
@@ -2108,7 +2205,12 @@ pub(crate) fn execute_zone_move(
     // battlefield from any source (effect-driven entry — bounce-return,
     // reanimate, blink, etc.). Spell-cast entry is handled in stack.rs.
     if dest_zone == Zone::Battlefield {
-        if let Some(obj) = state.objects.get(&obj_id) {
+        if let Some(obj) = state
+            .liminal_entries
+            .get(&obj_id)
+            .map(|entry| &entry.object)
+            .or_else(|| state.objects.get(&obj_id))
+        {
             // CR 712.14a + CR 712.18: A permanent entering transformed (e.g. a
             // double-faced card exiled and returned with its back face up, like
             // a creature-front // planeswalker-back DFC) will have its back

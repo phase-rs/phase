@@ -123,6 +123,16 @@ pub enum OutsideGameSelection {
 #[serde(tag = "type", content = "data")]
 pub enum GameAction {
     PassPriority,
+    /// CR 608.2d + CR 701.42: select the exact pair to process for meld.
+    ChooseMeldPair {
+        source_id: ObjectId,
+        partner_id: ObjectId,
+    },
+    /// CR 508.4a: select the engine-enumerated destination for a permanent
+    /// entering the battlefield attacking.
+    ChooseEntryAttackTarget {
+        target: AttackTarget,
+    },
     PlayLand {
         object_id: ObjectId,
         card_id: CardId,
@@ -1430,6 +1440,8 @@ impl GameAction {
     /// without updating this method is a compile-time error.
     pub fn source_object(&self) -> Option<ObjectId> {
         match self {
+            GameAction::ChooseMeldPair { source_id, .. } => Some(*source_id),
+            GameAction::ChooseEntryAttackTarget { .. } => None,
             GameAction::PlayLand { object_id, .. } => Some(*object_id),
             GameAction::CastSpell { object_id, .. } => Some(*object_id),
             GameAction::Foretell { object_id, .. } => Some(*object_id),

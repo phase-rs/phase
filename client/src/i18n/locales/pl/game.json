@@ -1036,6 +1036,13 @@
     "activationCost": {
       "title": "Wybierz koszt aktywacji"
     },
+    "meld": {
+      "choosePair": "Wybierz karty do scalenia",
+      "into": "Scal w {{result}}",
+      "chooseAttackTarget": "Wybierz, co atakuje",
+      "player": "Gracz {{id}}",
+      "permanent": "Permanent {{id}}"
+    },
     "debug": {
       "modeBanner": "TRYB DEBUGOWANIA - Kliknij dowolną kartę",
       "modeButtonOff": "TRYB KLIKNIĘCIA WYŁĄCZONY"

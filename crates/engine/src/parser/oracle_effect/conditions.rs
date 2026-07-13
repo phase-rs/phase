@@ -238,6 +238,24 @@ pub(crate) fn strip_leading_general_conditional(
     text: &str,
     ctx: &mut ParseContext,
 ) -> (Option<AbilityCondition>, String) {
+    // CR 508.4 + CR 608.2c + CR 701.42: this condition contains an internal
+    // comma before its second conjunct ("are attacking, and you both own and
+    // control them"). Peel it through the shared condition production before
+    // the generic first-comma splitter, then leave the imperative body to the
+    // normal effect-chain parser.
+    if let Some((condition, _, _, partner, body)) = super::meld::strip_live_pair_conditional(text) {
+        ctx.pending_meld_partner = Some(partner);
+        return (Some(condition), body);
+    }
+    // CR 603.4: an inline `If` in an activated ability has its normal English
+    // meaning. Parse the shared own/control pair grammar as an AbilityCondition;
+    // this covers Hanweir Battlements and Urza, Lord Protector without a
+    // card-name dispatch.
+    if let Some((condition, _, _, partner, body)) = super::meld::strip_owned_pair_conditional(text)
+    {
+        ctx.pending_meld_partner = Some(partner);
+        return (Some(condition), body);
+    }
     if let Some((condition_fragment, body)) = split_leading_conditional(text) {
         let condition_lower = condition_fragment.to_lowercase();
         let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
@@ -5120,6 +5138,14 @@ pub(super) fn try_nom_condition_as_ability_condition(
     use crate::parser::oracle_nom::condition::parse_inner_condition;
 
     let lower = text.to_lowercase();
+
+    // CR 508.4 + CR 608.2c + CR 701.42: attacking meld-pair conditions are
+    // resolution-time leading conditions. Keep them in the shared condition
+    // dispatcher so trigger, activated-ability, and ordinary effect chains all
+    // obtain the same typed source/partner predicates.
+    if let Some((condition, ..)) = super::meld::parse_live_pair_ability_condition(text) {
+        return Some(condition);
+    }
 
     // CR 608.2c: "<condition A> or if <condition B>" disjunction (Reptilian
     // Recruiter: "If that creature's power is 2 or less or if you control another

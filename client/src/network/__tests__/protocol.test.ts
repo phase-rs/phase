@@ -47,6 +47,19 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       action: { type: "PassPriority" },
     },
     {
+      type: "action",
+      senderPlayerId: 0,
+      action: { type: "ChooseMeldPair", data: { source_id: 42, partner_id: 43 } },
+    },
+    {
+      type: "action",
+      senderPlayerId: 0,
+      action: {
+        type: "ChooseEntryAttackTarget",
+        data: { target: { type: "Battle", data: 44 } },
+      },
+    },
+    {
       type: "game_setup",
       wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       assignedPlayerId: 1,

@@ -6100,6 +6100,12 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
             return attach_unless_slots(clause, None, unless_pay_deferred);
         }
     }
+    let live_meld_fields = peel_ctx
+        .condition()
+        .and_then(meld::live_pair_fields_from_condition);
+    if let Some((_, _, partner)) = &live_meld_fields {
+        ctx.pending_meld_partner = Some(partner.clone());
+    }
     let mut clause = parse_effect_clause_inner(&peeled_text, ctx);
     // Trial-parse fallback: peeling may have removed disambiguation signal
     // a specialized parser depends on (e.g., `the next spell you cast this
@@ -6130,6 +6136,18 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         if let Some(cond) = peel_ctx.condition().cloned().or(unless_condition) {
             clause.condition = Some(cond);
         }
+    }
+    if let (
+        Effect::Meld {
+            source_filter,
+            partner_filter,
+            ..
+        },
+        Some((live_source, live_partner, _)),
+    ) = (&mut clause.effect, live_meld_fields)
+    {
+        *source_filter = live_source;
+        *partner_filter = live_partner;
     }
     attach_unless_slots(clause, None, unless_pay_deferred)
 }
@@ -27405,6 +27423,26 @@ pub(crate) fn parse_effect_chain_ir(
         // carries the caster default (Controller). Per D-04, this is parse-time
         // pronoun resolution that belongs in IR production.
         let mut clause = clause;
+        // CR 508.4 + CR 701.42: the shared leading-condition pass owns the live
+        // attacking/ownership predicates, while the bare Meld body parser owns
+        // the effect. Join those independently parsed building blocks here at
+        // the generic clause-IR seam.
+        if let (
+            Effect::Meld {
+                source_filter,
+                partner_filter,
+                ..
+            },
+            Some((live_source, live_partner, _)),
+        ) = (
+            &mut clause.effect,
+            condition
+                .as_ref()
+                .and_then(meld::live_pair_fields_from_condition),
+        ) {
+            *source_filter = live_source;
+            *partner_filter = live_partner;
+        }
         // CR 608.2c + CR 400.7: Carry the source zone of a "choose card(s) in
         // <zone>" producer forward to the NEXT chunk. The chosen cards stay in
         // that zone until a downstream "put those cards onto the battlefield"

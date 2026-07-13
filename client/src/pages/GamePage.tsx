@@ -1702,6 +1702,7 @@ function GamePageContent({
         {waitingFor?.type === "OrderTriggers" &&
           canActForWaitingState && <TriggerOrderModal />}
         <BattleProtectorModal />
+        <MeldChoiceModal />
         <AssistChoosePlayerModal />
         <ClashOpponentModal />
         <PileOpponentModal />
@@ -3324,6 +3325,57 @@ function ActivationCostOneOfChoiceModal() {
       }
     />
   );
+}
+
+function MeldChoiceModal() {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type === "MeldPairChoice") {
+    const choices = waitingFor.data.choices;
+    return (
+      <ChoiceModal
+        title={t("gamePage.meld.choosePair")}
+        options={choices.map((choice, index) => ({
+          id: String(index),
+          label: `${objects?.[choice.source_id]?.name ?? choice.expected_source} + ${objects?.[choice.partner_id]?.name ?? choice.expected_partner}`,
+          description: t("gamePage.meld.into", { result: choice.result }),
+        }))}
+        onChoose={(id) => {
+          const choice = choices[Number.parseInt(id, 10)];
+          if (!choice) return;
+          dispatch({
+            type: "ChooseMeldPair",
+            data: { source_id: choice.source_id, partner_id: choice.partner_id },
+          });
+        }}
+      />
+    );
+  }
+
+  if (waitingFor?.type === "MeldAttackTargetChoice") {
+    const targets = waitingFor.data.valid_targets;
+    return (
+      <ChoiceModal
+        title={t("gamePage.meld.chooseAttackTarget")}
+        options={targets.map((target, index) => {
+          const label = target.type === "Player"
+            ? t("gamePage.meld.player", { id: target.data })
+            : objects?.[target.data]?.name ?? t("gamePage.meld.permanent", { id: target.data });
+          return { id: String(index), label };
+        })}
+        onChoose={(id) => {
+          const target = targets[Number.parseInt(id, 10)];
+          if (!target) return;
+          dispatch({ type: "ChooseEntryAttackTarget", data: { target } });
+        }}
+      />
+    );
+  }
+
+  return null;
 }
 
 function DebugModeBanner() {

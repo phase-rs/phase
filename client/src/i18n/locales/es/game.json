@@ -1036,6 +1036,13 @@
     "activationCost": {
       "title": "Elegir coste de activación"
     },
+    "meld": {
+      "choosePair": "Elige las cartas que se fusionarán",
+      "into": "Fusionar en {{result}}",
+      "chooseAttackTarget": "Elige qué atacará",
+      "player": "Jugador {{id}}",
+      "permanent": "Permanente {{id}}"
+    },
     "debug": {
       "modeBanner": "MODO DEPURACIÓN - Haz clic en cualquier carta",
       "modeButtonOff": "MODO CLIC DESACTIVADO"

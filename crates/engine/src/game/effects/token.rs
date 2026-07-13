@@ -5904,6 +5904,8 @@ mod tests {
                 spec_resume: None,
                 enter_tapped: EtbTapState::Unspecified,
                 enter_with_counters: Vec::new(),
+                kind: crate::types::game_state::LiminalEntryKind::Token,
+                replacement_applied: std::collections::HashSet::new(),
             },
         );
 

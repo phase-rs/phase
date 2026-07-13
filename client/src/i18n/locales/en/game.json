@@ -1068,6 +1068,13 @@
     "activationCost": {
       "title": "Choose Activation Cost"
     },
+    "meld": {
+      "choosePair": "Choose Cards to Meld",
+      "into": "Meld into {{result}}",
+      "chooseAttackTarget": "Choose What It Attacks",
+      "player": "Player {{id}}",
+      "permanent": "Permanent {{id}}"
+    },
     "debug": {
       "modeBanner": "DEBUG MODE - Click any card",
       "modeButtonOff": "CLICK MODE OFF"

@@ -740,7 +740,10 @@ fn scan_effect(x: &Effect) -> Axes {
             source: _,
             partner: _,
             result: _,
-        } => Axes::NONE,
+            source_filter,
+            partner_filter,
+            entry: _,
+        } => scan_target_filter(source_filter).or(scan_target_filter(partner_filter)),
         Effect::ExileHaunting { target } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target));

@@ -61,7 +61,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *   3 — Planechase state and action payloads in game_setup/reconnect snapshots
  *   4 — Archenemy derived view and scheme deck payloads
  *   5 — CardPredicateGuessMade game event shape
- *   8 — Mana-payment preview request/response variants.
+ *   8 — Meld pair/attacking-entry choices and mana-payment preview variants.
  *   7 — PrecastCopyShortcut action and its two WaitingFor variants.
  *   6 — Mulligan bottoming folded into a MulliganDecisionPhase::BottomCards
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards

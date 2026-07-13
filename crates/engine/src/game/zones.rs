@@ -667,6 +667,33 @@ pub fn move_to_zone(
         return;
     }
 
+    // CR 614.12 + CR 701.42: a meld result is projected while its two physical
+    // cards remain in exile. Once its approved battlefield delivery commits,
+    // that projection is the authority for the entry snapshot; the source
+    // card's front-face object remains the storage authority so the meld can
+    // later split back into its physical fronts.
+    let liminal_entry_projection = (to == Zone::Battlefield)
+        .then(|| {
+            state
+                .liminal_entries
+                .get(&object_id)
+                .map(|entry| entry.object.clone())
+        })
+        .flatten();
+    let liminal_attack_target = (to == Zone::Battlefield)
+        .then(|| {
+            state
+                .liminal_entries
+                .get(&object_id)
+                .and_then(|entry| match &entry.kind {
+                    crate::types::game_state::LiminalEntryKind::Meld { attack_target, .. } => {
+                        *attack_target
+                    }
+                    crate::types::game_state::LiminalEntryKind::Token => None,
+                })
+        })
+        .flatten();
+
     // CR 903.9a: A fresh zone change resets the "declined zone return" flag
     // so the owner gets a new choice opportunity if the commander moves again.
     state.commander_declined_zone_return.remove(&object_id);
@@ -674,7 +701,10 @@ pub fn move_to_zone(
     // CR 614.1d: Check CantEnterBattlefieldFrom statics before allowing the move.
     // e.g., Grafdigger's Cage: "Creature cards in graveyards and libraries can't enter the battlefield."
     if to == Zone::Battlefield {
-        if let Some(obj) = state.objects.get(&object_id) {
+        if let Some(obj) = liminal_entry_projection
+            .as_ref()
+            .or_else(|| state.objects.get(&object_id))
+        {
             if is_blocked_from_entering_battlefield(state, obj) {
                 return;
             }
@@ -750,7 +780,9 @@ pub fn move_to_zone(
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
     });
-    let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), to);
+    let snapshot_object = liminal_entry_projection.as_ref().unwrap_or(obj);
+    let mut zone_change_record =
+        snapshot_object.snapshot_for_zone_change(object_id, Some(from), to);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
     // CR 603.10a + CR 607.2a: Leaves-the-battlefield triggers look back to the
@@ -767,7 +799,19 @@ pub fn move_to_zone(
             .linked_exile_lki
             .insert(object_id, zone_change_record.linked_exile_snapshot.clone());
     }
-    zone_change_record.combat_status = capture_combat_status(state, object_id);
+    zone_change_record.combat_status = if let Some(target) = liminal_attack_target {
+        ZoneChangeCombatStatus {
+            attacking: true,
+            defending_player: super::combat::entry_attack_target_defender(
+                state,
+                snapshot_object.controller,
+                target,
+            ),
+            ..ZoneChangeCombatStatus::default()
+        }
+    } else {
+        capture_combat_status(state, object_id)
+    };
 
     sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
 

@@ -1036,6 +1036,13 @@
     "activationCost": {
       "title": "Escolher Custo de Ativação"
     },
+    "meld": {
+      "choosePair": "Escolha os cards para fundir",
+      "into": "Fundir em {{result}}",
+      "chooseAttackTarget": "Escolha o que ele ataca",
+      "player": "Jogador {{id}}",
+      "permanent": "Permanente {{id}}"
+    },
     "debug": {
       "modeBanner": "MODO DE DEPURAÇÃO - Clique em qualquer carta",
       "modeButtonOff": "MODO DE CLIQUE DESLIGADO"

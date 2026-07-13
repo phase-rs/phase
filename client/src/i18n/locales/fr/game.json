@@ -1036,6 +1036,13 @@
     "activationCost": {
       "title": "Choisir le coût d'activation"
     },
+    "meld": {
+      "choosePair": "Choisissez les cartes à assimiler",
+      "into": "Assimiler en {{result}}",
+      "chooseAttackTarget": "Choisissez ce qu’il attaque",
+      "player": "Joueur {{id}}",
+      "permanent": "Permanent {{id}}"
+    },
     "debug": {
       "modeBanner": "MODE DÉBOGAGE - Cliquez sur n'importe quelle carte",
       "modeButtonOff": "MODE CLIC DÉSACTIVÉ"

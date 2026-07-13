@@ -1036,6 +1036,13 @@
     "activationCost": {
       "title": "Scegli il costo di attivazione"
     },
+    "meld": {
+      "choosePair": "Scegli le carte da combinare",
+      "into": "Combina in {{result}}",
+      "chooseAttackTarget": "Scegli cosa attacca",
+      "player": "Giocatore {{id}}",
+      "permanent": "Permanente {{id}}"
+    },
     "debug": {
       "modeBanner": "MODALITÀ DEBUG - Clicca qualsiasi carta",
       "modeButtonOff": "MODALITÀ CLIC DISATTIVATA"

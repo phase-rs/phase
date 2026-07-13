@@ -1036,6 +1036,13 @@
     "activationCost": {
       "title": "Aktivierungskosten wählen"
     },
+    "meld": {
+      "choosePair": "Wähle die zu verschmelzenden Karten",
+      "into": "Zu {{result}} verschmelzen",
+      "chooseAttackTarget": "Wähle, was angegriffen wird",
+      "player": "Spieler {{id}}",
+      "permanent": "Bleibende Karte {{id}}"
+    },
     "debug": {
       "modeBanner": "DEBUG-MODUS - Klicke eine beliebige Karte",
       "modeButtonOff": "KLICKMODUS AUS"

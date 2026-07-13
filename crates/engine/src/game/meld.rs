@@ -1,50 +1,32 @@
-//! Meld (CR 701.42 / CR 712.4) — runtime resolver for the meld keyword action.
+//! Meld resolution (CR 701.42 / CR 712.4).
 //!
-//! A meld instigator's ability (triggered or activated) resolves to
-//! [`Effect::Meld`], dispatched here via [`perform_meld`]. When the controller
-//! both OWNS and CONTROLS the instigator (`source_id`) AND a battlefield object
-//! named `partner` (CR 701.42b), both cards are exiled and a single melded
-//! permanent is put onto the battlefield presenting the `result` card's
-//! characteristics (the combined back faces, exposed in card-data as the named
-//! result card). If either half is missing/illegal the objects stay in place
-//! (CR 701.42c, a silent no-op).
-//!
-//! ## LAYER-ONLY characteristics (never mutate the survivor's base)
-//!
-//! Unlike a naive "apply the result face onto the survivor", this resolver is
-//! LAYER-ONLY: it NEVER calls `apply_card_face_to_object` on the survivor (that
-//! would overwrite the survivor's `base_*`, permanently replacing Gisela's
-//! printed identity with Brisela). Instead it builds a [`CopiableValues`] from
-//! the result `CardFace` via [`copiable_values_from_face`] and installs it as a
-//! layer-1 `CopyValues` continuous effect through
-//! [`merge::install_merge_layer_effect`] — exactly mirroring `merge_object_onto`'s
-//! never-touch-base discipline. On leave, `split_merged_permanent_on_leave`
-//! returns each card as its own FRONT face (Gisela / Bruna), satisfying
-//! CR 712.4b / CR 712.21.
-//!
-//! ## Meld DOES enter the battlefield (unlike Mutate)
-//!
-//! `merge_object_onto` (Mutate) SUPPRESSES ETB per CR 730.2b; meld does NOT
-//! (CR 701.42a / CR 712.4a — "put them onto the battlefield"). The survivor's
-//! exile→battlefield entry is therefore driven through the NORMAL
-//! `zones::move_to_zone` path so the `ZoneChanged { to: Battlefield }` event
-//! fires and ETB triggers match (CR 603.6a). This is why `merge_object_onto`
-//! is NOT reused wholesale — only its `merged_components` bookkeeping, its
-//! layer-install pattern, and `split_merged_permanent_on_leave` are shared.
+//! Live Oracle referents are selected from current layered characteristics.
+//! The selected objects are then exiled simultaneously; only afterward are
+//! their physical front-face identities checked. This distinction is required
+//! for copied/renamed/token objects: they may satisfy the instruction's live
+//! condition while still being unable to form the printed meld pair.
 
+use crate::game::combat::{self, AttackTarget, AttackerInfo};
 use crate::game::game_object::MergeKind;
 use crate::game::merge;
-use crate::game::printed_cards::{copiable_values_from_face, printed_ref_from_face};
-use crate::game::zone_pipeline::{self, ZoneMoveRequest};
-use crate::types::ability::{Effect, EffectError, ResolvedAbility};
+use crate::game::printed_cards::{
+    apply_card_face_to_object, copiable_values_from_face, printed_ref_from_face,
+};
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest, ZoneMoveResult};
+use crate::types::ability::{
+    ControllerRef, Effect, EffectError, FilterProp, PermanentEntryMode, ResolvedAbility,
+    TargetFilter, TypedFilter,
+};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{
+    BatchCompletion, GameState, LiminalEntry, LiminalEntryKind, MeldSelection, WaitingFor,
+};
+use crate::types::identifiers::ObjectId;
+use crate::types::proposed_event::EtbTapState;
 use crate::types::zones::Zone;
 
-/// CR 701.42 / CR 712.4: Resolve a meld instigator ability. Exiles both halves
-/// (CR 701.42a) and puts a single melded permanent onto the battlefield
-/// presenting the `result` card's characteristics, or no-ops if the meld is
-/// illegal (CR 701.42c).
+/// CR 701.42a-b: choose the live referents for a meld instruction. Physical
+/// pair validation deliberately occurs after the exile instruction.
 pub fn perform_meld(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -52,121 +34,358 @@ pub fn perform_meld(
 ) -> Result<(), EffectError> {
     let Effect::Meld {
         source: expected_source,
-        partner,
+        partner: expected_partner,
         result,
+        source_filter,
+        partner_filter,
+        entry,
     } = &ability.effect
     else {
         return Err(EffectError::MissingParam("Meld".to_string()));
     };
 
-    let source = ability.source_id;
+    let source_id = ability.source_id;
     let controller = ability.controller;
-
-    // CR 701.42b: the controller must both OWN and CONTROL the instigator, and
-    // the instigator must be the real meld card — only a card (CR 111.1: not a
-    // token; CR 707.10: not a copy) printed with the meld instruction can be
-    // melded. A token copy or a renamed non-meld impostor carrying the same name
-    // is NOT a valid meld half. The instigator must be on the battlefield (it was
-    // put there to activate/trigger this ability).
-    let source_ok = state.objects.get(&source).is_some_and(|o| {
-        o.zone == Zone::Battlefield
-            && o.controller == controller
-            && o.owner == controller
-            && o.is_represented_by_a_card()
-            && o.base_name.eq_ignore_ascii_case(expected_source.as_str())
+    let filter_ctx = crate::game::filter::FilterContext::from_ability(ability);
+    let source_matches = state.objects.get(&source_id).is_some_and(|object| {
+        object.zone == Zone::Battlefield
+            && object.owner == controller
+            && object.controller == controller
+            && crate::game::filter::matches_target_filter(
+                state,
+                source_id,
+                source_filter,
+                &filter_ctx,
+            )
     });
-    if !source_ok {
-        // CR 701.42c: objects that can't be melded stay in their current zone.
+    if !source_matches {
+        emit_resolved(state, ability.source_id, events);
         return Ok(());
     }
 
-    // CR 701.42b: find a battlefield object that is the real `partner` meld card,
-    // co-owned and co-controlled. We match `base_name` (the object's PRINTED
-    // identity), NOT the layer-modified current `name`: `FilterProp::Named`
-    // matches the post-layer `name` (filter.rs:2812), which (i) would let a
-    // renamed non-meld impostor whose current name equals the partner pass, and
-    // (ii) would wrongly REJECT a real partner whose name was changed by an
-    // effect. `base_name` is rename-proof — `ContinuousModification::SetName`
-    // overwrites `name` but never `base_name`, and layers reset `name =
-    // base_name` each pass — so a `base_name` match proves the object IS the real
-    // pair card (closing the token/copy/rename impostor classes and the
-    // real-partner-renamed inverse). It must also be card-backed (CR 111.1 /
-    // CR 707.10) for the same reason as the source.
-    let Some(partner_id) = state.battlefield.iter().copied().find(|&id| {
-        id != source
-            && state.objects.get(&id).is_some_and(|o| {
-                o.controller == controller
-                    && o.owner == controller
-                    && o.is_represented_by_a_card()
-                    && o.base_name.eq_ignore_ascii_case(partner.as_str())
+    let effective_partner_filter = if matches!(partner_filter, TargetFilter::Any) {
+        legacy_partner_filter(expected_partner)
+    } else {
+        partner_filter.clone()
+    };
+    let choices: Vec<MeldSelection> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate != source_id)
+        .filter(|candidate| {
+            state.objects.get(candidate).is_some_and(|object| {
+                object.owner == controller
+                    && object.controller == controller
+                    && crate::game::filter::matches_target_filter(
+                        state,
+                        *candidate,
+                        &effective_partner_filter,
+                        &filter_ctx,
+                    )
             })
-    }) else {
-        // CR 701.42c: no real co-owned/controlled partner → no-op.
-        return Ok(());
-    };
+        })
+        .map(|partner_id| MeldSelection {
+            source_id,
+            partner_id,
+            controller,
+            expected_source: expected_source.clone(),
+            expected_partner: expected_partner.clone(),
+            result: result.clone(),
+            entry: entry.clone(),
+        })
+        .collect();
 
-    // CR 712.4b: resolve the result `CardFace` from the registry (seeded at init
-    // via `walk_effect` → `build_conjure_registry`; conjure lookup pattern). If
-    // the result card is unknown, the meld cannot produce its permanent — no-op.
-    let Some(result_face) = state
-        .card_face_registry
-        .get(&result.to_lowercase())
-        .cloned()
-    else {
-        return Ok(());
-    };
-
-    // CR 701.42a / CR 614.6: exile BOTH halves. Route through the zone-change
-    // pipeline so any exile `Moved` redirect is consulted (none target Exile
-    // today — behavior-preserving, future-proof), mirroring `haunt::resolve`.
-    for &id in &[source, partner_id] {
-        let res = zone_pipeline::move_object(
-            state,
-            ZoneMoveRequest::effect(id, Zone::Exile, source),
-            events,
-        );
-        if let zone_pipeline::ZoneMoveResult::NeedsChoice(player) = res {
-            // CR 616.1: a future Exile-targeting redirect could surface an
-            // ordering choice. Park the prompt and return (no redirect targets
-            // Exile today, so this is behavior-preserving).
-            state.waiting_for =
-                crate::game::replacement::replacement_choice_waiting_for(player, state);
-            return Ok(());
+    match choices.as_slice() {
+        [] => emit_resolved(state, ability.source_id, events),
+        [only] => begin_selected_meld(state, only.clone(), events),
+        _ => {
+            state.waiting_for = WaitingFor::MeldPairChoice {
+                player: controller,
+                choices,
+            };
         }
     }
+    Ok(())
+}
 
-    // CR 730.2c-analogue: the survivor is the instigator (`source`), keeping its
-    // `ObjectId`. Record the merge identity (CR 712.21 leave-split reads it) and
-    // the TYPED meld discriminator (CR 712.4c transform guard keys on it).
-    // DO NOT call `apply_card_face_to_object` — meld is LAYER-ONLY; the
-    // survivor's `base_*` (its front face, Gisela) must stay intact so it returns
-    // as its own front face on leave (CR 712.4b / CR 712.21).
-    if let Some(survivor) = state.objects.get_mut(&source) {
-        survivor.merged_components = vec![source, partner_id];
-        survivor.merge_kind = Some(MergeKind::Meld);
+fn legacy_partner_filter(name: &str) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        type_filters: Vec::new(),
+        controller: Some(ControllerRef::You),
+        properties: vec![
+            FilterProp::Named {
+                name: name.to_string(),
+            },
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+        ],
+    })
+}
+
+/// Start the exact selected pair's simultaneous exile batch.
+pub(crate) fn begin_selected_meld(
+    state: &mut GameState,
+    context: MeldSelection,
+    events: &mut Vec<GameEvent>,
+) {
+    let requests = vec![
+        ZoneMoveRequest::effect(context.source_id, Zone::Exile, context.source_id),
+        ZoneMoveRequest::effect(context.partner_id, Zone::Exile, context.source_id),
+    ];
+    let completion = BatchCompletion::MeldExile {
+        context: context.clone(),
+    };
+    match zone_pipeline::move_objects_simultaneously_then(state, requests, Some(completion), events)
+    {
+        BatchMoveResult::Done | BatchMoveResult::NeedsChoice => {}
+    }
+}
+
+/// CR 701.42b-c + CR 400.7j: after both exile attempts settle, validate the
+/// tracked physical cards in whatever public zones the instruction put them.
+pub(crate) fn finish_meld_exile(
+    state: &mut GameState,
+    context: MeldSelection,
+    events: &mut Vec<GameEvent>,
+) {
+    if !is_canonical_physical_meld_pair(state, &context)
+        || !state
+            .card_face_registry
+            .contains_key(&context.result.to_lowercase())
+    {
+        finish_resolution(state, context.source_id, events);
+        return;
     }
 
-    // CR 712.4b: install the result characteristics (combined back faces) as a
-    // layer-1 copy effect WITHOUT mutating the survivor's base identity, so each
-    // card returns as its own front face on leave (CR 712.21). Build the values
-    // directly from the result face (LAYER-ONLY) — never from the survivor's base
-    // (which is intentionally never written here). `install_merge_layer_effect`
-    // calls `flush_layers`, so the survivor already presents the result
-    // characteristics BEFORE the ETB-emitting entry below — mirroring
-    // `merge_object_onto`'s install-then-observe ordering and the conjure entry
-    // path, so the ETB scan sees the melded permanent.
+    // CR 508.4 + CR 614.12a: replacement effects can determine the entrant's
+    // controller. The attack-destination choice is therefore made by the final
+    // controller after the replacement pipeline has produced its approved
+    // event, immediately before delivery.
+    finish_meld_entry(state, context, None, events);
+}
+
+/// CR 701.42b + CR 400.2 + CR 400.7j: whether a selected pair is the canonical
+/// physical meld pair and remains findable after the preceding exile
+/// instruction. Replacement effects may leave a card where it was or move it
+/// to a different public zone; neither changes the tracked card identity.
+pub fn is_canonical_physical_meld_pair(state: &GameState, context: &MeldSelection) -> bool {
+    let pair_key = format!(
+        "{}\0{}",
+        context.expected_source.to_lowercase(),
+        context.expected_partner.to_lowercase()
+    );
+    let canonical_pair = state
+        .meld_pair_registry
+        .get(&pair_key)
+        .is_some_and(|record| {
+            record.source.eq_ignore_ascii_case(&context.expected_source)
+                && record
+                    .partner
+                    .eq_ignore_ascii_case(&context.expected_partner)
+                && record.result.eq_ignore_ascii_case(&context.result)
+        });
+    let physical_pair = state.objects.get(&context.source_id).is_some_and(|object| {
+        is_public_zone(object.zone)
+            && object.is_represented_by_a_card()
+            && object
+                .base_name
+                .eq_ignore_ascii_case(&context.expected_source)
+    }) && state
+        .objects
+        .get(&context.partner_id)
+        .is_some_and(|object| {
+            is_public_zone(object.zone)
+                && object.is_represented_by_a_card()
+                && object
+                    .base_name
+                    .eq_ignore_ascii_case(&context.expected_partner)
+        });
+    canonical_pair && physical_pair
+}
+
+/// CR 400.2: graveyard, battlefield, stack, exile, and command are public
+/// zones. Hand and library remain hidden even when their cards are revealed.
+fn is_public_zone(zone: Zone) -> bool {
+    match zone {
+        Zone::Battlefield | Zone::Graveyard | Zone::Stack | Zone::Exile | Zone::Command => true,
+        Zone::Library | Zone::Hand => false,
+    }
+}
+
+/// Commit the projected result entry, then atomically make the second card a
+/// component if (and only if) the result actually reached the battlefield.
+pub(crate) fn finish_meld_entry(
+    state: &mut GameState,
+    context: MeldSelection,
+    attack_target: Option<AttackTarget>,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(result_face) = state
+        .card_face_registry
+        .get(&context.result.to_lowercase())
+        .cloned()
+    else {
+        finish_resolution(state, context.source_id, events);
+        return;
+    };
+
+    // CR 614.12: replacement effects inspect the characteristics the meld result
+    // will have on the battlefield. Keep that projection detached while choices
+    // are pending: the two physical component cards remain ordinary objects in
+    // their post-instruction public zones until the entry actually commits.
+    let Some(mut projected) = state.objects.get(&context.source_id).cloned() else {
+        finish_resolution(state, context.source_id, events);
+        return;
+    };
+    apply_card_face_to_object(&mut projected, &result_face);
+    projected.controller = context.controller;
+    let enters_tapped = matches!(context.entry, PermanentEntryMode::TappedAndAttacking { .. });
+    if enters_tapped {
+        projected.tapped = true;
+    }
+    state.liminal_entries.insert(
+        context.source_id,
+        LiminalEntry {
+            object: projected,
+            name: context.result.clone(),
+            source_id: context.source_id,
+            controller: context.controller,
+            enters_attacking: attack_target.is_some(),
+            attach_to: None,
+            sacrifice_at: None,
+            remaining_count: 0,
+            created_ids: Vec::new(),
+            copy_resume: None,
+            spec_resume: None,
+            enter_tapped: if enters_tapped {
+                EtbTapState::Tapped
+            } else {
+                EtbTapState::Unspecified
+            },
+            enter_with_counters: Vec::new(),
+            kind: LiminalEntryKind::Meld {
+                context: context.clone(),
+                attack_target,
+            },
+            replacement_applied: std::collections::HashSet::new(),
+        },
+    );
+
+    let mut request =
+        ZoneMoveRequest::effect(context.source_id, Zone::Battlefield, context.source_id);
+    if enters_tapped {
+        request = request.tapped();
+    }
+    match zone_pipeline::move_object(state, request, events) {
+        ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            zone_pipeline::defer_completion_on_pause(
+                state,
+                BatchCompletion::MeldEntry {
+                    context,
+                    attack_target,
+                },
+            );
+        }
+        ZoneMoveResult::Done => finish_meld_delivery(state, context, attack_target, events),
+    }
+}
+
+/// Finish a synchronously delivered or replacement-resumed meld entry.
+pub(crate) fn finish_meld_delivery(
+    state: &mut GameState,
+    context: MeldSelection,
+    attack_target: Option<AttackTarget>,
+    events: &mut Vec<GameEvent>,
+) {
+    // The approved entry event may have changed the entrant's controller and
+    // may have auto-selected the only CR 508.4 destination after replacement
+    // processing. That post-replacement liminal state is authoritative for both
+    // synchronous delivery and a deferred BatchCompletion resume.
+    let (context, _attack_target, replacement_applied) = state
+        .liminal_entries
+        .get(&context.source_id)
+        .and_then(|entry| match &entry.kind {
+            LiminalEntryKind::Meld {
+                context,
+                attack_target,
+                ..
+            } => Some((
+                context.clone(),
+                *attack_target,
+                entry.replacement_applied.clone(),
+            )),
+            LiminalEntryKind::Token => None,
+        })
+        .unwrap_or((context, attack_target, Default::default()));
+    state.liminal_entries.remove(&context.source_id);
+    let destination = state
+        .objects
+        .get(&context.source_id)
+        .map(|object| object.zone);
+    if destination != Some(Zone::Battlefield) {
+        // CR 701.42c: a prevented entry leaves both cards in exile. If a
+        // replacement sent the result elsewhere, route the second physical card
+        // through its own CR 400.6 replacement consult to the same destination.
+        // CR 614.5: seed that modified event with the result event's applied set
+        // so the redirect that fixed the shared destination cannot apply again.
+        if let Some(zone) = destination.filter(|zone| *zone != Zone::Exile) {
+            let request = ZoneMoveRequest::effect(context.partner_id, zone, context.source_id)
+                .with_replacement_applied(replacement_applied);
+            let completion = BatchCompletion::MeldRedirect {
+                source_id: context.source_id,
+            };
+            match zone_pipeline::move_objects_simultaneously_then(
+                state,
+                vec![request],
+                Some(completion),
+                events,
+            ) {
+                BatchMoveResult::Done | BatchMoveResult::NeedsChoice => {}
+            }
+            return;
+        }
+        finish_resolution(state, context.source_id, events);
+        return;
+    }
+
+    if commit_meld_battlefield(state, &context) {
+        finish_deferred_meld_entry(state, context, events);
+    } else {
+        finish_resolution(state, context.source_id, events);
+    }
+}
+
+/// Materialize the meld result's layer-1 identity and physical component set.
+/// This is separate from resolution completion so a CR 707.9 copy-as-enters
+/// choice can install its later-timestamp copy effect after the meld identity.
+pub(crate) fn commit_meld_battlefield(state: &mut GameState, context: &MeldSelection) -> bool {
+    state.liminal_entries.remove(&context.source_id);
+
+    let Some(result_face) = state
+        .card_face_registry
+        .get(&context.result.to_lowercase())
+        .cloned()
+    else {
+        return false;
+    };
+    let entry_controller = state
+        .objects
+        .get(&context.source_id)
+        .map(|object| object.controller)
+        .unwrap_or(context.controller);
     let values = copiable_values_from_face(&result_face);
     let printed_ref = printed_ref_from_face(&result_face);
     merge::install_merge_layer_effect(
         state,
-        source,
-        controller,
+        context.source_id,
+        entry_controller,
         values,
         crate::game::game_object::DisplaySource::Card,
         printed_ref,
         None,
     );
-
     // CR 701.42a / CR 730.2: absorb the partner into the single melded permanent
     // — it is no longer an independent object; remove it from the exile list and
     // mark it absorbed (zone == Battlefield, in no zone list), mirroring
@@ -175,45 +394,257 @@ pub fn perform_meld(
     // entry-replacement consult (CR 614.1c) can park a `NeedsChoice` pause, and
     // absorbing first guarantees the partner is never stranded in exile across
     // that pause.
-    crate::game::zones::absorb_component(state, partner_id, Some(Zone::Exile));
-
-    // CR 603.6a / CR 701.42a: drive the survivor's exile→battlefield entry through
-    // the zone-change pipeline so the `ZoneChanged { to: Battlefield }` event
-    // fires and ETB triggers match (unlike Mutate's CR 730.2b suppression). The
-    // `Effect` cause is non-exempt, so `execute_zone_move` runs the entry
-    // replacement consult (CR 614.1c entries-with-counters / CR 614.12a
-    // enters-tapped) that a raw `move_to_zone` would skip. The leave-split
-    // (CR 712.21) is wired automatically into the exit seam via
-    // `split_merged_permanent_on_leave` — no leave code needed here.
-    // `reset_for_battlefield_entry` does NOT clear merged_components / merge_kind
-    // / merge_layer_effect_id, so the merge identity survives the entry.
-    match zone_pipeline::move_object(
-        state,
-        ZoneMoveRequest::effect(source, Zone::Battlefield, source),
-        events,
-    ) {
-        zone_pipeline::ZoneMoveResult::Done => {
-            // CR 613.1 + CR 400.7: the battlefield entry re-derived the survivor's
-            // characteristics from its (intact) base, so re-flush the layers to
-            // re-apply the installed meld `CopyValues` on top — the melded
-            // permanent presents the result identity (Brisela) once it is on the
-            // battlefield (the same re-flush the prior raw path performed). The
-            // transient continuous effect persists across the move (its id is
-            // keyed to the survivor and not cleared on entry).
-            crate::game::layers::flush_layers(state);
-            Ok(())
-        }
-        zone_pipeline::ZoneMoveResult::NeedsChoice(player) => {
-            // CR 616.1: an entry replacement surfaced an ordering choice. Park the
-            // prompt and return; the partner is already absorbed (above), so it is
-            // not stranded across the pause.
-            state.waiting_for =
-                crate::game::replacement::replacement_choice_waiting_for(player, state);
-            Ok(())
-        }
-        // CR 303.4f: only an Aura entering via a non-spell effect needs an
-        // enchant-host choice. A melded permanent is never an Aura, so this arm is
-        // documented-unreachable — handled exhaustively rather than wildcarded.
-        zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => Ok(()),
+    crate::game::zones::absorb_component(state, context.partner_id, Some(Zone::Exile));
+    if let Some(survivor) = state.objects.get_mut(&context.source_id) {
+        survivor.merged_components = vec![context.source_id, context.partner_id];
+        survivor.merge_kind = Some(MergeKind::Meld);
     }
+    crate::game::layers::flush_layers(state);
+
+    if matches!(context.entry, PermanentEntryMode::TappedAndAttacking { .. }) {
+        if let Some(object) = state.objects.get_mut(&context.source_id) {
+            object.tapped = true;
+        }
+    }
+    true
+}
+
+/// CR 508.4 + CR 611.3: after every as-enters choice and continuous-effect
+/// layer has finalized the melded permanent, use its current creature status
+/// and controller to determine whether and where it enters attacking.
+pub(crate) fn finish_deferred_meld_entry(
+    state: &mut GameState,
+    mut context: MeldSelection,
+    events: &mut Vec<GameEvent>,
+) {
+    crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
+
+    let Some(object) = state.objects.get(&context.source_id) else {
+        finish_resolution(state, context.source_id, events);
+        return;
+    };
+    if object.zone != Zone::Battlefield {
+        finish_resolution(state, context.source_id, events);
+        return;
+    }
+    let controller = object.controller;
+    let is_creature = object
+        .card_types
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Creature);
+    context.controller = controller;
+
+    let targets = match &context.entry {
+        PermanentEntryMode::TappedAndAttacking { destination } if is_creature => {
+            combat::valid_entry_attack_targets(state, controller, destination)
+        }
+        PermanentEntryMode::Normal | PermanentEntryMode::TappedAndAttacking { .. } => Vec::new(),
+    };
+
+    if targets.len() > 1 {
+        park_meld_entry_event(state, context.source_id, events);
+        state.waiting_for = WaitingFor::MeldAttackTargetChoice {
+            player: controller,
+            context,
+            valid_targets: targets,
+        };
+        return;
+    }
+
+    let attack_target = targets.first().copied();
+    commit_final_attack_status(state, &context, attack_target);
+    finalize_meld_entry_snapshot(state, context.source_id, attack_target, events);
+    finish_resolution(state, context.source_id, events);
+}
+
+/// Finish the CR 508.4 destination choice against the permanent's final live
+/// controller and creature characteristics. A destination that became stale
+/// leaves the permanent tapped but nonattacking (CR 508.4a).
+pub(crate) fn finish_meld_attack_choice(
+    state: &mut GameState,
+    mut context: MeldSelection,
+    selected: AttackTarget,
+    events: &mut Vec<GameEvent>,
+) {
+    crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
+    let (controller, is_creature) = state
+        .objects
+        .get(&context.source_id)
+        .map(|object| {
+            (
+                object.controller,
+                object
+                    .card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Creature),
+            )
+        })
+        .unwrap_or((context.controller, false));
+    context.controller = controller;
+    let still_valid = match &context.entry {
+        PermanentEntryMode::TappedAndAttacking { destination } if is_creature => {
+            combat::valid_entry_attack_targets(state, controller, destination).contains(&selected)
+        }
+        PermanentEntryMode::Normal | PermanentEntryMode::TappedAndAttacking { .. } => false,
+    };
+    let attack_target = still_valid.then_some(selected);
+    commit_final_attack_status(state, &context, attack_target);
+    finalize_meld_entry_snapshot(state, context.source_id, attack_target, events);
+    finish_resolution(state, context.source_id, events);
+}
+
+fn commit_final_attack_status(
+    state: &mut GameState,
+    context: &MeldSelection,
+    attack_target: Option<AttackTarget>,
+) {
+    if let Some(combat_state) = state.combat.as_mut() {
+        combat_state
+            .attackers
+            .retain(|attacker| attacker.object_id != context.source_id);
+    }
+    let Some(target) = attack_target else {
+        return;
+    };
+    let Some(defending_player) =
+        combat::entry_attack_target_defender(state, context.controller, target)
+    else {
+        return;
+    };
+    if let Some(combat_state) = state.combat.as_mut() {
+        combat_state.attackers.push(AttackerInfo::new(
+            context.source_id,
+            target,
+            defending_player,
+        ));
+        state.layers_dirty.mark_full();
+    }
+}
+
+fn park_meld_entry_event(state: &mut GameState, source_id: ObjectId, events: &mut Vec<GameEvent>) {
+    if let Some(index) = events.iter().rposition(|event| {
+        matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                ..
+            } if *object_id == source_id
+        )
+    }) {
+        state.deferred_entry_events.push(events.remove(index));
+    }
+}
+
+fn finalize_meld_entry_snapshot(
+    state: &mut GameState,
+    source_id: ObjectId,
+    attack_target: Option<AttackTarget>,
+    events: &mut Vec<GameEvent>,
+) {
+    let defending_player = attack_target.and_then(|target| {
+        state.objects.get(&source_id).and_then(|object| {
+            combat::entry_attack_target_defender(state, object.controller, target)
+        })
+    });
+    let combat_status = crate::types::game_state::ZoneChangeCombatStatus {
+        attacking: defending_player.is_some(),
+        defending_player,
+        ..Default::default()
+    };
+    refresh_meld_entry_records(state, source_id, combat_status, events);
+
+    if !state.deferred_entry_events.is_empty() {
+        events.extend(state.deferred_entry_events.iter().cloned());
+        let _ =
+            crate::game::engine_replacement::replay_deferred_entry_events(state, source_id, events);
+    }
+}
+
+fn refresh_meld_entry_records(
+    state: &mut GameState,
+    source_id: ObjectId,
+    combat_status: crate::types::game_state::ZoneChangeCombatStatus,
+    events: &mut [GameEvent],
+) {
+    let Some(object) = state.objects.get(&source_id).cloned() else {
+        return;
+    };
+    let refresh = |record: &mut crate::types::game_state::ZoneChangeRecord| {
+        let old = record.clone();
+        let mut realized = object.snapshot_for_zone_change(source_id, old.from_zone, old.to_zone);
+        realized.cast_from_zone = old.cast_from_zone;
+        realized.played_from_zone = old.played_from_zone;
+        realized.attachments = old.attachments;
+        realized.linked_exile_snapshot = old.linked_exile_snapshot;
+        realized.co_departed = old.co_departed;
+        realized.entered_incarnation = old.entered_incarnation;
+        realized.attached_to = old.attached_to;
+        realized.turn_zone_change_index = old.turn_zone_change_index;
+        realized.combat_status = combat_status;
+        *record = realized;
+    };
+
+    for event in events
+        .iter_mut()
+        .chain(state.deferred_entry_events.iter_mut())
+    {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Battlefield,
+            record,
+            ..
+        } = event
+        {
+            if *object_id == source_id {
+                refresh(record);
+            }
+        }
+    }
+    if let Some(record) = state
+        .zone_changes_this_turn
+        .iter_mut()
+        .rev()
+        .find(|record| record.object_id == source_id && record.to_zone == Zone::Battlefield)
+    {
+        refresh(record);
+    }
+    if let Some(record) = state
+        .battlefield_entries_this_turn
+        .iter_mut()
+        .rev()
+        .find(|record| record.object_id == source_id)
+    {
+        record.name = object.name.clone();
+        record.core_types = object.card_types.core_types.clone();
+        record.subtypes = object.card_types.subtypes.clone();
+        record.supertypes = object.card_types.supertypes.clone();
+        record.colors = object.color.clone();
+        record.keywords = object.keywords.clone();
+        record.controller = object.controller;
+    }
+}
+
+pub(crate) fn finish_deferred_meld_resolution(
+    state: &mut GameState,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    finish_resolution(state, source_id, events);
+}
+
+fn emit_resolved(state: &mut GameState, source_id: ObjectId, events: &mut Vec<GameEvent>) {
+    events.push(GameEvent::EffectResolved {
+        kind: crate::types::ability::EffectKind::Meld,
+        source_id,
+        subject: None,
+    });
+    state.last_effect_count = Some(1);
+}
+
+fn finish_resolution(state: &mut GameState, source_id: ObjectId, events: &mut Vec<GameEvent>) {
+    emit_resolved(state, source_id, events);
+    crate::game::effects::drain_pending_continuation(state, events);
 }

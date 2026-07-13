@@ -770,7 +770,7 @@ pub(super) enum BindGuard {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EffectClass {
-    /// `CopyTokenOf` | `Token` | `ChangeZone` — the only effects
+    /// `CopyTokenOf` | `Token` | `ChangeZone` | `Meld` — the effects
     /// `ModifyPrior::EntersTappedAttacking` can patch.
     PermanentCreator,
     /// `ChooseDrawnThisTurnPayOrTopdeck` — the only effect
@@ -1000,7 +1000,10 @@ impl AssemblyEnv {
             Some(BindGuard::NoSubAbility) => defs[index].sub_ability.is_none(),
             Some(BindGuard::EffectShape(EffectClass::PermanentCreator)) => matches!(
                 &*defs[index].effect,
-                Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::ChangeZone { .. }
+                Effect::CopyTokenOf { .. }
+                    | Effect::Token { .. }
+                    | Effect::ChangeZone { .. }
+                    | Effect::Meld { .. }
             ),
             Some(BindGuard::EffectShape(EffectClass::DrawnThisTurnChoice)) => matches!(
                 &*defs[index].effect,
@@ -1340,6 +1343,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                         *enters_attacking = true;
                                         *enter_tapped = crate::types::zones::EtbTapState::Tapped;
                                     }
+                                    Effect::Meld { entry, .. } => {
+                                        *entry = crate::types::ability::PermanentEntryMode::TappedAndAttacking {
+                                            destination: crate::types::ability::EntryAttackDestination::AnyDefender,
+                                        };
+                                    }
                                     _ => {}
                                 }
                                 let original = {
@@ -1369,6 +1377,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                             *enters_attacking = false;
                                             *enter_tapped =
                                                 crate::types::zones::EtbTapState::Unspecified;
+                                        }
+                                        Effect::Meld { entry, .. } => {
+                                            *entry =
+                                                crate::types::ability::PermanentEntryMode::Normal;
                                         }
                                         _ => {}
                                     }

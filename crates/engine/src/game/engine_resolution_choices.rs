@@ -109,7 +109,9 @@ fn park_search_observer_triggers(
 pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
-        WaitingFor::ScryChoice { .. }
+        WaitingFor::MeldPairChoice { .. }
+            | WaitingFor::MeldAttackTargetChoice { .. }
+            | WaitingFor::ScryChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
@@ -560,6 +562,42 @@ pub(super) fn handle_resolution_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<ResolutionChoiceOutcome, EngineError> {
     let outcome = match (waiting_for, action) {
+        (
+            WaitingFor::MeldPairChoice { player, choices },
+            GameAction::ChooseMeldPair {
+                source_id,
+                partner_id,
+            },
+        ) => {
+            let context = choices
+                .into_iter()
+                .find(|choice| choice.source_id == source_id && choice.partner_id == partner_id)
+                .ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "meld selection is not one of the offered pairs".to_string(),
+                    )
+                })?;
+            state.waiting_for = WaitingFor::Priority { player };
+            crate::game::meld::begin_selected_meld(state, context, events);
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
+            WaitingFor::MeldAttackTargetChoice {
+                player,
+                context,
+                valid_targets,
+            },
+            GameAction::ChooseEntryAttackTarget { target },
+        ) => {
+            if !valid_targets.contains(&target) {
+                return Err(EngineError::InvalidAction(
+                    "entry attack target is not one of the offered destinations".to_string(),
+                ));
+            }
+            state.waiting_for = WaitingFor::Priority { player };
+            crate::game::meld::finish_meld_attack_choice(state, context, target, events);
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
         (
             WaitingFor::ScryChoice { player, cards },
             GameAction::SelectCards { cards: top_cards },
@@ -5188,6 +5226,18 @@ pub(crate) fn run_batch_completion(
                 events,
             )
             .expect("scoped library search batch completion must resolve");
+        }
+        BatchCompletion::MeldExile { context } => {
+            crate::game::meld::finish_meld_exile(state, context, events);
+        }
+        BatchCompletion::MeldEntry {
+            context,
+            attack_target,
+        } => {
+            crate::game::meld::finish_meld_delivery(state, context, attack_target, events);
+        }
+        BatchCompletion::MeldRedirect { source_id } => {
+            crate::game::meld::finish_deferred_meld_resolution(state, source_id, events);
         }
     }
 }

@@ -1578,10 +1578,12 @@ mod tests {
                 spec_resume: None,
                 enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
                 enter_with_counters: Vec::new(),
+                kind: crate::types::game_state::LiminalEntryKind::Token,
+                replacement_applied: std::collections::HashSet::new(),
             },
         );
         state.pending_liminal_entry_resume =
-            Some(crate::types::game_state::PendingLiminalEntryResume {
+            Some(crate::types::game_state::PendingLiminalEntryResume::Token {
                 source_id: entry_ref,
                 player: PlayerId(0),
                 event: crate::types::proposed_event::ProposedEvent::TokenEntry {

@@ -4290,6 +4290,116 @@ pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
     targets
 }
 
+/// CR 508.4 + CR 508.4c: destinations for a creature put onto the battlefield
+/// attacking. This intentionally does not call attack-declaration legality:
+/// requirements, restrictions, costs, protection, goad, summoning sickness,
+/// and taxes do not apply to an object that was never declared as an attacker.
+pub fn valid_entry_attack_targets(
+    state: &GameState,
+    controller: PlayerId,
+    domain: &crate::types::ability::EntryAttackDestination,
+) -> Vec<AttackTarget> {
+    let attacking_players: Vec<PlayerId> = std::iter::once(state.active_player)
+        .chain(players::teammates(state, state.active_player))
+        .collect();
+    if state.combat.is_none() || !attacking_players.contains(&controller) {
+        return Vec::new();
+    }
+    let allies = players::teammates(state, controller);
+    let defending_players: Vec<PlayerId> = state
+        .players
+        .iter()
+        .filter(|player| {
+            player.id != controller
+                && !allies.contains(&player.id)
+                && !state.eliminated_players.contains(&player.id)
+                && player.is_phased_in()
+        })
+        .map(|player| player.id)
+        .collect();
+    let mut targets: Vec<AttackTarget> = defending_players
+        .iter()
+        .copied()
+        .map(AttackTarget::Player)
+        .collect();
+    for &id in &state.battlefield {
+        let Some(object) = state.objects.get(&id) else {
+            continue;
+        };
+        if defending_players.contains(&object.controller)
+            && object
+                .card_types
+                .core_types
+                .contains(&CoreType::Planeswalker)
+        {
+            targets.push(AttackTarget::Planeswalker(id));
+        }
+        if object.card_types.core_types.contains(&CoreType::Battle)
+            && object
+                .protector()
+                .is_some_and(|protector| defending_players.contains(&protector))
+        {
+            targets.push(AttackTarget::Battle(id));
+        }
+    }
+
+    match domain {
+        crate::types::ability::EntryAttackDestination::AnyDefender => targets,
+        crate::types::ability::EntryAttackDestination::PlayerOrPlaneswalker => targets
+            .into_iter()
+            .filter(|candidate| !matches!(candidate, AttackTarget::Battle(_)))
+            .collect(),
+        crate::types::ability::EntryAttackDestination::Exact { target } => targets
+            .into_iter()
+            .filter(|candidate| candidate == target)
+            .collect(),
+    }
+}
+
+/// CR 508.4a: resolve a still-valid entry-attack target to its defending
+/// player. Returns `None` when the selected player/permanent is no longer a
+/// legal combat destination, in which case the permanent enters nonattacking.
+pub fn entry_attack_target_defender(
+    state: &GameState,
+    controller: PlayerId,
+    target: AttackTarget,
+) -> Option<PlayerId> {
+    if !valid_entry_attack_targets(
+        state,
+        controller,
+        &crate::types::ability::EntryAttackDestination::AnyDefender,
+    )
+    .contains(&target)
+    {
+        return None;
+    }
+    match target {
+        AttackTarget::Player(player) => state
+            .players
+            .iter()
+            .any(|candidate| {
+                candidate.id == player
+                    && candidate.is_phased_in()
+                    && !state.eliminated_players.contains(&player)
+            })
+            .then_some(player),
+        AttackTarget::Planeswalker(id) => state.objects.get(&id).and_then(|object| {
+            (object.zone == Zone::Battlefield
+                && object
+                    .card_types
+                    .core_types
+                    .contains(&CoreType::Planeswalker))
+            .then_some(object.controller)
+        }),
+        AttackTarget::Battle(id) => state.objects.get(&id).and_then(|object| {
+            (object.zone == Zone::Battlefield
+                && object.card_types.core_types.contains(&CoreType::Battle))
+            .then(|| object.protector())
+            .flatten()
+        }),
+    }
+}
+
 /// CR 506.4: A creature stops being an attacker when it leaves the battlefield
 /// or phases out. Attackers that left during the declare-attackers step may
 /// remain listed until pruned.
@@ -5928,6 +6038,83 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("cannot attack player"), "err={err}");
+    }
+
+    #[test]
+    fn entry_attacker_controlled_by_active_teammate_uses_defending_team() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.combat = Some(CombatState::default());
+
+        let targets = valid_entry_attack_targets(
+            &state,
+            PlayerId(1),
+            &crate::types::ability::EntryAttackDestination::AnyDefender,
+        );
+        assert!(targets.contains(&AttackTarget::Player(PlayerId(2))));
+        assert!(targets.contains(&AttackTarget::Player(PlayerId(3))));
+        assert!(!targets.contains(&AttackTarget::Player(PlayerId(0))));
+        assert!(!targets.contains(&AttackTarget::Player(PlayerId(1))));
+        assert_eq!(
+            entry_attack_target_defender(&state, PlayerId(1), AttackTarget::Player(PlayerId(2)),),
+            Some(PlayerId(2))
+        );
+    }
+
+    /// CR 508.4a-c: an effect may specify the player, planeswalker, or battle
+    /// that an entering creature attacks. Exact destinations use the same live
+    /// defender validation as the open choice domain, including protected
+    /// battles, and disappear when the specified destination becomes stale.
+    #[test]
+    fn exact_entry_attack_destination_validates_all_target_kinds_and_staleness() {
+        use crate::types::ability::EntryAttackDestination;
+
+        let mut state = setup();
+        state.combat = Some(CombatState::default());
+        let planeswalker = create_planeswalker(&mut state, PlayerId(1), "Defending Jace");
+        let battle = create_battle(&mut state, PlayerId(0), "Protected Invasion", PlayerId(1));
+
+        for target in [
+            AttackTarget::Player(PlayerId(1)),
+            AttackTarget::Planeswalker(planeswalker),
+            AttackTarget::Battle(battle),
+        ] {
+            assert_eq!(
+                valid_entry_attack_targets(
+                    &state,
+                    PlayerId(0),
+                    &EntryAttackDestination::Exact { target },
+                ),
+                vec![target],
+                "each exact live defender kind must remain available"
+            );
+        }
+
+        crate::game::zones::move_to_zone(
+            &mut state,
+            planeswalker,
+            Zone::Graveyard,
+            &mut Vec::new(),
+        );
+        crate::game::zones::move_to_zone(&mut state, battle, Zone::Graveyard, &mut Vec::new());
+        state.eliminated_players.push(PlayerId(1));
+
+        for target in [
+            AttackTarget::Player(PlayerId(1)),
+            AttackTarget::Planeswalker(planeswalker),
+            AttackTarget::Battle(battle),
+        ] {
+            assert!(
+                valid_entry_attack_targets(
+                    &state,
+                    PlayerId(0),
+                    &EntryAttackDestination::Exact { target },
+                )
+                .is_empty(),
+                "a stale exact destination must produce a nonattacking entry"
+            );
+        }
     }
 
     /// CR 805.10d: "Creatures controlled by the defending players can block

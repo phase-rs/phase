@@ -4832,11 +4832,11 @@ fn object_replacement_candidate_applies(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     rid: ReplacementId,
 ) -> bool {
-    let liminal_obj = state
-        .liminal_entries
-        .get(&rid.source)
+    let liminal_obj = liminal_entry_ref(event)
+        .filter(|entry_ref| *entry_ref == rid.source)
+        .and_then(|entry_ref| state.liminal_entries.get(&entry_ref))
         .map(|entry| &entry.object);
-    let Some(obj) = state.objects.get(&rid.source).or(liminal_obj) else {
+    let Some(obj) = liminal_obj.or_else(|| state.objects.get(&rid.source)) else {
         return false;
     };
     let Some(repl_def) = obj.replacement_definitions.get(rid.index) else {
@@ -5236,6 +5236,20 @@ fn object_replacement_candidate_applies(
     true
 }
 
+/// CR 614.12: identify a not-yet-committed battlefield entry whose projected
+/// characteristics live in `GameState::liminal_entries`.
+fn liminal_entry_ref(event: &ProposedEvent) -> Option<ObjectId> {
+    match event {
+        ProposedEvent::TokenEntry { entry_ref, .. } => Some(*entry_ref),
+        ProposedEvent::ZoneChange {
+            object_id,
+            to: Zone::Battlefield,
+            ..
+        } => Some(*object_id),
+        _ => None,
+    }
+}
+
 fn legacy_object_replacement_candidates(
     state: &GameState,
     event: &ProposedEvent,
@@ -5250,8 +5264,8 @@ fn legacy_object_replacement_candidates(
             object_replacement_candidate_applies(state, event, registry, rid).then_some(rid)
         })
         .collect();
-    if let ProposedEvent::TokenEntry { entry_ref, .. } = event {
-        if let Some(entry) = state.liminal_entries.get(entry_ref) {
+    if let Some(entry_ref) = liminal_entry_ref(event) {
+        if let Some(entry) = state.liminal_entries.get(&entry_ref) {
             candidates.extend(
                 entry
                     .object
@@ -5260,7 +5274,7 @@ fn legacy_object_replacement_candidates(
                     .enumerate()
                     .filter_map(|(index, _)| {
                         let rid = ReplacementId {
-                            source: *entry_ref,
+                            source: entry_ref,
                             index,
                         };
                         object_replacement_candidate_applies(state, event, registry, rid)
@@ -5299,8 +5313,8 @@ fn indexed_object_replacement_candidates_from_index(
         })
         .collect();
 
-    if let ProposedEvent::TokenEntry { entry_ref, .. } = event {
-        if let Some(entry) = state.liminal_entries.get(entry_ref) {
+    if let Some(entry_ref) = liminal_entry_ref(event) {
+        if let Some(entry) = state.liminal_entries.get(&entry_ref) {
             candidates.extend(
                 entry
                     .object
@@ -5309,7 +5323,7 @@ fn indexed_object_replacement_candidates_from_index(
                     .enumerate()
                     .filter_map(|(index, _)| {
                         let rid = ReplacementId {
-                            source: *entry_ref,
+                            source: entry_ref,
                             index,
                         };
                         object_replacement_candidate_applies(state, event, registry, rid)
@@ -6207,14 +6221,10 @@ fn apply_single_replacement(
         state.pending_damage_replacements.get(rid.index)
     } else {
         state
-            .objects
+            .liminal_entries
             .get(&rid.source)
-            .or_else(|| {
-                state
-                    .liminal_entries
-                    .get(&rid.source)
-                    .map(|entry| &entry.object)
-            })
+            .map(|entry| &entry.object)
+            .or_else(|| state.objects.get(&rid.source))
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
 
@@ -7054,14 +7064,10 @@ fn replacement_definition_for_id(
     rid: ReplacementId,
 ) -> Option<&ReplacementDefinition> {
     state
-        .objects
+        .liminal_entries
         .get(&rid.source)
-        .or_else(|| {
-            state
-                .liminal_entries
-                .get(&rid.source)
-                .map(|entry| &entry.object)
-        })
+        .map(|entry| &entry.object)
+        .or_else(|| state.objects.get(&rid.source))
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
         // CR 121.2: an instruction to draw multiple cards is performed as that many
         // individual draws, and CR 121.2a modifies the instruction's count *before* any
@@ -8217,6 +8223,8 @@ mod tests {
                 spec_resume: None,
                 enter_tapped: EtbTapState::Unspecified,
                 enter_with_counters: Vec::new(),
+                kind: crate::types::game_state::LiminalEntryKind::Token,
+                replacement_applied: HashSet::new(),
             },
         );
         assert!(!state.objects.contains_key(&entry_ref));

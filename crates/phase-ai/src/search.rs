@@ -844,6 +844,23 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // fallback declines while normal search evaluates legal tap choices.
         WaitingFor::EnlistChoice { .. } => Some(GameAction::ChooseEnlist { target: None }),
 
+        // CR 701.42b / CR 508.4: deadlock-safe deterministic fallbacks. Normal
+        // public `choose_action` evaluates these legal actions through search;
+        // when time expires, preserve the engine's canonical physical-pair
+        // authority before falling back to the first legal live-name choice.
+        WaitingFor::MeldPairChoice { choices, .. } => choices
+            .iter()
+            .find(|choice| engine::game::meld::is_canonical_physical_meld_pair(state, choice))
+            .or_else(|| choices.first())
+            .map(|choice| GameAction::ChooseMeldPair {
+                source_id: choice.source_id,
+                partner_id: choice.partner_id,
+            }),
+        WaitingFor::MeldAttackTargetChoice { valid_targets, .. } => valid_targets
+            .first()
+            .copied()
+            .map(|target| GameAction::ChooseEntryAttackTarget { target }),
+
         // Target selection: skip optional slots, fizzle mandatory ones.
         // TriggerTargetSelection is not a pending cast — the trigger is
         // already on the stack. ChooseTarget { target: None } signals
@@ -3014,6 +3031,137 @@ mod tests {
             fallback_action(&state),
             Some(GameAction::DeclineShortcut),
             "the no-score fallback must select DeclineShortcut from engine legal actions"
+        );
+    }
+
+    /// CR 701.42b: the public search path prefers the physical canonical meld
+    /// pair over an earlier live-name impostor that would exile both selected
+    /// objects without producing the result permanent. This proves the choice
+    /// is handled by ordinary simulation/evaluation, not bespoke name scoring.
+    #[test]
+    fn choose_action_simulates_meld_pair_outcomes() {
+        use engine::types::ability::{PermanentEntryMode, PtValue};
+        use engine::types::card::CardFace;
+        use engine::types::game_state::{MeldPairRecord, MeldSelection};
+
+        const SOURCE: &str = "AI Meld Source";
+        const PARTNER: &str = "AI Meld Partner";
+        const RESULT: &str = "AI Meld Result";
+
+        let mut state = make_state();
+        let impostor_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let impostor_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        for (id, live_name, base_name) in [
+            (impostor_source, SOURCE, "Printed Impostor Source"),
+            (impostor_partner, PARTNER, "Printed Impostor Partner"),
+            (real_source, SOURCE, SOURCE),
+            (real_partner, PARTNER, PARTNER),
+        ] {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.name = live_name.to_string();
+            object.base_name = base_name.to_string();
+        }
+        let mut result = CardFace {
+            name: RESULT.to_string(),
+            power: Some(PtValue::Fixed(9)),
+            toughness: Some(PtValue::Fixed(9)),
+            ..CardFace::default()
+        };
+        result.card_type.core_types.push(CoreType::Creature);
+        Arc::make_mut(&mut state.card_face_registry).insert(RESULT.to_lowercase(), result);
+        Arc::make_mut(&mut state.meld_pair_registry).insert(
+            format!("{}\0{}", SOURCE.to_lowercase(), PARTNER.to_lowercase()),
+            MeldPairRecord {
+                source: SOURCE.to_string(),
+                partner: PARTNER.to_string(),
+                result: RESULT.to_string(),
+            },
+        );
+        let selection = |source_id, partner_id| MeldSelection {
+            source_id,
+            partner_id,
+            controller: PlayerId(0),
+            expected_source: SOURCE.to_string(),
+            expected_partner: PARTNER.to_string(),
+            result: RESULT.to_string(),
+            entry: PermanentEntryMode::Normal,
+        };
+        state.waiting_for = WaitingFor::MeldPairChoice {
+            player: PlayerId(0),
+            choices: vec![
+                selection(impostor_source, impostor_partner),
+                selection(real_source, real_partner),
+            ],
+        };
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(9);
+        let mut rng = SmallRng::seed_from_u64(9);
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseMeldPair {
+                source_id: real_source,
+                partner_id: real_partner,
+            })
+        );
+    }
+
+    /// CR 701.42b: even when search cannot run, the deterministic fallback
+    /// prefers the canonical physical pair over an earlier live-name impostor.
+    #[test]
+    fn meld_pair_fallback_prefers_canonical_pair_in_hostile_order() {
+        use engine::types::ability::PermanentEntryMode;
+        use engine::types::game_state::{MeldPairRecord, MeldSelection};
+
+        const SOURCE: &str = "Fallback Meld Source";
+        const PARTNER: &str = "Fallback Meld Partner";
+        const RESULT: &str = "Fallback Meld Result";
+
+        let mut state = make_state();
+        let impostor_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let impostor_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        for (id, base_name) in [
+            (impostor_source, "Printed Impostor Source"),
+            (impostor_partner, "Printed Impostor Partner"),
+            (real_source, SOURCE),
+            (real_partner, PARTNER),
+        ] {
+            state.objects.get_mut(&id).unwrap().base_name = base_name.to_string();
+        }
+        Arc::make_mut(&mut state.meld_pair_registry).insert(
+            format!("{}\0{}", SOURCE.to_lowercase(), PARTNER.to_lowercase()),
+            MeldPairRecord {
+                source: SOURCE.to_string(),
+                partner: PARTNER.to_string(),
+                result: RESULT.to_string(),
+            },
+        );
+        let selection = |source_id, partner_id| MeldSelection {
+            source_id,
+            partner_id,
+            controller: PlayerId(0),
+            expected_source: SOURCE.to_string(),
+            expected_partner: PARTNER.to_string(),
+            result: RESULT.to_string(),
+            entry: PermanentEntryMode::Normal,
+        };
+        state.waiting_for = WaitingFor::MeldPairChoice {
+            player: PlayerId(0),
+            choices: vec![
+                selection(impostor_source, impostor_partner),
+                selection(real_source, real_partner),
+            ],
+        };
+
+        assert_eq!(
+            fallback_action(&state),
+            Some(GameAction::ChooseMeldPair {
+                source_id: real_source,
+                partner_id: real_partner,
+            })
         );
     }
 

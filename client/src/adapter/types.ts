@@ -298,6 +298,25 @@ export type AttackTarget =
   | { type: "Planeswalker"; data: ObjectId }
   | { type: "Battle"; data: ObjectId };
 
+export type EntryAttackDestination =
+  | { type: "AnyDefender" }
+  | { type: "PlayerOrPlaneswalker" }
+  | { type: "Exact"; data: { target: AttackTarget } };
+
+export type PermanentEntryMode =
+  | { type: "Normal" }
+  | { type: "TappedAndAttacking"; data: { destination: EntryAttackDestination } };
+
+export interface MeldSelection {
+  source_id: ObjectId;
+  partner_id: ObjectId;
+  controller: PlayerId;
+  expected_source: string;
+  expected_partner: string;
+  result: string;
+  entry: PermanentEntryMode;
+}
+
 // CR 508.1c/d + CR 509.1b/c: per-creature combat requirement/restriction the
 // engine surfaces on the declare-attackers/blockers waiting payloads for
 // display-only badges + Confirm gating. `#[serde(tag = "kind")]` in the engine.
@@ -1317,6 +1336,8 @@ export type MulliganDecisionPhase =
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
+  | { type: "MeldPairChoice"; data: { player: PlayerId; choices: MeldSelection[] } }
+  | { type: "MeldAttackTargetChoice"; data: { player: PlayerId; context: MeldSelection; valid_targets: AttackTarget[] } }
   | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: SerializedAbilityCost[]; pending_cast: PendingCast } }
   | {
       type: "MulliganDecision";
@@ -1841,6 +1862,8 @@ export type PrecastCopyShortcutResponse =
 
 export type GameAction =
   | { type: "PassPriority" }
+  | { type: "ChooseMeldPair"; data: { source_id: ObjectId; partner_id: ObjectId } }
+  | { type: "ChooseEntryAttackTarget"; data: { target: AttackTarget } }
   | { type: "RollPlanarDie" }
   | { type: "ChooseActivationCostBranch"; data: { index: number } }
   | { type: "PlayLand"; data: { object_id: ObjectId; card_id: CardId } }

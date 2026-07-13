@@ -33,6 +33,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
   new Set<WaitingFor["type"]>([
     // Active priority — passes via PassButton / mana payment / cast.
     "Priority",
+    // CR 701.42 / CR 508.4: meld pair and attacking-entry destination dialogs.
+    "MeldPairChoice",
+    "MeldAttackTargetChoice",
     // Cast / activation chain — ManaPayment + PhyrexianPayment share ManaPaymentUI.
     ...MANA_PAYMENT_WAITING_FOR_TYPES,
     "ChooseXValue",

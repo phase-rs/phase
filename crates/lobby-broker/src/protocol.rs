@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
-/// 15 — Mana-payment preview request/response variants.
+/// 15 — Meld pair/attacking-entry choices and mana-payment preview variants.
 /// 14 — `PrecastCopyShortcut` action and its two `WaitingFor` variants.
 /// 13 — `WaitingFor::MulliganBottomCards` removed from the full-game state
 ///      payload; mulligan bottoming folded into a
@@ -360,6 +360,12 @@ fn json_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protocol_version_tracks_meld_wire_additions() {
+        assert_eq!(PROTOCOL_VERSION, 15);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 14);
+    }
 
     #[test]
     fn known_tags_parse_to_messages() {
