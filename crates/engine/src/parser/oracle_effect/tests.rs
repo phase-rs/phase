@@ -3,7 +3,8 @@ use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
-    AttachmentKind, ExcessRecipient, ForEachCategoryAction, PerpetualModification,
+    AttachmentKind, CastManaObjectScope, CastManaSpentMetric, ExcessRecipient,
+    ForEachCategoryAction, PerpetualModification,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -29141,6 +29142,165 @@ fn where_x_power_of_the_exiled_card_binds_exiled_card_power() {
              resolves to no modification at all (silent no-op), got {value:?}"
         );
     }
+}
+
+/// CR 107.3c: the QUANTITY channel of the same "where X is …" defect #5706 fixed
+/// for P/T. When the where-clause defined X with an expression the parser could
+/// not type, `apply_where_x_quantity_expression` fabricated
+/// `QuantityRef::Variable { name: "<raw oracle text>" }`. That node is well-typed
+/// and renders as a supported dynamic quantity in the coverage report, but
+/// `game/quantity.rs` (non-`"X"` `Variable` arm) resolves it through
+/// `state.last_named_choice` and `.unwrap_or(0)` — so the effect read 0 (or an
+/// unrelated stale number left by some earlier "choose a number").
+///
+/// These four expression classes each have a typed home AND a live resolver arm
+/// that both already existed; the where-X interpreter simply never delegated to
+/// them. Each assertion below is a regression pin: the raw-text fallback must
+/// never come back.
+#[test]
+fn where_x_intensity_binds_source_intensity() {
+    // Arek, False Goldwarden: "Target opponent loses X life and you gain X life,
+    // where X is Arek's intensity." Self-reference is normalized to `~` upstream.
+    let def = parse_effect_chain(
+        "target opponent loses X life, where X is ~'s intensity",
+        AbilityKind::Spell,
+    );
+    let expected = QuantityExpr::Ref {
+        qty: QuantityRef::Intensity {
+            scope: ObjectScope::Source,
+        },
+    };
+    let Effect::LoseLife { amount, .. } = &*def.effect else {
+        panic!("expected LoseLife, got {:?}", def.effect);
+    };
+    assert_eq!(
+        amount, &expected,
+        "X must bind to Intensity{{Source}}; a raw-text Variable resolves to 0"
+    );
+}
+
+/// Mycelic Ballad spells the same quantity as "this spell's intensity" — the
+/// possessive is the only axis that differs, so it must reach the same binding.
+#[test]
+fn where_x_this_spells_intensity_binds_source_intensity() {
+    let def = parse_effect_chain(
+        "you gain X life, where X is this spell's intensity",
+        AbilityKind::Spell,
+    );
+    let Effect::GainLife { amount, .. } = &*def.effect else {
+        panic!("expected GainLife, got {:?}", def.effect);
+    };
+    assert_eq!(
+        amount,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::Intensity {
+                scope: ObjectScope::Source,
+            },
+        },
+        "\"this spell's intensity\" must reach the same Intensity binding as \"~'s intensity\""
+    );
+}
+
+/// Liquid Fire / Fluros of Myra's Marvels: "where X is the chosen number".
+/// `QuantityRef::ChosenNumber` reads `ChosenAttribute::Number` off the source
+/// object (game/quantity.rs) — the value the player actually chose.
+#[test]
+fn where_x_the_chosen_number_binds_chosen_number() {
+    let def = parse_effect_chain(
+        "~ deals X damage to target creature, where X is the chosen number",
+        AbilityKind::Spell,
+    );
+    let Effect::DealDamage { amount, .. } = &*def.effect else {
+        panic!("expected DealDamage, got {:?}", def.effect);
+    };
+    assert_eq!(
+        amount,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::ChosenNumber
+        },
+        "X must bind to ChosenNumber, not a raw-text Variable"
+    );
+}
+
+/// Toph, Greatest Earthbender: "where X is the amount of mana spent to cast her".
+/// CR 107.3c + the existing `ManaSpentToCast{SelfObject, Total}` typed home.
+#[test]
+fn where_x_mana_spent_to_cast_binds_mana_spent_to_cast() {
+    for text in [
+        "you gain X life, where X is the amount of mana spent to cast her",
+        "you gain X life, where X is the amount of mana spent to cast it",
+        "you gain X life, where X is the amount of mana spent to cast this spell",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::GainLife { amount, .. } = &*def.effect else {
+            panic!("expected GainLife for {text:?}, got {:?}", def.effect);
+        };
+        assert_eq!(
+            amount,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::SelfObject,
+                    metric: CastManaSpentMetric::Total,
+                },
+            },
+            "X must bind to ManaSpentToCast{{Total}} for {text:?}"
+        );
+    }
+}
+
+/// CR 107.4h: "{S} … can also be used to refer to mana of any type produced by a
+/// snow source spent to pay a cost." Graven Lore / Blessing of Frost / Blood on
+/// the Snow: "where X is the amount of {S} spent to cast this spell".
+/// `CastManaSpentMetric::FromSource` counts the mana whose PRODUCING source
+/// matches the filter, so a Snow-supertype source filter is the exact model.
+#[test]
+fn where_x_snow_mana_spent_binds_mana_spent_from_snow_source() {
+    let def = parse_effect_chain(
+        "scry X, where X is the amount of {S} spent to cast this spell",
+        AbilityKind::Spell,
+    );
+    let Effect::Scry { count, .. } = &*def.effect else {
+        panic!("expected Scry, got {:?}", def.effect);
+    };
+    let QuantityExpr::Ref {
+        qty:
+            QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::FromSource { source_filter },
+            },
+    } = count
+    else {
+        panic!("X must bind to ManaSpentToCast{{FromSource}}, got {count:?}");
+    };
+    assert!(
+        format!("{source_filter:?}").contains("Snow"),
+        "the source filter must select snow sources (CR 107.4h), got {source_filter:?}"
+    );
+}
+
+/// The convert half of the same defect: a where-X definition with NO typed home
+/// must FAIL HONESTLY, not fabricate. Porcuparrot's "{T}: This creature deals X
+/// damage to any target, where X is the number of times this creature has
+/// mutated" has no QuantityRef and no resolver — mutation count is not modeled.
+///
+/// Pre-fix this lowered to `QuantityRef::Variable { name: "the number of times ~
+/// has mutated" }`, which `game/quantity.rs` resolves through `last_named_choice`
+/// to 0: Porcuparrot dealt ZERO damage while the coverage report called it
+/// supported. The ability must lower to an Unimplemented gap so the report shows
+/// red instead.
+#[test]
+fn where_x_unrepresentable_quantity_fails_honestly_instead_of_fabricating() {
+    let def = parse_effect_chain(
+        "~ deals X damage to any target, where X is the number of times ~ has mutated",
+        AbilityKind::Activated,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "an unrepresentable where-X definition must lower to Unimplemented (honest red), \
+         never to a raw-text Variable that resolves to 0 while reading as supported; \
+         got {:?}",
+        def.effect
+    );
 }
 
 #[test]

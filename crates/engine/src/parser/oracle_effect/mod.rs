@@ -7960,7 +7960,18 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     let (discover_tp, discover_where_x) = strip_trailing_where_x(tp);
     if let Some((discover_player, limit, rest_orig)) = parse_discover_with_player(discover_tp) {
         if rest_orig.trim().is_empty() {
-            let limit = apply_where_x_quantity_expression(limit, discover_where_x.as_deref());
+            // CR 107.3c: "discover X, where X is <expr>" — the clause DEFINES X.
+            // If the definition has no typed home, report the gap instead of
+            // fabricating a raw-text placeholder that resolves to 0 (a discover
+            // for mana value 0) while still reading as supported.
+            let Some(limit) = apply_where_x_quantity_expression(limit, discover_where_x.as_deref())
+            else {
+                let expression = discover_where_x.unwrap_or_default();
+                return parsed_clause(Effect::unimplemented(
+                    "where_x_binding",
+                    format!("where X is {expression}"),
+                ));
+            };
             return parsed_clause(Effect::Discover {
                 mana_value_limit: limit,
                 player: discover_player,
@@ -10719,7 +10730,8 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         let (after_count_lower, raw_count) = parse_reveal_until_count(rest_lower).ok()?;
         let (_, filter_text) = parse_reveal_until_active_filter_text(after_count_lower).ok()?;
         let filter = build_reveal_until_filter(filter_text);
-        let count = apply_where_x_quantity_expression(raw_count, where_x_expression.as_deref());
+        // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
+        let count = apply_where_x_quantity_expression(raw_count, where_x_expression.as_deref())?;
         return Some(parsed_clause(Effect::RevealUntil {
             player,
             filter,
@@ -27794,7 +27806,8 @@ fn try_parse_put_zone_change_parts(
             // unbounded. The expression is parsed by the shared
             // `parse_where_x_quantity_expression` building block.
             let where_x_expression = strip_trailing_where_x(after_put_tp).1;
-            let target = apply_where_x_to_filter(target, where_x_expression.as_deref());
+            // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
+            let target = apply_where_x_to_filter(target, where_x_expression.as_deref())?;
             // CR 608.2c: Restrict the target to objects affected by the
             // preceding effect when a "this way" result phrase appears in the
             // target text. The relevant resolvers publish `state.tracked_object_sets`

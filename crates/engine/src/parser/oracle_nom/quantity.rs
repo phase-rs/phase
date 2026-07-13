@@ -592,11 +592,48 @@ fn parse_guessed_number_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
+/// Alchemy (digital-only) intensity: "<self-possessive> intensity".
+///
+/// The self-reference is normalized to `~` upstream, so Arek, False
+/// Goldwarden's "where X is Arek's intensity" arrives as "~'s intensity"; a
+/// spell reading its own counter says "this spell's intensity" (Mycelic
+/// Ballad). Both denote the SOURCE object, which is what
+/// `QuantityRef::Intensity { scope: Source }` resolves against (game/quantity.rs).
+///
+/// Without this arm the phrase fell through to the raw-text
+/// `QuantityRef::Variable`, which resolves to 0 — every intensity card silently
+/// did nothing while reading as supported.
+fn parse_intensity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::Intensity {
+            scope: ObjectScope::Source,
+        },
+        terminated(
+            // "this spell's" is a leaf variant of the same self-possessive axis;
+            // it is kept local rather than pushed into `parse_self_possessive`,
+            // whose many other callers do not expect a stack-only possessive.
+            alt((parse_self_possessive, value((), tag("this spell's")))),
+            tag(" intensity"),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 107.3: "the chosen number" — the number a player named for this object
+/// (Liquid Fire's additional cost; Fluros of Myra's Marvels' as-enters choice).
+/// `QuantityRef::ChosenNumber` reads `ChosenAttribute::Number` off the source
+/// object (game/quantity.rs), which is where the choice is recorded.
+fn parse_chosen_number_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(QuantityRef::ChosenNumber, tag("the chosen number")).parse(input)
+}
+
 pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         alt((
             parse_guessed_number_ref,
             parse_object_count_by_shared_quality,
+            parse_chosen_number_ref,
+            parse_intensity_ref,
         )),
         parse_the_number_of,
         parse_object_property_aggregate_ref,
@@ -3590,6 +3627,27 @@ fn parse_mana_spent_to_cast_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         ));
     }
 
+    // CR 107.4h: "{S} spent to cast <self>" — the snow mana symbol "can also be
+    // used to refer to mana of any type produced by a snow source spent to pay a
+    // cost". That is exactly `FromSource`, whose filter selects the PRODUCING
+    // source (game/quantity.rs counts each spent-mana snapshot whose source
+    // matches), so a Snow-supertype filter is the precise model. Graven Lore,
+    // Blessing of Frost, Blood on the Snow. The symbol is matched case-insensitively
+    // because this combinator runs on both original and lowercased text.
+    if let Ok((rest, _)) = parse_snow_mana_symbol(input) {
+        let (rest, _) = tag(" spent to cast ").parse(rest)?;
+        let (rest, _scope) = parse_mana_spent_self_subject(rest)?;
+        return Ok((
+            rest,
+            QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: snow_source_filter(),
+                },
+            },
+        ));
+    }
+
     let (rest, _) = tag("mana spent to cast ").parse(input)?;
     // SelfObject literal retained: this ref form never accepts "that" subjects.
     let (rest, _scope) = parse_mana_spent_self_subject(rest)?;
@@ -3626,6 +3684,26 @@ pub(crate) fn parse_mana_source_filter(input: &str) -> OracleResult<'_, TargetFi
     Ok((rest, source_filter))
 }
 
+/// CR 107.4h: The snow mana symbol `{S}`. Matched case-insensitively because
+/// this combinator runs on both original-case and lowercased text.
+pub(crate) fn parse_snow_mana_symbol(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag::<_, _, OracleError<'_>>("{s}"), tag("{S}")))).parse(input)
+}
+
+/// CR 106.3 + CR 107.4h: The filter that selects a SNOW SOURCE — any object with
+/// the Snow supertype. Single authority for the `{S}` model, shared by every
+/// "mana produced by a snow source" reading so the two entry points
+/// (`parse_mana_spent_to_cast_ref` here and `parse_mana_spent_to_cast_amount` in
+/// `oracle_quantity`) cannot drift apart.
+pub(crate) fn snow_source_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        properties: vec![FilterProp::HasSupertype {
+            value: crate::types::card_type::Supertype::Snow,
+        }],
+        ..Default::default()
+    })
+}
+
 /// CR 400.7d: Parse the subject anaphora of a "mana spent to cast <subject>"
 /// clause and report which `CastManaObjectScope` it selects.
 ///
@@ -3647,6 +3725,12 @@ pub(crate) fn parse_mana_spent_self_subject(input: &str) -> OracleResult<'_, Cas
         value(CastManaObjectScope::SelfObject, tag("this permanent")),
         value(CastManaObjectScope::SelfObject, tag("it")),
         value(CastManaObjectScope::SelfObject, tag("them")),
+        // CR 400.7d: gendered self-anaphora — Oracle text for a legendary
+        // creature refers to the spell as "her"/"him" (Toph, Greatest
+        // Earthbender: "where X is the amount of mana spent to cast her").
+        // Same self-object axis as "it"/"them"; only the pronoun differs.
+        value(CastManaObjectScope::SelfObject, tag("her")),
+        value(CastManaObjectScope::SelfObject, tag("him")),
         value(CastManaObjectScope::SelfObject, tag("~")),
     ))
     .parse(input)

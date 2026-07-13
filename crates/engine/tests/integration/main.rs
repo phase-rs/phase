@@ -935,6 +935,7 @@ mod vanille_meld_optional_cost;
 mod vannifar_cloak_from_hand;
 mod veteran_bodyguard_tap_redirect;
 mod weeping_angel_combat_prevention;
+mod where_x_quantity_channel_binds;
 mod winding_way_reveal_partition_2931;
 mod witchs_oven_food_tokens;
 mod xantid_swarm_defending_player_cant_cast;

@@ -106,15 +106,18 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
         {
             if let Some(where_expression) = extract_token_where_x_expression(&text) {
-                count = super::parse_where_x_quantity_expression(&where_expression)
-                    .or_else(|| {
+                // CR 107.3c: the clause DEFINES X. If the definition is not
+                // representable, this copy-token clause does not lower — fail the
+                // parse instead of fabricating a raw-text placeholder. The
+                // fabricated `QuantityRef::Variable { name: "<oracle text>" }` is
+                // well-typed but DEAD (game/quantity.rs resolves a non-`X` variable
+                // name to 0), so the effect copied ZERO tokens while the raw text
+                // still rendered as a supported dynamic quantity. This mirrors the
+                // sibling non-copy token path below.
+                count =
+                    super::parse_where_x_quantity_expression(&where_expression).or_else(|| {
                         crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
-                    })
-                    .unwrap_or(QuantityExpr::Ref {
-                        qty: QuantityRef::Variable {
-                            name: where_expression,
-                        },
-                    });
+                    })?;
             }
         }
         return Some(Effect::CopyTokenOf {
@@ -703,15 +706,17 @@ fn parse_token_description_with_context(
             // `parse_event_context_quantity` only fires when `parse_cda_quantity`
             // returns None and itself returns None for unrecognized phrases, so
             // it strictly widens coverage without disturbing existing matches.
+            // CR 122.1 + CR 608.2c: bind the deferred "a number of" count to the
+            // quantity its "equal to <expr>" clause names. An unrepresentable
+            // expression FAILS the token clause — the raw-text placeholder it used
+            // to fabricate is dead at runtime (game/quantity.rs resolves a non-`X`
+            // variable name to 0), so the card created ZERO tokens while still
+            // reading as supported.
             count = crate::parser::oracle_quantity::parse_cda_quantity(&count_expression)
                 .or_else(|| {
                     crate::parser::oracle_quantity::parse_event_context_quantity(&count_expression)
                 })
-                .unwrap_or(QuantityExpr::Ref {
-                    qty: QuantityRef::Variable {
-                        name: count_expression,
-                    },
-                });
+                .or_else(|| super::parse_where_x_quantity_expression(&count_expression))?;
         }
     }
 
