@@ -6514,6 +6514,34 @@ pub(super) fn current_self_enter_replacement_modifiers(
     result
 }
 
+/// CR 614.12 + CR 707.9: an object entering as a copy also acquires any
+/// mandatory "as this enters, choose ..." replacement printed on the copied
+/// card. The copy-target prompt is already in progress, so surface the copied
+/// persisted choice before replaying its battlefield-entry event.
+pub(super) fn current_self_enter_replacement_choice(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Option<AbilityDefinition> {
+    let registry = replacement_registry();
+    let event = ProposedEvent::zone_change(source_id, Zone::Battlefield, Zone::Battlefield, None);
+
+    find_applicable_replacements(state, &event, registry)
+        .into_iter()
+        .filter(|rid| rid.source == source_id)
+        .filter_map(|rid| {
+            state
+                .objects
+                .get(&rid.source)
+                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        })
+        .filter(|replacement| !replacement_mode_is_optional(&replacement.mode))
+        .filter_map(|replacement| {
+            EventModifiers::first_non_modifier_ability(replacement.execute.as_deref())
+        })
+        .find(|ability| matches!(&*ability.effect, Effect::Choose { persist: true, .. }))
+        .cloned()
+}
+
 fn battlefield_entry_current_tapped(event: &ProposedEvent) -> Option<bool> {
     match event {
         ProposedEvent::ZoneChange { enter_tapped, .. } => Some(enter_tapped.resolve(false)),

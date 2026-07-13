@@ -3321,6 +3321,96 @@ fn copy_target_choice_applies_copied_enter_with_counters_replacement_before_sba(
     assert_eq!(copied.toughness, Some(5));
 }
 
+#[test]
+fn echoing_deeps_copying_sunken_citadel_prompts_for_the_copied_color_choice() {
+    let mut state = setup_game_at_main_phase();
+    let citadel = zones::create_object(
+        &mut state,
+        CardId(9_021),
+        PlayerId(1),
+        "Sunken Citadel".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&citadel)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_oracle_to_object(
+        &mut state,
+        citadel,
+        "Sunken Citadel",
+        "This land enters tapped. As it enters, choose a color.\n{T}: Add one mana of the chosen color.\n{T}: Add two mana of the chosen color. Spend this mana only to activate abilities of land sources.",
+    );
+    let deeps = zones::create_object(
+        &mut state,
+        CardId(9_022),
+        PlayerId(0),
+        "Echoing Deeps".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&deeps)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_oracle_to_object(
+        &mut state,
+        deeps,
+        "Echoing Deeps",
+        "You may have this land enter tapped as a copy of any land card in a graveyard, except it's a Cave in addition to its other types.\n{T}: Add {C}.",
+    );
+    state.waiting_for = WaitingFor::CopyTargetChoice {
+        player: PlayerId(0),
+        source_id: deeps,
+        valid_targets: vec![citadel],
+        max_mana_value: None,
+    };
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(citadel)),
+        },
+    )
+    .expect("Echoing Deeps should copy Sunken Citadel");
+    let WaitingFor::NamedChoice {
+        player,
+        source_id,
+        options,
+        ..
+    } = result.waiting_for
+    else {
+        panic!(
+            "the copied as-enters choice must be offered, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(player, PlayerId(0));
+    assert_eq!(source_id, Some(deeps));
+    assert!(options
+        .iter()
+        .any(|option| option.eq_ignore_ascii_case("blue")));
+
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseOption {
+            choice: options
+                .into_iter()
+                .find(|option| option.eq_ignore_ascii_case("blue"))
+                .unwrap(),
+        },
+    )
+    .expect("the copied land must accept its as-enters color choice");
+    let copy = &state.objects[&deeps];
+    assert_eq!(copy.name, "Sunken Citadel");
+    assert_eq!(copy.chosen_color(), Some(ManaColor::Blue));
+}
+
 /// CR 614.12a + CR 707.9: Callidus Assassin grants its copy a "When this
 /// creature enters" trigger as part of the entering-as-copy bundle. The
 /// ETB event for the copy must fire *after* the player chooses a target

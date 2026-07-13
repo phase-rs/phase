@@ -1591,6 +1591,21 @@ fn finish_copy_target_choice_entry(
         );
         return Ok(Some(state.waiting_for.clone()));
     }
+    if let Some(choice) =
+        super::replacement::current_self_enter_replacement_choice(state, source_id)
+    {
+        if let Some(waiting_for) = apply_post_replacement_effect(
+            state,
+            &choice,
+            Some(source_id),
+            None,
+            Some(&ReplacementEvent::Moved),
+            HashSet::new(),
+            events,
+        ) {
+            return Ok(Some(waiting_for));
+        }
+    }
     crate::game::layers::mark_layers_full(state);
     // CR 614.12a + CR 707.9: The battlefield-entry `ZoneChanged` event was
     // captured into `state.deferred_entry_events` when `CopyTargetChoice` was
