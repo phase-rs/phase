@@ -8443,6 +8443,7 @@ fn learn_rummage_stashes_draw_continuation() {
             source,
             PlayerId(0),
         )),
+        &state,
     ));
 
     let learn_ability = ResolvedAbility::new(Effect::Learn, vec![], source, PlayerId(0));

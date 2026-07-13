@@ -222,7 +222,7 @@ pub(super) fn handle_opponent_may_choice(
                         // owner's library") is silently skipped.
                         sub.context = ability.context.clone();
                         sub.context.optional_effect_performed = true;
-                        state.pending_continuation = Some(PendingContinuation::new(sub));
+                        state.pending_continuation = Some(PendingContinuation::new(sub, state));
                     }
                     state.waiting_for = WaitingFor::MultiTargetSelection {
                         player: promptee,

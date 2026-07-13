@@ -108,6 +108,9 @@ pub fn resolve(
         || state.die_result_this_resolution.is_some())
     .then(|| ResolvingTriggerContext {
         event: state.current_trigger_event.clone(),
+        // Forced field-threading for the new plural-event list (CR 603.2c);
+        // mechanism-B behavior is otherwise unchanged.
+        events: state.current_trigger_events.clone(),
         match_count: state.current_trigger_match_count,
         die_result: state.die_result_this_resolution,
     });
@@ -2443,7 +2446,7 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         );
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation), &state));
 
         let ability = ResolvedAbility::new(
             Effect::ForEachCategory {

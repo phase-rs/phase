@@ -1758,6 +1758,384 @@ mod tests {
         );
     }
 
+    /// Shared Power-Leak-shaped fixture: an Aura controlled by P0 whose
+    /// beginning-of-upkeep trigger fires for the enchanted permanent's
+    /// controller P1 (the active player). The chain is
+    /// `optional PayCost { Mana {X}, payer: TriggeringPlayer }`
+    /// → SequentialSibling `DealDamage { target: TriggeringPlayer, 2 }`.
+    /// `ability.controller` is P0 and `TriggeringPlayer` is P1 — the asymmetry
+    /// that discriminates the CR 608.2 trigger-context-across-pause fix.
+    #[cfg(test)]
+    fn power_leak_fixture() -> (GameState, ResolvedAbility, ObjectId) {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{QuantityExpr, SubAbilityLink, TargetFilter};
+        use crate::types::events::GameEvent;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        // CR 500.2 + CR 603.7c: the upkeep belongs to the enchanted permanent's
+        // controller (P1) — the active player — so `TriggeringPlayer` on the
+        // PhaseChanged event resolves to P1, never the Aura controller P0.
+        state.active_player = PlayerId(1);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(600),
+            PlayerId(0),
+            "Power Leak".to_string(),
+            Zone::Battlefield,
+        );
+
+        // CR 107.3a: give the payer (P1) mana so the {X} pay-amount prompt has a
+        // positive max and `SubmitPayAmount { amount: 1 }` is legal.
+        for _ in 0..5 {
+            state.players[1].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+
+        // CR 603.7c: the triggering event — a beginning-of-upkeep phase change.
+        state.current_trigger_event = Some(GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        });
+
+        // CR 120.1: "Power Leak deals X damage to that player" — the damage
+        // recipient is `TriggeringPlayer` (P1). Fixed(2) is used in place of the
+        // production ClampMin(X) shape; the recipient, not the magnitude, is
+        // under test.
+        let mut damage = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::TriggeringPlayer,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        damage.sub_link = SubAbilityLink::SequentialSibling;
+
+        // CR 601.2c: "you may pay {X}" — optional cost paid by the triggering
+        // player (P1), NOT the Aura controller.
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::TriggeringPlayer,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        pay.sub_ability = Some(Box::new(damage));
+        pay.optional = true;
+
+        (state, pay, source_id)
+    }
+
+    /// CR 608.2 + CR 603.7c: the primary regression discriminator. When the
+    /// resolution pauses on the victim's `PayAmountChoice` and the live trigger
+    /// context is cleared (as `stack::resolve_top` does once the trigger's stack
+    /// entry has left the stack), the drained `DealDamage { TriggeringPlayer }`
+    /// MUST still hit P1 — the player the trigger fired for — not fall back to
+    /// the Aura controller P0 via `resolve_player_for_context_ref`'s bare
+    /// `ability.controller` fallback. Reverting the `drain_pending_continuation`
+    /// push/restore wrap flips this to P0 losing life.
+    #[test]
+    fn power_leak_pattern_deals_damage_to_correct_player_across_pay_amount_pause() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
+        let (mut state, pay, _source_id) = power_leak_fixture();
+        let mut events = Vec::new();
+
+        // Step A: optional "may pay" prompt.
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "expected OptionalEffectChoice, got {:?}",
+            state.waiting_for
+        );
+
+        // Step B: Accept → PayAmountChoice, prompting the TRIGGERING player P1.
+        let waiting = handle_optional_effect_choice(&mut state, true, &mut events).unwrap();
+        match &waiting {
+            WaitingFor::PayAmountChoice { player, .. } => assert_eq!(
+                *player,
+                PlayerId(1),
+                "the {{X}} payer is the triggering player P1, not the Aura controller P0"
+            ),
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+
+        // Reach guard: the stashed continuation is a REAL DealDamage node (never
+        // Effect::Unimplemented), and it snapshotted the trigger context.
+        let cont = state
+            .pending_continuation
+            .as_ref()
+            .expect("DealDamage continuation must be stashed on the pause");
+        assert!(
+            matches!(cont.chain.effect, Effect::DealDamage { .. }),
+            "continuation must wrap the DealDamage node, got {:?}",
+            cont.chain.effect
+        );
+        assert!(
+            cont.trigger_context.is_some(),
+            "pending_continuation must snapshot the trigger context at stash time \
+             (CR 608.2 capture) — without it the drain cannot restore TriggeringPlayer"
+        );
+
+        // Simulate stack::resolve_top's CR 603.7c cleanup: the trigger's stack
+        // entry has left the stack while the resolution is paused, so the LIVE
+        // trigger context is cleared. From here only the snapshotted
+        // pending_continuation.trigger_context can restore TriggeringPlayer.
+        state.current_trigger_event = None;
+        state.current_trigger_events.clear();
+        state.current_trigger_match_count = None;
+        state.die_result_this_resolution = None;
+
+        let p0_before = state.players[0].life;
+        let p1_before = state.players[1].life;
+
+        // Step C: submit the pay amount → drains the DealDamage continuation.
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SubmitPayAmount { amount: 1 },
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.players[1].life,
+            p1_before - 2,
+            "TriggeringPlayer (P1) must take the 2 damage after the paused drain"
+        );
+        assert_eq!(
+            state.players[0].life, p0_before,
+            "the Aura controller (P0) must NOT take damage — reverting the drain \
+             push/restore wrap reproduces the bug by damaging P0 here"
+        );
+    }
+
+    /// CR 601.2c + CR 608.2: declining the optional payment still runs the
+    /// SequentialSibling `DealDamage` (a separate printed instruction), and it
+    /// damages the triggering player P1 — never the Aura controller P0. Sibling
+    /// coverage for the decline branch; the decline resolves synchronously
+    /// inside `handle_optional_effect_choice`, so its trigger context is kept
+    /// live by the pre-existing `pending_optional_trigger_event` mechanism
+    /// rather than by the drain-time snapshot under test. It guards that the
+    /// `PendingContinuation::new` signature change did not regress the decline
+    /// path's damage recipient.
+    #[test]
+    fn power_leak_pattern_declining_payment_still_damages_correct_player() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+
+        let (mut state, pay, _source_id) = power_leak_fixture();
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "expected OptionalEffectChoice, got {:?}",
+            state.waiting_for
+        );
+
+        let p0_before = state.players[0].life;
+        let p1_before = state.players[1].life;
+
+        handle_optional_effect_choice(&mut state, false, &mut events).unwrap();
+
+        // Reach guard + positive assertion: the DealDamage DID run (P1 lost
+        // life), so the P0-unchanged assertion is not vacuous.
+        assert_eq!(
+            state.players[1].life,
+            p1_before - 2,
+            "declining the pay still deals the SequentialSibling damage to P1"
+        );
+        assert_eq!(
+            state.players[0].life, p0_before,
+            "the Aura controller (P0) must NOT take damage on the decline path"
+        );
+    }
+
+    /// CR 120.1: baseline control — a bare `DealDamage { TriggeringPlayer }`
+    /// with NO PayCost, so the chain never pauses and the live trigger context
+    /// is never cleared. P1 takes the damage in one shot. This must pass
+    /// identically before and after the fix, proving the no-pause path is
+    /// untouched.
+    #[test]
+    fn warp_artifact_pattern_baseline_unaffected_by_fix() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{QuantityExpr, TargetFilter};
+        use crate::types::events::GameEvent;
+        use crate::types::identifiers::CardId;
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(1);
+        let source_id = create_object(
+            &mut state,
+            CardId(601),
+            PlayerId(0),
+            "Warp Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        });
+
+        let damage = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::TriggeringPlayer,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        let p0_before = state.players[0].life;
+        let p1_before = state.players[1].life;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &damage, &mut events, 0).unwrap();
+
+        // Reach guard: no residual pending continuation — the DealDamage fully
+        // resolved in one shot (positive P1 life-loss confirms it ran).
+        assert!(
+            state.pending_continuation.is_none(),
+            "the no-pause path must not stash a continuation"
+        );
+        assert_eq!(
+            state.players[1].life,
+            p1_before - 1,
+            "TriggeringPlayer (P1) takes 1 damage with no pause"
+        );
+        assert_eq!(
+            state.players[0].life, p0_before,
+            "the Aura controller (P0) is never the recipient"
+        );
+    }
+
+    /// CR 608.2: nested-pause carry-over discriminator for
+    /// `prepend_to_pending_continuation`'s "a continuation already exists"
+    /// branch. When a SECOND pause splices a new head onto a continuation that a
+    /// FIRST pause already stashed, the merged continuation must keep the FIRST
+    /// pause's snapshotted trigger context — an ability's resolution is anchored
+    /// to its earliest pause (CR 608.2), so it must NOT re-latch to whatever
+    /// trigger context happens to be live at splice time.
+    ///
+    /// This is a direct-call unit test on the helper rather than a full
+    /// production drive. No production seam flips `current_trigger_event` (or its
+    /// siblings) BETWEEN two nested stash points inside one `stack::resolve_top`:
+    /// the live trigger context is set once at resolution start and cleared once
+    /// at resolution end, never mid-resolution. So every currently-reachable
+    /// production nested-pause has IDENTICAL live context at both stash points,
+    /// and a production-path fixture therefore cannot make the two pauses' live
+    /// contexts DIFFER — without a difference the test cannot tell "carried over"
+    /// apart from "re-captured", which is exactly the behavior under test.
+    /// Driving the helper directly with a deliberately-mutated live context is
+    /// the only way to make the assertion discriminating; reverting the
+    /// carry-over line to `ResolvingTriggerContext::capture(state)` flips this
+    /// assertion red (it would then observe context B, the second-pause live
+    /// state, instead of context A).
+    #[test]
+    fn nested_pause_prepend_carries_first_pause_trigger_context() {
+        use crate::types::ability::QuantityExpr;
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{PendingContinuation, ResolvingTriggerContext};
+        use crate::types::phase::Phase;
+
+        let mut state = GameState::new_two_player(42);
+
+        // First pause happens under live trigger context A (beginning-of-upkeep
+        // phase change). Capturing here exercises the real `capture` path.
+        let event_a = GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        };
+        state.current_trigger_event = Some(event_a.clone());
+        let context_a = ResolvingTriggerContext::capture(&state)
+            .expect("context A must capture — current_trigger_event is Some");
+
+        // Stash the FIRST pause's continuation, snapshotting context A via the
+        // real constructor.
+        let first_chain = make_ability(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        });
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(first_chain), &state));
+        assert_eq!(
+            state
+                .pending_continuation
+                .as_ref()
+                .and_then(|c| c.trigger_context.clone()),
+            Some(context_a.clone()),
+            "sanity: the first pause stashed context A"
+        );
+
+        // Between the two pauses the live context is DELIBERATELY changed to a
+        // DISTINCT context B (a life change for a different player). In
+        // production these would be identical; forcing a difference is what makes
+        // the carry-over assertion below able to discriminate.
+        let event_b = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: 3,
+        };
+        state.current_trigger_event = Some(event_b.clone());
+        let context_b = ResolvingTriggerContext::capture(&state)
+            .expect("context B must capture — current_trigger_event is Some");
+        assert_ne!(
+            context_a, context_b,
+            "the fixture is only discriminating if the two contexts differ"
+        );
+
+        // SECOND pause: splice a new head onto the already-stashed continuation.
+        // This reaches the "existing" branch of prepend_to_pending_continuation.
+        let second_head = make_ability(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        });
+        crate::game::effects::prepend_to_pending_continuation(&mut state, second_head);
+
+        // The merged continuation must retain context A (the earliest pause),
+        // NOT re-capture context B from the live state at splice time.
+        let merged = state
+            .pending_continuation
+            .as_ref()
+            .expect("merge must leave a continuation stashed");
+        assert_eq!(
+            merged.trigger_context,
+            Some(context_a),
+            "CR 608.2: the spliced continuation must carry the FIRST pause's \
+             trigger context (A), not re-latch to the live context (B) at splice \
+             time — reverting the carry-over line to capture(state) makes this A→B"
+        );
+    }
+
     /// CR 107.3a: Accepting the optional, then submitting amount=0, is a
     /// legal payment of zero mana (the controller chooses X for the {X} cost,
     /// and 0 is legal since the trigger sets no positive lower bound). The `IfYouDo` Draw fires — the effect WAS

@@ -703,10 +703,20 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 chain,
                 parent_kind,
                 search_attach_host,
+                trigger_context,
             } = cont;
             state.search_continuation_attach_host = search_attach_host;
             let source_id = chain.source_id;
+            // CR 608.2: replay the resolving ability's snapshotted trigger
+            // context so TargetFilter::TriggeringPlayer (and its siblings)
+            // resolve against the original trigger, not whatever is live now.
+            let trigger_snapshot = trigger_context
+                .as_ref()
+                .map(|ctx| super::triggers::push_resolving_trigger_context(state, ctx));
             let _ = resolve_ability_chain(state, &chain, events, 1);
+            if let Some(snapshot) = trigger_snapshot {
+                super::triggers::restore_trigger_event_context(state, snapshot);
+            }
             state.search_continuation_attach_host = None;
             if let Some(kind) = parent_kind {
                 events.push(GameEvent::EffectResolved {
@@ -1218,7 +1228,7 @@ pub(crate) fn append_to_pending_continuation(
                 .as_mut();
         }
     } else {
-        state.pending_continuation = Some(PendingContinuation::new(tail));
+        state.pending_continuation = Some(PendingContinuation::new(tail, state));
     }
 }
 
@@ -1228,15 +1238,20 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
             chain,
             parent_kind,
             search_attach_host,
+            trigger_context,
         } = existing;
         super::ability_utils::append_to_sub_chain(&mut head, *chain);
         state.pending_continuation = Some(PendingContinuation {
             chain: Box::new(head),
             parent_kind,
             search_attach_host,
+            // CR 608.2: carry over the existing stash's trigger context — an
+            // ability's resolution is anchored to its earliest pause, not
+            // re-latched to whatever is live at splice time.
+            trigger_context,
         });
     } else {
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(head)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(head), state));
     }
 }
 
@@ -1612,8 +1627,10 @@ fn try_begin_deferred_else_branch_target_selection(
             })
             .collect();
         if !candidates.is_empty() {
-            state.pending_continuation =
-                Some(PendingContinuation::new(Box::new(else_resolved.clone())));
+            state.pending_continuation = Some(PendingContinuation::new(
+                Box::new(else_resolved.clone()),
+                state,
+            ));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: else_resolved.controller,
                 cards: candidates,
@@ -7032,7 +7049,7 @@ fn resolve_chain_body(
                                 let mut cont = ability.clone();
                                 cont.targets.clear();
                                 state.pending_continuation =
-                                    Some(PendingContinuation::new(Box::new(cont)));
+                                    Some(PendingContinuation::new(Box::new(cont), state));
                                 state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                                     player: chosen,
                                     cards: candidates,
@@ -8022,7 +8039,7 @@ fn resolve_chain_body(
                             "pending_continuation overwritten before consumption — else_ability chain will be lost"
                         );
                         state.pending_continuation =
-                            Some(PendingContinuation::new(Box::new(resolved)));
+                            Some(PendingContinuation::new(Box::new(resolved), state));
                     } else {
                         resolve_ability_chain(state, &resolved, events, depth + 1)?;
                     }
@@ -8054,7 +8071,7 @@ fn resolve_chain_body(
                             "pending_continuation overwritten before consumption — else_ability chain will be lost"
                         );
                         state.pending_continuation =
-                            Some(PendingContinuation::new(Box::new(resolved)));
+                            Some(PendingContinuation::new(Box::new(resolved), state));
                     } else {
                         resolve_ability_chain(state, &resolved, events, depth + 1)?;
                     }
@@ -8114,7 +8131,7 @@ fn resolve_chain_body(
                                 "pending_continuation overwritten before consumption — instead-tail chain will be lost"
                             );
                             state.pending_continuation =
-                                Some(PendingContinuation::new(Box::new(resolved)));
+                                Some(PendingContinuation::new(Box::new(resolved), state));
                         } else {
                             resolve_ability_chain(state, &resolved, events, depth + 1)?;
                         }
@@ -16040,8 +16057,8 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
         };
-        state.pending_continuation =
-            Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
+        state.pending_continuation = Some(PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::Plotted { turn_plotted: 0 },
                     target: TargetFilter::TrackedSet {
@@ -16052,7 +16069,9 @@ mod tests {
                 vec![],
                 source,
                 PlayerId(0),
-            ))));
+            )),
+            &state,
+        ));
         let mut events = Vec::new();
 
         let _outcome = crate::game::engine_resolution_choices::handle_resolution_choice(
