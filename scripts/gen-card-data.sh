@@ -163,8 +163,17 @@ cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
 echo "Generating token preset catalog from MTGJSON set files..."
 TOKENS_FILE="crates/engine/data/known-tokens.toml"
 # Temp beside the target so the replace below is an atomic same-filesystem
-# rename (Tilt's card-data resource may run this script concurrently).
-TOKENS_TMP="$(mktemp "${TOKENS_FILE}.XXXXXX")"
+# rename (Tilt's card-data resource may run this script concurrently). The
+# `.tmp.` infix is load-bearing: crates/engine/data/ is watched as part of the
+# Tiltfile's ENGINE_SRC, and only names matching its TMP_IGNORE (`**/*.tmp.*`)
+# are exempt from retriggering. Without it, creating this file re-triggers the
+# very resource that created it — an unbreakable card-data rebuild loop that
+# also drags every other ENGINE_SRC watcher (clippy, test-engine, wasm) with it.
+TOKENS_TMP="$(mktemp "${TOKENS_FILE}.tmp.XXXXXX")"
+# Register before tokens-gen runs: a failure or interrupt between here and the
+# promote below would otherwise strand the staging file in the watched data dir,
+# where nothing else would ever collect it.
+track_tmp "$TOKENS_TMP"
 "$TOOL_BIN/tokens-gen" --input "$DATA_DIR/mtgjson/sets" --output "$TOKENS_TMP"
 # tokens-gen output is deterministic, so only overwrite when content actually
 # changed — an unconditional copy bumps the file's mtime and forces a full
@@ -172,7 +181,9 @@ TOKENS_TMP="$(mktemp "${TOKENS_FILE}.XXXXXX")"
 if cmp -s "$TOKENS_TMP" "$TOKENS_FILE"; then
   rm -f "$TOKENS_TMP"
 else
-  mv -f "$TOKENS_TMP" "$TOKENS_FILE"
+  # promote_tmp, not a bare `mv`: it deregisters the path so the EXIT trap
+  # cannot delete the file it was just promoted onto.
+  promote_tmp "$TOKENS_TMP" "$TOKENS_FILE"
   # The catalog changed, so the generator bins built above embed the stale
   # copy. Rebuild them (same shape) to re-bake the new catalog — this is the
   # one case where an engine recompile is genuinely required.

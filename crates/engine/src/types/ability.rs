@@ -13249,6 +13249,16 @@ impl TargetFilter {
             }
             TargetFilter::Not { filter } => filter.extract_in_zone(),
             TargetFilter::ExiledBySource => Some(crate::types::zones::Zone::Exile),
+            // CR 109.2: a stack-spell/stack-ability filter denotes an object on
+            // the stack by construction — mirrors the `ExiledBySource` arm above
+            // so a continuous effect's affected-filter scan
+            // (`layers::apply_continuous_effect_filtered`) scans `Zone::Stack`
+            // instead of defaulting to the battlefield when the filter is (or
+            // contains, via `And`) a stack-spell reference (Secret Arcade's
+            // "permanent spells you control").
+            TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => {
+                Some(crate::types::zones::Zone::Stack)
+            }
             _ => None,
         }
     }
@@ -17814,6 +17824,15 @@ pub enum ReplacementCondition {
     /// instead" — Freyalise's Winds, Edge of Malacol) so it does NOT apply to
     /// effect-untaps ("untap target creature") at other times.
     DuringUntapStep,
+    /// CR 504.1 + CR 614.1a: Replacement applies only during the draw step.
+    /// Used by Island Sanctuary ("If you would draw a card during your draw
+    /// step..."). `active_player_req` scopes whose draw step: `Some(You)` gates
+    /// on the source controller's turn (CR 504.1 turn-based draw), `Some(Opponent)`
+    /// on an opponent's draw step, `None` on any draw step.
+    DuringDrawStep {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_player_req: Option<ControllerRef>,
+    },
     /// CR 611.2b: "for as long as you control [source]" continuous-effect
     /// duration, encoded as a replacement applicability gate. The replacement
     /// applies only while `source` is on the battlefield AND still controlled by
@@ -21228,6 +21247,40 @@ mod tests {
             serde_json::to_string(&filter).unwrap(),
             r#"{"type":"StackAbility","controller":"You"}"#
         );
+    }
+
+    // CR 109.2: a stack-spell/stack-ability filter denotes an object on the
+    // stack by construction — mirrors the `ExiledBySource => Exile` arm so a
+    // continuous effect's affected-filter scan
+    // (`layers::apply_continuous_effect_filtered`) knows to scan `Zone::Stack`
+    // for a filter built by `oracle_target::scope_target_spell_phrase` (Secret
+    // Arcade's "permanent spells you control").
+    #[test]
+    fn extract_in_zone_reports_stack_for_stack_spell_and_stack_ability() {
+        assert_eq!(
+            TargetFilter::StackSpell.extract_in_zone(),
+            Some(Zone::Stack)
+        );
+        assert_eq!(
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: None,
+            }
+            .extract_in_zone(),
+            Some(Zone::Stack)
+        );
+        // Composed inside an `And` — the shape `stack_spell_filter` actually
+        // produces for "permanent spells you control": `And{[StackSpell,
+        // Typed{Permanent, controller: You}]}`. The recursive `And` arm must
+        // still surface `Stack`.
+        let compound = TargetFilter::And {
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+            ],
+        };
+        assert_eq!(compound.extract_in_zone(), Some(Zone::Stack));
     }
 
     #[test]

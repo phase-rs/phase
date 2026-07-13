@@ -4554,6 +4554,69 @@ fn apply_continuous_effect_to(
     );
 }
 
+/// CR 611.3a + CR 611.3b: computes the set of zones `apply_continuous_effect_filtered`
+/// must scan for `filter`'s affected population. A bare filter (or a filter
+/// with a single explicit zone marker) yields exactly one zone, identical to
+/// the pre-existing single-zone behavior. A compound filter distributes the
+/// CR 611.3b battlefield-implicit default across every `Or` branch
+/// independently, however deeply that `Or` is nested under other combinators
+/// — e.g. `And{[Or{[a, b]}, c]}`, the shape `oracle_static::shared::add_property`
+/// produces when a compound "you control" subject picks up an additional
+/// qualifier ("... with a mana ability") — so a disjunct with no explicit
+/// zone marker of its own is never silently dropped in favor of a sibling
+/// disjunct's explicit one. Falls back to `[Zone::Battlefield]` when the
+/// whole tree carries no explicit zone marker anywhere.
+fn continuous_effect_scan_zones(filter: &TargetFilter) -> Vec<Zone> {
+    let mut zones = Vec::new();
+    collect_scan_zones(filter, &mut zones);
+    if zones.is_empty() {
+        zones.push(Zone::Battlefield);
+    }
+    zones
+}
+
+/// Recursion body for [`continuous_effect_scan_zones`]. `Or` applies the
+/// battlefield default to each branch independently (a branch that resolves
+/// to nothing explicit is still a real disjunct, not an absence of one).
+/// `And`/`Not` propagate their child/children's zones into the same
+/// accumulator unmodified — an unzoned `And` sibling narrows type, color, etc.,
+/// not zone, so it must not erase a zone an already-scoped sibling requires.
+/// A leaf contributes its own explicit zone, if any, mirroring
+/// [`TargetFilter::extract_in_zone`] (which this function supersedes for
+/// affected-filter scanning specifically; `extract_in_zone` keeps its
+/// existing single-zone contract for its other callers).
+fn collect_scan_zones(filter: &TargetFilter, out: &mut Vec<Zone>) {
+    match filter {
+        TargetFilter::Or { filters } => {
+            for f in filters {
+                let mut branch_zones = Vec::new();
+                collect_scan_zones(f, &mut branch_zones);
+                if branch_zones.is_empty() {
+                    branch_zones.push(Zone::Battlefield);
+                }
+                for zone in branch_zones {
+                    if !out.contains(&zone) {
+                        out.push(zone);
+                    }
+                }
+            }
+        }
+        TargetFilter::And { filters } => {
+            for f in filters {
+                collect_scan_zones(f, out);
+            }
+        }
+        TargetFilter::Not { filter } => collect_scan_zones(filter, out),
+        other => {
+            if let Some(zone) = other.extract_in_zone() {
+                if !out.contains(&zone) {
+                    out.push(zone);
+                }
+            }
+        }
+    }
+}
+
 fn apply_continuous_effect_filtered(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
@@ -4568,21 +4631,37 @@ fn apply_continuous_effect_filtered(
         return;
     }
 
-    let scan_zone = effect
-        .affected_filter
-        .extract_in_zone()
-        .unwrap_or(Zone::Battlefield);
-    let scan_ids = zone_cache.ids_for(state, scan_zone);
+    // CR 611.3a: a compound affected filter may combine disjuncts that imply
+    // different zones — Secret Arcade's "nonland permanents you control and
+    // permanent spells you control" unions a battlefield-implicit disjunct
+    // with a stack-scoped one — and an `Or` can itself be nested under an
+    // `And` (the static-subject grammar's own qualifier-wrapping helper,
+    // `add_property`, produces exactly that shape for e.g. "`<compound
+    // subject>` with a mana ability"). `continuous_effect_scan_zones` walks
+    // the whole tree so every disjunct's zone defaults independently,
+    // however deeply it's nested, rather than a single `extract_in_zone()`
+    // call stopping at the first explicit zone marker found anywhere and
+    // silently dropping a sibling disjunct's implicit-battlefield
+    // population. For a filter with no `Or` anywhere this produces exactly
+    // one zone, identical to the previous single-zone behavior.
+    let scan_zones = continuous_effect_scan_zones(&effect.affected_filter);
+
     let ctx = FilterContext::from_source(state, effect.source_id);
-    let affected_ids: Vec<ObjectId> = scan_ids
-        .iter()
-        // Incremental fast path: re-apply only to the freshly-entered objects.
-        // The rest of the battlefield was not reset and keeps its prior derived
-        // values, so re-applying to it would double-apply.
-        .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
-        .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
-        .filter(|&&id| {
-            effect.condition.as_ref().is_none_or(|condition| {
+    let mut affected_ids: Vec<ObjectId> = Vec::new();
+    for &zone in &scan_zones {
+        let zone_ids = zone_cache.ids_for(state, zone);
+        for &id in zone_ids {
+            // Incremental fast path: re-apply only to the freshly-entered
+            // objects. The rest of the battlefield was not reset and keeps
+            // its prior derived values, so re-applying to it would
+            // double-apply.
+            if !restrict_to.is_none_or(|ids| ids.contains(&id)) {
+                continue;
+            }
+            if !matches_target_filter(state, id, &effect.affected_filter, &ctx) {
+                continue;
+            }
+            let condition_ok = effect.condition.as_ref().is_none_or(|condition| {
                 evaluate_condition_with_recipient(
                     state,
                     condition,
@@ -4590,10 +4669,12 @@ fn apply_continuous_effect_filtered(
                     effect.source_id,
                     id,
                 )
-            })
-        })
-        .copied()
-        .collect();
+            });
+            if condition_ok {
+                affected_ids.push(id);
+            }
+        }
+    }
 
     record_attribution(state, effect, &affected_ids);
 
@@ -5768,6 +5849,179 @@ mod tests {
         assert!(
             !has_green_tap_mana(&sc.state, p1_treasure),
             "an opponent's token must NOT gain the controller-scoped grant"
+        );
+    }
+
+    // Issue #5740 (review follow-up): `continuous_effect_scan_zones` must
+    // recurse through an `Or` nested under an `And` — the shape
+    // `oracle_static::shared::add_property` produces when a compound "you
+    // control" subject picks up an additional qualifier (e.g. "... with a
+    // mana ability"). A flat `extract_in_zone()` call over the whole tree
+    // would stop at the first explicit zone marker found anywhere
+    // (`StackSpell`, here) and drop the sibling battlefield-implicit
+    // disjunct.
+    #[test]
+    fn continuous_effect_scan_zones_recurses_through_or_nested_under_and() {
+        let nested = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                        TargetFilter::And {
+                            filters: vec![
+                                TargetFilter::StackSpell,
+                                TargetFilter::Typed(
+                                    TypedFilter::permanent().controller(ControllerRef::You),
+                                ),
+                            ],
+                        },
+                    ],
+                },
+                TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::HasManaAbility]),
+                ),
+            ],
+        };
+        let zones = continuous_effect_scan_zones(&nested);
+        assert!(
+            zones.contains(&Zone::Battlefield),
+            "the battlefield-implicit disjunct must not be dropped: {zones:?}"
+        );
+        assert!(
+            zones.contains(&Zone::Stack),
+            "the stack-scoped disjunct must not be dropped: {zones:?}"
+        );
+        assert_eq!(
+            zones.len(),
+            2,
+            "expected exactly the two distinct zones: {zones:?}"
+        );
+    }
+
+    // Non-`Or` filters (the overwhelming majority of existing static
+    // abilities) must still resolve to exactly the single zone
+    // `extract_in_zone` would have produced — no behavior change for the
+    // common case.
+    #[test]
+    fn continuous_effect_scan_zones_matches_extract_in_zone_for_non_or_filters() {
+        let no_zone = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        assert_eq!(
+            continuous_effect_scan_zones(&no_zone),
+            vec![Zone::Battlefield]
+        );
+
+        let explicit_zone =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }]));
+        assert_eq!(
+            continuous_effect_scan_zones(&explicit_zone),
+            vec![Zone::Graveyard]
+        );
+
+        let flat_stack_and = TargetFilter::And {
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+            ],
+        };
+        assert_eq!(
+            continuous_effect_scan_zones(&flat_stack_and),
+            vec![Zone::Stack]
+        );
+    }
+
+    /// CR 109.2 + CR 611.3a + issue #5740: Secret Arcade's compound-subject
+    /// additive-type static spans two zones simultaneously — "Nonland
+    /// permanents you control and permanent spells you control are
+    /// enchantments in addition to their other types." The parsed `affected`
+    /// filter is an `Or` of a battlefield-implicit conjunct (nonland
+    /// permanents you control) and a stack-scoped conjunct (permanent spells
+    /// you control, `And{[StackSpell, Typed]}`).
+    ///
+    /// REVERT-PROBE: reverting `apply_continuous_effect_filtered`'s
+    /// per-disjunct scan-zone computation back to a single
+    /// `effect.affected_filter.extract_in_zone().unwrap_or(Zone::Battlefield)`
+    /// call over the whole `Or` makes this fail — `extract_in_zone`'s
+    /// find-first-match semantics resolve the whole compound to a *single*
+    /// zone (whichever disjunct's marker it happens to find first), so only
+    /// one of the two assertions below would hold, never both.
+    #[test]
+    fn secret_arcade_additive_type_static_applies_across_battlefield_and_stack() {
+        let mut sc = GameScenario::new();
+        let source = sc
+            .add_creature(P0, "Secret Arcade", 0, 0)
+            .as_enchantment()
+            .from_oracle_text(
+                "Nonland permanents you control and permanent spells you control are enchantments in addition to their other types.",
+            )
+            .id();
+
+        // The battlefield conjunct: a nonland permanent under Secret Arcade's
+        // controller.
+        let battlefield_permanent = make_creature(&mut sc.state, "Bear", 2, 2, P0);
+
+        // The stack conjunct: a permanent (creature) spell on the stack under
+        // the same controller. Constructed directly — mirrors the established
+        // bare-stack-spell pattern in `casting_costs.rs` — since putting a
+        // spell on the stack without resolving it isn't exposed by the
+        // scenario builder's cast pipeline.
+        let stack_card_id = CardId(sc.state.next_object_id);
+        let stack_spell = create_object(
+            &mut sc.state,
+            stack_card_id,
+            P0,
+            "Stack Creature".to_string(),
+            Zone::Stack,
+        );
+        sc.state
+            .objects
+            .get_mut(&stack_spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        sc.state
+            .stack
+            .push_back(crate::types::game_state::StackEntry {
+                id: stack_spell,
+                source_id: stack_spell,
+                controller: P0,
+                kind: crate::types::game_state::StackEntryKind::Spell {
+                    card_id: stack_card_id,
+                    ability: None,
+                    casting_variant: crate::types::game_state::CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+
+        evaluate_layers(&mut sc.state);
+
+        assert!(
+            sc.state.objects[&battlefield_permanent]
+                .card_types
+                .core_types
+                .contains(&CoreType::Enchantment),
+            "the battlefield nonland permanent must become an Enchantment: {:?}",
+            sc.state.objects[&battlefield_permanent].card_types
+        );
+        assert!(
+            sc.state.objects[&stack_spell]
+                .card_types
+                .core_types
+                .contains(&CoreType::Enchantment),
+            "the permanent spell on the stack must become an Enchantment: {:?}",
+            sc.state.objects[&stack_spell].card_types
+        );
+        // Reach-guard: the source must still exist as an Enchantment itself
+        // (proves `from_oracle_text` actually attached Secret Arcade's real
+        // parsed static rather than silently no-oping).
+        assert!(
+            sc.state.objects[&source]
+                .card_types
+                .core_types
+                .contains(&CoreType::Enchantment),
+            "the source permanent itself must be an Enchantment"
         );
     }
 

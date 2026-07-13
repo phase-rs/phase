@@ -430,6 +430,29 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         let mut def = ReplacementDefinition::new(ReplacementEvent::Draw)
             .draw_scope(draw_scope)
             .description(text.to_string());
+        // CR 614.6 + CR 121.6 + CR 614.1a: "you may skip that draw [instead]"
+        // (Obstinate Familiar) and "instead you may skip that draw" (Island
+        // Sanctuary) are OPTIONAL draw-suppression replacements. Must precede
+        // the mandatory `body_is_draw_skip` arm (Living Conundrum) and the
+        // generic `you may instead {effect}` execute path (Abundance).
+        if let Some(effect) = effect_text.as_deref() {
+            let effect_lower = effect.to_lowercase();
+            if let Some(remainder) = strip_optional_draw_skip(&effect_lower, effect) {
+                def = def.mode(ReplacementMode::Optional { decline: None });
+                def = def.quantity_modification(QuantityModification::Prevent);
+                def = attach_optional_draw_skip_rider(def, remainder)?;
+                apply_draw_player_scope(&lower, &mut def);
+                // CR 504.1 + CR 614.1a + CR 614.11: draw-step timing and "while …"
+                // quantity gates are independent antecedent dimensions — compose
+                // both rather than mutually excluding them.
+                match compose_draw_replacement_conditions(&lower, "would draw a card") {
+                    Ok(Some(condition)) => def = def.condition(condition),
+                    Ok(None) => {}
+                    Err(()) => return None,
+                }
+                return Some(def);
+            }
+        }
         // CR 614.6 + CR 121.6: "skip that draw instead" fully suppresses the
         // draw (Living Conundrum: "If you would draw a card while your library
         // has no cards in it, skip that draw instead"). The body lowers to a
@@ -6492,6 +6515,45 @@ fn body_is_draw_skip(lower_body: &str) -> bool {
         .is_ok()
 }
 
+/// CR 614.6 + CR 121.6 + CR 614.1a: Strip a leading optional draw-suppression
+/// modal — `"[instead] you may skip that draw [instead]"` — and return the
+/// remainder for an optional `"if you do, …"` rider (Island Sanctuary). Returns
+/// `None` when the body is not this shape. Distinct from mandatory
+/// `body_is_draw_skip` (Living Conundrum), which has no `"may"` modal.
+fn strip_optional_draw_skip<'a>(lower_body: &str, original_body: &'a str) -> Option<&'a str> {
+    let (_, rest) = nom_on_lower(original_body, lower_body, |input| {
+        value(
+            (),
+            (
+                opt(tag::<_, _, OracleError<'_>>("instead ")),
+                tag("you may "),
+                alt((tag("skips "), tag("skip "))),
+                alt((tag("that draw"), tag("the draw"))),
+                opt(tag(" instead")),
+            ),
+        )
+        .parse(input)
+    })?;
+    Some(rest.trim_start())
+}
+
+/// CR 603.12 + issue #5655: Attach an optional `"if you do, …"` rider to an
+/// optional draw-skip replacement. Returns `None` when non-empty rider text is
+/// present but cannot be lowered to a typed effect — fail closed rather than
+/// report the card as supported with a silently discarded rider (Island
+/// Sanctuary's conditional attack restriction class).
+fn attach_optional_draw_skip_rider(
+    def: ReplacementDefinition,
+    remainder: &str,
+) -> Option<ReplacementDefinition> {
+    let trimmed = remainder.trim_start_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        return Some(def);
+    }
+    let rider = parse_when_you_do_reflexive(remainder)?;
+    Some(def.execute(rider))
+}
+
 /// CR 614.1a: Assign the replacement's player scope from the antecedent subject
 /// ("an opponent" → Opponent, "a player" / "its controller" → AnyPlayer,
 /// "you" → controller-only/None). Shared by the `Prevent` short-circuit and the
@@ -6966,6 +7028,35 @@ fn parse_scry_replacement_count(input: &str) -> nom::IResult<&str, QuantityExpr,
     .parse(input)
 }
 
+/// CR 504.1 + CR 614.1a + CR 614.11: Compose independent draw-replacement
+/// gates from the antecedent — "during [your/their] draw step" timing and
+/// "while …" quantity guards are separate dimensions and must not be mutually
+/// exclusive.
+fn compose_draw_replacement_conditions(
+    lower: &str,
+    verb_anchor: &str,
+) -> Result<Option<ReplacementCondition>, ()> {
+    let mut conditions = Vec::new();
+
+    if let Some(active_player_req) = parse_during_draw_step_antecedent(lower) {
+        conditions.push(ReplacementCondition::DuringDrawStep {
+            active_player_req: Some(active_player_req),
+        });
+    }
+
+    match parse_while_antecedent(lower, verb_anchor) {
+        WhileAntecedent::Parsed(condition) => conditions.push(condition),
+        WhileAntecedent::Unparsed => return Err(()),
+        WhileAntecedent::Absent => {}
+    }
+
+    Ok(match conditions.len() {
+        0 => None,
+        1 => Some(conditions.into_iter().next().expect("len checked")),
+        _ => Some(ReplacementCondition::And { conditions }),
+    })
+}
+
 /// Outcome of inspecting the `"...would <verb> while <condition>,"` antecedent
 /// of a replacement line. The three states are deliberately distinct: a guard
 /// that is *present but unparseable* must never be silently collapsed into
@@ -7145,6 +7236,32 @@ pub(super) fn has_except_first_draw_in_draw_step_clause(lower: &str) -> bool {
             .map_or("", |i| remaining[i + 1..].trim_start());
     }
     false
+}
+
+/// CR 504.1 + CR 614.1a: Parse "...during [your/their] draw step..." in a
+/// draw-replacement antecedent (Island Sanctuary class). Scans word-by-word so
+/// the phrase can appear between the verb anchor and the consequent comma.
+fn parse_during_draw_step_antecedent(lower: &str) -> Option<ControllerRef> {
+    fn parse_clause(input: &str) -> nom::IResult<&str, ControllerRef, OracleError<'_>> {
+        let (input, _) = tag("during ").parse(input)?;
+        let (input, scope) = alt((
+            value(ControllerRef::You, tag("your ")),
+            value(ControllerRef::Opponent, tag("their ")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag("draw step").parse(input)?;
+        Ok((input, scope))
+    }
+    let mut remaining = lower;
+    while !remaining.is_empty() {
+        if let Ok((_, scope)) = parse_clause(remaining) {
+            return Some(scope);
+        }
+        remaining = remaining
+            .find(' ')
+            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    None
 }
 
 /// CR 707.10 + CR 614.1a: Parse a "copy an additional time" replacement —
@@ -10894,6 +11011,150 @@ mod tests {
             Some(QuantityModification::Prevent)
         );
         assert_eq!(you_def.valid_player, None);
+    }
+
+    /// CR 614.1a + CR 614.6 + CR 121.6 + issue #5655: Obstinate Familiar — "you
+    /// may skip that draw instead" must compose Optional mode with structured
+    /// `Prevent`, NOT fall through to `Effect::Unimplemented`.
+    #[test]
+    fn optional_draw_skip_lowers_to_optional_prevent_not_unimplemented() {
+        let def = parse_replacement_line(
+            "If you would draw a card, you may skip that draw instead.",
+            "Obstinate Familiar",
+        )
+        .expect("Obstinate Familiar draw replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert!(
+            matches!(def.mode, ReplacementMode::Optional { decline: None }),
+            "optional skip must lift to Optional {{ decline: None }}; got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent),
+            "optional skip accept branch must carry Prevent"
+        );
+        assert!(
+            def.execute.is_none(),
+            "pure optional skip must not carry an execute effect"
+        );
+    }
+
+    /// CR 504.1 + CR 614.1a + CR 614.11: draw-step timing and "while …" gates
+    /// compose via `ReplacementCondition::And` rather than mutually excluding.
+    #[test]
+    fn optional_draw_skip_composes_during_draw_step_and_while_gates() {
+        let def = parse_replacement_line(
+            "If you would draw a card during your draw step while you have 5 or less life, \
+             instead you may skip that draw.",
+            "Synthetic Draw Gate",
+        )
+        .expect("combined draw-step + while gate should parse");
+        let condition = def
+            .condition
+            .as_ref()
+            .expect("during draw step and while gates must compose with And");
+        match condition {
+            ReplacementCondition::And { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                assert!(matches!(
+                    conditions[0],
+                    ReplacementCondition::DuringDrawStep {
+                        active_player_req: Some(ControllerRef::You),
+                    }
+                ));
+                match &conditions[1] {
+                    ReplacementCondition::OnlyIfQuantity {
+                        lhs,
+                        comparator,
+                        rhs,
+                        active_player_req,
+                    } => {
+                        assert_eq!(
+                            *lhs,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::LifeTotal {
+                                    player: crate::types::ability::PlayerScope::Controller,
+                                },
+                            }
+                        );
+                        assert_eq!(*comparator, Comparator::LE);
+                        assert_eq!(*rhs, QuantityExpr::Fixed { value: 5 });
+                        assert_eq!(*active_player_req, None);
+                    }
+                    other => panic!("expected OnlyIfQuantity, got {other:?}"),
+                }
+            }
+            other => panic!("expected And, got {other:?}"),
+        }
+    }
+
+    /// CR 504.1 + CR 614.1a: optional draw-skip during the draw step without a
+    /// reflexive rider parses cleanly (Island Sanctuary's base clause shape).
+    #[test]
+    fn optional_draw_skip_during_draw_step_without_rider_parses() {
+        let def = parse_replacement_line(
+            "If you would draw a card during your draw step, instead you may skip that draw.",
+            "Synthetic Draw Skip",
+        )
+        .expect("optional draw skip during draw step should parse");
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::DuringDrawStep {
+                active_player_req: Some(ControllerRef::You),
+            }),
+            "during your draw step antecedent must gate on controller's draw step"
+        );
+        assert!(
+            def.execute.is_none(),
+            "no reflexive rider must not attach an execute effect"
+        );
+    }
+
+    /// CR 614.1a + CR 614.6 + CR 121.6 + issue #5655: Island Sanctuary's full
+    /// Oracle text carries an `"if you do, …"` attack-restriction rider that is
+    /// not yet implemented — fail closed rather than silently discarding it.
+    #[test]
+    fn island_sanctuary_unimplemented_rider_fails_closed() {
+        assert!(
+            parse_replacement_line(
+                "If you would draw a card during your draw step, instead you may skip that draw. \
+                 If you do, until your next turn, you can't be attacked except by creatures with \
+                 flying and/or islandwalk.",
+                "Island Sanctuary",
+            )
+            .is_none(),
+            "unimplemented rider must fail closed, not report partial support"
+        );
+    }
+
+    /// CR 614.6 + CR 121.6: mandatory "skip that draw" must NOT be misclassified
+    /// as optional when there is no "may" modal (Living Conundrum class).
+    #[test]
+    fn mandatory_draw_skip_stays_non_optional() {
+        let def = parse_replacement_line(
+            "If you would draw a card while your library has no cards in it, skip that draw instead.",
+            "Living Conundrum",
+        )
+        .expect("Living Conundrum draw replacement should parse");
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        assert!(
+            matches!(def.mode, ReplacementMode::Mandatory),
+            "mandatory skip must not lift to Optional; got {:?}",
+            def.mode
+        );
     }
 
     #[test]

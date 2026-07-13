@@ -41,6 +41,14 @@ const KICKOFF: &str = "You gain 1 life.";
 const TARGETED_KICKOFF: &str = "Target player gains 1 life.";
 const SELF_LIFE_ENGINE: &str = "Whenever you gain life, you gain 1 life.";
 const LIFE_LOSS_IMMUNE: &str = "Your life total can't change.";
+/// Symmetric self-sustaining life-loss engine: each loss event re-triggers a loss for EVERYONE.
+/// The `Effect::LoseLife` AST is IDENTICAL to `DRAIN_CLERIC`'s (both `{ amount: Fixed(1), target }`);
+/// the each-player/each-opponent split rides the ability-level `player_scope` (`All` vs `Opponent`),
+/// and the TRIGGER differs — "a player loses life" here vs `DRAIN_CLERIC`'s "you gain life".
+const PLAGUE_ENGINE: &str = "Whenever a player loses life, each player loses 1 life.";
+/// Symmetric kick-off. NOT "Target player loses 1 life." — a targeted kickoff desynchronises the
+/// fallers' ABSOLUTE lives and trips `fallers_lives_pairwise_equal`, so no offer is ever raised.
+const LOSE_ALL_KICKOFF: &str = "Each player loses 1 life.";
 
 // Verbatim Oracle text (data/card-data.json) for the PR-7 gate-relax witness — the
 // REAL escalating TARGETED drain that only detects once item-3 (forced-unique) and
@@ -195,6 +203,42 @@ fn setup_3p_subset_lethal(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
     scenario.add_creature_from_oracle(P2, "Test Bulwark", 2, 2, LIFE_LOSS_IMMUNE);
     let kickoff = scenario
         .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = mode;
+    (runner, kickoff)
+}
+
+/// 3-player BYSTANDER-WINNER loop. P0's `PLAGUE_ENGINE` turns any life loss into a symmetric
+/// loss for everyone, so a single symmetric kick-off self-sustains. Per-cycle: P0 = -1, P1 = -1
+/// (EQUAL — required by `live_mandatory_loop_winner`'s CR 704.3 simultaneity floor: fallers die in
+/// ONE SBA event, so unequal lives are not a determinate single-winner shape), P2 = 0
+/// (life-loss-immune: CR 101.2 — a "can't" effect takes precedence over the trigger's life-loss
+/// instruction; cf. CR 119.8 for the same const elsewhere in this file). Living partition each
+/// cycle: fallers = {P0, P1}, nonfallers = {P2} ⇒ len == 1 ⇒ the engine NATURALLY latches
+/// `predicted_winner = Some(P2)` — a winner who controls no loop enabler and is not the proposer.
+/// No injection.
+///
+/// P1's land + Bolt are LOAD-BEARING: they make the loop OPTIONAL (`mandatory: false`). Without
+/// them the loop is mandatory and the engine auto-crowns `GameOver { winner: Some(P2) }` with no
+/// offer at all (measured).
+///
+/// All three lives start EQUAL and high: `fallers_lives_pairwise_equal` gates on the fallers'
+/// ABSOLUTE lives, not just their per-cycle deltas.
+fn setup_3p_bystander_winner(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 1000);
+    scenario.with_life(P1, 1000);
+    scenario.with_life(P2, 1000);
+    scenario.add_creature_from_oracle(P0, "Test Plague Engine", 2, 2, PLAGUE_ENGINE);
+    scenario.add_creature_from_oracle(P2, "Test Bulwark", 2, 2, LIFE_LOSS_IMMUNE);
+    // Optionality: P1 holds a real interactive answer ⇒ `mandatory: false` ⇒ the engine OFFERS
+    // instead of auto-crowning (CR 104.4b: a loop with an optional action is not a draw either).
+    scenario.add_basic_land(P1, ManaColor::Red);
+    scenario.add_bolt_to_hand(P1);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Symmetric Kickoff", false, LOSE_ALL_KICKOFF)
         .id();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
@@ -3256,4 +3300,156 @@ fn loop_shortcut_serializes_schema_under_data() {
     let schema_back: ShortcutDecisionSchema =
         serde_json::from_value(v["data"]["schema"].clone()).expect("deserialize schema");
     assert_eq!(&schema_back, schema, "the schema round-trips off the wire");
+}
+
+/// T-concede-winner — the `predicted_winner` conjunct of the `apply_confirmed_shortcut` liveness
+/// guard (`engine.rs:864-878`). The latched PREDICTED WINNER (not the proposer) concedes DURING the
+/// open CR 732.2b APNAP window. `GameAction::Concede` bypasses the `WaitingFor` dispatch, so the
+/// offer survives with a departed winner latched in `proposal.predicted_winner`. On the last living
+/// opponent's Accept, the guard must REFUSE to act on the stale proposal (CR 104.3a: the winner has
+/// left and lost; CR 104.2a: a departed player cannot be crowned; CR 800.4a: their objects are gone,
+/// so the sequence they were predicted to win is not the sequence on the board) and hand priority to
+/// a living seat — WITHOUT driving a single cycle.
+///
+/// # ⚠️ DO NOT "SIMPLIFY" THE LIFE ASSERTIONS. They are the only ones with teeth.
+///
+/// `waiting_for` is `Priority { P0 }` in BOTH arms of the revert-probe, and `GameOver` is reached in
+/// NEITHER (`Fixed(n)` materializes cycles; it does not crown). Therefore
+/// `assert!(!matches!(wf, GameOver{..}))` and "priority went to a living seat" PASS WITH THE GUARD
+/// DELETED — they are CR 800.4a post-remedy INVARIANTS (the remedy must leave a valid state), NOT
+/// discriminators. **The only assertion with teeth is the board: `life(P0)` / `life(P1)` unchanged.**
+/// Measured revert-probe: guard present ⇒ (998, 998, 1000); guard deleted ⇒ (995, 995, 1000).
+///
+/// # Why `Fixed(3)` and not `UntilLethal`
+///
+/// `apply_until_lethal_shortcut` re-derives the winner through `live_mandatory_loop_winner`, whose
+/// `!p.is_eliminated` living-filter ALREADY refuses to name a departed player — so on that path the
+/// conjunct is redundant defence-in-depth and any test would be vacuous.
+/// `materialize_fixed_shortcut` NEVER consults `predicted_winner` and COMMITS each driven cycle, so
+/// this conjunct is the ONLY thing between a departed winner and 3 committed loop cycles.
+///
+/// `Fixed(n)` is reachable via the public `GameAction` surface (UI, scripted client, server payload
+/// surface): `handle_declare_shortcut` moves `count` into the proposal with zero validation; the
+/// fail-closed firewall validates only `template` pins and is skipped entirely when `template` is
+/// `None`. It is NOT emitted by the AI's own candidate generator, which hardcodes `UntilLethal`.
+///
+/// # Why this test scripts `DeclareShortcut` directly instead of routing through the AI
+///
+/// This same board is ALSO a firing case for `phase_ai::policies::loop_shortcut::LoopShortcutPolicy`
+/// (proposer P0 is a faller; the winner P2 != proposer ⇒ the policy REJECTS `DeclareShortcut`). A
+/// future reader must not "fix" this test by routing it through the AI picker — the AI will now
+/// correctly refuse to declare, and the test would silently stop reaching the engine seam.
+///
+/// REVERT-PROBE: delete `|| proposal.predicted_winner.is_some_and(|winner| !is_alive(state, winner))`
+/// from `apply_confirmed_shortcut`. The proposer P0 is alive, so the guard no longer fires;
+/// `materialize_fixed_shortcut` drives and commits 3 cycles of the still-live plague engine. The
+/// `life(P1) == p1_before` assertion FAILS with left = 995, right = 998.
+#[test]
+fn predicted_winner_concede_mid_apnap_does_not_drive() {
+    let (mut runner, kickoff) = setup_3p_bystander_winner(LoopDetectionMode::Interactive);
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 600);
+
+    // ── REACH-GUARDS: the offer is ENGINE-LATCHED, not injected ────────────────────────────────
+    // This pair is what proves the fixture is real. If the engine ever stops naming a
+    // non-owner bystander as the winner, this test must FAIL LOUDLY, not silently degrade.
+    let WaitingFor::LoopShortcut {
+        proposer,
+        predicted_winner,
+        ..
+    } = wf
+    else {
+        panic!("the engine must OFFER on this board (optional loop), got {wf:?}");
+    };
+    assert_eq!(proposer, P0, "the priority holder proposes (CR 732.2a)");
+    assert_eq!(
+        predicted_winner,
+        Some(P2),
+        "the engine must latch the life-loss-immune BYSTANDER as winner — a player who controls \
+         no loop enabler and is not the proposer (CR 732.2a: the shortcut's ending point need not \
+         be the proposer)"
+    );
+    assert!(
+        life(&runner, P0) < 1000 && life(&runner, P1) < 1000,
+        "both fallers have bled"
+    );
+
+    // P0 declares `Fixed(3)` — the count whose apply path never re-consults `predicted_winner`.
+    // `template: None` skips `handle_declare_shortcut`'s pin firewall entirely.
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(3),
+            template: None,
+        })
+        .expect("P0 declares Fixed(3)");
+
+    // CR 732.2b: the window opens in turn order starting AFTER the proposer ⇒ P1, then P2.
+    let WaitingFor::RespondToShortcut {
+        player,
+        remaining_players,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "Declare must open the APNAP window, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P1, "window opens on P1");
+    assert_eq!(
+        remaining_players,
+        vec![P2],
+        "P2 (the latched winner) is queued behind P1"
+    );
+
+    // CR 104.3a: the latched PREDICTED WINNER concedes mid-window. The acting responder (P1) is
+    // alive, so the elimination self-heal leaves the stale offer standing.
+    runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("P2 (the predicted winner) concedes");
+    assert!(is_eliminated(&runner, P2), "P2 has left the game");
+    assert!(
+        !is_eliminated(&runner, P0) && !is_eliminated(&runner, P1),
+        "P0 and P1 remain — a living seat exists to receive priority (CR 800.4a)"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::RespondToShortcut { player, .. } if player == P1),
+        "the offer survives the conceder (acting P1 is alive), got {:?}",
+        runner.state().waiting_for
+    );
+
+    let p0_before = life(&runner, P0);
+    let p1_before = life(&runner, P1);
+
+    // The last living opponent accepts ⇒ CR 732.2c ⇒ `apply_confirmed_shortcut` with a STALE
+    // `predicted_winner` (P2, departed) and a LIVING proposer (P0).
+    accept_all_opponents(&mut runner);
+
+    // ── (b) THE DISCRIMINATOR — the board is untouched. DO NOT DELETE. ─────────────────────────
+    assert_eq!(
+        life(&runner, P1),
+        p1_before,
+        "guard must REFUSE to drive: P1's life must be untouched by the refused shortcut"
+    );
+    assert_eq!(
+        life(&runner, P0),
+        p0_before,
+        "…and so must the proposer's (Fixed(n) COMMITS every cycle it drives)"
+    );
+
+    // ── POST-REMEDY INVARIANTS (necessary, NOT discriminating — see the doc comment) ───────────
+    // (a) CR 104.2a: no crown, for anyone.
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
+        "a stale proposal whose predicted winner has left must not end the game, got {:?}",
+        runner.state().waiting_for
+    );
+    // (c) CR 800.4a: priority lands on a LIVING seat.
+    match runner.state().waiting_for {
+        WaitingFor::Priority { player } => assert!(
+            !is_eliminated(&runner, player),
+            "CR 800.4a: priority must never land on a departed seat"
+        ),
+        ref other => panic!("the liveness guard hands priority back (manual play), got {other:?}"),
+    }
 }

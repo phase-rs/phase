@@ -3465,6 +3465,7 @@ fn scan_replacement_condition(x: &ReplacementCondition) -> Axes {
         }
         ReplacementCondition::ClassLevelGE { level: _ } => Axes::NONE,
         ReplacementCondition::DuringUntapStep => Axes::NONE,
+        ReplacementCondition::DuringDrawStep { .. } => Axes::NONE,
         ReplacementCondition::ControllerControlsSource {
             source: _,
             controller: _,
