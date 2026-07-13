@@ -1028,3 +1028,115 @@ fn journey_to_nowhere_two_trigger_oracle_returns_exiled_creature() {
     assert!(!state.exile.contains(&creature_id));
     assert!(state.exile_links.is_empty());
 }
+
+/// CR 603.2 + CR 603.3: A creature returned to the battlefield by an
+/// "until this leaves" exile-return (Fiend Hunter's leaves-the-battlefield
+/// trigger) enters the battlefield, so its OWN enters-the-battlefield trigger
+/// must fire. Regression test for issue #3673: Wall of Omens, returned when
+/// Fiend Hunter dies, was not drawing a card because `check_exile_returns`
+/// appended the enter event without scanning it for triggers.
+#[test]
+fn exile_return_fires_returned_creatures_etb_trigger() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::game_state::StackEntryKind;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Fiend Hunter on P0's battlefield (source of the exile). We register the
+    // UntilSourceLeaves link directly rather than resolving Fiend Hunter's ETB
+    // exile — the return path, not the exile path, is under test here.
+    let hunter_id = scenario.add_creature(P0, "Fiend Hunter", 1, 3).id();
+
+    // Wall of Omens, owned by P0, with its real ETB draw trigger. It is placed
+    // on the battlefield so the parser installs the trigger, then relocated to
+    // exile below (a returned card comes back under its owner's control).
+    let wall_id = scenario
+        .add_creature(P0, "Wall of Omens", 0, 4)
+        .from_oracle_text("Defender\nWhen this creature enters, draw a card.")
+        .id();
+
+    // A card for the ETB draw to reveal.
+    scenario.with_library_top(P0, &["Plains"]);
+
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+
+    // Sanity-check the parser: Wall of Omens must have an ETB (ChangesZone to
+    // Battlefield) trigger. If this fails, the parser regressed, not the engine.
+    let wall = state.objects.get(&wall_id).expect("Wall on battlefield");
+    assert!(
+        wall.trigger_definitions.iter_all().any(|t| {
+            matches!(t.mode, crate::types::TriggerMode::ChangesZone)
+                && t.destination == Some(Zone::Battlefield)
+        }),
+        "Wall of Omens must have an ETB trigger for this regression to be meaningful"
+    );
+
+    // Move Wall to exile and register the return link, mirroring the state after
+    // Fiend Hunter's ETB has resolved.
+    let mut relocate_events: Vec<GameEvent> = Vec::new();
+    crate::game::zones::move_to_zone(state, wall_id, Zone::Exile, &mut relocate_events);
+    state.exile_links.push(ExileLink {
+        exiled_id: wall_id,
+        source_id: hunter_id,
+        kind: ExileLinkKind::UntilSourceLeaves {
+            return_zone: Zone::Battlefield,
+        },
+    });
+
+    let hand_before = state.players[0].hand.len();
+
+    // Fiend Hunter leaves the battlefield; the post-action pipeline returns Wall
+    // of Omens and must fire its ETB.
+    let mut events: Vec<GameEvent> = Vec::new();
+    crate::game::zones::move_to_zone(state, hunter_id, Zone::Graveyard, &mut events);
+    let default_wf = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    crate::game::engine_priority::run_post_action_pipeline(
+        state,
+        &mut events,
+        &default_wf,
+        false,
+        false,
+    )
+    .unwrap();
+
+    // Wall of Omens is back on the battlefield ...
+    assert!(
+        state.battlefield.contains(&wall_id),
+        "Wall of Omens should return to the battlefield"
+    );
+    assert!(
+        state.exile_links.is_empty(),
+        "return link should be consumed"
+    );
+
+    // ... and its ETB trigger is on the stack (the bug: it never triggered).
+    let etb_on_stack = state.stack.iter().any(|entry| {
+        matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == wall_id
+        )
+    });
+    assert!(
+        etb_on_stack,
+        "returned Wall of Omens' ETB trigger must be on the stack; stack={:?}",
+        state.stack,
+    );
+
+    // Resolving it draws a card for P0.
+    let mut resolve_events: Vec<GameEvent> = Vec::new();
+    crate::game::stack::resolve_top(state, &mut resolve_events);
+    assert_eq!(
+        state.players[0].hand.len(),
+        hand_before + 1,
+        "resolving the returned creature's ETB must draw a card"
+    );
+}
