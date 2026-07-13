@@ -823,6 +823,7 @@ mod issue_5263_chaos_warp;
 mod karplusan_yeti_fight_back;
 mod kav_landseeker_delayed_sacrifice;
 mod kellan_daring_traveler_mana_value_gate;
+mod ketramose_exile_trigger_gate_4952;
 mod kid_loki_counter_hexproof_static;
 mod klaw_play_from_exile_trigger_msh_wave1;
 mod koh_face_stealer_grants;

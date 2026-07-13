@@ -12046,6 +12046,15 @@ fn parse_your_zone_token(input: &str) -> nom::IResult<&str, Zone, OracleError<'_
     alt((
         value(Zone::Library, tag("your library")),
         value(Zone::Graveyard, tag("your graveyard")),
+        // CR 400.1: source zones expressed player-agnostically — bare plural
+        // "graveyards"/"libraries" (any player's), "a graveyard", or "the
+        // battlefield" (Ketramose, the New Dawn: "…from graveyards and/or the
+        // battlefield"). The batched trigger keys on the zone TYPE the exile
+        // came from, so these lower to the same `Zone` as the "your" forms.
+        value(Zone::Graveyard, tag("graveyards")),
+        value(Zone::Graveyard, tag("a graveyard")),
+        value(Zone::Library, tag("libraries")),
+        value(Zone::Battlefield, tag("the battlefield")),
     ))
     .parse(input)
 }
@@ -12086,9 +12095,21 @@ fn try_parse_one_or_more_put_into_exile_from(
         let Ok((after_zones, zones)) = parse_disjunctive_zone_set(rest) else {
             continue;
         };
-        // Trailing text (after the optional zone-set) may be empty or a
-        // constraint clause we don't handle here. Any non-empty trailing text
-        // means this isn't a clean match — bail so another parser can try.
+        // CR 603.1 + CR 603.2: an optional trailing " during your turn" is part of
+        // the trigger's event/condition — it restricts the batched
+        // trigger to the controller's own turn (Ketramose, the New Dawn — "…are
+        // put into exile from graveyards and/or the battlefield during your
+        // turn"). Peel it here rather than bailing, so the disjunctive origin
+        // (graveyards + battlefield) is captured AND the own-turn gate applies —
+        // otherwise the line falls through to a less-precise parser that drops
+        // both (firing on any turn and on exile from any zone, e.g. hand).
+        let (after_zones, only_during_your_turn) =
+            match value((), tag::<_, _, OracleError<'_>>(" during your turn")).parse(after_zones) {
+                Ok((tail, ())) => (tail, true),
+                Err(_) => (after_zones, false),
+            };
+        // Any other non-empty trailing text is an unhandled constraint clause —
+        // bail so another parser can try.
         if !after_zones.is_empty() {
             continue;
         }
@@ -12098,6 +12119,9 @@ fn try_parse_one_or_more_put_into_exile_from(
         def.origin_zones = zones;
         def.destination = Some(Zone::Exile);
         def.batched = true;
+        if only_during_your_turn {
+            def.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
+        }
         // CR 113.6 / CR 113.6b: this batched "cards are put into exile from
         // library/graveyard" ability is a permanent's triggered ability whose source
         // (e.g. Laelia the Blade Reforged, Rakshasa Vizier) is on the battlefield, and
