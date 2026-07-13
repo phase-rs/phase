@@ -50,7 +50,7 @@ use super::lower::{
     rewrite_two_target_counter_chain, target_choice_timing_for_clause,
     thread_chosen_damage_source_into_oneshot_effects,
 };
-use super::sequence::apply_clause_continuation;
+use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
 use super::{
     append_to_deepest_sub_ability, apply_player_scope_rewrites,
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
@@ -628,6 +628,33 @@ pub(super) enum AntecedentRole {
     /// old scans never reached. Same trap, mirrored, as narrowing `GenericEffectHead`
     /// to "has a static".
     DigLook,
+    /// A def whose effect TREE bears a `CopySpell` — the antecedent a "you may choose
+    /// new targets for the copy/copies" sentence binds back to (CR 707.10c). A clause
+    /// that resolves between the copy and the sentence may sit in between (Narset's
+    /// Reversal's bounce, Spinerock Tyrant's wither rider), which is why this is a
+    /// role and not `LastEmitted`.
+    ///
+    /// The FIRST TREE-RECURSIVE role. Every role above is a property of a def's own
+    /// top-level effect (`DamageDealer` already peeks one level, through a `TargetOnly`
+    /// head); this one is a property of the def's whole effect SUBTREE, because the
+    /// `CopySpell` it names can be nested arbitrarily deep — under a
+    /// `CreateDelayedTrigger` wrapper (Galvanic Iteration) or down the `sub_ability`
+    /// chain (the Chain cycle nests the optional copy under the parent discard).
+    ///
+    /// This does NOT breach the "no recursive inspection of the output" rule. That rule
+    /// forbids a handler from walking the output GRAPH — sideways across `defs`, or
+    /// through parent/sibling links — to discover WHICH node is its antecedent. Here the
+    /// search across `defs` is exactly the declared `LastWithRole` walk, and membership
+    /// of each candidate is a property of that candidate ALONE, computed from its own
+    /// subtree. Node-local, just deeper than one level.
+    ///
+    /// Membership mirrors the mutator's descent EXACTLY — see
+    /// `sequence::def_bears_retargetable_copy`. Widening it (e.g. descending
+    /// `else_ability`, which the mutator does not) would bind a def the mutator cannot
+    /// patch, and because the walk STOPS at the bound node the retarget would be
+    /// silently dropped instead of reaching the real copy further back. Same trap as
+    /// narrowing `GenericEffectHead`, in the opposite direction.
+    CopySpellBearer,
 }
 
 /// Membership predicates for the roles whose candidacy is **live** — recomputed
@@ -669,6 +696,14 @@ fn live_role_predicate(role: AntecedentRole) -> Option<fn(&AbilityDefinition) ->
         // to stay correct for THIS role today is luck, not design. Cached membership is
         // stale by construction here, so it is not offered.
         AntecedentRole::DamageDealer => Some(def_is_damage_dealer),
+        // LIVE — and this role could not be cached even in principle. Its membership is
+        // a property of a def's whole effect SUBTREE, and the assembler moves effects
+        // INTO subtrees without touching `defs.len()`: nesting a `sub_ability` in place
+        // can make a def that was NOT a copy-bearer into one (the Chain cycle hangs the
+        // optional `CopySpell` under the parent discard). `observe` only refreshes where
+        // the length changes, so a registry would miss that node's birth entirely — not
+        // merely go stale on a rewrite, but never see it. Live, the role IS the scan.
+        AntecedentRole::CopySpellBearer => Some(def_bears_retargetable_copy),
         AntecedentRole::Conditional
         | AntecedentRole::OptionalHead
         | AntecedentRole::DigOrRevealUntil
@@ -945,7 +980,8 @@ impl AssemblyEnv {
                     | AntecedentRole::KeywordCounterPlacement
                     | AntecedentRole::DigOrMill
                     | AntecedentRole::DigLook
-                    | AntecedentRole::DamageDealer => None,
+                    | AntecedentRole::DamageDealer
+                    | AntecedentRole::CopySpellBearer => None,
                 },
             },
         };

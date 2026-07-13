@@ -3340,6 +3340,42 @@ fn set_copy_retarget_in_ability(
     patched_here || patched_sub
 }
 
+/// Membership mirror for `AntecedentRole::CopySpellBearer` (CR 707.10c) — does this
+/// def's effect TREE bear a `CopySpell` that `set_copy_retarget_in_ability` can reach?
+///
+/// A STRUCTURAL MIRROR of that mutator's descent, and it lives beside it so the two
+/// cannot drift apart: the def's own effect, through a `CreateDelayedTrigger` wrapper's
+/// inner ability, and down the `sub_ability` chain. It deliberately does NOT descend
+/// `else_ability` — the mutator does not either. A predicate WIDER than its mutator is
+/// the dangerous direction here: `LastWithRole` stops the walk at the node it binds, so
+/// claiming membership for a def the mutator cannot patch would swallow the retarget
+/// instead of reaching the real copy further back.
+///
+/// Independent of the mutator's `all` flag BY CONSTRUCTION, so one predicate mirrors
+/// both the singular ("the copy") and plural ("the copies") clause: `all` decides how
+/// MANY copies get patched, never WHETHER one is found. Every return path of
+/// `set_copy_retarget_in_ability` reduces to "a reachable `CopySpell` exists" — the
+/// `!all` early return is taken only when `patched_here` is already true.
+///
+/// Membership therefore holds exactly when the mutator would return true, which is why
+/// the binding site can `debug_assert!` the mutation lands.
+pub(super) fn def_bears_retargetable_copy(def: &AbilityDefinition) -> bool {
+    effect_bears_retargetable_copy(&def.effect)
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(def_bears_retargetable_copy)
+}
+
+/// The effect half of `def_bears_retargetable_copy` — mirrors `set_copy_retarget`.
+fn effect_bears_retargetable_copy(effect: &Effect) -> bool {
+    match effect {
+        Effect::CopySpell { .. } => true,
+        Effect::CreateDelayedTrigger { effect: inner, .. } => def_bears_retargetable_copy(inner),
+        _ => false,
+    }
+}
+
 pub(super) fn apply_clause_continuation(
     defs: &mut Vec<AbilityDefinition>,
     continuation: ContinuationAst,
@@ -3505,32 +3541,46 @@ pub(super) fn apply_clause_continuation(
             }
         }
         ContinuationAst::CopyMayRetarget { all_copies } => {
-            // CR 707.10c: patch the nearest preceding CopySpell — descending
-            // through a CreateDelayedTrigger wrapper ("When you next cast ...,
-            // copy that spell" — Galvanic Iteration) and through the sub-ability
-            // chain ("That player may copy this spell ..." — the Chain cycle,
-            // where the optional CopySpell is nested under the parent discard).
-            // The copy is usually the last def, but a clause that resolves
-            // between the copy and the retarget sentence (Narset's Reversal's
-            // bounce, Increasing Vengeance's conditional "copy that spell twice",
-            // Spinerock Tyrant's "those spells gain wither" rider) can sit in
-            // between — so walk the defs backward to the first ability whose
-            // effect-tree contains a CopySpell. Recognition already confirmed a
-            // preceding copy exists (parse_followup_continuation_ast), so this
-            // binds it; if somehow none is found, the loop is a no-op.
+            // CR 707.10c: bind the most recent copy-bearing ability and grant its
+            // CopySpell(s) the retarget permission. The copy is usually the last def,
+            // but a clause that resolves between the copy and the retarget sentence can
+            // sit in between (Narset's Reversal's bounce, Spinerock Tyrant's "those
+            // spells gain wither" rider) — so this is a ROLE, not `LastEmitted`.
             //
-            // `all_copies` (the plural "the copies" clause) patches every copy in
-            // that copy-bearing ability — Increasing Vengeance's primary copy and
-            // its nested conditional "copy that spell twice" copy both live in one
-            // ability — while the singular clause keeps nearest-only binding.
-            for previous in defs.iter_mut().rev() {
-                if set_copy_retarget_in_ability(
-                    previous,
+            // `CopySpellBearer` is a LIVE predicate (`def_bears_retargetable_copy`), so
+            // `LastWithRole` resolves to `(0..defs.len()).rev().find(|i|
+            // bears_copy(&defs[i]))` — the backward scan this replaces, over the same
+            // `defs` at the same moment, with the SAME tree descent (own effect →
+            // CreateDelayedTrigger wrapper → sub-ability chain). Recognition already
+            // confirmed a preceding copy exists (parse_followup_continuation_ast); if
+            // somehow none does, `OnMiss::Ignore` keeps it a silent no-op, as before.
+            //
+            // `all_copies` (the plural "the copies" clause) patches every copy in that
+            // copy-bearing ability — Increasing Vengeance's primary copy and its nested
+            // conditional "copy that spell twice" copy both live in one ability — while
+            // the singular clause keeps nearest-only binding. The flag steers the
+            // MUTATION only; it is not part of the role (see the predicate's doc).
+            let bound = env.resolve(
+                defs,
+                super::assembly::AntecedentSelector::LastWithRole(
+                    super::assembly::AntecedentRole::CopySpellBearer,
+                ),
+                None,
+                super::assembly::OnMiss::Ignore,
+            );
+            if let Some(bound_index) = bound {
+                // `CopySpellBearer` membership is the structural mirror of this
+                // mutator's own success condition (`def_bears_retargetable_copy`), so a
+                // bound node ALWAYS patches — the role and the mutator cannot disagree.
+                let patched = set_copy_retarget_in_ability(
+                    &mut defs[bound_index],
                     &CopyRetargetPermission::MayChooseNewTargets,
                     all_copies,
-                ) {
-                    break;
-                }
+                );
+                debug_assert!(
+                    patched,
+                    "CopySpellBearer membership must imply the mutator patches"
+                );
             }
         }
         ContinuationAst::SuspectLastCreated => {
