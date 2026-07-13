@@ -8040,12 +8040,68 @@ pub(super) fn apply_where_x_effect_expression(
         }
         _ => {}
     }
+    // CR 107.3c — TOTALITY GUARD. The match above rewrites the quantity slots of the
+    // `Effect` variants it enumerates. It is NOT exhaustive: of the 64 variants that
+    // carry a `QuantityExpr`, 42 fall through the `_ => {}` above (task #95 binds the
+    // representable ones). Without this guard the wildcard's failure mode is a
+    // FABRICATION rather than a red — the effect keeps its bare `Variable("X")`, which
+    // resolves to 0 at runtime (amass 0 / surveil 0 / discard 0) while the face still
+    // renders as fully supported. That lie is invisible BOTH to a red-count ledger
+    // (there is no `Unimplemented` node to count) and to the zero-raw-text invariant
+    // ("X" is the legitimate alias). So the pass asserts its own post-condition: if the
+    // clause DEFINED X and an unbound X survived the rewrite, report the gap. A control
+    // with an escape hatch is not a control.
+    //
+    // The guard is keyed on the EXPRESSION, never on tree-presence of `Variable("X")`.
+    // Some expressions legitimately bind TO the placeholder, and for those a surviving
+    // `Variable("X")` is the CORRECT binding, not a fabrication:
+    //   - Join Forces (CR 107.3i): "where X is the total amount of mana paid this way"
+    //     resolves through the `chosen_x` machinery.
+    //   - Constraint tails (CR 608.2g): "where X is less than or equal to <bound>"
+    //     BOUNDS the player's chosen X rather than defining it (Well of Lost Dreams).
+    // A tree-presence check would flip both families to red.
+    if let Some(expression) = where_x_expression.filter(|_| unbound_where_x.is_none()) {
+        if !where_x_binds_to_placeholder(expression) && effect_retains_unbound_x(effect) {
+            unbound_where_x = Some(expression.to_string());
+        }
+    }
     // CR 107.3c: the clause defines X, but we cannot represent that definition.
     // Report the gap instead of keeping a P/T placeholder that resolves to no
     // modification at all (a silent +0/+0 no-op that still reads as supported).
     if let Some(expression) = unbound_where_x {
         *effect = Effect::unimplemented("where_x_binding", format!("where X is {expression}"));
     }
+}
+
+/// CR 107.3i + CR 608.2g: does this where-X expression legitimately bind X to the
+/// PLACEHOLDER itself, rather than to a concrete quantity?
+///
+/// `parse_where_x_quantity_expression` deliberately returns `Variable("X")` for two
+/// families — Join Forces' "the total amount of mana paid this way" (resolved via
+/// `chosen_x`) and the comparator-shaped constraint tails ("where X is less than or
+/// equal to …", which bound rather than define X). For those, a residual
+/// `Variable("X")` in the effect is the CORRECT lowering, so the totality guard must
+/// not treat it as an unbound fabrication.
+fn where_x_binds_to_placeholder(expression: &str) -> bool {
+    matches!(
+        parse_where_x_quantity_expression(expression),
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::Variable { ref name },
+        }) if name.eq_ignore_ascii_case("X")
+    )
+}
+
+/// Does an unbound `QuantityRef::Variable { name: "X" }` survive anywhere in `effect`?
+///
+/// Uses the key-anchored typed-evidence probe (`QUANTITY_KEYS`) rather than a
+/// hand-rolled 64-variant visitor: a value reached through a quantity key IS a quantity
+/// by construction, so no cross-enum name collision is reachable. `QuantityRef` must
+/// never be probed unanchored — ten of its variant names are shared with other
+/// internally-tagged enums (see `swallow_evidence`).
+fn effect_retains_unbound_x(effect: &Effect) -> bool {
+    crate::parser::swallow_evidence::UnitEvidence::of_effect(effect).any_quantity_ref(
+        |qty| matches!(qty, QuantityRef::Variable { name } if name.eq_ignore_ascii_case("X")),
+    )
 }
 
 /// CR 107.3i + CR 611.2c: Substitute a "where X is <expression>" binding into a
