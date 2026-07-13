@@ -183,6 +183,119 @@ fn pure_chosen_color_without_choice_does_not_auto_pay_from_preview_colors() {
     );
 }
 
+#[test]
+fn powerstones_do_not_make_go_for_the_throat_castable() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_object(
+        &mut state,
+        CardId(9_013),
+        PlayerId(0),
+        "Go for the Throat".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Instant);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 1,
+        };
+        Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .with_type(TypeFilter::Non(Box::new(TypeFilter::Artifact))),
+                ),
+                cant_regenerate: false,
+            },
+        ));
+    }
+    let target = create_object(
+        &mut state,
+        CardId(9_014),
+        PlayerId(1),
+        "Creature Target".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&target)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+    create_tap_mana_source(
+        &mut state,
+        "Shipwreck Marsh",
+        ManaProduction::Fixed {
+            colors: vec![ManaColor::Black],
+            contribution: ManaContribution::Base,
+        },
+    );
+    for card_id in [9_015, 9_016] {
+        let source = create_object(
+            &mut state,
+            CardId(card_id),
+            PlayerId(0),
+            "Powerstone".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                        spell_type: "Artifact".to_string(),
+                        ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                    }],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+    }
+
+    let cost = state.objects[&spell].mana_cost.clone();
+    assert!(
+        !can_pay_cost_after_auto_tap(&state, PlayerId(0), spell, &cost),
+        "Powerstone mana cannot pay the generic part of a nonartifact spell"
+    );
+    assert!(
+        !can_feasibly_pay_mana_cost_without_x(&state, PlayerId(0), Some(spell), &cost),
+        "the feasibility path must not count Powerstones for a nonartifact spell"
+    );
+    assert!(
+        !can_cast_object_now(&state, PlayerId(0), spell),
+        "Go for the Throat needs an additional unrestricted mana source"
+    );
+    let probe = PriorityCastProbe::new(&state, PlayerId(0));
+    assert!(
+        !can_cast_object_now_with_probe(probe.state(), PlayerId(0), spell, Some(&probe)),
+        "the cached priority probe must not offer an unaffordable nonartifact spell"
+    );
+
+    create_tap_mana_source(
+        &mut state,
+        "Mountain",
+        ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        },
+    );
+    assert!(
+        can_cast_object_now(&state, PlayerId(0), spell),
+        "one additional unrestricted mana source makes Go for the Throat castable"
+    );
+}
+
 fn install_optional_discard_replacement(state: &mut GameState) -> ObjectId {
     let replacement_source = create_object(
         state,

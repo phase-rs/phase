@@ -1173,7 +1173,11 @@ pub(crate) fn feasible_mana_capacity(
     match explicit_max {
         Some(amount) => amount,
         // CR 305.1: Subtype-only basic-land fallback (same as `max_mana_yield`).
-        None if !activatable_mana_options(state, object_id, controller).is_empty() => 1,
+        None if obj.card_types.core_types.contains(&CoreType::Land)
+            && !activatable_mana_options(state, object_id, controller).is_empty() =>
+        {
+            1
+        }
         None => 0,
     }
 }
