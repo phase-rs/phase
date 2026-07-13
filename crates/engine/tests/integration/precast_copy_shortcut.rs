@@ -830,15 +830,20 @@ fn precast_offer_rejects_extra_cast_trigger_before_protocol_wait() {
         .expect("target the Chain at its caster");
     assert!(matches!(
         runner.state().waiting_for,
-        WaitingFor::OrderTriggers { .. }
+        WaitingFor::Priority { player } if player == P0
     ));
+    assert_eq!(
+        runner.state().stack.len(),
+        3,
+        "the ordinary stack contains Chain plus both players' Magecraft triggers"
+    );
     assert!(
         !matches!(
             runner.state().waiting_for,
             WaitingFor::PrecastCopyShortcutOffer { .. }
                 | WaitingFor::RespondToPrecastCopyShortcut { .. }
         ),
-        "extra cast triggers must remain in the ordinary trigger-ordering pipeline"
+        "extra cast triggers must remain in the ordinary post-cast pipeline"
     );
 }
 
