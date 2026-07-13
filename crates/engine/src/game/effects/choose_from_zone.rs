@@ -656,7 +656,7 @@ fn collect_player_zone_cards(
 /// tracked-set pick.
 ///
 /// Priority order:
-/// 1. The current resolution chain's tracked set (if non-empty).
+/// 1. The current resolution chain's tracked set, including an empty set.
 /// 2. The latest non-empty tracked set from any prior publish in this game.
 /// 3. Explicit `TargetRef::Object` targets on the ability.
 /// 4. Direct zone scan (`zone` + `additional_zones`).
@@ -696,8 +696,7 @@ fn resolve_candidate_cards(
 
 fn chain_tracked_set_cards(state: &GameState) -> Option<Vec<ObjectId>> {
     let chain_id = state.chain_tracked_set_id?;
-    let cards = state.tracked_object_sets.get(&chain_id)?;
-    (!cards.is_empty()).then(|| cards.clone())
+    state.tracked_object_sets.get(&chain_id).cloned()
 }
 
 fn collect_direct_zone_cards(
@@ -1840,6 +1839,86 @@ mod tests {
                 other
             ),
         }
+    }
+
+    /// CR 608.2c-d: an empty reveal is still the current resolution's
+    /// authoritative set. Atraxa must not offer cards left over from an older
+    /// reveal when its controller's library is empty.
+    #[test]
+    fn atraxa_style_empty_reveal_does_not_reuse_a_stale_tracked_set() {
+        use super::super::resolve_ability_chain;
+        use crate::types::ability::TargetFilter;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Atraxa, Grand Unifier".to_string(),
+            Zone::Battlefield,
+        );
+        let stale = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(1),
+            "Stale Revealed Card".to_string(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&stale).unwrap().card_types.core_types = vec![CoreType::Creature];
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(5), vec![stale]);
+        state.next_tracked_set_id = 6;
+        assert!(state.players[0].library.is_empty());
+
+        let categories = vec![
+            CoreType::Artifact,
+            CoreType::Battle,
+            CoreType::Creature,
+            CoreType::Enchantment,
+            CoreType::Instant,
+            CoreType::Land,
+            CoreType::Planeswalker,
+            CoreType::Sorcery,
+        ];
+        let choose = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: categories.len() as u32,
+                zone: Zone::Library,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: true,
+                constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let reveal = ResolvedAbility {
+            sub_ability: Some(Box::new(choose)),
+            ..ResolvedAbility::new(
+                Effect::RevealTop {
+                    player: TargetFilter::Controller,
+                    count: 10,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &reveal, &mut events, 0).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }),
+            "an empty reveal must not create a choice from an older tracked set"
+        );
+        assert!(state.last_choose_from_zone_found_nothing);
+        assert_eq!(state.objects[&stale].zone, Zone::Library);
     }
 
     #[test]
