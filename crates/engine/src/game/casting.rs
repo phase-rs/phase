@@ -16202,28 +16202,33 @@ fn apply_static_activated_ability_cost_reduction(
     let ability_is_loyalty = crate::types::ability::is_loyalty_ability_cost(cost);
 
     // CR 611.3 + CR 601.2f: printed battlefield/command-zone `ReduceAbilityCost`
-    // statics (Training Grounds, Suppression Field, Zirda, Agatha, …).
-    for (static_source, def) in super::functioning_abilities::battlefield_active_statics(state) {
-        if !matches!(def.mode, StaticMode::ReduceAbilityCost { .. }) {
-            continue;
+    // statics (Training Grounds, Suppression Field, Zirda, Agatha, …). The
+    // presence index avoids scanning all static sources when this activation is
+    // affected only by a duration-scoped continuous reduction.
+    if has_static {
+        for (static_source, def) in super::functioning_abilities::battlefield_active_statics(state)
+        {
+            if !matches!(def.mode, StaticMode::ReduceAbilityCost { .. }) {
+                continue;
+            }
+            // CR 604.1 + CR 109.5: "you control" in the affected filter anchors on the
+            // static's current controller, read live from the battlefield object.
+            let ctx = super::filter::FilterContext::from_source(state, static_source.id);
+            apply_one_reduce_ability_cost(
+                state,
+                cost,
+                source_id,
+                player,
+                active_keyword,
+                ability_is_mana,
+                ability_is_loyalty,
+                &def.mode,
+                def.affected.as_ref(),
+                static_source.id,
+                static_source.controller,
+                &ctx,
+            );
         }
-        // CR 604.1 + CR 109.5: "you control" in the affected filter anchors on the
-        // static's current controller, read live from the battlefield object.
-        let ctx = super::filter::FilterContext::from_source(state, static_source.id);
-        apply_one_reduce_ability_cost(
-            state,
-            cost,
-            source_id,
-            player,
-            active_keyword,
-            ability_is_mana,
-            ability_is_loyalty,
-            &def.mode,
-            def.affected.as_ref(),
-            static_source.id,
-            static_source.controller,
-            &ctx,
-        );
     }
 
     // CR 611.2 + CR 118.7: duration-scoped continuous `ReduceAbilityCost` effects
