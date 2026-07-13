@@ -16575,7 +16575,9 @@ fn trigger_coalition_relic_charge_counter_drain() {
                     assert_eq!(
                         *count,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::PreviousEffectAmount
+                            qty: QuantityRef::PreviousEffectAmount {
+                                channel: crate::types::ability::DamageChannel::Total,
+                            }
                         },
                         "for-each tail must dispatch to PreviousEffectAmount"
                     );

@@ -3643,14 +3643,24 @@ mod tests {
     #[test]
     fn for_each_charge_counter_removed_this_way_is_previous_effect_amount() {
         let qty = parse_for_each_clause("charge counter removed this way").unwrap();
-        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+        assert_eq!(
+            qty,
+            QuantityRef::PreviousEffectAmount {
+                channel: crate::types::ability::DamageChannel::Total,
+            }
+        );
     }
 
     #[test]
     fn for_each_charge_counters_removed_this_way_is_previous_effect_amount() {
         // Plural variant — same dispatch.
         let qty = parse_for_each_clause("charge counters removed this way").unwrap();
-        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+        assert_eq!(
+            qty,
+            QuantityRef::PreviousEffectAmount {
+                channel: crate::types::ability::DamageChannel::Total,
+            }
+        );
     }
 
     #[test]
@@ -3658,7 +3668,12 @@ mod tests {
         // Untyped (no leading counter-type word). The runtime amount is whatever
         // the parent removed; the omitted English type word is informational.
         let qty = parse_for_each_clause("counter removed this way").unwrap();
-        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+        assert_eq!(
+            qty,
+            QuantityRef::PreviousEffectAmount {
+                channel: crate::types::ability::DamageChannel::Total,
+            }
+        );
     }
 
     #[test]
@@ -3666,7 +3681,12 @@ mod tests {
         // Storage Counter cycle (Saprazzan Cove etc.) — same shape, different
         // counter type. Must produce the same dispatch.
         let qty = parse_for_each_clause("storage counter removed this way").unwrap();
-        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+        assert_eq!(
+            qty,
+            QuantityRef::PreviousEffectAmount {
+                channel: crate::types::ability::DamageChannel::Total,
+            }
+        );
     }
 
     #[test]
@@ -3674,13 +3694,23 @@ mod tests {
         // Blademane Baku: "For each counter removed, this creature gets +2/+0
         // until end of turn" — no "this way" suffix on the activated tail.
         let qty = parse_for_each_clause("counter removed").unwrap();
-        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+        assert_eq!(
+            qty,
+            QuantityRef::PreviousEffectAmount {
+                channel: crate::types::ability::DamageChannel::Total,
+            }
+        );
     }
 
     #[test]
     fn quantity_ref_number_of_counters_removed_this_way_is_previous_effect_amount() {
         let qty = parse_quantity_ref("the number of study counters removed this way").unwrap();
-        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+        assert_eq!(
+            qty,
+            QuantityRef::PreviousEffectAmount {
+                channel: crate::types::ability::DamageChannel::Total,
+            }
+        );
     }
 
     #[test]
@@ -5060,7 +5090,9 @@ mod tests {
             assert_eq!(
                 parse_event_context_quantity(phrase),
                 Some(QuantityExpr::Ref {
-                    qty: QuantityRef::PreviousEffectAmount,
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: crate::types::ability::DamageChannel::Total,
+                    },
                 }),
                 "phrase {phrase:?} must map to PreviousEffectAmount"
             );

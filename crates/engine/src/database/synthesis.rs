@@ -14594,7 +14594,7 @@ mod extort_synthesis_tests {
         assert!(matches!(
             amount,
             QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount
+                qty: QuantityRef::PreviousEffectAmount { .. }
             }
         ));
         assert!(matches!(player, TargetFilter::Controller));
@@ -14714,7 +14714,9 @@ mod extort_synthesis_tests {
         drain.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::PreviousEffectAmount,
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    },
                 },
                 player: TargetFilter::Controller,
             },

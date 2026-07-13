@@ -11378,7 +11378,7 @@ fn windfall_draw_uses_previous_discard_max_for_each_player() {
         &*sub.effect,
         Effect::Draw {
             count: QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount
+                qty: QuantityRef::PreviousEffectAmount { .. }
             },
             target: TargetFilter::Controller,
         }
@@ -32905,7 +32905,9 @@ fn for_each_prefix_pump_threads_self_ref_target() {
     assert_eq!(
         def.repeat_for,
         Some(QuantityExpr::Ref {
-            qty: QuantityRef::PreviousEffectAmount,
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: crate::types::ability::DamageChannel::Total,
+            },
         }),
         "repeat_for should scale by counters removed in the activation cost"
     );
