@@ -327,6 +327,14 @@ pub enum OpponentMayScope {
     AnyOpponent,
     /// CR 608.2d + CR 101.4: "any player may" — every player INCLUDING the controller is offered in APNAP order; first accept wins (distinct from AnyOpponent which excludes the controller).
     AnyPlayer,
+    /// CR 608.2d + CR 101.4: "any other player may" — every player EXCEPT the
+    /// affected player of the currently-resolving replaced event is offered in
+    /// APNAP order; first accept wins. This is affected-player-relative, not
+    /// controller-relative: for Zur's Weirding the excluded player is whoever
+    /// would have drawn (the drain's stashed event target), which need not be
+    /// the ability's controller. Distinct from `AnyOpponent` (excludes the
+    /// controller) and `AnyPlayer` (excludes no one).
+    AnyOtherPlayer,
 }
 
 /// CR 609.3 + CR 608.2d: whether a "choose a number" domain must exclude numbers
@@ -3927,6 +3935,32 @@ pub enum FilterProp {
     /// and for "target commander" in commander-format effects (Codsworth, Falthis,
     /// Anara, Champions of Archery, etc.).
     IsCommander,
+    /// CR 205.3m + CR 903.3: Matches an object that is a creature AND shares at
+    /// least one creature type with the filter-controller's commander(s) — the
+    /// Path of Ancestry predicate ("a creature spell that shares a creature type
+    /// with your commander").
+    ///
+    /// RELOCATED, not invented: this exact concept lived on
+    /// `ManaRestriction::SharesCreatureTypeWithCommander` (CR 106.6 — SPEND
+    /// legality), where it was never a spend restriction at all. Path of
+    /// Ancestry's mana may be spent on anything; the predicate only decides
+    /// whether the CR 603.3 trigger FIRES. Object predicates belong in
+    /// `FilterProp`, so it moves here and the wrong-section variant is deleted.
+    ///
+    /// Deliberately NOT expressed as `SharesQuality { CreatureType, reference:
+    /// <commander> }`, which is the shape one would reach for first. That
+    /// reference resolution walks `state.objects` for an `is_commander` object,
+    /// but the authority for "your commander" in a live game is
+    /// `deck_pools[player].current_commander` — which is exactly why
+    /// `commander::commander_creature_types` reads the deck pool FIRST and only
+    /// falls back to an object scan. A `SharesQuality` port would consult the
+    /// fallback and never the authority, so a commander that is registered but
+    /// not instantiated as a flagged object would be invisible and the trigger
+    /// would silently stop firing. This variant instead calls
+    /// `commander_creature_types` — the same authority the spend site used before
+    /// the retype — so the behavior is preserved BY CONSTRUCTION rather than by a
+    /// ledger that cannot see runtime evaluation.
+    SharesCreatureTypeWithCommander,
     Other {
         value: String,
     },
@@ -5275,7 +5309,31 @@ pub enum QuantityRef {
     /// CR 608.2c: Numeric amount produced by the preceding effect in the sub_ability chain.
     /// Used for patterns where a sub_ability references the parent effect's numeric
     /// result (life lost, damage dealt, counters removed).
-    PreviousEffectAmount,
+    ///
+    /// `channel` selects WHICH resolution-local tally the preceding effect left
+    /// behind — the same axis, and the same `DamageChannel`, already carried by
+    /// the condition peer [`AbilityCondition::PreviousEffectAmount`]:
+    ///
+    /// - [`DamageChannel::Total`] (default): the total amount (CR 120.6), via
+    ///   `GameState::last_effect_amount`. Every non-damage producer (life lost,
+    ///   counters removed, cards drawn) stamps only this channel.
+    /// - [`DamageChannel::Excess`]: the EXCESS amount (CR 120.10) — damage dealt
+    ///   beyond lethal — via `GameState::last_effect_excess_amount`. Reads "the
+    ///   amount of excess damage dealt to that creature this way" (Goblin
+    ///   Negotiation, Hell to Pay, Lacerate Flesh) and "that excess damage"
+    ///   (Contest of Claws).
+    ///
+    /// A sibling `PreviousEffectExcessAmount` variant would be the textbook
+    /// sibling-cluster smell: the channel is a leaf parameterization of one
+    /// structural axis, and it lies wholly inside CR 120 (120.6 total /
+    /// 120.10 excess), so it is a parameterization, not a new leaf.
+    ///
+    /// `Total` is serde-elided, so every pre-existing serialized card is
+    /// byte-identical.
+    PreviousEffectAmount {
+        #[serde(default, skip_serializing_if = "is_total_damage_channel")]
+        channel: DamageChannel,
+    },
     /// CR 118.4 + CR 119.3: Amount of life lost this turn, scoped by `player`
     /// per the workspace "Parameterize, don't proliferate" principle (Round Π-3).
     ///
@@ -13191,6 +13249,16 @@ impl TargetFilter {
             }
             TargetFilter::Not { filter } => filter.extract_in_zone(),
             TargetFilter::ExiledBySource => Some(crate::types::zones::Zone::Exile),
+            // CR 109.2: a stack-spell/stack-ability filter denotes an object on
+            // the stack by construction — mirrors the `ExiledBySource` arm above
+            // so a continuous effect's affected-filter scan
+            // (`layers::apply_continuous_effect_filtered`) scans `Zone::Stack`
+            // instead of defaulting to the battlefield when the filter is (or
+            // contains, via `And`) a stack-spell reference (Secret Arcade's
+            // "permanent spells you control").
+            TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => {
+                Some(crate::types::zones::Zone::Stack)
+            }
             _ => None,
         }
     }
@@ -16487,6 +16555,22 @@ pub enum AbilityCondition {
     /// CR 701.54a: True when the ability's source permanent is its controller's
     /// Ring-bearer. For "unless ~ is your Ring-bearer", wrap with `Not`.
     IsRingBearer,
+    /// CR 309.7: "if you've completed a dungeon" — true when the ability's
+    /// controller has completed at least one dungeon (`specific: None`) or the
+    /// named dungeon (`specific: Some(d)`). Negation wraps with `Not`.
+    ///
+    /// The resolution-time sibling of `TriggerCondition::CompletedDungeon`, and
+    /// deliberately shaped identically: both delegate to the single truth
+    /// function `game::dungeon::has_completed_dungeon`, so the intervening-if
+    /// reading and the resolution reading of the same printed clause can never
+    /// drift. It belongs with the other controller-designation predicates above
+    /// (`IsMonarch` CR 725, `IsInitiative` CR 726, `HasCityBlessing` CR 702.131c)
+    /// rather than being folded into them — each is its own CR rule section, so
+    /// the categorical boundary keeps them siblings.
+    CompletedDungeon {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        specific: Option<crate::game::dungeon::DungeonId>,
+    },
     /// CR 608.2c: "If [target] has [keyword], [override effect] instead"
     /// Checked at resolution time against the first resolved object target's keywords.
     /// Uses "Instead" override semantics: swaps the parent effect when condition is met.
@@ -21147,6 +21231,40 @@ mod tests {
             serde_json::to_string(&filter).unwrap(),
             r#"{"type":"StackAbility","controller":"You"}"#
         );
+    }
+
+    // CR 109.2: a stack-spell/stack-ability filter denotes an object on the
+    // stack by construction — mirrors the `ExiledBySource => Exile` arm so a
+    // continuous effect's affected-filter scan
+    // (`layers::apply_continuous_effect_filtered`) knows to scan `Zone::Stack`
+    // for a filter built by `oracle_target::scope_target_spell_phrase` (Secret
+    // Arcade's "permanent spells you control").
+    #[test]
+    fn extract_in_zone_reports_stack_for_stack_spell_and_stack_ability() {
+        assert_eq!(
+            TargetFilter::StackSpell.extract_in_zone(),
+            Some(Zone::Stack)
+        );
+        assert_eq!(
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: None,
+            }
+            .extract_in_zone(),
+            Some(Zone::Stack)
+        );
+        // Composed inside an `And` — the shape `stack_spell_filter` actually
+        // produces for "permanent spells you control": `And{[StackSpell,
+        // Typed{Permanent, controller: You}]}`. The recursive `And` arm must
+        // still surface `Stack`.
+        let compound = TargetFilter::And {
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+            ],
+        };
+        assert_eq!(compound.extract_in_zone(), Some(Zone::Stack));
     }
 
     #[test]

@@ -1825,7 +1825,7 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             },
         },
         QuantityRef::ExiledFromHandThisResolution => Axes::NONE,
-        QuantityRef::PreviousEffectAmount => Axes::NONE,
+        QuantityRef::PreviousEffectAmount { .. } => Axes::NONE,
         QuantityRef::LifeLostThisTurn { player } => {
             let mut acc = Axes {
                 event: false,
@@ -2233,6 +2233,8 @@ fn scan_ability_condition(x: &AbilityCondition) -> Axes {
         }
         AbilityCondition::HasMaxSpeed => Axes::NONE,
         AbilityCondition::IsMonarch => Axes::NONE,
+        // CR 309.7: controller-state predicate — touches no scan axis.
+        AbilityCondition::CompletedDungeon { .. } => Axes::NONE,
         AbilityCondition::IsInitiative => Axes::NONE,
         AbilityCondition::HasCityBlessing => Axes::NONE,
         AbilityCondition::IsRingBearer => Axes::NONE,
@@ -3153,6 +3155,9 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::IsCommander
+        // CR 205.3m + CR 903.3: reads commander designation + the candidate's own
+        // creature types — a board/object read, no player resource.
+        | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Other { .. } => Axes::NONE,
 
         // --- QuantityExpr-bearing: recurse so `Ref(LifeTotal)` / `PlayerCounter`

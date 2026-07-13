@@ -12,8 +12,8 @@ use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    CommanderOwnership, Comparator, ControllerRef, FilterProp, ParsedCondition, PlayerScope,
-    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypedFilter,
+    CommanderOwnership, Comparator, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
+    QuantityRef, StaticCondition, TargetFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
@@ -162,129 +162,51 @@ fn parse_restriction_only_condition(text: &str) -> Option<ParsedCondition> {
         return Some(condition);
     }
 
-    // JUSTIFICATION 3 — PHRASING GAP, NOT A VOCABULARY GAP. Port pending.
+    // P02-U3b CLOSED the phrasing-gap class that used to live here. The five families
+    // named in that task (`you attacked with <N|filter>`, `an opponent had <N> <type>
+    // enter`, `lands with the same name`, `an opponent searched their library`, and the
+    // `exactly N or M cards in hand` disjunction) are now SPELLED by
+    // `parse_inner_condition` and reach the restriction evaluator through the ordinary
+    // `QuantityComparison` conversion. Their parsers are deleted, not moved.
     //
-    // Read this before adding anything below. Each parser here is UNJUSTIFIED under the
-    // rules above: the shared vocabulary CAN express its condition
-    // (`QuantityRef::{AttackedThisTurn { filter }, BattlefieldEntriesThisTurn { player,
-    // filter }, ObjectCountBySharedQuality, PlayerActionsThisTurn, HandSize}` all exist),
-    // and `static_condition_to_restriction_condition` would convert the result through
-    // `QuantityComparison` unchanged. They survive only because `parse_inner_condition`
-    // does not yet SPELL these phrasings — a gap in the grammar, not in the type system.
+    // Two residuals remain below, and NEITHER is a phrasing gap. Both are JUSTIFICATION 2
+    // (no shared vocabulary) — the same class as `parse_source_condition` above:
     //
-    // They are not deleted here because moving them is not a parser edit: each port
-    // changes the runtime condition representation for live cards (a fixed
-    // `ParsedCondition` leaf becomes a `QuantityComparison` resolved through
-    // `game::quantity`), which needs its own runtime-equivalence proof and full-pool
-    // dual-run. That work is tracked as **P02-U3b (shared-grammar phrasing parity)**;
-    // deleting them now would silently drop the cards listed beside each parser.
-    //
-    // NOTE for P02-U3b: the source-predicate family above is a PREREQUISITE, not a
-    // sibling. Until `ParsedCondition` can hold a filter for its source, teaching the
-    // shared grammar a new source phrasing REMOVES restriction support for it (the shared
-    // parse starts succeeding, the conversion then rejects it). Align the vocabularies
-    // first.
+    //  1. `BeenAttackedThisStep` — `StaticCondition` has no per-STEP attack history at
+    //     all. Its whole vocabulary is per-TURN. There is nothing to spell.
+    //  2. "you have no <kind> cards in hand" — an OWNER-relative count in a hidden zone.
+    //     The shared reading would be an `ObjectCount` over a `TargetFilter` carrying
+    //     `InZone { Hand }`, but `TargetFilter` has NO owner axis (see the
+    //     `CommanderOwnership::Own` rejection in
+    //     `static_condition_to_restriction_condition`), and `object_count_matching_ids`
+    //     discriminates by CONTROLLER via `matches_target_filter` — not by owner. In an
+    //     owner zone those differ precisely when a control-change effect has touched the
+    //     card, which is why `matches_target_filter_in_owner_zone` exists as a separate
+    //     entry point that the count path does not use. `ZoneCoreTypeCardCountAtLeast`
+    //     reads `player_zone_ids(player, Hand)` and is exactly right; an `ObjectCount`
+    //     would be a silently different predicate. Aligning this needs an owner axis on
+    //     `TargetFilter` (or an owner-zone-aware count ref) — a vocabulary change, not a
+    //     parser edit.
     //
     // The rule for anyone extending this file: a NEW restriction phrase never lands here.
     // Teach `parse_inner_condition` the phrasing — that is where every static ability
     // with the same words already looks.
 
-    // "you control three or more lands with the same name" (Endless Atlas, Sceptre of
-    // Eternal Glory). Shared target: `ObjectCountBySharedQuality { quality: Name }`.
-    if let Some(condition) = parse_you_control_condition(text) {
-        return Some(condition);
-    }
-
-    // "you have exactly zero or seven cards in hand"; "you have no land cards in hand".
-    // Shared target: `Or` over `QuantityComparison { HandSize, EQ }` / an `ObjectCount`
-    // filtered to `InZone { Hand }`.
+    // "you have no land cards in hand" (Land Grant). See residual (2) above.
     if let Some(condition) = parse_hand_condition(text) {
         return Some(condition);
     }
 
-    // "an opponent had two or more creatures enter the battlefield under their control
-    // this turn"; "an opponent searched their library this turn"; "you've been attacked
-    // this step". Shared targets: `BattlefieldEntriesThisTurn { player, filter }` and
-    // `PlayerActionsThisTurn { action }`. (`BeenAttackedThisStep` is the one leaf here
-    // with NO shared counterpart — `StaticCondition` has no per-STEP attack history.)
+    // "you've been attacked this step" (Assassin's Blade, Harsh Justice, …), plus the
+    // "[type] entered under your control this turn" surface that ELIDES "the battlefield"
+    // (Gargoyle Flock's "an artifact entered under your control this turn"). The shared
+    // entered-grammar's suffix spells "the battlefield" literally, so it does not match
+    // the elided form. See residual (1) above.
     if let Some(condition) = parse_event_condition(text) {
         return Some(condition);
     }
 
-    // CR 508.1a: "you attacked with [N or more creatures | a <filter>] this turn"
-    // (Thaumaton Torpedo). Shared target: `QuantityComparison` over
-    // `AttackedThisTurn { scope, filter }`, which already carries the attacker filter.
-    if let Some(condition) = parse_you_attacked_with(text) {
-        return Some(condition);
-    }
-
     None
-}
-
-/// CR 508.1a: "you attacked with [N or more creatures | a/an <filter>] [this turn]".
-/// One authority for the whole attacked-with family: the bare numeric threshold carries
-/// no type qualifier (`filter: None`), the typed form carries the attacker filter.
-fn parse_you_attacked_with(text: &str) -> Option<ParsedCondition> {
-    if let Some(count) = parse_numeric_threshold(text, "you attacked with ", " creatures this turn")
-    {
-        return Some(ParsedCondition::YouAttackedWithAtLeast {
-            count: count as u32,
-            filter: None,
-        });
-    }
-    if let Some(count) =
-        parse_numeric_threshold(text, "you attacked with ", " or more creatures this turn")
-    {
-        return Some(ParsedCondition::YouAttackedWithAtLeast {
-            count: count as u32,
-            filter: None,
-        });
-    }
-    // The trailing "this turn" may already be stripped upstream (an activated-ability
-    // duration parser peels it before the cost-reduction condition is reparsed), so the
-    // typed form accepts both the suffixed and bare shapes.
-    parse_you_attacked_with_filter(text)
-}
-
-/// CR 508.1a: Parse "you attacked with a/an <filter>[ this turn]" into a
-/// `ParsedCondition::YouAttackedWithAtLeast { count: 1, filter }`. The `<filter>`
-/// is delegated to `parse_type_phrase` so the whole class of attacker qualifiers
-/// (Spacecraft, Vehicle, a specific creature type, …) is covered by the shared
-/// type-phrase combinator rather than a per-card literal. Returns `None` unless
-/// the entire phrase after the filter is consumed (modulo an optional " this
-/// turn"), keeping unrecognized qualifiers an honest gap.
-fn parse_you_attacked_with_filter(text: &str) -> Option<ParsedCondition> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("you attacked with ")
-        .parse(text)
-        .ok()?;
-    let (filter, remainder) = parse_type_phrase(rest);
-    // Reject the bare/untyped case: `parse_type_phrase` returns `Any` when no
-    // type word matched, which would over-match "you attacked with three or more
-    // creatures this turn" (handled by the numeric thresholds above). Require a
-    // concrete typed filter here.
-    if matches!(filter, TargetFilter::Any) {
-        return None;
-    }
-    // Consume an optional trailing " this turn" and any trailing punctuation with
-    // combinators (no manual string trimming), then require the phrase to be fully
-    // consumed so unrecognized qualifiers stay an honest gap. The duration suffix
-    // may already be stripped upstream, so it is optional.
-    let (remainder, _) = multispace0::<_, OracleError<'_>>(remainder).ok()?;
-    let (remainder, _) = opt(tag::<_, _, OracleError<'_>>("this turn"))
-        .parse(remainder)
-        .ok()?;
-    let (remainder, _) = multispace0::<_, OracleError<'_>>(remainder).ok()?;
-    let (remainder, _) = opt(one_of::<_, _, OracleError<'_>>(".,;"))
-        .parse(remainder)
-        .ok()?;
-    let (remainder, _) = multispace0::<_, OracleError<'_>>(remainder).ok()?;
-    if !remainder.is_empty() {
-        return None;
-    }
-    Some(ParsedCondition::YouAttackedWithAtLeast {
-        count: 1,
-        filter: Some(filter),
-    })
 }
 
 /// CR 601.3 / CR 602.5: Convert a shared `StaticCondition` into the restriction
@@ -646,121 +568,62 @@ fn parse_source_power_threshold(text: &str) -> Option<i32> {
         .ok()?;
     rest.trim().is_empty().then_some(power as i32)
 }
-
-/// CR 601.3 / CR 602.5: The one board-state restriction leaf the shared grammar cannot
-/// yet produce — "you control N or more lands with the same name" (Endless Atlas,
-/// Sceptre of Eternal Glory).
+/// CR 402.1 + CR 601.3: "you have no <kind> cards in hand" (Land Grant) — the ONE hand
+/// predicate the shared grammar cannot own.
 ///
-/// Everything else this function used to parse is now produced by `parse_inner_condition`
-/// and converted through `QuantityComparison`, including four readings this parser got
-/// WRONG and which are therefore deliberately not reproduced here:
+/// Every other hand surface this parser used to hold ("no cards in hand", "exactly N",
+/// "exactly N or M", "one or fewer", "more cards in hand than each opponent") is now
+/// spelled by `parse_hand_size_predicate` in the shared grammar and converts through
+/// `QuantityComparison` / `Or`. They were deleted in P02-U3b, not moved.
 ///
-/// - the bare-subtype catch-all dumped any unrecognized qualifier into a stringly-typed
-///   `subtype` ("creature that fought this turn", "green permanents that share an
-///   artist"), producing a subtype no permanent has and a restriction that could never
-///   be satisfied;
-/// - "you control fewer creatures than each opponent" built a `QuantityVsEachOpponent`
-///   whose lhs and rhs were BOTH "creatures you control", so it compared a value to
-///   itself and was constant-false;
-/// - "you control a commander" became subtype `"commander"`, likewise unsatisfiable
-///   (the shared grammar now reads it as `ControlsCommander`, which converts per CR 903.3d);
-/// - "you control no creatures and only during your turn" returned
-///   `YouControlNoCreatures` and silently swallowed the timing half of the restriction.
-///
-/// Those phrases now fail this parser and reach the ordinary `Effect::Unimplemented`
-/// fallback, which is the honest answer for text the engine cannot represent.
-fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
-    // Shared target once `parse_inner_condition` learns the phrasing:
-    // `QuantityRef::ObjectCountBySharedQuality { quality: Name }`.
-    parse_numeric_threshold(text, "you control ", " or more lands with the same name")
-        .map(|count| ParsedCondition::YouControlLandsWithSameNameAtLeast { count })
-}
-
+/// This leaf survives on JUSTIFICATION 2 (no shared vocabulary), NOT as a phrasing gap:
+/// it is an OWNER-relative count in a HIDDEN zone. `ZoneCoreTypeCardCountAtLeast` reads
+/// `player_zone_ids(player, Hand)` — the cards *this player owns* in hand. The shared
+/// reading would be an `ObjectCount` over a `TargetFilter` carrying `InZone { Hand }`,
+/// but `TargetFilter` has no owner axis, and the count path (`object_count_matching_ids`)
+/// discriminates by CONTROLLER through `matches_target_filter`. Those two predicates come
+/// apart exactly when a control-change effect has touched a card in an owner zone — the
+/// reason `matches_target_filter_in_owner_zone` exists as a separate entry point that the
+/// count path does not call. Converting this leaf would therefore not be a re-spelling; it
+/// would be a silently different question. Closing it needs an owner axis on
+/// `TargetFilter` (or an owner-zone-aware count ref).
 fn parse_hand_condition(text: &str) -> Option<ParsedCondition> {
-    // Quick reject: must reference "hand" somewhere
+    // Quick reject: must reference "hand" somewhere.
     if !text.contains("hand") {
         return None;
     }
-    // "you have no cards in hand"
-    if tag::<_, _, OracleError<'_>>("you have no cards")
-        .parse(text)
-        .is_ok()
-    {
-        return Some(ParsedCondition::HandSizeExact { count: 0 });
-    }
     // "you have no [kind] cards in hand" — e.g. "you have no land cards in hand".
-    // CR 601.3: Cast restriction — hand contains no cards of the given core type
-    // or subtype. Use count: 1 + Not because count-at-least 0 is always true.
-    // Verified: CR 601.3 (docs/MagicCompRules.txt:2475).
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you have no ").parse(text) {
-        if let Ok((_, kind_raw)) = terminated(
-            take_until::<_, _, OracleError<'_>>(" card"),
-            alt((tag(" cards in hand"), tag(" card in hand"))),
-        )
-        .parse(rest)
-        {
-            let kind = kind_raw.trim();
-            if let Some(core_type) = parse_core_type_word(kind) {
-                return Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::ZoneCoreTypeCardCountAtLeast {
-                        zone: Zone::Hand,
-                        core_type,
-                        count: 1,
-                    }),
-                });
-            }
-            if !kind.is_empty() {
-                return Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::ZoneSubtypeCardCountAtLeast {
-                        zone: Zone::Hand,
-                        subtype: kind.to_string(),
-                        count: 1,
-                    }),
-                });
-            }
-        }
-    }
-    if tag::<_, _, OracleError<'_>>("you have one or fewer cards in hand")
+    // `Not(count >= 1)` rather than `count == 0` because a count-at-least-0 gate is
+    // always true. CR 601.3: cast restriction on hand contents.
+    let (rest, _) = tag::<_, _, OracleError<'_>>("you have no ")
         .parse(text)
-        .is_ok()
-    {
-        return Some(ParsedCondition::HandSizeOneOf { counts: vec![0, 1] });
-    }
-    // "you have more cards in hand than each opponent"
-    if tag::<_, _, OracleError<'_>>("you have more cards in hand than")
-        .parse(text)
-        .is_ok()
-    {
-        return Some(ParsedCondition::QuantityVsEachOpponent {
-            lhs: QuantityRef::HandSize {
-                player: PlayerScope::Controller,
-            },
-            comparator: Comparator::GT,
-            rhs: QuantityRef::HandSize {
-                player: PlayerScope::Controller,
-            },
+        .ok()?;
+    let (_, kind_raw) = terminated(
+        take_until::<_, _, OracleError<'_>>(" card"),
+        alt((tag(" cards in hand"), tag(" card in hand"))),
+    )
+    .parse(rest)
+    .ok()?;
+    let kind = kind_raw.trim();
+    if let Some(core_type) = parse_core_type_word(kind) {
+        return Some(ParsedCondition::Not {
+            condition: Box::new(ParsedCondition::ZoneCoreTypeCardCountAtLeast {
+                zone: Zone::Hand,
+                core_type,
+                count: 1,
+            }),
         });
     }
-    // "you have exactly N or M cards in hand"
-    if let Some(rest) = tag::<_, _, OracleError<'_>>("you have exactly ")
-        .parse(text)
-        .ok()
-        .and_then(|(rest, _)| rest.strip_suffix(" cards in hand"))
-    {
-        if rest.contains(" or ") {
-            let counts: Vec<usize> = rest
-                .split(" or ")
-                .filter_map(|s| parse_count_word(s.trim()))
-                .collect();
-            if counts.len() >= 2 {
-                return Some(ParsedCondition::HandSizeOneOf { counts });
-            }
-        }
-        if let Some(count) = parse_count_word(rest) {
-            return Some(ParsedCondition::HandSizeExact { count });
-        }
+    if kind.is_empty() {
+        return None;
     }
-    None
+    Some(ParsedCondition::Not {
+        condition: Box::new(ParsedCondition::ZoneSubtypeCardCountAtLeast {
+            zone: Zone::Hand,
+            subtype: kind.to_string(),
+            count: 1,
+        }),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -768,29 +631,25 @@ fn parse_hand_condition(text: &str) -> Option<ParsedCondition> {
 // ---------------------------------------------------------------------------
 
 /// CR 601.3 / CR 602.5: Event-history restriction leaves the shared conversion cannot
-/// produce today.
+/// produce.
 ///
-/// The self-scoped event predicates this function used to own ("you attacked this turn",
-/// "you gained life this turn", "a creature died this turn", "you've cast a <type> spell
-/// this turn", "an opponent lost life this turn", …) are now parsed by
-/// `parse_inner_condition` as `QuantityComparison`s over the event-history `QuantityRef`s
-/// and converted exactly, so they are gone from here.
+/// P02-U3b removed the two OPPONENT-scoped leaves this function used to own — "an
+/// opponent had N <type> enter the battlefield under their control this turn" and "an
+/// opponent searched their library this turn". Both are now spelled by
+/// `parse_inner_condition`, scoped with `PlayerScope::Opponent { aggregate: Max }`, and
+/// converted through `QuantityComparison`. (That port also FIXED them: the filter-carried
+/// `controller: Opponent` they used to build made the runtime SUM entries across all
+/// opponents, so in multiplayer two different opponents with one creature each satisfied
+/// "an opponent had TWO OR MORE creatures enter". `Opponent { Max }` counts per opponent.)
 ///
-/// What remains: opponent-scoped battlefield entries and library searches, and
-/// `BeenAttackedThisStep`. Of these only `BeenAttackedThisStep` is a true vocabulary gap
-/// (`StaticCondition` has no per-STEP attack history); the others are phrasing gaps whose
-/// shared targets are named in `parse_restriction_only_condition`.
+/// What remains has no shared counterpart:
+/// - `BeenAttackedThisStep` — `StaticCondition`'s attack history is per-TURN; there is no
+///   per-STEP vocabulary to spell at all.
+/// - the "[type] entered under your control this turn" surface that ELIDES "the
+///   battlefield" (Gargoyle Flock). The shared entered-grammar spells "entered the
+///   battlefield under your control this turn" literally, so the elided form never
+///   reaches it.
 fn parse_event_condition(text: &str) -> Option<ParsedCondition> {
-    // "an opponent [verb phrase]" — prefix dispatch
-    if let Ok((verb_phrase, _)) = tag::<_, _, OracleError<'_>>("an opponent ").parse(text) {
-        if let Some(condition) = parse_opponent_had_entered_this_turn(verb_phrase) {
-            return Some(condition);
-        }
-        if let Ok((_, condition)) = parse_opponent_event(verb_phrase) {
-            return Some(condition);
-        }
-    }
-
     // "you've been attacked this step"
     if let Ok((_, _)) = alt((
         terminated(
@@ -810,61 +669,6 @@ fn parse_event_condition(text: &str) -> Option<ParsedCondition> {
     }
 
     None
-}
-
-fn parse_opponent_had_entered_this_turn(verb_phrase: &str) -> Option<ParsedCondition> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("had ")
-        .parse(verb_phrase)
-        .ok()?;
-    parse_had_entered_this_turn(rest, ControllerRef::Opponent)
-}
-
-fn parse_had_entered_this_turn(text: &str, controller: ControllerRef) -> Option<ParsedCondition> {
-    let suffix = "enter the battlefield under their control this turn";
-    let (count, type_and_suffix) =
-        if let Some((count, after_count)) = super::oracle_util::parse_number(text) {
-            if let Ok((after_or_more, _)) =
-                tag::<_, _, OracleError<'_>>("or more ").parse(after_count.trim_start())
-            {
-                (count, after_or_more)
-            } else {
-                (1, text)
-            }
-        } else {
-            (1, text)
-        };
-    let (rest, type_text) = take_until::<_, _, OracleError<'_>>(suffix)
-        .parse(type_and_suffix)
-        .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(suffix).parse(rest).ok()?;
-    if !rest.is_empty() {
-        return None;
-    }
-    let (mut filter, _) = parse_type_phrase(type_text.trim());
-    if let TargetFilter::Typed(typed) = &mut filter {
-        typed.controller = Some(controller);
-        typed.properties.push(FilterProp::InZone {
-            zone: Zone::Battlefield,
-        });
-    }
-    Some(ParsedCondition::BattlefieldEntriesThisTurn { filter, count })
-}
-
-/// "an opponent [verb phrase]" → typed condition.
-///
-/// Only the library-search predicate survives: "an opponent lost/gained life this turn"
-/// is now produced by `parse_inner_condition` as a `QuantityComparison` and converted.
-/// Shared target for this one: `QuantityRef::PlayerActionsThisTurn { action }`.
-fn parse_opponent_event(verb_phrase: &str) -> nom::IResult<&str, ParsedCondition, OracleError<'_>> {
-    value(
-        ParsedCondition::OpponentSearchedLibraryThisTurn,
-        alt((
-            tag("searched their library this turn"),
-            tag("searched a library this turn"),
-            tag("has searched their library this turn"),
-        )),
-    )
-    .parse(verb_phrase)
 }
 
 /// CR 603.6a: modern enters templating is written "When [this object] enters"
@@ -916,25 +720,6 @@ fn parse_etb_this_turn_condition(
 // ---------------------------------------------------------------------------
 // Helpers (moved from restrictions.rs)
 // ---------------------------------------------------------------------------
-
-fn parse_numeric_threshold(text: &str, prefix: &str, suffix: &str) -> Option<usize> {
-    let middle = text.strip_prefix(prefix)?.strip_suffix(suffix)?.trim();
-    parse_count_word(middle)
-}
-
-/// Parse a count word using nom combinator for digit/English number matching.
-fn parse_count_word(text: &str) -> Option<usize> {
-    let trimmed = text.trim();
-    if trimmed == "zero" {
-        return Some(0);
-    }
-    // Delegate to nom combinator for number parsing (handles digits and English words).
-    let lower = trimmed.to_lowercase();
-    nom_primitives::parse_number
-        .parse(&lower)
-        .ok()
-        .and_then(|(rest, n)| rest.is_empty().then_some(n as usize))
-}
 
 fn parse_core_type_word(text: &str) -> Option<CoreType> {
     CoreType::from_str(&capitalize_condition_word(
@@ -1040,9 +825,12 @@ fn capitalize_condition_word(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{CountScope, TypeFilter};
+    use crate::types::ability::{
+        AggregateFunction, CountScope, PlayerScope, SharedQuality, TypeFilter,
+    };
     use crate::types::card_type::Supertype;
     use crate::types::counter::CounterType;
+    use crate::types::events::PlayerActionKind;
 
     /// Helper: assert the phrase reaches the SHARED grammar and converts.
     fn shared(text: &str) -> ParsedCondition {
@@ -1625,26 +1413,52 @@ mod tests {
     }
 
     /// CR 508.1a: the attacked-with family — numeric threshold and typed attacker filter.
+    ///
+    /// P02-U3b INVERTED this test's architecture assertion. It used to `falls_back(…)` —
+    /// pinning the family to the restriction-only fallback — and to expect the fixed
+    /// `YouAttackedWithAtLeast` leaf. The shared grammar now SPELLS both surfaces, so the
+    /// phrase must be OWNED by `parse_inner_condition` and arrive as the generic
+    /// `QuantityComparison` over the filter-carrying `AttackedThisTurn` ref. The old
+    /// assertions are kept only as this comment: reverting the port makes `shared(…)`
+    /// panic with "NoMatch (fell to restriction-only grammar)".
     #[test]
     fn retained_attacked_with_family() {
-        falls_back("you attacked with three or more creatures this turn");
-        assert_eq!(
-            parse_restriction_condition("you attacked with three or more creatures this turn"),
-            Some(ParsedCondition::YouAttackedWithAtLeast {
-                count: 3,
-                filter: None,
-            })
-        );
+        match shared("you attacked with three or more creatures this turn") {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::AttackedThisTurn {
+                                scope: CountScope::Controller,
+                                filter: None,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } => {}
+            other => panic!("expected unfiltered AttackedThisTurn >= 3, got {other:?}"),
+        }
         // Typed attacker (Thaumaton Torpedo). The trailing "this turn" may already be
         // stripped upstream, so both shapes must parse.
         for text in [
             "you attacked with a spacecraft this turn",
             "you attacked with a spacecraft",
         ] {
+            // P02-U3b: the shared grammar now owns this phrase, so it arrives as a
+            // QuantityComparison over the filter-carrying AttackedThisTurn ref rather
+            // than the retired fixed `YouAttackedWithAtLeast` leaf.
             match parse_restriction_condition(text) {
-                Some(ParsedCondition::YouAttackedWithAtLeast {
-                    count: 1,
-                    filter: Some(TargetFilter::Typed(tf)),
+                Some(ParsedCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty:
+                                QuantityRef::AttackedThisTurn {
+                                    scope: CountScope::Controller,
+                                    filter: Some(TargetFilter::Typed(tf)),
+                                },
+                        },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
                 }) => assert!(tf
                     .type_filters
                     .iter()
@@ -1659,31 +1473,32 @@ mod tests {
         );
     }
 
-    /// The remaining retained leaves, each with no exact shared counterpart today.
+    /// The leaves that genuinely have NO shared counterpart, and so stay in the
+    /// restriction-only fallback after P02-U3b.
+    ///
+    /// The four phrases this test used to also cover (lands-with-the-same-name, the
+    /// exact-hand-size disjunction, opponent library search, opponent battlefield
+    /// entries) moved to the shared grammar and are asserted there — see the
+    /// `shared_grammar_owns_*` tests.
     #[test]
-    fn retained_board_hand_and_event_leaves() {
-        assert_eq!(
-            parse_restriction_condition("you control three or more lands with the same name"),
-            Some(ParsedCondition::YouControlLandsWithSameNameAtLeast { count: 3 })
-        );
-        assert_eq!(
-            parse_restriction_condition("you have exactly zero or seven cards in hand"),
-            Some(ParsedCondition::HandSizeOneOf { counts: vec![0, 7] })
-        );
+    fn retained_leaves_with_no_shared_counterpart() {
+        // No per-STEP attack history exists in StaticCondition at all.
         assert_eq!(
             parse_restriction_condition("you've been attacked this step"),
             Some(ParsedCondition::BeenAttackedThisStep)
         );
+        // OWNER-relative count in a hidden zone: TargetFilter has no owner axis, so an
+        // ObjectCount would silently ask a controller-scoped question instead.
         assert_eq!(
-            parse_restriction_condition("an opponent searched their library this turn"),
-            Some(ParsedCondition::OpponentSearchedLibraryThisTurn)
+            parse_restriction_condition("you have no land cards in hand"),
+            Some(ParsedCondition::Not {
+                condition: Box::new(ParsedCondition::ZoneCoreTypeCardCountAtLeast {
+                    zone: Zone::Hand,
+                    core_type: CoreType::Land,
+                    count: 1,
+                })
+            })
         );
-        assert!(matches!(
-            parse_restriction_condition(
-                "an opponent had two or more creatures enter the battlefield under their control this turn"
-            ),
-            Some(ParsedCondition::BattlefieldEntriesThisTurn { count: 2, .. })
-        ));
     }
 
     /// Existential opponent comparisons (Weathered Wayfarer, Isolated Watchtower) flow
@@ -1730,6 +1545,198 @@ mod tests {
             other => panic!("expected filtered SpellsCastThisTurn >= 3, got {other:?}"),
         }
     }
+
+    // ---- P02-U3b: ported phrasing families now owned by the SHARED grammar ----
+    //
+    // Each of these asserts the phrase reaches `parse_inner_condition` AND converts.
+    // Pre-port every one of them panics with "NoMatch (fell to restriction-only
+    // grammar)" — that RED is the witness that the family was a real phrasing gap
+    // and not already-shadowed dead code.
+
+    /// CR 508.1a: the typed-attacker surface (Thaumaton Torpedo).
+    #[test]
+    fn shared_grammar_owns_you_attacked_with_typed_filter() {
+        match shared("you attacked with a Spacecraft this turn") {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::AttackedThisTurn {
+                                scope: CountScope::Controller,
+                                filter: Some(_),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected filtered AttackedThisTurn >= 1, got {other:?}"),
+        }
+    }
+
+    /// CR 508.1a: the numeric-threshold surface carries NO type qualifier.
+    #[test]
+    fn shared_grammar_owns_you_attacked_with_creature_count() {
+        match shared("you attacked with three or more creatures this turn") {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::AttackedThisTurn {
+                                scope: CountScope::Controller,
+                                filter: None,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } => {}
+            other => panic!("expected unfiltered AttackedThisTurn >= 3, got {other:?}"),
+        }
+    }
+
+    /// HOSTILE: an unrecognized attacker qualifier must stay an honest gap rather
+    /// than widening to "attacked with anything".
+    #[test]
+    fn unknown_attacker_qualifier_is_not_silently_widened() {
+        let parsed = parse_restriction_condition("you attacked with a frob the wobble this turn");
+        assert!(
+            parsed.is_none(),
+            "unknown attacker type must not produce a condition, got {parsed:?}"
+        );
+    }
+
+    /// CR 201.2 + CR 109.3: shared-name land count (Endless Atlas, Sceptre of Eternal Glory).
+    /// `aggregate: Max` is the load-bearing field — it is what makes this "some ONE
+    /// name is shared by three lands" instead of "you control three lands".
+    #[test]
+    fn shared_grammar_owns_lands_with_the_same_name() {
+        match shared("you control three or more lands with the same name") {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCountBySharedQuality {
+                                quality: SharedQuality::Name,
+                                aggregate: AggregateFunction::Max,
+                                ..
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } => {}
+            other => panic!("expected ObjectCountBySharedQuality[Name,Max] >= 3, got {other:?}"),
+        }
+    }
+
+    /// CR 102.2 + CR 608.2h: the opponent-scoped entry tally (Whiplash Trap).
+    ///
+    /// The scope MUST ride on `PlayerScope::Opponent{Max}`, not on a controller
+    /// injected into the type filter. A filter-carried controller sums entries
+    /// across ALL opponents, so in multiplayer two different opponents with one
+    /// creature each would satisfy "an opponent had TWO OR MORE creatures enter".
+    #[test]
+    fn shared_grammar_owns_opponent_battlefield_entries_per_opponent() {
+        match shared(
+            "an opponent had two or more creatures enter the battlefield under their control this turn",
+        ) {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Max,
+                                    },
+                                ..
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } => {}
+            other => panic!("expected per-opponent BattlefieldEntriesThisTurn >= 2, got {other:?}"),
+        }
+    }
+
+    /// CR 701.23a: opponent library search (Archive Trap).
+    #[test]
+    fn shared_grammar_owns_opponent_searched_library() {
+        match shared("an opponent searched their library this turn") {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::PlayerActionsThisTurn {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Max,
+                                    },
+                                action: PlayerActionKind::SearchedLibrary,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected per-opponent SearchedLibrary >= 1, got {other:?}"),
+        }
+    }
+
+    /// CR 402.1 + CR 608.2c: the exact-hand-size DISJUNCTION (The Biblioplex).
+    /// Equivalent to the retired `HandSizeOneOf { counts }`, whose evaluator was
+    /// literally `counts.contains(&hand_size)`.
+    #[test]
+    fn shared_grammar_owns_exact_hand_size_disjunction() {
+        match shared("you have exactly zero or seven cards in hand") {
+            ParsedCondition::Or { conditions } => {
+                assert_eq!(conditions.len(), 2, "got {conditions:?}");
+                for (expected, cond) in [0, 7].iter().zip(conditions.iter()) {
+                    match cond {
+                        ParsedCondition::QuantityComparison {
+                            lhs:
+                                QuantityExpr::Ref {
+                                    qty: QuantityRef::HandSize { .. },
+                                },
+                            comparator: Comparator::EQ,
+                            rhs: QuantityExpr::Fixed { value },
+                        } => assert_eq!(value, expected),
+                        other => panic!("expected HandSize EQ leaf, got {other:?}"),
+                    }
+                }
+            }
+            other => panic!("expected Or over two HandSize EQ leaves, got {other:?}"),
+        }
+    }
+
+    /// The single-count "exactly N" surface must NOT become a one-armed `Or`
+    /// (Triskaidekaphile) — arity 1 stays a bare `EQ`, so the port is additive.
+    #[test]
+    fn exact_hand_size_single_count_stays_a_bare_eq() {
+        match shared("you have exactly seven cards in hand") {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize { .. },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            } => {}
+            other => panic!("expected a bare HandSize EQ 7, got {other:?}"),
+        }
+    }
+
+    /// RETAINED, NOT PORTED: `BeenAttackedThisStep` has no `StaticCondition`
+    /// counterpart (no per-STEP attack history), so it must still be produced by
+    /// the restriction-only fallback. This pins the boundary of the port.
+    #[test]
+    fn been_attacked_this_step_stays_in_the_restriction_only_fallback() {
+        assert!(matches!(
+            parse_shared_restriction_condition("you've been attacked this step"),
+            SharedRestrictionParse::NoMatch
+        ));
+        assert_eq!(
+            parse_restriction_condition("You've been attacked this step"),
+            Some(ParsedCondition::BeenAttackedThisStep)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1749,19 +1756,28 @@ mod retained_family_gate {
     ///
     /// If you are here because this test went red: do not just append your parser to the
     /// list. Justify it, or teach the shared grammar the phrasing instead.
-    const PINNED_RETAINED_FAMILIES: [&str; 6] = [
+    const PINNED_RETAINED_FAMILIES: [&str; 4] = [
         // (a) restriction-context referent — the in-flight spell (CR 601.3d). PERMANENT.
         "parse_spell_targets_filter",
         // (b) vocabulary gap — ParsedCondition has no filter-carrying source predicate,
         //     so StaticCondition::SourceMatchesFilter cannot be converted. Root fix is a
         //     vocabulary alignment, not a parser edit.
         "parse_source_condition",
-        // (c) PHRASING GAPS — port pending (P02-U3b). Each has an existing shared target.
-        "parse_you_control_condition",
+        // (b) vocabulary gap — OWNER-relative count in a HIDDEN zone. TargetFilter has no
+        //     owner axis and the ObjectCount path discriminates by CONTROLLER, so the
+        //     shared reading would be a different predicate, not a re-spelling.
+        //     ("you have no <kind> cards in hand" — Land Grant.)
         "parse_hand_condition",
+        // (b) vocabulary gap — StaticCondition's attack history is per-TURN; there is no
+        //     per-STEP vocabulary for `BeenAttackedThisStep` to convert into.
         "parse_event_condition",
-        "parse_you_attacked_with",
     ];
+
+    // P02-U3b: the (c) PHRASING-GAP class is now EMPTY. `parse_you_control_condition` and
+    // `parse_you_attacked_with` were deleted outright, and `parse_hand_condition` /
+    // `parse_event_condition` were reduced to the (b) leaves above. Every family that
+    // remains is here because the shared vocabulary genuinely cannot express it — not
+    // because the grammar merely spells it differently.
 
     #[test]
     fn restriction_only_fallback_dispatches_exactly_the_pinned_families() {

@@ -240,6 +240,9 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::IsCommander
+        // CR 205.3m: reads the controller's COMMANDER, not whole-board population;
+        // another object entering or leaving cannot change the commander's types.
+        | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Other { .. } => false,
     }
 }
@@ -475,6 +478,9 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::IsCommander
+        // CR 205.3m: an entering object cannot perturb this — the commander's
+        // creature types come from the deck-pool registration, not the board.
+        | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Other { .. } => false,
     }
 }
@@ -3238,6 +3244,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // commander identity — fail closed until a "cast a commander" use-case
         // requires it (CR 903.8 commander-tax tracking lives elsewhere).
         | FilterProp::IsCommander
+        // CR 205.3m: same fail-closed reason as `IsCommander` above — the
+        // spell-cast record path carries no commander identity.
+        | FilterProp::SharesCreatureTypeWithCommander
         // CR 608.2c: Tracked-set membership ("chosen this way" / "the rest") is
         // a resolution-time battlefield selection — a spell-cast snapshot is not
         // a member of a chosen-object set, so fail closed.
@@ -4344,6 +4353,34 @@ fn matches_filter_prop(
         // to a permanent on the battlefield that is a commander." `is_commander`
         // is the deck-construction designation per CR 903.3.
         FilterProp::IsCommander => obj.is_commander,
+        // CR 205.3m + CR 903.3: the object must be a creature AND share at least one
+        // creature type with the filter-controller's commander(s) (Path of Ancestry).
+        //
+        // Delegates to `commander::commander_creature_types`, which is the AUTHORITY
+        // for "your commander": it reads `deck_pools[player].current_commander` first
+        // and only falls back to scanning `is_commander` objects. That ordering is
+        // load-bearing, which is why this is its own prop rather than a `SharesQuality`
+        // reference filter — a reference filter resolves by walking `state.objects`,
+        // i.e. the FALLBACK only, and would miss a registered-but-not-instantiated
+        // commander entirely. Calling the same helper the pre-retype spend site called
+        // makes this port behavior-preserving by construction.
+        FilterProp::SharesCreatureTypeWithCommander => {
+            let Some(player) = source.controller else {
+                return false;
+            };
+            if !obj
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Creature)
+            {
+                return false;
+            }
+            let commander_types = crate::game::commander::commander_creature_types(state, player);
+            obj.card_types
+                .subtypes
+                .iter()
+                .any(|s| commander_types.iter().any(|c| c.eq_ignore_ascii_case(s)))
+        }
         FilterProp::Other { .. } => false, // Fail-closed for unrecognized properties
     }
 }
@@ -4808,6 +4845,9 @@ fn zone_change_record_matches_property(
         // triggers that need to filter by commander status will require record
         // plumbing (no current consumer).
         | FilterProp::IsCommander
+        // CR 205.3m: the zone-change record path carries no commander identity;
+        // fail closed, as `IsCommander` does.
+        | FilterProp::SharesCreatureTypeWithCommander
         // CR 607 (by analogy): the controller's per-player anchor label is a
         // live-game read; a zone-change snapshot does not carry it. Fail closed.
         | FilterProp::ControllerChoseLabel { .. }

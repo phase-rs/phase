@@ -2843,12 +2843,13 @@ mod tests {
     }
 
     /// CR 508.1a + CR 601.2f: the conditional flat form gated by "you attacked
-    /// with a <filter>" extracts a filtered `YouAttackedWithAtLeast { count: 1 }`.
-    /// The trailing "this turn" is stripped upstream as a duration before the
-    /// reparse, so the bare form is what reaches the reducer (Thaumaton Torpedo).
+    /// with a <filter>" extracts a filtered `AttackedThisTurn` quantity gate
+    /// (GE 1). The trailing "this turn" is stripped upstream as a duration
+    /// before the reparse, so the bare form is what reaches the reducer
+    /// (Thaumaton Torpedo).
     #[test]
     fn cost_reduction_if_attacked_with_filter_gate() {
-        use crate::types::ability::ParsedCondition;
+        use crate::types::ability::{Comparator, CountScope, ParsedCondition, QuantityRef};
         let r = try_parse_cost_reduction(
             "this ability costs {3} less to activate if you attacked with a spacecraft",
         )
@@ -2856,9 +2857,17 @@ mod tests {
         assert_eq!(r.amount_per, 3);
         assert_eq!(r.count, QuantityExpr::Fixed { value: 1 });
         match r.condition {
-            Some(ParsedCondition::YouAttackedWithAtLeast {
-                count: 1,
-                filter: Some(TargetFilter::Typed(tf)),
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::AttackedThisTurn {
+                                scope: CountScope::Controller,
+                                filter: Some(TargetFilter::Typed(tf)),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
             }) => assert!(
                 tf.type_filters
                     .iter()

@@ -3300,7 +3300,15 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
 
     let (filter, rest) = parse_type_phrase(trimmed);
     if rest.trim().is_empty() {
-        return Some(filter);
+        // CR 109.2: a bare "spell(s)" head noun in a static-ability subject
+        // ("permanent spells you control", Secret Arcade) means the affected
+        // objects sit on the stack, not the battlefield — the same rule
+        // `parse_target_with_ctx` already applies to targeting noun phrases.
+        // `parse_type_phrase` has no notion of this (it's a bare type-phrase
+        // grammar shared by many non-targeting callers), so without this the
+        // "spell(s)" word is silently swallowed and the filter collapses to a
+        // battlefield-permanent filter that never reaches the stack.
+        return Some(scope_target_spell_phrase(filter, &lower));
     }
 
     parse_rule_static_subject_filter(trimmed)

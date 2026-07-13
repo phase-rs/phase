@@ -59,12 +59,13 @@ use super::{
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
     def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
-    def_is_keyword_counter_placement, fold_cast_copy_of_card_defs, has_explicit_player_target,
-    inject_chosen_color_choice_grant, mark_uses_tracked_set,
-    parse_spell_graveyard_replacement_rider, publishes_tracked_set_from_resolution,
-    retarget_counter_additional_cost_to_target, rewrite_parent_targets_to_tracked_set,
-    rewrite_rounding_mode, rewrite_that_type_mana_instead, stamp_delayed_returns,
-    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
+    def_is_keyword_counter_placement, demote_unbindable_batch_aggregate,
+    fold_cast_copy_of_card_defs, has_explicit_player_target, inject_chosen_color_choice_grant,
+    mark_uses_tracked_set, parse_spell_graveyard_replacement_rider,
+    publishes_aggregate_set_from_resolution, publishes_tracked_set_from_resolution,
+    rebind_tracked_aggregate_to_chain_set, retarget_counter_additional_cost_to_target,
+    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
+    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
 
 // ===========================================================================
@@ -517,7 +518,9 @@ pub(super) struct AssemblyEnv {
     search_destination_nodes: Vec<usize>,
     /// Every `Dig`/`RevealUntil` node (the `RestDestination` patchable set).
     dig_or_reveal_until_nodes: Vec<usize>,
-    /// Every `Destroy`/`DestroyAll` node (the can't-be-regenerated antecedent set).
+    /// Every `Destroy`/`DestroyAll` node — including those nested inside a
+    /// `CreateDelayedTrigger` wrapper (Merieke Ri Berit) — that forms the
+    /// can't-be-regenerated antecedent set (see `effect_wraps_destroy_like`).
     destroy_like_nodes: Vec<usize>,
     /// Every node already carrying a face-down profile (CR 708.2a spec antecedent).
     face_down_profile_nodes: Vec<usize>,
@@ -598,7 +601,9 @@ pub(super) enum AntecedentRole {
     /// to. Deliberately a DIFFERENT set from `DigOrMill`.
     DigOrRevealUntil,
     /// A `Destroy` or `DestroyAll` — the antecedent of a "can't be regenerated"
-    /// rider, which may be non-adjacent (Kirtar's Wrath puts a Token between them).
+    /// rider, which may be non-adjacent (Kirtar's Wrath puts a Token between them)
+    /// and may be nested inside a `CreateDelayedTrigger` wrapper (Merieke Ri
+    /// Berit's leaves-battlefield/becomes-untapped delayed destroy).
     DestroyLike,
     /// A move/manifest/turn-face-down node that ALREADY carries a face-down
     /// profile — the antecedent a "They're N/M ... creatures." spec refines
@@ -874,10 +879,10 @@ impl AssemblyEnv {
             ) {
                 self.dig_or_reveal_until_nodes.push(index);
             }
-            if matches!(
-                &*def.effect,
-                Effect::Destroy { .. } | Effect::DestroyAll { .. }
-            ) {
+            // CR 608.2c: include delayed-trigger-wrapped Destroy/DestroyAll
+            // (Merieke Ri Berit) in the can't-be-regenerated antecedent set, not
+            // just top-level ones — descends via effect_wraps_destroy_like.
+            if super::sequence::effect_wraps_destroy_like(&def.effect) {
                 self.destroy_like_nodes.push(index);
             }
             if matches!(
@@ -1701,6 +1706,25 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 SubAbilityLink::ContinuationStep
             }
         };
+        // CR 615.5: A "(When|Whenever|If) damage is prevented this way, …" rider
+        // is printed as its own sentence but is not an independent instruction —
+        // its "this way" back-reference binds to the preceding prevention. Detect
+        // it (only when the previous clause is the prevention it references) so the
+        // clause is folded into that prevention rather than dropped as a sibling.
+        let is_prevented_this_way_rider = matches!(
+            defs.last().map(|d| &*d.effect),
+            Some(Effect::PreventDamage { .. })
+        )
+            && crate::parser::oracle_replacement::clause_is_prevented_this_way_rider(
+                clause_ir.source.fragment().unwrap_or_default(),
+            );
+        // The Sentence boundary would mark the rider `SequentialSibling`, which the
+        // prevention resolver never installs as the shield's `runtime_execute` (the
+        // payoff silently does nothing — New Way Forward, Phyrexian Vindicator,
+        // Outfitted Jouster). Force `ContinuationStep` so it rides the shield.
+        if is_prevented_this_way_rider {
+            def.sub_link = SubAbilityLink::ContinuationStep;
+        }
         def.target_choice_timing = target_choice_timing_for_clause(clause_ir);
         // CR 115.1 + CR 701.9b: copy the per-clause selection mode captured by
         // `parse_target_with_ctx` during chunk parse. `Random` flips the engine
@@ -1972,6 +1996,22 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             apply_where_x_ability_expression(current, clause_ir.where_x_expression.as_deref());
         }
 
+        // CR 615.5 + CR 609.7: In a "damage is prevented this way" rider, the
+        // surface phrase "that source's controller" lowers to
+        // `ParentTargetController`, but there is no parent-target slot at runtime —
+        // it refers to the controller of the PREVENTED event's damage source (New
+        // Way Forward: "deals that much damage to that source's controller").
+        // Rewrite it to `PostReplacementSourceController` so the rider resolves
+        // against the shield's event context, mirroring the static-shield
+        // follow-up path in `oracle_replacement`.
+        if is_prevented_this_way_rider {
+            for current in &mut current_defs {
+                crate::parser::oracle_replacement::rewrite_parent_target_controller_to_post_replacement_source(
+                    current,
+                );
+            }
+        }
+
         // CR 603.7: Wrap in CreateDelayedTrigger if temporal suffix was found.
         if let Some(ref delayed_cond) = clause_ir.delayed_condition {
             for current in &mut current_defs {
@@ -2034,6 +2074,50 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         mark_uses_tracked_set(current);
                         rewrite_parent_targets_to_tracked_set(&mut current.effect);
                     }
+                }
+            }
+
+            // CR 608.2c: Re-anchor this clause's set-anaphor AGGREGATE ("their
+            // total power", "the greatest power among them") to the set an
+            // EARLIER clause published, overriding the leaf combinator's
+            // context-free triggering-batch reading.
+            //
+            // Strictly prior by construction: `defs` holds only the clauses
+            // already emitted, so a clause does not count itself as its own
+            // publisher — which is what keeps Witch-king, Sky Scourge ("exile
+            // the top X cards …, where X is their total power", whose own
+            // `ExileTop` IS a publisher) on the triggering-batch reading while
+            // Kylox, Visionary Inventor (a preceding SACRIFICE clause) flips to
+            // the chain set.
+            //
+            // A separate scan from `any_prior_publishes` above, on its own
+            // predicate: this axis additionally counts `Effect::Sacrifice` as a
+            // producer, and it must not widen the pronoun→target rewrite that
+            // the gate above drives. See
+            // `publishes_aggregate_set_from_resolution`.
+            if defs
+                .iter()
+                .any(|d| publishes_aggregate_set_from_resolution(&d.effect))
+            {
+                for current in &mut current_defs {
+                    rebind_tracked_aggregate_to_chain_set(current);
+                }
+            }
+
+            // CR 603.2c: An anaphor left on the TRIGGERING-BATCH reading in a
+            // chain that has NO trigger event has nothing to refer to — the
+            // aggregate would reduce an empty set to a confident 0. Fail
+            // honestly instead. (Angrath, Minotaur Pirate's loyalty ability:
+            // "Destroy all creatures target opponent controls. Angrath deals
+            // damage to that player equal to their total power.")
+            if !ir.in_trigger {
+                let fragment = clause_ir
+                    .where_x_expression
+                    .as_deref()
+                    .map(|expr| format!("where X is {expr}"))
+                    .unwrap_or_else(|| clause_ir.source.fragment().unwrap_or_default().to_string());
+                for current in &mut current_defs {
+                    demote_unbindable_batch_aggregate(current, &fragment);
                 }
             }
 

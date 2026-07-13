@@ -6221,11 +6221,44 @@ fn extract_mana_spend_trigger_from_chain(def: &mut AbilityDefinition) {
     if !matches!(&*def.effect, Effect::Mana { .. }) {
         return;
     }
-    if let Some(grant) = strip_mana_spend_trigger_node(&mut def.sub_ability) {
+    if let Some(mut grant) = strip_mana_spend_trigger_node(&mut def.sub_ability) {
+        // CR 707.10c: "… copy that spell AND you may choose new targets for the copy"
+        // (Pyromancer's Goggles, Primal Wellspring). The retarget sentence could not
+        // bind on the ordinary clause-streaming path, and not by accident: THIS fold is
+        // a post-pass, so when the continuation recognizer went looking for the
+        // sentence's antecedent the `CopySpell` did not exist yet — the copy is born
+        // right here, one pass later. The sentence therefore survived as an honest
+        // `orphaned_copy_retarget` residual, and now that the copy is real we reclaim
+        // it. Without this the copy is modeled but permanently un-retargetable.
+        if let crate::types::mana::ManaSpellGrant::TriggerOnSpend { ability, .. } = &mut grant {
+            strip_orphaned_copy_retarget_node(&mut def.sub_ability, ability);
+        }
         if let Effect::Mana { grants, .. } = &mut *def.effect {
             grants.push(grant);
         }
     }
+}
+
+/// CR 707.10c: Walk the sub-ability chain for the `orphaned_copy_retarget` residual left
+/// by the retarget sentence, fold it into `copy_ability`'s `CopySpell`, and remove the
+/// node. Declines any gap node whose text is not a retarget clause, so an unrelated
+/// residual is never silently swallowed.
+fn strip_orphaned_copy_retarget_node(
+    slot: &mut Option<Box<AbilityDefinition>>,
+    copy_ability: &mut AbilityDefinition,
+) -> bool {
+    let Some(sub) = slot.as_mut() else {
+        return false;
+    };
+    if let Some(desc) = sub.effect.unimplemented_description() {
+        let lower = desc.to_lowercase();
+        if super::oracle_effect::sequence::absorb_orphaned_copy_retarget(copy_ability, &lower) {
+            // Remove this node, promote its child (usually None).
+            *slot = sub.sub_ability.take();
+            return true;
+        }
+    }
+    strip_orphaned_copy_retarget_node(&mut sub.sub_ability, copy_ability)
 }
 
 /// Recursively walk the sub_ability chain. If a node is an `Unimplemented`

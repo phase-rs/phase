@@ -6432,6 +6432,13 @@ fn apply_single_replacement(
     let proposed_event_target = match &proposed {
         ProposedEvent::Damage { target, .. } => Some(target.clone()),
         ProposedEvent::LifeGain { player_id, .. } => Some(TargetRef::Player(*player_id)),
+        // CR 614.6 + CR 608.2d: the drawing player of a replaced Draw is the
+        // "affected player" referent for an execute chain's "any other player
+        // may" fan-out (Zur's Weirding). Stashed on the drain as its event
+        // target and read back via `post_replacement_event_target()` while the
+        // resident-top continuation drains (the count is zeroed for a full
+        // reveal-instead substitution, so the original draw never happens).
+        ProposedEvent::Draw { player_id, .. } => Some(TargetRef::Player(*player_id)),
         _ => None,
     };
     let replacement_applied = proposed.applied_set().clone();
@@ -6524,7 +6531,13 @@ fn apply_single_replacement(
                         new_event.affected_object_id().unwrap_or(rid.source),
                         replacement_applied.clone(),
                         None,
-                        None,
+                        // CR 614.6 + CR 608.2d: carry the replaced Draw's affected
+                        // player (the drawing player) so an "any other player may"
+                        // execute (Zur's Weirding) can exclude them from the APNAP
+                        // fan-out. `None` for every other event kind (see the
+                        // `proposed_event_target` match above), so no existing
+                        // continuation's event-target slot changes.
+                        proposed_event_target.clone(),
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {

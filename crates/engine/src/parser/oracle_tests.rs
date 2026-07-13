@@ -2033,7 +2033,8 @@ fn hyldas_crown_full_card_supported_with_during_your_turn_cost_reduction() {
 /// unimplemented parts. The card is a single activated ability; the only
 /// previously-failing fragment was the "This ability costs {3} less to
 /// activate if you attacked with a Spacecraft this turn" cost-reduction
-/// clause, now extracted with a filtered `YouAttackedWithAtLeast` gate.
+/// clause, now extracted as a typed `QuantityComparison` over a filtered
+/// `AttackedThisTurn` count (GE 1).
 /// (Runtime discrimination — Spacecraft attacker required, opponent's
 /// Spacecraft excluded — lives in `game::casting::tests::
 /// thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker`.)
@@ -2058,12 +2059,15 @@ fn thaumaton_torpedo_full_card_supported_with_spacecraft_attacked_cost_reduction
     assert!(
         matches!(
             ability.cost_reduction.as_ref().unwrap().condition,
-            Some(
-                crate::types::ability::ParsedCondition::YouAttackedWithAtLeast {
-                    count: 1,
-                    filter: Some(_)
-                }
-            )
+            Some(crate::types::ability::ParsedCondition::QuantityComparison {
+                lhs: crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::AttackedThisTurn {
+                        filter: Some(_),
+                        ..
+                    },
+                },
+                ..
+            })
         ),
         "cost reduction must gate on a filtered attacked-with condition, got {:?}",
         ability.cost_reduction
@@ -6883,7 +6887,18 @@ fn spell_casting_option_parses_trap_alternative_cost() {
                 shards: vec![],
             },
         })
-        .condition(crate::types::ability::ParsedCondition::OpponentSearchedLibraryThisTurn)
+        .condition(crate::types::ability::ParsedCondition::QuantityComparison {
+            lhs: crate::types::ability::QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::PlayerActionsThisTurn {
+                    player: crate::types::ability::PlayerScope::Opponent {
+                        aggregate: crate::types::ability::AggregateFunction::Max,
+                    },
+                    action: crate::types::events::PlayerActionKind::SearchedLibrary,
+                },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+        })
     );
     assert_eq!(r.abilities.len(), 1);
     assert!(!matches!(
@@ -7481,7 +7496,7 @@ fn forest_reminder_text_only() {
 /// (no leftover `Effect:when` gap). Issue #3101-style mana-spent trigger.
 #[test]
 fn lapis_orb_mana_spend_trigger_folds_into_grant() {
-    use crate::types::mana::{ManaRestriction, ManaSpellGrant};
+    use crate::types::mana::ManaSpellGrant;
     let r = parse(
         "{T}: Add {U}. When you spend this mana to cast a Dragon creature spell, scry 2.",
         "Lapis Orb of Dragonkind",
@@ -7494,16 +7509,20 @@ fn lapis_orb_mana_spend_trigger_folds_into_grant() {
         panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
     };
     assert_eq!(grants.len(), 1, "grants: {:?}", grants);
-    let ManaSpellGrant::TriggerOnSpend {
-        restriction,
-        ability,
-    } = &grants[0]
-    else {
+    let ManaSpellGrant::TriggerOnSpend { filter, ability } = &grants[0] else {
         panic!("expected TriggerOnSpend, got {:?}", grants[0]);
     };
+    // CR 603.3: the trigger's EVENT filter — "a Dragon creature spell" — parsed by the
+    // shared type-phrase authority, not a bespoke spend-restriction shape.
     assert_eq!(
-        *restriction,
-        Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string()))
+        *filter,
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![
+                TypeFilter::Creature,
+                TypeFilter::Subtype("Dragon".to_string())
+            ],
+            ..TypedFilter::default()
+        })
     );
     assert!(
         matches!(*ability.effect, Effect::Scry { .. }),
@@ -7759,7 +7778,7 @@ fn tin_street_gossip_face_down_or_turn_face_up_is_coverage_supported() {
 #[test]
 fn path_of_ancestry_full_parse_no_unimplemented() {
     use crate::types::ability::ManaProduction;
-    use crate::types::mana::{ManaRestriction, ManaSpellGrant};
+    use crate::types::mana::ManaSpellGrant;
     let r = parse(
             "This land enters tapped.\n{T}: Add one mana of any color in your commander's color identity. When that mana is spent to cast a creature spell that shares a creature type with your commander, scry 1. (Look at the top card of your library. You may put that card on the bottom.)",
             "Path of Ancestry",
@@ -7787,16 +7806,20 @@ fn path_of_ancestry_full_parse_no_unimplemented() {
         "must stay a mana ability"
     );
     assert_eq!(grants.len(), 1, "grants: {grants:?}");
-    let ManaSpellGrant::TriggerOnSpend {
-        restriction,
-        ability,
-    } = &grants[0]
-    else {
+    let ManaSpellGrant::TriggerOnSpend { filter, ability } = &grants[0] else {
         panic!("expected TriggerOnSpend, got {:?}", grants[0]);
     };
-    assert_eq!(
-        *restriction,
-        Some(ManaRestriction::SharesCreatureTypeWithCommander)
+    // CR 205.3m + CR 903.3: the commander-relational predicate is an OBJECT filter
+    // (which spell fires the trigger), not a CR 106.6 spend restriction — Path of
+    // Ancestry's mana may be spent on anything.
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected a Typed spell filter, got {filter:?}");
+    };
+    assert!(
+        typed
+            .properties
+            .contains(&FilterProp::SharesCreatureTypeWithCommander),
+        "expected the commander-relational property, got {typed:?}"
     );
     assert!(matches!(*ability.effect, Effect::Scry { .. }));
     assert!(
@@ -20985,5 +21008,38 @@ fn parsed_activation_condition_commits_both_cadence_and_condition() {
             }
         )),
         "condition must commit alongside the cadence, got {restrictions:?}"
+    );
+}
+
+/// CR 106.6 + CR 202.3: Gilanra's mana-value spend filter ("a spell with mana value 6 or
+/// greater") must keep parsing after the retype. Regression pin: the shared spell-filter
+/// grammar is written for the article-less "cast your next … spell" phrasing, so a spend
+/// trigger's leading article would otherwise leave a bare "a" as the type phrase and
+/// reject the whole clause — silently turning a supported card into a gap.
+#[test]
+fn gilanra_mana_value_spend_trigger_survives_the_retype() {
+    use crate::types::mana::ManaSpellGrant;
+    let r = parse(
+        "{T}: Add {G}. When you spend this mana to cast a spell with mana value 6 or greater, draw a card.",
+        "Gilanra, Caller of Wirewood",
+        &[],
+        &["Creature"],
+        &["Gilanra, Caller of Wirewood"],
+    );
+    let Effect::Mana { grants, .. } = &*r.abilities[0].effect else {
+        panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+    };
+    assert_eq!(grants.len(), 1, "grants: {grants:?}");
+    let ManaSpellGrant::TriggerOnSpend { filter, ability } = &grants[0] else {
+        panic!("expected TriggerOnSpend, got {:?}", grants[0]);
+    };
+    assert!(
+        format!("{filter:?}").contains("Cmc"),
+        "the mana-value threshold must survive as a Cmc predicate: {filter:?}"
+    );
+    assert!(matches!(*ability.effect, Effect::Draw { .. }));
+    assert!(
+        !matches!(*r.abilities[0].effect, Effect::Unimplemented { .. }),
+        "Gilanra must not regress to Unimplemented"
     );
 }

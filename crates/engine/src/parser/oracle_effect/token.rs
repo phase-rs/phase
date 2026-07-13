@@ -1674,7 +1674,9 @@ mod tests {
             (
                 "Create an X/X green Ooze creature token, where X is the number of +1/+1 counters removed this way.",
                 QuantityExpr::Ref {
-                    qty: QuantityRef::PreviousEffectAmount,
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: crate::types::ability::DamageChannel::Total,
+                    },
                 },
             ),
             (

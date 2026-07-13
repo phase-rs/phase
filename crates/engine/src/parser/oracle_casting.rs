@@ -767,9 +767,9 @@ fn scan_timing_restrictions(text: &str) -> Vec<CastingRestriction> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AdditionalCostRepeatability, BeholdCostAction, CardSelectionMode, Comparator,
-        ControllerRef, CountScope, FilterProp, ParsedCondition, QuantityExpr, QuantityRef,
-        TargetFilter, TypeFilter,
+        AdditionalCostRepeatability, AggregateFunction, BeholdCostAction, CardSelectionMode,
+        Comparator, ControllerRef, CountScope, FilterProp, ParsedCondition, PlayerScope,
+        QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
     };
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost};
@@ -1701,11 +1701,25 @@ mod tests {
         )
         .expect("trap alt-cost should parse");
         match option.condition {
-            Some(ParsedCondition::BattlefieldEntriesThisTurn {
-                filter: TargetFilter::Typed(filter),
-                count: 1,
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Max,
+                                    },
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
             }) => {
-                assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+                // The per-opponent scope carries "under their control" (the
+                // resolver counts entries whose recorded controller is the
+                // scoped opponent), so the filter itself must stay type-only.
+                assert_eq!(filter.controller, None);
                 assert!(filter.type_filters.contains(&TypeFilter::Artifact));
             }
             other => panic!("expected opponent artifact entry condition, got {other:?}"),
@@ -1720,11 +1734,25 @@ mod tests {
         )
         .expect("trap alt-cost should parse");
         match option.condition {
-            Some(ParsedCondition::BattlefieldEntriesThisTurn {
-                filter: TargetFilter::Typed(filter),
-                count: 2,
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Max,
+                                    },
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
             }) => {
-                assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+                // Per-opponent Max is the semantic fix: "an opponent had two or
+                // more lands enter" means ONE opponent with 2+, never two
+                // opponents with 1 each (which a summed count would accept).
+                assert_eq!(filter.controller, None);
                 assert!(filter.type_filters.contains(&TypeFilter::Land));
             }
             other => panic!("expected opponent land entry condition, got {other:?}"),

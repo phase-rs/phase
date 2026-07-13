@@ -8896,6 +8896,12 @@ pub struct DrawSequenceFrameId(pub u64);
 pub struct DrawSequenceFrame {
     pub frame_id: DrawSequenceFrameId,
     pub player: PlayerId,
+    /// CR 614.5: replacement identities already applied to the draw instruction
+    /// that produced this frame. Every individual draw, including one resumed
+    /// after a replacement choice, starts with this set so an originating
+    /// replacement cannot apply to its own substitute draw.
+    #[serde(default)]
+    pub applied: HashSet<AppliedReplacementKey>,
     /// CR 121.6b: individual draws of this instruction not yet attempted. "If an
     /// effect replaces a draw within a sequence of card draws, the replacement
     /// effect is completed before resuming the sequence."
@@ -8963,11 +8969,22 @@ impl DrawSequenceStack {
     /// Push a new instruction and return its ID. Monotonic: the allocator never
     /// rewinds, so an ID from a popped frame is never reissued.
     pub fn push(&mut self, player: PlayerId, count: u32) -> DrawSequenceFrameId {
+        self.push_with_replacement_applied(player, count, HashSet::new())
+    }
+
+    /// Push a draw instruction carrying replacement identity from its origin.
+    pub fn push_with_replacement_applied(
+        &mut self,
+        player: PlayerId,
+        count: u32,
+        applied: HashSet<AppliedReplacementKey>,
+    ) -> DrawSequenceFrameId {
         let frame_id = DrawSequenceFrameId(self.next_frame_id);
         self.next_frame_id += 1;
         self.frames.push(DrawSequenceFrame {
             frame_id,
             player,
+            applied,
             remaining: count,
             accumulated: 0,
         });

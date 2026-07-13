@@ -1423,6 +1423,36 @@ pub(crate) fn extract_source_from_event(
     }
 }
 
+/// CR 603.2c + CR 508.1: Extract EVERY object the trigger event names as a
+/// subject — the set-valued widening of [`extract_source_from_event`].
+///
+/// A batched trigger's plural anaphor ("them", "those creatures", "their total
+/// power") refers to the whole triggering batch, so an aggregate reduced over
+/// that batch must see every member. `AttackersDeclared` is the only event that
+/// carries a multi-object batch *within a single event* (CR 508.1: attackers are
+/// declared together as one turn-based action), and the singleton extractor
+/// deliberately collapses a >1 attacker batch to `None` — there is no single
+/// "the" attacker to name. Reducing an aggregate over that `None` yields an
+/// empty set, i.e. 0: a silent wrong answer on every multi-attacker board.
+///
+/// Every other event names exactly one subject, so this widening DELEGATES to
+/// the singleton and lifts its answer into a 1-vec. That keeps the two
+/// extractors from drifting apart and leaves every existing singleton caller
+/// untouched.
+///
+/// CR 603.10a: batched *dies* triggers are unaffected — they emit one
+/// `ZoneChanged` event PER creature, so their batch is reconstructed by
+/// collecting ACROSS events, never within one. This function preserves that
+/// (each `ZoneChanged` contributes its own 1-vec).
+pub(crate) fn extract_sources_from_event(event: &crate::types::events::GameEvent) -> Vec<ObjectId> {
+    use crate::types::events::GameEvent;
+    match event {
+        // CR 508.1: the full declared-attackers batch.
+        GameEvent::AttackersDeclared { attacker_ids, .. } => attacker_ids.clone(),
+        _ => extract_source_from_event(event).into_iter().collect(),
+    }
+}
+
 /// CR 603.2 + CR 120.1: Extract the object that *received* the damage referenced
 /// by the current trigger event — the recipient counterpart to
 /// [`extract_source_from_event`]. Resolves `ObjectScope::EventTarget` ("that
@@ -4893,6 +4923,56 @@ mod tests {
         );
         // Suppress unused-variable warning when setup_with_creatures changes.
         let _ = &mut state;
+    }
+
+    /// CR 508.1 + CR 603.2c: the SET-valued extractor is a pure widening of the
+    /// singleton.
+    ///
+    /// The singleton deliberately collapses a MULTI-attacker `AttackersDeclared`
+    /// to `None` — there is no single "the" attacker — and every one of its
+    /// callers depends on that. But an aggregate reduced over that `None` sees an
+    /// EMPTY set, i.e. 0, on every multi-attacker board. `extract_sources_from_event`
+    /// returns the whole batch instead, and delegates every other event arm back
+    /// to the singleton so the two cannot drift.
+    #[test]
+    fn set_extractor_widens_the_multi_attacker_batch_that_the_singleton_drops() {
+        use crate::types::events::GameEvent;
+
+        let a = ObjectId(11);
+        let b = ObjectId(12);
+        let batch = GameEvent::AttackersDeclared {
+            attacker_ids: vec![a, b],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        };
+
+        assert_eq!(
+            extract_source_from_event(&batch),
+            None,
+            "the singleton must STILL collapse a 2-attacker batch to None — this \
+             is the behavior its existing callers rely on, and it is untouched"
+        );
+        assert_eq!(
+            extract_sources_from_event(&batch),
+            vec![a, b],
+            "the set extractor must return EVERY attacker"
+        );
+
+        // Pure widening: a 1-attacker batch agrees with the singleton, and a
+        // non-batch event is lifted to a 1-vec rather than losing its subject.
+        let solo = GameEvent::AttackersDeclared {
+            attacker_ids: vec![a],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        };
+        assert_eq!(extract_source_from_event(&solo), Some(a));
+        assert_eq!(extract_sources_from_event(&solo), vec![a]);
+
+        assert_eq!(
+            extract_sources_from_event(&GameEvent::PermanentUntapped { object_id: b }),
+            vec![b],
+            "a singleton-subject event must be lifted, not dropped"
+        );
     }
 
     /// CR 509.1g + CR 608.2c: for "When this creature blocks a creature,

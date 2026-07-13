@@ -106,8 +106,8 @@ use crate::types::ability::{
     RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SkipScope,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
     SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    UntilCondition, ZoneOwner,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -17657,6 +17657,30 @@ fn lower_subject_predicate_ast(
             if let Some(wrapped) = wrap_target_subject_damage(clause.clone(), &subject) {
                 return wrapped;
             }
+            // CR 608.2c + CR 109.4 + CR 701.16a: `Effect::Investigate` is a
+            // fieldless unit variant with no player slot for `inject_subject_target`
+            // to stamp the subject onto, so an explicit non-caster subject ("That
+            // player investigates" — Declaration in Stone, where "that player" is
+            // the controller of the exiled target) would be silently dropped and
+            // the Clue handed to the caster. Record the subject as a pending
+            // `player_scope` (consumed by the effect-chain loop) so resolution fans
+            // the Investigate out to the anchored player instead. Only lifts an
+            // explicit parent-target player anaphor; a bare "investigate" leaves
+            // `affected == SelfRef`/`Controller` and is untouched (caster default).
+            if matches!(clause.effect, Effect::Investigate) {
+                if let Some(scope) = player_scope_from_parent_target_subject(&subject.affected) {
+                    ctx.pending_player_scope = Some(scope);
+                }
+                // CR 701.16a + CR 608.2c + CR 400.7: "investigate FOR EACH nontoken
+                // creature exiled this way" — the fieldless Investigate carries no
+                // count slot, so lift the "for each <filter> … this way" suffix to a
+                // pending `repeat_for` (the effect-chain loop stamps it on this
+                // clause's def). The resolver loops the Investigate N times over the
+                // merged exile tracked set, one Clue per nontoken creature exiled.
+                if let Some(qty) = repeat_for_each_this_way_suffix(&pred_lower) {
+                    ctx.pending_repeat_for = Some(qty);
+                }
+            }
             inject_subject_target(&mut clause.effect, &subject);
             sync_subject_into_nested_shuffle_sub(&mut clause, &subject);
             // CR 109.4 + CR 608.2c (issue #534): When the subject phrase
@@ -17849,6 +17873,52 @@ fn extract_player_anchor_in_chain(clause: &ParsedEffectClause) -> Option<TargetF
 fn player_filter_from_anchor_for_chooser(anchor: &TargetFilter) -> Option<PlayerFilter> {
     match anchor {
         TargetFilter::ParentTargetOwner => Some(PlayerFilter::ParentObjectTargetOwner),
+        _ => None,
+    }
+}
+
+/// CR 109.4 + CR 608.2h: Map a subject-phrase player anaphor that resolved to
+/// the controller/owner of the spell's target ("its controller" / "that
+/// player" → `ParentTargetController`/`ParentTargetOwner`) to the matching
+/// `PlayerFilter` player-scope axis. Used when the predicate effect has no
+/// player field to carry the subject (`Effect::Investigate`), so the subject is
+/// lifted to `AbilityDefinition.player_scope` instead. Returns `None` for any
+/// non-parent-target subject (caster default, chosen player, target player),
+/// which belong on the effect's own field or a different scope path.
+fn player_scope_from_parent_target_subject(affected: &TargetFilter) -> Option<PlayerFilter> {
+    match affected {
+        TargetFilter::ParentTargetController => Some(PlayerFilter::ParentObjectTargetController),
+        TargetFilter::ParentTargetOwner => Some(PlayerFilter::ParentObjectTargetOwner),
+        _ => None,
+    }
+}
+
+/// CR 701.16a + CR 400.7: Parse a "for each <filter> <cause> this way" SUFFIX
+/// (lowercased predicate text) into a `repeat_for` count for a count-less effect
+/// like `Effect::Investigate`. Routes the tail through the shared
+/// `parse_for_each_clause` (the parser the "for each …, <effect>" prefix path
+/// already uses) and accepts ONLY a cause-filtered tracked-set count
+/// (`FilteredTrackedSetSize { caused_by: Some(_) }`, e.g. "nontoken creature
+/// exiled this way") — an unfiltered or non-"this way" suffix returns `None` so
+/// the caller leaves the effect untouched. The chain-tracked exile set the count
+/// reads is published by the preceding `ChangeZone`/`ChangeZoneAll` exiles.
+fn repeat_for_each_this_way_suffix(pred_lower: &str) -> Option<QuantityExpr> {
+    // Combinator split at the " for each " delimiter (PATTERNS.md Pattern 6): the
+    // tail is the count clause.
+    let (after_base, _) = take_until::<_, _, OracleError<'_>>(" for each ")
+        .parse(pred_lower)
+        .ok()?;
+    let (tail, _) = tag::<_, _, OracleError<'_>>(" for each ")
+        .parse(after_base)
+        .ok()?;
+    // allow-noncombinator: trailing-sentence-period cleanup on the pre-split tail, not parse dispatch
+    let clause = tail.trim_end().trim_end_matches('.').trim_end();
+    match parse_for_each_clause(clause) {
+        Some(
+            qty @ QuantityRef::FilteredTrackedSetSize {
+                caused_by: Some(_), ..
+            },
+        ) => Some(QuantityExpr::Ref { qty }),
         _ => None,
     }
 }
@@ -21730,6 +21800,188 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
         )
 }
 
+/// CR 608.2c + CR 701.21a: Does this clause publish, at resolution, a chain
+/// tracked set that a LATER set-AGGREGATE anaphor ("their total power", "the
+/// greatest power among them") would reduce?
+///
+/// A superset of [`publishes_tracked_set_from_resolution`] by exactly one
+/// producer: `Effect::Sacrifice` (CR 701.21a). A sacrifice publishes its
+/// affected ids as the chain set at resolution
+/// (`game/effects/mod.rs::publish_tracked_set_with_causes`), and that set is the
+/// antecedent of Kylox, Visionary Inventor's "their" ("sacrifice any number of
+/// other creatures, then exile the top X cards of your library, where X is their
+/// total power").
+///
+/// Sacrifice is deliberately NOT added to
+/// [`publishes_tracked_set_from_resolution`] itself. That predicate drives
+/// `rewrite_parent_targets_to_tracked_set` — the pronoun→TARGET rewrite axis —
+/// where re-pointing a post-sacrifice clause's `ParentTarget` at the sacrificed
+/// set is a different question with a far wider blast radius. Two axes, two
+/// predicates; this one only ever re-anchors an aggregate's `source` field.
+fn publishes_aggregate_set_from_resolution(effect: &Effect) -> bool {
+    publishes_tracked_set_from_resolution(effect) || matches!(effect, Effect::Sacrifice { .. })
+}
+
+/// CR 608.2c: Re-anchor a batched set-anaphor aggregate to the CHAIN-published
+/// set.
+///
+/// The leaf quantity combinator is context-free: "their total power" and "the
+/// greatest power among them" both parse to `TrackedSetAggregate { source:
+/// TriggeringBatch }`, because the pronoun ALONE cannot say whether its
+/// antecedent is the triggering batch or a set that an earlier clause published.
+/// The two readings are byte-identical in the leaf text and resolve from
+/// different state:
+///
+///   Witch-king, Sky Scourge  "Whenever you attack with one or more Wraiths,
+///     exile the top X cards …, where X is their total power."
+///     -> TRIGGERING BATCH (the attacking Wraiths).
+///   Kylox, Visionary Inventor  "Whenever Kylox attacks, sacrifice any number of
+///     other creatures, then exile the top X cards …, where X is their total
+///     power."
+///     -> CHAIN SET (the creatures the PRECEDING clause sacrificed).
+///
+/// The disambiguator is therefore the SIBLING CLAUSE, which is only visible one
+/// layer up from the leaf — here, at chain assembly. CR 608.2c: an ability's
+/// instructions are followed in the order written, so when an earlier
+/// instruction has just established a set of objects, the pronoun refers to it.
+/// Binding the batch reading in a chain that published a set is a silent 0 (the
+/// event batch and the chain set are different state); this pass is what keeps
+/// that from shipping as a supported-looking card.
+///
+/// Mirrors `rebind_anaphoric_object_scope` (the object-scope analogue).
+pub(crate) fn rebind_tracked_aggregate_to_chain_set(def: &mut AbilityDefinition) {
+    each_quantity_expr_mut(&mut def.effect, &mut rebind_tracked_aggregate_expr);
+    if let Some(spec) = def.multi_target.as_mut() {
+        spec.map_quantities(|expr| {
+            let mut slot = expr;
+            rebind_tracked_aggregate_expr(&mut slot);
+            slot
+        });
+    }
+    if let Some(repeat_for) = def.repeat_for.as_mut() {
+        rebind_tracked_aggregate_expr(repeat_for);
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rebind_tracked_aggregate_to_chain_set(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        rebind_tracked_aggregate_to_chain_set(else_ability);
+    }
+}
+
+/// CR 603.2c: Demote an UNBINDABLE triggering-batch anaphor to an honest gap.
+///
+/// `TrackedSetAggregate { source: TriggeringBatch }` reduces the objects of the
+/// CURRENT TRIGGER EVENT. A chain that is not a triggered ability's body — a
+/// spell, or an activated/loyalty ability — has no trigger event, so the pronoun
+/// has no antecedent at all: the aggregate would reduce an EMPTY set to 0 while
+/// the card still rendered as fully supported. That is strictly worse than a
+/// gap, because a confident 0 is indistinguishable from a correct answer.
+///
+/// This is a live shape, not a hypothetical. Angrath, Minotaur Pirate's
+/// "−11: Destroy all creatures target opponent controls. Angrath deals damage to
+/// that player equal to their total power." carries the possessive anaphor in a
+/// LOYALTY ability. Its true antecedent is the creatures the preceding clause
+/// destroyed — a CHAIN set — but the clause ALSO needs "that player" to bind to
+/// the targeted opponent, which is a separate (player-anaphor) binding gap. With
+/// only half the clause representable, the honest answer is a gap, not a
+/// confident 0. The `Unimplemented` marker is the single authority for that
+/// (`Effect::unimplemented`), never a hand-rolled sentinel.
+///
+/// Demotes exactly the node that carries the unbindable anaphor, so sibling
+/// clauses that DID parse (Angrath's `DestroyAll`) are preserved.
+pub(crate) fn demote_unbindable_batch_aggregate(def: &mut AbilityDefinition, fragment: &str) {
+    if def_slots_reference_triggering_batch(def) {
+        *def.effect = Effect::unimplemented("tracked_set_anaphor", fragment);
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        demote_unbindable_batch_aggregate(sub, fragment);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        demote_unbindable_batch_aggregate(else_ability, fragment);
+    }
+}
+
+/// CR 603.2c: Does THIS def's own quantity slots (not its sub-abilities') carry
+/// a triggering-batch aggregate? Companion to
+/// [`demote_unbindable_batch_aggregate`], which recurses separately so it can
+/// demote the precise node that holds the anaphor.
+fn def_slots_reference_triggering_batch(def: &AbilityDefinition) -> bool {
+    fn expr_references_batch(expr: &QuantityExpr) -> bool {
+        match expr {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::TrackedSetAggregate {
+                        source: TrackedAnaphorSource::TriggeringBatch,
+                        ..
+                    },
+            } => true,
+            QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => false,
+            QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
+            | QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::UpTo { max: inner }
+            | QuantityExpr::Power {
+                exponent: inner, ..
+            } => expr_references_batch(inner),
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+                exprs.iter().any(expr_references_batch)
+            }
+            QuantityExpr::Difference { left, right } => {
+                expr_references_batch(left) || expr_references_batch(right)
+            }
+        }
+    }
+    // `each_quantity_expr_mut` is the only quantity visitor over `Effect`; it is
+    // mutable-only, so probe a throwaway clone (parse-time, and only on the
+    // no-trigger path).
+    let mut found = false;
+    let mut effect = def.effect.clone();
+    each_quantity_expr_mut(&mut effect, &mut |expr| {
+        found |= expr_references_batch(expr);
+    });
+    found
+        || def.repeat_for.as_ref().is_some_and(expr_references_batch)
+        || def.multi_target.as_ref().is_some_and(|spec| {
+            expr_references_batch(&spec.min) || spec.max.as_ref().is_some_and(expr_references_batch)
+        })
+}
+
+/// CR 608.2c: Retarget every `TrackedSetAggregate` in one `QuantityExpr` tree
+/// from the context-free `TriggeringBatch` default to the chain-published set.
+/// A `source` the parser already committed to `ChainSet` (the explicit "those
+/// exiled cards" anaphor) is left alone — it named its set outright.
+fn rebind_tracked_aggregate_expr(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::TrackedSetAggregate {
+                    source: source @ TrackedAnaphorSource::TriggeringBatch,
+                    ..
+                },
+        } => *source = TrackedAnaphorSource::ChainSet,
+        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => rebind_tracked_aggregate_expr(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                rebind_tracked_aggregate_expr(inner);
+            }
+        }
+        QuantityExpr::Difference { left, right } => {
+            rebind_tracked_aggregate_expr(left);
+            rebind_tracked_aggregate_expr(right);
+        }
+    }
+}
+
 /// CR 508.1a + CR 508.1d + CR 608.2c: A mass "attack this turn if able" coercion —
 /// a `GenericEffect` carrying a `MustAttack` (CR 508.1a, attack-if-able) or
 /// `MustAttackPlayer` (CR 508.1d, directed attack) static over a BROADCAST
@@ -22194,6 +22446,17 @@ pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Surveil { count, .. }
         | Effect::PutCounter { count, .. } => f(count),
         Effect::Sacrifice { count, .. } => f(count),
+        // CR 608.2c: the two remaining `where X is …` quantity carriers reached
+        // by the set-anaphor grammar — `ExileTop` (Kylox, Visionary Inventor /
+        // Witch-king, Sky Scourge: "exile the top X cards … where X is their
+        // total power") and `Discover` (Aloy, Savior of Meridian: "discover X,
+        // where X is the greatest power among them"). Without these arms a
+        // `TrackedSetAggregate` bound into either slot is invisible to every
+        // caller of this visitor, including the chain-set re-anchor.
+        Effect::ExileTop { count, .. } => f(count),
+        Effect::Discover {
+            mana_value_limit, ..
+        } => f(mana_value_limit),
         _ => {}
     }
 }
@@ -24497,6 +24760,7 @@ pub(crate) fn parse_effect_chain_ir(
                 kind,
                 chain_rounding,
                 actor: ctx.actor.clone(),
+                in_trigger: ctx.in_trigger,
                 repeat_until: None,
             };
         }
@@ -25567,21 +25831,39 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 608.2c: "if [condition], [effect] instead" — the preceding ability's effect
         // is replaced when the condition holds. Keep the base effect as the root so
         // target collection stays anchored on the printed target-bearing clause.
-        if let Some(instead_def) = try_parse_generic_instead_clause(normalized_text, kind, ctx) {
-            if !builder.is_empty() {
-                builder
-                    .clause(
-                        normalized_text,
-                        placeholder_parsed_clause("instead_clause_placeholder"),
-                        chunk.boundary_after,
-                        ClauseDisposition::ReplaceMeaning {
-                            kind: ReplaceMeaningKind::Instead(Box::new(instead_def)),
-                        },
-                    )
-                    .push();
-                continue;
-            }
-        }
+        // CR 614.1a + CR 614.6: when the override's condition has NO typed variant,
+        // this chunk must never be emitted as an ordinary (unconditional) chain
+        // clause — that runs the replaced effect AND its replacement. But the
+        // decision cannot be made here: several handlers FURTHER DOWN this same
+        // ladder still own "instead" clauses and recover a condition for them
+        // (`strip_target_keyword_instead` → `TargetHasKeywordInstead` for Porcelain
+        // Zealot; `strip_additional_cost_conditional` → `AdditionalCostPaidInstead`
+        // for Sea Gate Stormcaller). Short-circuiting here would pre-empt them and
+        // destroy working branches. So we only remember the verdict, and enforce it
+        // at the LAST resort — immediately before the generic emission at the tail
+        // of this loop, where every other owner has already had its chance.
+        let instead_condition_unlowerable =
+            match try_parse_generic_instead_clause(normalized_text, kind, ctx) {
+                conditions::InsteadLowering::Branch(instead_def) if !builder.is_empty() => {
+                    builder
+                        .clause(
+                            normalized_text,
+                            placeholder_parsed_clause("instead_clause_placeholder"),
+                            chunk.boundary_after,
+                            ClauseDisposition::ReplaceMeaning {
+                                kind: ReplaceMeaningKind::Instead(instead_def),
+                            },
+                        )
+                        .push();
+                    continue;
+                }
+                // A branch with no antecedent in this chain (empty builder) keeps its
+                // historical fall-through, as does anything this grammar does not own.
+                conditions::InsteadLowering::Branch(_) | conditions::InsteadLowering::NotOwned => {
+                    false
+                }
+                conditions::InsteadLowering::ConditionUnlowerable => true,
+            };
 
         let has_card_predicate_guess = chain_has_card_predicate_guess(builder.clauses());
         let (predicate_guess_cond, predicate_guess_text) = if has_card_predicate_guess {
@@ -26196,7 +26478,17 @@ pub(crate) fn parse_effect_chain_ir(
             // per promptee. Stamping Opponent (the `Some(_)` arm below) would make
             // the controller unable to sacrifice their OWN permanents. Must precede
             // the catch-all. Does NOT change AnyOpponent.
-            (true, Some(crate::types::ability::OpponentMayScope::AnyPlayer), _) => None,
+            (
+                true,
+                Some(
+                    crate::types::ability::OpponentMayScope::AnyPlayer
+                    // CR 608.2d: "any other player" has no single controller to
+                    // stamp either — each promptee acts on their own permanents,
+                    // so leave the actor absent exactly like AnyPlayer.
+                    | crate::types::ability::OpponentMayScope::AnyOtherPlayer,
+                ),
+                _,
+            ) => None,
             (true, Some(_), _) => Some(ControllerRef::Opponent),
             (_, _, Some(PlayerFilter::Opponent)) => Some(ControllerRef::You),
             (_, _, Some(PlayerFilter::Controller)) => Some(ControllerRef::You),
@@ -26754,6 +27046,24 @@ pub(crate) fn parse_effect_chain_ir(
         // the resolver iterates all players and `Controller` reads the
         // rebound per-player controller.
         lift_each_player_exile_top_scope(&mut clause.effect, &mut player_scope);
+        // CR 608.2c + CR 109.4: Fold a pending player-scope lifted from a
+        // fieldless subject-predicate (`Effect::Investigate` — "That player
+        // investigates", Declaration in Stone) into this chunk's `player_scope`.
+        // `lower_subject_predicate_ast` stamps `ctx.pending_player_scope` because
+        // the effect has no player field for the subject; here it becomes the
+        // chunk's `AbilityDefinition.player_scope`. Take() so it is consumed
+        // within this chunk and cannot leak to a later one; a pre-existing scope
+        // (e.g. a leading "each opponent") wins.
+        if let Some(scope) = ctx.pending_player_scope.take() {
+            if player_scope.is_none() {
+                player_scope = Some(scope);
+            }
+        }
+        // CR 701.16a + CR 608.2c: Fold a pending `repeat_for` lifted from a
+        // count-less "investigate for each … this way" (Declaration in Stone) into
+        // this chunk's repeat count (→ `AbilityDefinition.repeat_for`). take() so
+        // it is consumed within this chunk; a pre-existing repeat_for wins.
+        let repeat_for = repeat_for.or_else(|| ctx.pending_repeat_for.take());
         // CR 109.5: Rebind recipient-bearing nodes inside a decline body so the
         // body's "you"/"that player" anaphors resolve relative to the surrounding
         // per-player iteration. The two walkers are parallel inverses:
@@ -27456,6 +27766,26 @@ pub(crate) fn parse_effect_chain_ir(
             restore_this_way_trigger_anaphor(&mut clause.effect);
         }
 
+        // CR 614.1a + CR 614.6: LAST RESORT for an "instead" override whose
+        // condition never found a typed home. Every specific owner above has now
+        // declined (they `continue`, or they set `condition`), so reaching here
+        // with `instead_condition_unlowerable` and no recovered condition means the
+        // override body is about to be emitted as an ordinary, UNCONDITIONAL chain
+        // clause — a sequel to the very effect it is supposed to REPLACE. A
+        // replaced event never happens (CR 614.6), so the engine would then run
+        // both branches with the condition silently dropped: Anax, Hardened in the
+        // Forge made 1 + 2 = three Satyrs on every nontoken creature death,
+        // regardless of its power. Fail honestly instead of lying.
+        if instead_condition_unlowerable && condition.is_none() {
+            unimplemented_clause(
+                &mut builder,
+                "instead_condition",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
+
         // CR 115.1 + CR 701.9b: `target_selection_mode` snapshots the parser's
         // per-chunk selection mode. Set to `Random` by `parse_target_with_ctx`
         // when "random " was stripped from this chunk's target phrase.
@@ -27571,6 +27901,7 @@ pub(crate) fn parse_effect_chain_ir(
         kind,
         chain_rounding,
         actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
         repeat_until: pending_repeat_until,
     }
 }

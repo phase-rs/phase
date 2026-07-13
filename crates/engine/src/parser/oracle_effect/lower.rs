@@ -7295,6 +7295,20 @@ pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Opt
 
 fn structurally_bound_where_x_clause<'a>(clause: TextPair<'a>) -> TextPair<'a> {
     let clause = clause.trim_start().trim_end_matches('.').trim_end();
+    // CR 613.4c: a "+X/+Y" pump binds each axis to its own quantity via
+    // "<X quantity>, and Y is <Y quantity>" (Aspect of Wolf). The "and Y is …"
+    // is a continuation of the SAME binding, not a new instruction, so keep the
+    // whole clause when both halves independently parse as where-X quantities —
+    // `parse_dynamic_pt_in_text` then splits it back and assigns each half to its
+    // axis. Guarded on both halves parsing so a genuine "…, and <verb>" next
+    // instruction still falls through to the comma-bounding below.
+    if let Ok((_, (x_part, y_part))) = nom_primitives::split_once_on(clause.lower, ", and y is ") {
+        if parse_where_x_quantity_expression(x_part).is_some()
+            && parse_where_x_quantity_expression(y_part).is_some()
+        {
+            return clause;
+        }
+    }
     let mut has_comma = false;
     let mut best_end = None;
 

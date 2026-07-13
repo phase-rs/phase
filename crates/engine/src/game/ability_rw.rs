@@ -1910,6 +1910,8 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::CastVariantPaidInstead { .. }
         | AbilityCondition::HasMaxSpeed
         | AbilityCondition::IsMonarch
+        // CR 309.7: controller-state predicate; reads no object, writes nothing.
+        | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
         | AbilityCondition::IsRingBearer
@@ -2070,7 +2072,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
-        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::ChosenNumber
@@ -2370,6 +2372,9 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::IsCommander
+        // CR 205.3m: a unit variant with no nested TargetFilter/QuantityExpr/
+        // ControllerRef interior — nothing to descend, so no legacy referent.
+        | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::NotHistoric
@@ -2624,6 +2629,8 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::IsCommander
+        // CR 205.3m: no nested interior to carry a member-bound referent.
+        | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::NotHistoric
@@ -5661,7 +5668,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // Resolution-local / turn- / commander-scoped: no per-source binding
         // (member-invariant under uniformity).
         QuantityRef::ExiledFromHandThisResolution
-        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::AttackedThisTurn { .. }
@@ -5886,6 +5893,8 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         | AbilityCondition::CastVariantPaidInstead { .. }
         | AbilityCondition::HasMaxSpeed
         | AbilityCondition::IsMonarch
+        // CR 309.7: controller-state predicate; reads no object, writes nothing.
+        | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
         | AbilityCondition::IsRingBearer

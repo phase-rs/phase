@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::{char, multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map_opt, opt, peek, rest, value};
 use nom::multi::separated_list1;
@@ -466,7 +466,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             if optional_modal_present {
                 def = def.mode(ReplacementMode::Optional { decline: None });
             }
-            def = def.execute(parse_effect_chain(effect_after_modal, AbilityKind::Spell));
+            let mut execute = parse_effect_chain(effect_after_modal, AbilityKind::Spell);
+            rewrite_draw_replacement_execute_referents(&mut execute);
+            def = def.execute(execute);
         }
         // CR 614.1a: Player scope for draw replacements.
         apply_draw_player_scope(&lower, &mut def);
@@ -555,7 +557,7 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             // damage recipients. Generic `ParentTarget*` resolution is left
             // untouched.
             let mut execute = parse_effect_chain(&e, AbilityKind::Spell);
-            rewrite_damage_recipient_to_post_replacement_target(&mut execute);
+            rewrite_replacement_event_recipient_to_post_replacement_target(&mut execute);
             def = def.execute(execute);
         }
         // CR 614.1a: Parse the subject to determine player scope.
@@ -8554,7 +8556,7 @@ fn parse_damage_to_player_instead_followup(
 
     let effect_text = original_text.get(effect_start..effect_start + effect_len)?;
     let mut followup = parse_effect_chain(effect_text, AbilityKind::Spell);
-    rewrite_damage_recipient_to_post_replacement_target(&mut followup);
+    rewrite_replacement_event_recipient_to_post_replacement_target(&mut followup);
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -9040,7 +9042,9 @@ fn parse_damage_recipient_after_prefix(working_lower: &str, prefix: &str) -> Opt
 /// `TargetFilter::ParentTargetController` slot to
 /// `TargetFilter::PostReplacementSourceController`. Invoked at the prevention
 /// follow-up call site only — see the parent comment for rationale.
-fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut AbilityDefinition) {
+pub(crate) fn rewrite_parent_target_controller_to_post_replacement_source(
+    def: &mut AbilityDefinition,
+) {
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
         if matches!(f, TargetFilter::ParentTargetController) {
             *f = TargetFilter::PostReplacementSourceController;
@@ -9064,7 +9068,7 @@ fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut Ability
 /// `ParentTarget` to `PostReplacementDamageTarget` so the runtime resolves
 /// it against `state.post_replacement_event_target`.
 ///
-/// Sibling of `rewrite_damage_recipient_to_post_replacement_target` which
+/// Sibling of `rewrite_replacement_event_recipient_to_post_replacement_target` which
 /// handles the player-anaphor cohort ("that player draws cards ..."). Kept
 /// separate so the player walker stays scoped to player refs and this walker
 /// only fires when the caller has confirmed the shield is event-driven (via
@@ -9173,16 +9177,63 @@ fn rewrite_parent_target_to_self_ref(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 615.5: In a prevention follow-up attached to "damage would be dealt to a
-/// player", the surface subject "that player" refers to the prevented event's
-/// damage recipient. The ordinary effect parser has no active trigger event in
-/// this replacement context, so it lowers a standalone non-trigger "that player"
-/// subject to `TargetFilter::ParentTargetController` (the generic CR 608.2c
-/// anaphor) — or, inside a trigger context, to `TargetFilter::TriggeringPlayer`.
-/// Neither resolves correctly here (there is no parent target and no trigger
-/// event), so rewrite the anaphoric recipient to `PostReplacementDamageTarget`
-/// at the call site.
-fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefinition) {
+/// CR 614.6 + CR 608.2c: In a draw-replacement execute chain ("they reveal it
+/// instead. Then any other player may … / otherwise, that player draws"), surface
+/// pronouns refer to the replaced draw's affected player and the card they would
+/// have drawn — not the ability's controller. The generic effect parser lowers
+/// "they reveal it" to `RevealTop { player: Controller }` and standalone "that
+/// player" subjects to `ParentTargetController` / `TriggeringPlayer`. Rewrite at
+/// the parser seam, mirroring the lifegain-replacement and CR 615.5 prevention
+/// follow-up paths.
+fn rewrite_draw_replacement_execute_referents(def: &mut AbilityDefinition) {
+    rewrite_reveal_top_player_to_post_replacement_target(def);
+    rewrite_replacement_event_recipient_to_post_replacement_target(def);
+}
+
+/// CR 614.6 + CR 701.20a: "they reveal it" in a draw replacement reveals the top
+/// card of the *drawing player's* library, not the enchantment controller's.
+fn rewrite_reveal_top_player_to_post_replacement_target(def: &mut AbilityDefinition) {
+    match def.effect.as_mut() {
+        Effect::RevealTop { player, .. } => {
+            if matches!(
+                player,
+                TargetFilter::Controller
+                    | TargetFilter::ParentTargetController
+                    | TargetFilter::TriggeringPlayer
+                    | TargetFilter::Player
+            ) {
+                *player = TargetFilter::PostReplacementDamageTarget;
+            }
+        }
+        // CR 701.20a: a subject-bound "they reveal it" can lower to
+        // `Reveal { ParentTarget }` before chain lowering; in a draw replacement
+        // the anaphor is the would-be-drawn library top, not a parent target slot.
+        Effect::Reveal {
+            target: TargetFilter::ParentTarget,
+        } => {
+            *def.effect = Effect::RevealTop {
+                player: TargetFilter::PostReplacementDamageTarget,
+                count: 1,
+            };
+        }
+        _ => {}
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_reveal_top_player_to_post_replacement_target(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_reveal_top_player_to_post_replacement_target(else_branch);
+    }
+}
+
+/// CR 614.6 + CR 615.5: In an event-driven replacement execute chain, the
+/// surface recipient (for example, "that player") refers to the affected player
+/// of the replaced Draw, life-gain, or damage event. The ordinary effect parser
+/// has no active replacement event, so it lowers the anaphor to
+/// `ParentTargetController` or `TriggeringPlayer`; neither resolves correctly
+/// once the replacement continuation runs. Rewrite that recipient to the
+/// explicit post-replacement event target at the parser seam.
+fn rewrite_replacement_event_recipient_to_post_replacement_target(def: &mut AbilityDefinition) {
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
         if matches!(
             f,
@@ -9194,10 +9245,10 @@ fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefiniti
         }
     });
     if let Some(sub) = def.sub_ability.as_mut() {
-        rewrite_damage_recipient_to_post_replacement_target(sub);
+        rewrite_replacement_event_recipient_to_post_replacement_target(sub);
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
-        rewrite_damage_recipient_to_post_replacement_target(else_branch);
+        rewrite_replacement_event_recipient_to_post_replacement_target(else_branch);
     }
 }
 
@@ -9267,6 +9318,29 @@ fn extract_prevention_followup(original_text: &str) -> Option<String> {
         return None;
     }
     Some(body.to_string())
+}
+
+/// CR 615.5: True when a clause is introduced by a
+/// `"(When|Whenever|If) damage is prevented this way, …"` prelude. That
+/// back-reference ("this way") can only bind to the prevention printed
+/// immediately before it, so the clause is always a rider on that prevention —
+/// it fires once per prevented event against the amount the shield prevented,
+/// never as an independent following instruction. Effect-chain assembly uses
+/// this to keep such a rider a `ContinuationStep` even when it is printed as its
+/// own sentence, so the prevention resolver installs it as the shield's
+/// `runtime_execute` instead of dropping it (New Way Forward, Phyrexian
+/// Vindicator, Outfitted Jouster).
+pub(crate) fn clause_is_prevented_this_way_rider(fragment: &str) -> bool {
+    preceded(
+        alt((
+            tag_no_case::<_, _, OracleError<'_>>("when "),
+            tag_no_case::<_, _, OracleError<'_>>("whenever "),
+            tag_no_case::<_, _, OracleError<'_>>("if "),
+        )),
+        tag_no_case::<_, _, OracleError<'_>>("damage is prevented this way,"),
+    )
+    .parse(fragment.trim_start())
+    .is_ok()
 }
 
 /// CR 614.1a: Parse event substitution replacement effects.
@@ -11392,6 +11466,69 @@ mod tests {
              When damage is prevented this way, ~ deals 2 damage to any target.",
         );
         assert_eq!(result.as_deref(), Some("~ deals 2 damage to any target."));
+    }
+
+    #[test]
+    fn clause_is_prevented_this_way_rider_matches_the_prelude_forms() {
+        // CR 615.5: the three attested prelude forms (New Way Forward,
+        // Outfitted Jouster / Phyrexian Vindicator "When", the "If" variant).
+        assert!(clause_is_prevented_this_way_rider(
+            "When damage is prevented this way, ~ deals 2 damage to any target."
+        ));
+        assert!(clause_is_prevented_this_way_rider(
+            "Whenever damage is prevented this way, you draw a card."
+        ));
+        assert!(clause_is_prevented_this_way_rider(
+            "If damage is prevented this way, you draw a card."
+        ));
+        // Leading whitespace (chunker hand-off) is tolerated.
+        assert!(clause_is_prevented_this_way_rider(
+            "  When damage is prevented this way, sacrifice an Equipment."
+        ));
+        // The same-sentence "equal to the damage prevented this way" form is NOT a
+        // separate-sentence rider (Swans of Bryn Argoll's working class).
+        assert!(!clause_is_prevented_this_way_rider(
+            "The source's controller draws cards equal to the damage prevented this way."
+        ));
+        // An unrelated following instruction is not a rider.
+        assert!(!clause_is_prevented_this_way_rider("You draw a card."));
+    }
+
+    /// CR 615.5 + CR 609.7 (issue #5658): New Way Forward's separate-sentence
+    /// "When damage is prevented this way, …" rider must fold into the preceding
+    /// prevention as a `ContinuationStep` (so `prevent_damage.rs` installs it as
+    /// the shield's `runtime_execute`), and "that source's controller" must lower
+    /// to `PostReplacementSourceController` — not a dangling `ParentTargetController`.
+    #[test]
+    fn new_way_forward_rider_folds_into_the_prevention_shield() {
+        use crate::types::ability::SubAbilityLink;
+        let parsed = parse_oracle_text(
+            "The next time a source of your choice would deal damage to you this turn, \
+             prevent that damage. When damage is prevented this way, New Way Forward \
+             deals that much damage to that source's controller and you draw that many cards.",
+            "New Way Forward",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let prevent = &parsed.abilities[0];
+        assert!(matches!(*prevent.effect, Effect::PreventDamage { .. }));
+        let rider = prevent
+            .sub_ability
+            .as_ref()
+            .expect("the prevention must carry the rider as a sub-ability");
+        assert_eq!(
+            rider.sub_link,
+            SubAbilityLink::ContinuationStep,
+            "the 'When damage is prevented this way' sentence is a rider, not a sibling"
+        );
+        assert!(matches!(
+            &*rider.effect,
+            Effect::DealDamage {
+                target: TargetFilter::PostReplacementSourceController,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -18921,6 +19058,72 @@ mod snapshot_tests {
             );
             node = ability.sub_ability.as_deref();
         }
+    }
+
+    /// CR 614.6 + CR 608.2d: Zur's Weirding — the draw-replacement execute must
+    /// thread the affected drawing player through "they reveal it" and "that
+    /// player draws", and peel "any other player may" to `AnyOtherPlayer`.
+    #[test]
+    fn zurs_weirding_draw_replacement_threads_affected_player_referents() {
+        use crate::types::ability::{AbilityCondition, OpponentMayScope};
+        let def = parse_replacement_line(
+            "If a player would draw a card, they reveal it instead. Then any other player may pay 2 life. \
+             If a player does, put that card into its owner's graveyard. Otherwise, that player draws a card.",
+            "Zur's Weirding",
+        )
+        .expect("Zur's Weirding must parse as a Draw replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::AnyPlayer));
+
+        let execute = def.execute.as_ref().expect("execute chain must be present");
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::RevealTop {
+                    player: TargetFilter::PostReplacementDamageTarget,
+                    count: 1,
+                }
+            ),
+            "reveal-it must target the drawing player via PostReplacementDamageTarget, got {:?}",
+            execute.effect
+        );
+
+        let opponent_may = execute
+            .sub_ability
+            .as_ref()
+            .expect("reveal must chain to opponent-may");
+        assert!(opponent_may.optional);
+        assert_eq!(
+            opponent_may.optional_for,
+            Some(OpponentMayScope::AnyOtherPlayer),
+            "any other player may must peel to AnyOtherPlayer"
+        );
+
+        let if_player_does = opponent_may
+            .sub_ability
+            .as_ref()
+            .expect("opponent-may must chain to if-a-player-does");
+        assert_eq!(
+            if_player_does.condition,
+            Some(AbilityCondition::effect_performed())
+        );
+
+        let else_draw = if_player_does
+            .else_ability
+            .as_ref()
+            .expect("if-a-player-does must carry otherwise draw");
+        assert!(
+            matches!(
+                *else_draw.effect,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::PostReplacementDamageTarget,
+                }
+            ),
+            "otherwise draw must draw one card for the drawing player, got {:?}",
+            else_draw.effect
+        );
     }
 
     /// CR 614.1a + CR 614.6: A "you may instead" lead-in on a draw

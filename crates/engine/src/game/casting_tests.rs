@@ -2581,7 +2581,13 @@ fn mana_spend_trigger_fires_only_on_matching_spell() {
         source_could_produce_two_or_more_colors: false,
         restrictions: vec![],
         grants: vec![ManaSpellGrant::TriggerOnSpend {
-            restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Subtype("Dragon".to_string()),
+                ],
+                ..TypedFilter::default()
+            }),
             ability: Box::new(trigger_ability),
         }],
         expiry: None,
@@ -2611,11 +2617,20 @@ fn mana_spend_trigger_fires_only_on_matching_spell() {
     );
 }
 
-/// CR 106.6 + CR 205.3m + CR 903.3: Path of Ancestry's
-/// `SharesCreatureTypeWithCommander` spend filter fires the reflexive scry
-/// only when the spell is a creature sharing a creature type with the
-/// controller's commander. Evaluated at the spend-check site (game-state
-/// aware), not via `allows_spell`.
+/// CR 603.3 + CR 205.3m + CR 903.3: Path of Ancestry's commander-relational trigger
+/// filter fires the reflexive scry only when the spell is a creature sharing a
+/// creature type with the controller's commander.
+///
+/// THIS TEST IS THE BEHAVIOR-PRESERVATION PROOF for the `TriggerOnSpend`
+/// `ManaRestriction` → `TargetFilter` retype, and it is the ONLY instrument that can
+/// be. The retype moved this predicate from a bespoke check at the spend site into
+/// the generic filter layer: a RUNTIME semantics change with an IDENTICAL parse
+/// shape. A full-pool export diff — the campaign's usual collateral instrument —
+/// would come back 100% clean even if this card silently stopped triggering, because
+/// it compares parse output and this change is not in the parse. Only a runtime test
+/// can see it. If it ever goes red, the filter layer has stopped consulting the
+/// commander authority (`commander::commander_creature_types`, deck-pool-FIRST) and
+/// Path of Ancestry is broken.
 #[test]
 fn mana_spend_trigger_shares_creature_type_with_commander() {
     let mut state = setup_game_at_main_phase();
@@ -2703,7 +2718,13 @@ fn mana_spend_trigger_shares_creature_type_with_commander() {
         source_could_produce_two_or_more_colors: false,
         restrictions: vec![],
         grants: vec![ManaSpellGrant::TriggerOnSpend {
-            restriction: Some(ManaRestriction::SharesCreatureTypeWithCommander),
+            filter: {
+                let mut typed = TypedFilter::new(TypeFilter::Creature);
+                typed
+                    .properties
+                    .push(FilterProp::SharesCreatureTypeWithCommander);
+                TargetFilter::Typed(typed)
+            },
             ability: Box::new(trigger_ability),
         }],
         expiry: None,
@@ -2791,7 +2812,13 @@ fn mana_spend_trigger_cast_pipeline_places_trigger_after_spell_is_cast() {
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
             grants: vec![ManaSpellGrant::TriggerOnSpend {
-                restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![
+                        TypeFilter::Creature,
+                        TypeFilter::Subtype("Dragon".to_string()),
+                    ],
+                    ..TypedFilter::default()
+                }),
                 ability: Box::new(trigger_ability),
             }],
             expiry: None,
@@ -5043,7 +5070,9 @@ fn x_spell_doubled_lose_life_drains_opponents_and_gains_controller() {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Ref {
-                        qty: QuantityRef::PreviousEffectAmount,
+                        qty: QuantityRef::PreviousEffectAmount {
+                            channel: crate::types::ability::DamageChannel::Total,
+                        },
                     },
                     player: TargetFilter::Controller,
                 },
@@ -5178,7 +5207,7 @@ fn exsanguinate_oracle_text_drains_each_opponent_and_gains_controller() {
         Effect::GainLife {
             amount:
                 QuantityExpr::Ref {
-                    qty: QuantityRef::PreviousEffectAmount,
+                    qty: QuantityRef::PreviousEffectAmount { .. },
                 },
             player,
         } => assert_eq!(
@@ -39759,8 +39788,8 @@ fn hyldas_crown_cost_reduction_applies_only_during_your_turn() {
 /// reparse, mirroring production) and applied through `apply_cost_reduction`.
 ///
 /// Discriminating assertion: `generic_of(&def)` is 3 with a Spacecraft
-/// attacker declaration present and 6 without. Reverting the
-/// `YouAttackedWithAtLeast { filter }` parser arm leaves `condition: None`
+/// attacker declaration present and 6 without. Reverting the filtered
+/// attacked-with parser arm leaves `condition: None`
 /// (try_parse_cost_reduction returns None), so the positive case would read
 /// {6} and this assertion fails. Reverting the runtime filter arm in
 /// `restrictions::evaluate_condition` would treat the filtered count as the
@@ -39768,7 +39797,7 @@ fn hyldas_crown_cost_reduction_applies_only_during_your_turn() {
 #[test]
 fn thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker() {
     use crate::parser::oracle_cost::try_parse_cost_reduction;
-    use crate::types::ability::{Effect, ParsedCondition};
+    use crate::types::ability::{Effect, ParsedCondition, QuantityExpr, QuantityRef};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -39783,9 +39812,14 @@ fn thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker() {
     assert!(
         matches!(
             reduction.condition,
-            Some(ParsedCondition::YouAttackedWithAtLeast {
-                count: 1,
-                filter: Some(_)
+            Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::AttackedThisTurn {
+                        filter: Some(_),
+                        ..
+                    },
+                },
+                ..
             })
         ),
         "must gate on a filtered attacked-with condition, got {:?}",
@@ -44588,5 +44622,174 @@ fn land_grant_alt_cost_not_offered_with_land_in_hand() {
     assert!(
         !can_cast_object_now(&state, PlayerId(0), land_grant),
         "without the alt-cost and with no mana available, Land Grant must not be castable"
+    );
+}
+
+/// The exact spell filter Path of Ancestry's Oracle text lowers to, taken from the
+/// parser so the runtime witnesses below cannot drift from the real card.
+fn path_of_ancestry_spend_filter() -> TargetFilter {
+    let grant = crate::parser::oracle_effect::mana::parse_mana_spend_trigger(
+        "when that mana is spent to cast a creature spell that shares a creature type with your commander, scry 1",
+    )
+    .expect("Path of Ancestry's spend trigger must parse");
+    match grant {
+        ManaSpellGrant::TriggerOnSpend { filter, .. } => filter,
+        other => panic!("expected TriggerOnSpend, got {other:?}"),
+    }
+}
+
+/// Build a Path of Ancestry mana unit carrying the real parsed spend filter.
+fn path_of_ancestry_unit(source_id: ObjectId) -> ManaUnit {
+    ManaUnit {
+        color: ManaType::Green,
+        source_id,
+        pip_id: crate::types::mana::ManaPipId(0),
+        supertype: None,
+        source_could_produce_two_or_more_colors: false,
+        restrictions: vec![],
+        grants: vec![ManaSpellGrant::TriggerOnSpend {
+            filter: path_of_ancestry_spend_filter(),
+            ability: Box::new(crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Activated,
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )),
+        }],
+        expiry: None,
+    }
+}
+
+/// CR 106.6 + CR 903.3: the commander a player *registered* is the authority for
+/// "your commander", and `commander_creature_types` reads
+/// `deck_pools.current_commander` FIRST. A player whose commander is known only from
+/// the deck pool (no command-zone `is_commander` object materialized) must still fire
+/// Path of Ancestry's reflexive scry.
+///
+/// This is the witness the parse-shape export ledger is structurally blind to: the
+/// spell filter is byte-identical either way, but resolving it by scanning
+/// `state.objects` alone silently finds nothing here and the trigger never fires.
+#[test]
+fn path_of_ancestry_fires_for_a_deck_pool_registered_commander() {
+    let mut state = setup_game_at_main_phase();
+    // CR 205.3m: the creature-type vocabulary is loaded from card data in production;
+    // the shared-quality evaluator filters subtypes through it, so an empty list here
+    // would make every creature-type comparison vacuously false.
+    state.all_creature_types = vec!["Elf".to_string(), "Goblin".to_string()];
+    // Commander known ONLY as a registered deck-pool entry — no game object for it.
+    state
+        .deck_pools
+        .push(crate::types::game_state::PlayerDeckPool {
+            player: PlayerId(0),
+            current_commander: std::sync::Arc::new(vec![crate::game::deck_loading::DeckEntry {
+                card: crate::types::card::CardFace {
+                    name: "Elvish Commander".to_string(),
+                    card_type: crate::types::card_type::CardType {
+                        core_types: vec![CoreType::Creature],
+                        subtypes: vec!["Elf".to_string()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                count: 1,
+            }]),
+            ..Default::default()
+        });
+    assert!(
+        !state
+            .objects
+            .values()
+            .any(|o| o.is_commander && o.owner == PlayerId(0)),
+        "premise: no commander OBJECT exists — only the deck-pool registration"
+    );
+
+    let path = create_object(
+        &mut state,
+        CardId(410),
+        PlayerId(0),
+        "Path of Ancestry".to_string(),
+        Zone::Battlefield,
+    );
+    let elf_id = create_object(
+        &mut state,
+        CardId(411),
+        PlayerId(0),
+        "Elvish Mystic".to_string(),
+        Zone::Stack,
+    );
+    {
+        let e = state.objects.get_mut(&elf_id).unwrap();
+        e.card_types.core_types.push(CoreType::Creature);
+        e.card_types.subtypes.push("Elf".to_string());
+    }
+
+    let unit = path_of_ancestry_unit(path);
+    let base = state.deferred_triggers.len();
+    apply_mana_spell_grants(&mut state, elf_id, std::slice::from_ref(&unit));
+    assert_eq!(
+        state.deferred_triggers.len(),
+        base + 1,
+        "an Elf creature spell shares a type with the DECK-POOL-registered Elf commander"
+    );
+}
+
+/// CR 903.3: the commander designation "is an attribute of the card itself" and is
+/// retained across zones — it belongs to the player who registered it, NOT to whoever
+/// currently CONTROLS the permanent. So when an opponent steals your commander, it is
+/// still *your* commander and your Path of Ancestry keeps triggering.
+///
+/// Resolving "your commander" by CONTROLLER instead of by registration/ownership
+/// silently breaks this.
+#[test]
+fn path_of_ancestry_fires_for_a_commander_an_opponent_controls() {
+    let mut state = setup_game_at_main_phase();
+    // CR 205.3m: the creature-type vocabulary is loaded from card data in production;
+    // the shared-quality evaluator filters subtypes through it, so an empty list here
+    // would make every creature-type comparison vacuously false.
+    state.all_creature_types = vec!["Elf".to_string(), "Goblin".to_string()];
+    // P0 owns the commander; P1 has stolen it (controls the permanent).
+    let commander = create_object(
+        &mut state,
+        CardId(420),
+        PlayerId(0),
+        "Elvish Commander".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let c = state.objects.get_mut(&commander).unwrap();
+        c.is_commander = true;
+        c.controller = PlayerId(1);
+        c.card_types.core_types.push(CoreType::Creature);
+        c.card_types.subtypes.push("Elf".to_string());
+    }
+
+    let path = create_object(
+        &mut state,
+        CardId(421),
+        PlayerId(0),
+        "Path of Ancestry".to_string(),
+        Zone::Battlefield,
+    );
+    let elf_id = create_object(
+        &mut state,
+        CardId(422),
+        PlayerId(0),
+        "Elvish Mystic".to_string(),
+        Zone::Stack,
+    );
+    {
+        let e = state.objects.get_mut(&elf_id).unwrap();
+        e.card_types.core_types.push(CoreType::Creature);
+        e.card_types.subtypes.push("Elf".to_string());
+    }
+
+    let unit = path_of_ancestry_unit(path);
+    let base = state.deferred_triggers.len();
+    apply_mana_spell_grants(&mut state, elf_id, std::slice::from_ref(&unit));
+    assert_eq!(
+        state.deferred_triggers.len(),
+        base + 1,
+        "a stolen commander is still YOUR commander (CR 903.3) — the scry must still fire"
     );
 }

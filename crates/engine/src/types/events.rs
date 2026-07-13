@@ -652,6 +652,11 @@ impl EventObjectSnapshot {
             | FilterProp::HasXInActivationCost
             | FilterProp::WasKicked
             | FilterProp::HasManaAbility
+            // CR 903.3: needs the live deck-pool commander registry (owner-scoped),
+            // not the subject snapshot. Parsed only inside mana-spend SPELL filters
+            // (CR 106.6 / CR 603.7a), which are evaluated live at the casting site —
+            // never from the event-subject grammar.
+            | FilterProp::SharesCreatureTypeWithCommander
             | FilterProp::Other { .. } => Unsupported,
         }
     }

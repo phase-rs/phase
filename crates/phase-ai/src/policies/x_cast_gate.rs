@@ -398,7 +398,9 @@ mod tests {
         });
         ability.sub_ability = Some(Box::new(spell(Effect::GainLife {
             amount: QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount,
+                qty: QuantityRef::PreviousEffectAmount {
+                    channel: engine::types::ability::DamageChannel::Total,
+                },
             },
             player: TargetFilter::Controller,
         })));
@@ -776,7 +778,9 @@ mod tests {
         });
         let mut draw = spell(Effect::Draw {
             count: QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount,
+                qty: QuantityRef::PreviousEffectAmount {
+                    channel: engine::types::ability::DamageChannel::Total,
+                },
             },
             target: TargetFilter::Controller,
         });

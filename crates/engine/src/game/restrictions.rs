@@ -2722,6 +2722,96 @@ mod tests {
         ));
     }
 
+    /// P02-U3b RUNTIME WITNESS (CR 102.2 + CR 102.3 + CR 608.2h) — Whiplash Trap.
+    ///
+    /// "If **an opponent** had **two or more** creatures enter the battlefield under
+    /// **their** control this turn …". "An opponent" binds ONE player, and "their
+    /// control" binds the count to that same player. So the threshold is PER OPPONENT,
+    /// never a sum across opponents.
+    ///
+    /// This is the red-first witness for the multiplayer correction. BEFORE the port the
+    /// restriction fallback encoded the opponent INSIDE the TargetFilter
+    /// (`controller: Opponent`), so `evaluate_condition` counted every entry under ANY
+    /// opponent's control and compared the SUM — two DIFFERENT opponents with one creature
+    /// each wrongly satisfied "two or more". This test FAILS on that code. After the port
+    /// the phrase is a `QuantityComparison` over
+    /// `BattlefieldEntriesThisTurn { player: Opponent { aggregate: Max } }`, which counts
+    /// per opponent and takes the largest tally: max(1, 1) = 1 < 2 → correctly FALSE.
+    ///
+    /// The two readings coincide at two players, which is why this needs THREE seats.
+    ///
+    /// Placement note: this is a condition-SEMANTICS witness, and `evaluate_condition` is
+    /// `pub(crate)`. It lives beside the other runtime condition tests rather than in
+    /// `tests/integration/` because reaching it from an integration test would mean
+    /// widening the evaluator's visibility purely for a test. It still drives the real
+    /// runtime path — a real 3-player `GameState` through `game::quantity`'s
+    /// `resolve_per_player_scalar`, not a parse-tree assertion.
+    #[test]
+    fn opponent_entry_threshold_is_per_opponent_not_summed_across_opponents() {
+        const WHIPLASH_TRAP: &str = "an opponent had two or more creatures enter the battlefield under their control this turn";
+
+        fn state_with_entries(entries: &[(PlayerId, u32)]) -> crate::types::game_state::GameState {
+            // free-for-all, THREE seats: P1 and P2 are both genuine opponents of P0 (a
+            // team format would make one of them a teammate and defeat the point).
+            let mut state = crate::types::game_state::GameState::new(
+                crate::types::format::FormatConfig::free_for_all(),
+                3,
+                42,
+            );
+            let mut next_id = 100u64;
+            for (controller, count) in entries {
+                for _ in 0..*count {
+                    state
+                        .battlefield_entries_this_turn
+                        .push(BattlefieldEntryRecord {
+                            object_id: ObjectId(next_id),
+                            name: "Bear".to_string(),
+                            core_types: vec![CoreType::Creature],
+                            subtypes: vec![],
+                            supertypes: vec![],
+                            colors: vec![],
+                            keywords: vec![],
+                            controller: *controller,
+                        });
+                    next_id += 1;
+                }
+            }
+            state
+        }
+
+        // THE BUG: two DIFFERENT opponents, ONE creature each. No single opponent had two,
+        // so the condition must be FALSE. The pre-port fallback summed 1 + 1 = 2 and
+        // returned TRUE.
+        let split = state_with_entries(&[(PlayerId(1), 1), (PlayerId(2), 1)]);
+        assert!(
+            !parse_and_evaluate_condition(&split, PlayerId(0), ObjectId(10), WHIPLASH_TRAP),
+            "two DIFFERENT opponents with one creature each must NOT satisfy \"an opponent \
+             had two or more creatures enter\" — no single opponent had two (CR 102.2/102.3: \
+             \"an opponent\" binds one player; \"their control\" binds the count to that same \
+             player). Summing across opponents is the pre-port bug this test exists to catch."
+        );
+
+        // POSITIVE CONTROL (nonvacuity): ONE opponent with TWO creatures MUST satisfy it.
+        // Without this, the assertion above would also pass if the condition were broken to
+        // always-false — or if the parse silently stopped producing anything at all.
+        let concentrated = state_with_entries(&[(PlayerId(1), 2)]);
+        assert!(
+            parse_and_evaluate_condition(&concentrated, PlayerId(0), ObjectId(10), WHIPLASH_TRAP),
+            "a SINGLE opponent with two creatures entering MUST satisfy the condition — if \
+             this fails the per-opponent tally is broken (or the phrase stopped parsing), and \
+             the negative assertion above is vacuous"
+        );
+
+        // CONTROL: the controller's OWN entries are not an opponent's. Two creatures under
+        // the ability controller's control must not satisfy an opponent-scoped threshold.
+        let mine = state_with_entries(&[(PlayerId(0), 2)]);
+        assert!(
+            !parse_and_evaluate_condition(&mine, PlayerId(0), ObjectId(10), WHIPLASH_TRAP),
+            "the controller's own battlefield entries must not satisfy an OPPONENT-scoped \
+             entry threshold"
+        );
+    }
+
     #[test]
     fn evaluates_you_control_creature_with_flying_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
@@ -2855,9 +2945,16 @@ mod tests {
     #[test]
     fn evaluates_opponent_searched_library_this_turn_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
+        // Production (`effects::search_library`) records the search in BOTH the
+        // legacy set and the `PlayerPerformedAction` ledger; the shared grammar
+        // now counts the latter, so this test must simulate both halves.
         state
             .players_who_searched_library_this_turn
             .insert(PlayerId(1));
+        state.player_actions_this_turn.push((
+            PlayerId(1),
+            crate::types::events::PlayerActionKind::SearchedLibrary,
+        ));
 
         assert!(parse_and_evaluate_condition(
             &state,
@@ -2870,8 +2967,34 @@ mod tests {
     #[test]
     fn evaluates_you_attacked_with_two_or_more_creatures_this_turn_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
-        state.players_attacked_this_turn.insert(PlayerId(0));
-        state.attacking_creatures_this_turn.insert(PlayerId(0), 2);
+        state.active_player = PlayerId(0);
+        // The shared grammar counts `attacker_declarations_this_turn` snapshots;
+        // production `combat::declare_attackers` records those AND the summary
+        // counters, so this test must simulate both halves (see
+        // `zero_attacker_declaration_does_not_satisfy_you_attacked_this_turn`).
+        for card_id in [2, 3] {
+            let attacker = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(card_id),
+                PlayerId(0),
+                format!("Attacker {card_id}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            let record = state
+                .objects
+                .get(&attacker)
+                .unwrap()
+                .snapshot_for_attack_declaration(attacker);
+            state.attacker_declarations_this_turn.push(record);
+        }
+        record_attackers_declared(&mut state, 2);
 
         assert!(parse_and_evaluate_condition(
             &state,
