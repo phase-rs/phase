@@ -6,11 +6,14 @@ import type {
   GameObject,
   GameState,
   LegalActionsResult,
+  LoopCertificate,
   ObjectId,
   PendingCast,
   Phase,
   Player,
   PlayerId,
+  ShortcutDecisionSchema,
+  ShortcutProposal,
   StackEntry,
   TargetSelectionProgress,
   TargetSelectionSlot,
@@ -27,6 +30,8 @@ type TriggerTargetSelectionWaitingFor = Extract<
 >;
 type ChooseXValueWaitingFor = Extract<WaitingFor, { type: "ChooseXValue" }>;
 type AssistPaymentWaitingFor = Extract<WaitingFor, { type: "AssistPayment" }>;
+type LoopShortcutWaitingFor = Extract<WaitingFor, { type: "LoopShortcut" }>;
+type RespondToShortcutWaitingFor = Extract<WaitingFor, { type: "RespondToShortcut" }>;
 
 /**
  * Convenience-method factory for `Player`:
@@ -294,6 +299,93 @@ export class WaitingForFactory extends Factory<WaitingFor, WaitingForTransient> 
 export const waitingForFactory = WaitingForFactory.define(
   ({ transientParams }) => transientParams.variant ?? buildPriorityWaitingFor(),
 );
+
+export const loopShortcutWaitingForFactory = Factory.define<LoopShortcutWaitingFor>(() => ({
+  type: "LoopShortcut",
+  data: {
+    proposer: 0,
+    predicted_winner: 0,
+    certificate: {
+      unbounded: [{ DamageDealt: 1 }],
+      win_kind: "LethalDamage",
+      mandatory: false,
+      residual_board_delta: { added: [], removed: [] },
+    },
+    schema: {
+      iteration_count: "UntilLethal",
+      points: [],
+      convoke_tappable_count: 0,
+    },
+  },
+}));
+
+export const buildLoopShortcutWaitingFor = ({
+  proposer,
+  predictedWinner,
+  certificate,
+  schema,
+}: {
+  proposer?: PlayerId;
+  predictedWinner?: PlayerId | null;
+  certificate?: Partial<LoopCertificate>;
+  schema?: Partial<ShortcutDecisionSchema>;
+} = {}): LoopShortcutWaitingFor => {
+  const waitingFor = loopShortcutWaitingForFactory.build();
+  const mergedSchema = { ...waitingFor.data.schema, ...schema };
+  // The engine owns convoke_tappable_count (build_shortcut_schema sums the ConvokeTaps
+  // tappable lengths); mirror that here so overriding `points` keeps the count consistent
+  // and the modal — which reads the field directly — renders the matching value.
+  mergedSchema.convoke_tappable_count = mergedSchema.points.reduce(
+    (total, point) =>
+      typeof point.kind === "object" && "ConvokeTaps" in point.kind
+        ? total + point.kind.ConvokeTaps.tappable.length
+        : total,
+    0,
+  );
+  return {
+    ...waitingFor,
+    data: {
+      ...waitingFor.data,
+      ...(proposer === undefined ? {} : { proposer }),
+      ...(predictedWinner === undefined ? {} : { predicted_winner: predictedWinner }),
+      certificate: { ...waitingFor.data.certificate, ...certificate },
+      schema: mergedSchema,
+    },
+  };
+};
+
+export const respondToShortcutWaitingForFactory =
+  Factory.define<RespondToShortcutWaitingFor>(() => ({
+    type: "RespondToShortcut",
+    data: {
+      player: 0,
+      proposal: {
+        proposer: 1,
+        predicted_winner: 1,
+        count: "UntilLethal",
+        unbounded: [{ DamageDealt: 1 }],
+        win_kind: "LethalDamage",
+      },
+    },
+  }));
+
+export const buildRespondToShortcutWaitingFor = ({
+  player,
+  proposal,
+}: {
+  player?: PlayerId;
+  proposal?: Partial<ShortcutProposal>;
+} = {}): RespondToShortcutWaitingFor => {
+  const waitingFor = respondToShortcutWaitingForFactory.build();
+  return {
+    ...waitingFor,
+    data: {
+      ...waitingFor.data,
+      ...(player === undefined ? {} : { player }),
+      proposal: { ...waitingFor.data.proposal, ...proposal },
+    },
+  };
+};
 
 export const stackEntryFactory = Factory.define<StackEntry>(({ sequence }) => ({
   id: sequence,

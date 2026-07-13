@@ -170,6 +170,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::GivePlayerCounter,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -224,6 +225,7 @@ pub fn resolve_lose_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::LoseAllPlayerCounters,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())

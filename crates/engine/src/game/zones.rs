@@ -505,6 +505,25 @@ pub(crate) fn apply_zone_exit_cleanup(
                         crate::types::game_state::ExileLinkKind::TrackedBySource
                     ))
         });
+
+        // PR-7 Phase 4c (B5 defuse): CR 104.4b / CR 110.1 / CR 700.4 — an enabling
+        // permanent leaving the battlefield revokes the revocable-∞ capability it
+        // enabled (every-enabler: `interactive_loop_bridge` Path C). Gated on a
+        // non-empty enabler map so Off/On games (which never populate it — only the
+        // Interactive B5 arm does) pay nothing and stay byte-identical. Whole-
+        // capability clear per controller whose enabler set contains this object
+        // (`clear_unbounded_loop` removes BOTH maps in lockstep).
+        if !state.unbounded_loop_enablers.is_empty() {
+            let revoked: Vec<PlayerId> = state
+                .unbounded_loop_enablers
+                .iter()
+                .filter(|(_, ids)| ids.contains(&object_id))
+                .map(|(c, _)| *c)
+                .collect();
+            for controller in revoked {
+                state.clear_unbounded_loop(controller);
+            }
+        }
     }
 }
 
@@ -846,6 +865,17 @@ pub fn move_to_zone(
         crate::game::layers::mark_layers_full(state);
     }
 
+    // CR 401.5 + CR 611.3a: A move into or out of a library can change that
+    // library's top card, flipping a continuous static gated on it (Vampire
+    // Nocturnus: "as long as the top card of your library is black, ..."). The
+    // hand/battlefield and graveyard marks above don't cover library moves (a
+    // draw off the top, a mill into the graveyard, a put-on-top), so re-evaluate
+    // — self-gated so routine library churn stays cheap when no such static is
+    // live.
+    if to == Zone::Library || from == Zone::Library {
+        crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+    }
+
     // CR 702.145c + CR 702.145f: Daybound/Nightbound permanents entering under
     // the opposite day/night designation transform immediately. Runs after
     // battlefield-entry bookkeeping but before the ZoneChanged event is emitted
@@ -1181,6 +1211,11 @@ pub fn move_to_library_at_index(
         to: Zone::Library,
         record: Box::new(zone_change_record),
     });
+
+    // CR 401.5 + CR 611.3a: placing a card at library index 0 changes the top
+    // card, so a `TopOfLibraryMatches` static must be re-evaluated. This path
+    // bypasses `move_to_zone`, so it invalidates directly (self-gated).
+    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
 }
 
 /// Remove an ObjectId from the appropriate zone collection (CR 400.1).

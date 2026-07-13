@@ -127,6 +127,7 @@ pub fn resolve(
                     events.push(GameEvent::EffectResolved {
                         kind: EffectKind::Vote,
                         source_id: ability.source_id,
+                        subject: None,
                     });
                     return Ok(());
                 }
@@ -179,6 +180,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Vote,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -503,6 +505,7 @@ pub fn resolve_tally(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Vote,
         source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -626,6 +629,7 @@ fn resolve_top_votes_tally(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Vote,
         source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -834,6 +838,7 @@ pub(crate) fn drain_pending_vote_ballot_iteration(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Vote,
         source_id,
+        subject: None,
     });
 }
 

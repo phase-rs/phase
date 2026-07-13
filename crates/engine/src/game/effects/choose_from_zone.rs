@@ -83,6 +83,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -123,6 +124,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseFromZone,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -274,6 +276,7 @@ fn prompt_next_category_member(
     events.push(GameEvent::EffectResolved {
         kind,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -461,6 +464,7 @@ pub(crate) fn resolve_random_in_chain(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,
+            subject: None,
         });
         return true;
     }
@@ -476,6 +480,7 @@ pub(crate) fn resolve_random_in_chain(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseFromZone,
         source_id: ability.source_id,
+        subject: None,
     });
     true
 }
@@ -573,6 +578,7 @@ fn prompt_next_each_player(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseFromZone,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }

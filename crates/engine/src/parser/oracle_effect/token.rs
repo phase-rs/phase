@@ -662,31 +662,34 @@ fn parse_token_description_with_context(
         // to `QuantityRef::Variable("X")` so the upstream `PayCost { Mana { X } }`
         // loop's accumulated total flows through. Falls back to the CDA path
         // (and then the raw variable name) for phrases neither layer recognizes.
-        let resolve_count = || {
-            super::parse_where_x_quantity_expression(&where_expression)
-                .or_else(|| crate::parser::oracle_quantity::parse_cda_quantity(&where_expression))
-        };
-        if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
-        {
-            count = resolve_count().unwrap_or_else(|| QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: where_expression.clone(),
-                },
-            });
-        }
-        if matches!(&power, Some(PtValue::Variable(alias)) if alias == "X") {
-            power = Some(
-                resolve_count()
-                    .map(PtValue::Quantity)
-                    .unwrap_or_else(|| PtValue::Variable(where_expression.clone())),
-            );
-        }
-        if matches!(&toughness, Some(PtValue::Variable(alias)) if alias == "X") {
-            toughness = Some(
-                resolve_count()
-                    .map(PtValue::Quantity)
-                    .unwrap_or_else(|| PtValue::Variable(where_expression)),
-            );
+        let binds_x = matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
+            || matches!(&power, Some(PtValue::Variable(alias)) if alias == "X")
+            || matches!(&toughness, Some(PtValue::Variable(alias)) if alias == "X");
+        if binds_x {
+            // CR 107.3c: the clause DEFINES X. If the definition is not
+            // representable, this token clause does not lower — fail the parse
+            // instead of fabricating a raw-text placeholder.
+            //
+            // The fabricated forms (`PtValue::Variable("<oracle text>")` and
+            // `QuantityRef::Variable { name: "<oracle text>" }`) are well-typed
+            // but DEAD: nothing resolves a non-`X` variable name, so the token
+            // entered as a 0/0 (or with a count of 0) while the raw text still
+            // rendered as a supported dynamic quantity in the coverage report —
+            // a fabricated green. Honest failure is the only correct answer.
+            let bound =
+                super::parse_where_x_quantity_expression(&where_expression).or_else(|| {
+                    crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
+                })?;
+            if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
+            {
+                count = bound.clone();
+            }
+            if matches!(&power, Some(PtValue::Variable(alias)) if alias == "X") {
+                power = Some(PtValue::Quantity(bound.clone()));
+            }
+            if matches!(&toughness, Some(PtValue::Variable(alias)) if alias == "X") {
+                toughness = Some(PtValue::Quantity(bound));
+            }
         }
     }
     bind_bare_token_x_pt_to_cost_x(&mut power);
@@ -759,18 +762,14 @@ fn parse_token_description_with_context(
 
     if power.is_none() || toughness.is_none() {
         if let Some(pt_expression) = extract_token_pt_expression(suffix) {
-            let parsed = crate::parser::oracle_quantity::parse_cda_quantity(&pt_expression);
-            power = Some(
-                parsed
-                    .clone()
-                    .map(PtValue::Quantity)
-                    .unwrap_or_else(|| PtValue::Variable(pt_expression.clone())),
-            );
-            toughness = Some(
-                parsed
-                    .map(PtValue::Quantity)
-                    .unwrap_or_else(|| PtValue::Variable(pt_expression)),
-            );
+            // CR 107.3c + CR 208.2: a token whose P/T is defined by an
+            // expression ("an X/X token, where X is …") must bind that
+            // expression to a typed quantity. If it is not representable the
+            // token clause does not lower — a raw-text `PtValue::Variable` is a
+            // dead node that silently produces a 0/0 token.
+            let parsed = crate::parser::oracle_quantity::parse_cda_quantity(&pt_expression)?;
+            power = Some(PtValue::Quantity(parsed.clone()));
+            toughness = Some(PtValue::Quantity(parsed));
         }
     }
 

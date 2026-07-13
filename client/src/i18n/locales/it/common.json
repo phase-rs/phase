@@ -32,7 +32,8 @@
     "label": "Rilevatore di combo",
     "title": "Rileva i loop infiniti: termina automaticamente i loop obbligatori e mostra le risorse ∞ (disattivato per impostazione predefinita)",
     "on": "Attivo",
-    "off": "Disattivato"
+    "off": "Disattivato",
+    "interactive": "Interattivo"
   },
   "gameMenu": {
     "sections": {

@@ -92,7 +92,3 @@ pub fn authorized_submitters(state: &GameState) -> Vec<PlayerId> {
 pub fn is_authorized_submitter(state: &GameState, actor: PlayerId) -> bool {
     authorized_submitters(state).contains(&actor)
 }
-
-pub fn viewer_controls_active_turn(state: &GameState, viewer: PlayerId) -> bool {
-    state.turn_decision_controller == Some(viewer)
-}

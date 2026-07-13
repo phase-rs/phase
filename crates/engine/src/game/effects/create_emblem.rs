@@ -108,6 +108,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -157,6 +158,7 @@ mod tests {
             play_mode: crate::types::ability::CardPlayMode::Play,
             graveyard_destination_replacement: None,
             extra_cost: None,
+            enters_with_counter: None,
         })
         .affected(TargetFilter::Typed(TypedFilter::new(
             crate::types::ability::TypeFilter::Land,

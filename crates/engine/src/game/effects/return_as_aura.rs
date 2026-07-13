@@ -84,6 +84,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ReturnAsAura,
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -171,6 +172,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ReturnAsAura,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -200,6 +202,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ReturnAsAura,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -275,6 +278,7 @@ pub(crate) fn finalize_attach(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ReturnAsAura,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }

@@ -604,7 +604,7 @@ pub fn resolve(
         }
     }
 
-    // CR 609.3: Consume the tracked set after reading its size for "this way" counting.
+    // CR 608.2c: Consume the tracked set after reading its size for "this way" counting.
     if matches!(
         &ability.effect,
         Effect::Token {
@@ -625,6 +625,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -5806,6 +5807,7 @@ mod tests {
                     GameEvent::EffectResolved {
                         kind: EffectKind::Token,
                         source_id: ObjectId(100),
+                        ..
                     }
                 ))
                 .count(),

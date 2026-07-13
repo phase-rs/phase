@@ -10,6 +10,7 @@ import {
   SETUP_FORMATS,
 } from "../data/formatRegistry";
 import { useAudioContext } from "../audio/useAudioContext";
+import { loopDetectionModeToQuery } from "../game/loopDetectionMode";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
 import { FormatPicker } from "../components/menu/FormatPicker";
@@ -201,7 +202,8 @@ export function GameSetupPage() {
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
     // CR 732.2a: carry the creation-time combo-detector opt-in into the game URL;
     // GamePage projects it onto the local MatchConfig. Omitted = Off (engine default).
-    const loopParam = loopDetection.type === "On" ? "&loop=on" : "";
+    const loopMode = loopDetectionModeToQuery(loopDetection);
+    const loopParam = loopMode ? `&loop=${loopMode}` : "";
     navigate(
       `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${loopParam}${firstParam}`,
     );
@@ -536,7 +538,7 @@ export function GameSetupPage() {
                     <span className="text-xs text-slate-400" title={t("common:comboDetector.title")}>
                       {t("common:comboDetector.label")}
                     </span>
-                    <div className="grid grid-cols-2 gap-1 rounded-[10px] border border-gray-700 bg-gray-950/70 p-1">
+                    <div className="grid grid-cols-3 gap-1 rounded-[10px] border border-gray-700 bg-gray-950/70 p-1">
                       <button
                         type="button"
                         onClick={() => setLoopDetection({ type: "Off" })}
@@ -558,6 +560,17 @@ export function GameSetupPage() {
                         }`}
                       >
                         {t("common:comboDetector.on")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLoopDetection({ type: "Interactive" })}
+                        className={`rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
+                          loopDetection.type === "Interactive"
+                            ? "bg-indigo-600 text-white"
+                            : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+                        }`}
+                      >
+                        {t("common:comboDetector.interactive")}
                       </button>
                     </div>
                   </label>

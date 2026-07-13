@@ -755,6 +755,18 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // Priority is the only state where PassPriority is valid.
         WaitingFor::Priority { .. } => Some(GameAction::PassPriority),
 
+        // CR 732.2a: if tactical scoring found no choice, take the conservative legal escape
+        // from the engine's candidate set. The AI is never forced to propose a shortcut.
+        WaitingFor::LoopShortcut { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| matches!(action, GameAction::DeclineShortcut)),
+        // PR-7 Phase 4c (LOW-2): self-preservation via the single-authority
+        // `smart_shortcut_response` — Shorten when the polled player has a meaningful
+        // way to break the loop, else Accept.
+        WaitingFor::RespondToShortcut { player, .. } => Some(GameAction::RespondToShortcut {
+            response: engine::ai_support::smart_shortcut_response(state, *player),
+        }),
+
         // Combat declarations: an empty declaration is NOT always legal —
         // CR 508.1d / CR 701.15b require goaded / "attacks if able" creatures
         // to be declared. Delegate to the engine's `legal_actions`, which runs
@@ -2927,6 +2939,28 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    #[test]
+    fn loop_shortcut_fallback_selects_legal_decline() {
+        let mut state = make_state();
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: PlayerId(0),
+            predicted_winner: Some(PlayerId(1)),
+            certificate: engine::analysis::loop_check::LoopCertificate {
+                unbounded: vec![],
+                win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+                mandatory: false,
+                residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            },
+            schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
+        };
+
+        assert_eq!(
+            fallback_action(&state),
+            Some(GameAction::DeclineShortcut),
+            "the no-score fallback must select DeclineShortcut from engine legal actions"
+        );
     }
 
     fn add_creature(

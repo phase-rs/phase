@@ -1114,6 +1114,7 @@ pub(super) fn handle_unless_payment(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&pending_effect.effect),
                 source_id: pending_effect.source_id,
+                subject: None,
             });
 
             // CR 118.12 + CR 118.12a: "[Effect] unless [player] pays [cost].
@@ -1482,6 +1483,7 @@ pub(super) fn handle_ward_discard_choice(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&pending_effect.effect),
         source_id: pending_effect.source_id,
+        subject: None,
     });
 
     set_active_priority(state);
@@ -1621,6 +1623,7 @@ pub(super) fn handle_ward_sacrifice_choice(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&pending_effect.effect),
         source_id: pending_effect.source_id,
+        subject: None,
     });
 
     set_active_priority(state);
@@ -1672,6 +1675,7 @@ pub(super) fn handle_unless_bounce_choice(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&pending_effect.effect),
         source_id: pending_effect.source_id,
+        subject: None,
     });
 
     set_active_priority(state);

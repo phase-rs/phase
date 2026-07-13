@@ -1809,7 +1809,8 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         | GameAction::CancelAutoPass
         | GameAction::SetPhaseStops { .. }
         | GameAction::SetPriorityYield { .. }
-        | GameAction::SetMayTriggerAutoChoice { .. } => {
+        | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetTriggerOrderTemplate { .. } => {
             AvailableActionConversion::Unsupported("local.autopass-settings-unsupported")
         }
         GameAction::AssignCombatDamage { .. } => AvailableActionConversion::Skip,
@@ -1848,6 +1849,14 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         | GameAction::GrantDebugPermission { .. }
         | GameAction::RevokeDebugPermission { .. } => {
             AvailableActionConversion::Unsupported("local.debug-action-unsupported")
+        }
+        // CR 732.2a/b/c: the interactive loop-shortcut protocol is opt-in
+        // (`LoopDetectionMode::Interactive`) and never reached on the legacy manabrew
+        // protocol — a legacy client never sets that mode.
+        GameAction::DeclareShortcut { .. }
+        | GameAction::RespondToShortcut { .. }
+        | GameAction::DeclineShortcut => {
+            AvailableActionConversion::Unsupported("local.loop-shortcut-unsupported")
         }
     }
 }

@@ -43,6 +43,10 @@ fn live_battlefield_object_mut<'a>(
     })
 }
 
+fn pending_replacement_pauses_sba(state: &GameState) -> bool {
+    state.pending_replacement.is_some()
+}
+
 /// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,
 /// capped at MAX_SBA_ITERATIONS.
 pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEvent>) {
@@ -131,7 +135,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // on the next pass once the choice is answered. The later
         // `pending_replacement` guard (after lethal-damage) still handles
         // regeneration replacements created *within* this loop.
-        if state.pending_replacement.is_some() {
+        if pending_replacement_pauses_sba(state) {
             return;
         }
 
@@ -154,12 +158,19 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // CR 704.5f: A creature with toughness 0 or less is put into its owner's graveyard.
             check_zero_toughness(state, events, &mut any_performed, &battlefield_snapshot);
 
+            // A zero-toughness move can park on a CR 616.1 choice. Do not let
+            // the later lethal-damage SBA mutate an unrelated creature until the
+            // affected player has chosen and the first move settles.
+            if pending_replacement_pauses_sba(state) {
+                return;
+            }
+
             // CR 704.5g: A creature with lethal damage marked on it is destroyed.
             check_lethal_damage(state, events, &mut any_performed, &battlefield_snapshot);
         }
 
         // CR 614.3 / CR 701.19b: If a regeneration replacement choice is pending, pause SBA evaluation.
-        if state.pending_replacement.is_some() {
+        if pending_replacement_pauses_sba(state) {
             return;
         }
 
@@ -171,6 +182,9 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // CR 704.5m: If an Aura is attached to an illegal object or player, it is put into
             // its owner's graveyard.
             check_unattached_auras(state, events, &mut any_performed, &battlefield_snapshot);
+            if pending_replacement_pauses_sba(state) {
+                return;
+            }
 
             // CR 704.5n: If an Equipment or Fortification is attached to an illegal
             // permanent, it becomes unattached.
@@ -181,20 +195,32 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // graveyard. Runs after unattached_auras so dead-host Roles are already
             // gone — only attached Roles compete for the per-(host, controller) slot.
             check_role_uniqueness(state, events, &mut any_performed, &battlefield_snapshot);
+            if pending_replacement_pauses_sba(state) {
+                return;
+            }
 
             // CR 704.5k: If two or more permanents have the world supertype, all but the one
             // that has held it the shortest time (highest timestamp) go to their owners'
             // graveyards; on a tie for newest, all of them do. Global (not per-player) and
             // choiceless — modeled on check_role_uniqueness.
             check_world_rule(state, events, &mut any_performed, &battlefield_snapshot);
+            if pending_replacement_pauses_sba(state) {
+                return;
+            }
 
             // CR 704.5i + CR 306.9: If a planeswalker has loyalty 0, it is put into its owner's graveyard.
             check_zero_loyalty(state, events, &mut any_performed, &battlefield_snapshot);
+            if pending_replacement_pauses_sba(state) {
+                return;
+            }
 
             // CR 704.5v + CR 310.7: If a battle has defense 0 and isn't the source of an
             // ability that has triggered but not yet left the stack, it's put into its
             // owner's graveyard.
             check_zero_defense(state, events, &mut any_performed, &battlefield_snapshot);
+            if pending_replacement_pauses_sba(state) {
+                return;
+            }
 
             // CR 704.5p + CR 310.9: If a battle is somehow attached to a permanent, unattach it.
             check_battle_unattached(state, &mut any_performed, &battlefield_snapshot);
@@ -202,10 +228,16 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // CR 704.5w + CR 704.5x + CR 310.10: Battle with no (or illegal) protector —
             // controller chooses an appropriate protector; graveyard if none can be chosen.
             check_battle_protector(state, events, &mut any_performed, &battlefield_snapshot);
+            if pending_replacement_pauses_sba(state) {
+                return;
+            }
 
             // CR 704.5s + CR 714.4: If a Saga has lore counters >= its final chapter number,
             // and no chapter ability has triggered but not yet left the stack, sacrifice it.
             check_saga_sacrifice(state, events, &mut any_performed, &battlefield_snapshot);
+            if pending_replacement_pauses_sba(state) {
+                return;
+            }
 
             // CR 704.5q: +1/+1 and -1/-1 counters on the same permanent cancel in pairs.
             check_counter_cancellation(state, &mut any_performed, &battlefield_snapshot);
@@ -223,6 +255,9 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
                 &mut any_performed,
                 &battlefield_snapshot,
             );
+            if pending_replacement_pauses_sba(state) {
+                return;
+            }
 
             // CR 704.5z: A player controlling Start your engines! gets speed 1 if they had none.
             check_start_your_engines(state, events, &mut any_performed, &battlefield_snapshot);
@@ -638,7 +673,7 @@ fn collect_commander_damage_losers(state: &GameState) -> Vec<PlayerId> {
 /// source, so the departing object anchors its own CR 400.7 attribution
 /// (matching the pre-pipeline raw move, which recorded no source).
 #[must_use]
-fn move_to_graveyard_via_pipeline(
+pub(crate) fn move_to_graveyard_via_pipeline(
     state: &mut GameState,
     id: crate::types::identifiers::ObjectId,
     events: &mut Vec<GameEvent>,
@@ -1984,8 +2019,13 @@ fn check_dungeon_completion(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
+    };
+    use crate::types::actions::GameAction;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::replacements::ReplacementEvent;
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
@@ -3609,6 +3649,103 @@ mod tests {
             Zone::Graveyard,
             "with no pending replacement the zero-toughness SBA (CR 704.5f) must \
              destroy the 0/0"
+        );
+    }
+
+    #[test]
+    fn sba_pauses_after_zero_toughness_replacement_choice_before_lethal_damage() {
+        let mut state = setup();
+        let zero = create_creature(&mut state, CardId(9131), PlayerId(0), "Finality 0/0", 0, 0);
+        state
+            .objects
+            .get_mut(&zero)
+            .expect("zero-toughness creature exists")
+            .counters
+            .insert(CounterType::Finality, 1);
+        let lethal = create_creature(
+            &mut state,
+            CardId(9132),
+            PlayerId(0),
+            "Independent lethal",
+            2,
+            2,
+        );
+        state
+            .objects
+            .get_mut(&lethal)
+            .expect("lethal creature exists")
+            .damage_marked = 2;
+
+        let redirect_source = create_object(
+            &mut state,
+            CardId(9133),
+            PlayerId(0),
+            "Competing graveyard redirect".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&redirect_source)
+            .expect("redirect source exists")
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Graveyard)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Library,
+                    target: TargetFilter::SelfRef,
+                    owner_library: true,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))]
+        .into();
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        let WaitingFor::ReplacementChoice { candidates, .. } = state.waiting_for.clone() else {
+            panic!(
+                "zero-toughness finality plus a competing redirect must park a CR 616 choice, got {:?}",
+                state.waiting_for
+            );
+        };
+        let finality_index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == zero)
+            .expect("the finality replacement must retain the dying permanent identity");
+        assert_eq!(candidates[finality_index].description, "Exile it instead");
+        assert_eq!(state.objects[&zero].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&lethal].zone,
+            Zone::Battlefield,
+            "lethal SBA must not run after zero-toughness parks a replacement choice"
+        );
+
+        state.priority_player = PlayerId(0);
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement {
+                index: finality_index,
+            },
+        )
+        .expect("choose the finality redirect");
+        check_state_based_actions(&mut state, &mut events);
+
+        assert_eq!(state.objects[&zero].zone, Zone::Exile);
+        assert_eq!(
+            state.objects[&lethal].zone,
+            Zone::Library,
+            "after the choice settles, the independent lethal SBA must resolve through the \
+             remaining graveyard redirect"
         );
     }
 
@@ -5751,6 +5888,36 @@ mod tests {
 
         assert!(state.players[0].graveyard.contains(&augment));
         assert_eq!(zone_changed_for(&events, augment), 1);
+    }
+
+    #[test]
+    fn sba_standalone_finality_augment_is_exiled_instead() {
+        let mut state = setup();
+        let augment = add_standalone_augment(&mut state, PlayerId(0), "Finality Augment");
+        state
+            .objects
+            .get_mut(&augment)
+            .expect("augment exists")
+            .counters
+            .insert(CounterType::Finality, 1);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&augment].zone,
+            Zone::Exile,
+            "the standalone Augment SBA must use the replacement-aware move path"
+        );
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ReplacementApplied {
+                    source_id,
+                    event_type,
+                } if *source_id == augment && event_type == "Moved"
+            )
+        }));
     }
 
     #[test]

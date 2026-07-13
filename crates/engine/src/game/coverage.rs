@@ -18,15 +18,15 @@ use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
-    Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
-    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect,
-    EffectOutcomeSignal, EffectScope, FilterProp, ForEachCategoryAction, GameRestriction,
-    LibraryPosition, ManaProduction, ObjectProperty, ObjectScope, PerpetualModification,
-    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
-    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    CoinFlipResult, Comparator, ContinuousModification, ControllerRef, CountScope,
+    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
+    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
+    ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
+    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -3662,8 +3662,15 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         AbilityCondition::AlternativeManaCostPaid => "alternative mana cost was paid".into(),
         AbilityCondition::EffectOutcome { .. } => "previous effect outcome".into(),
         AbilityCondition::EventOutcomeWon => "you won the event".into(),
+        AbilityCondition::CoinFlipOutcome { result } => match result {
+            CoinFlipResult::Won => "you won the flip".into(),
+            CoinFlipResult::Lost => "you lost the flip".into(),
+        },
         AbilityCondition::WhenYouDo => "when you do".into(),
-        AbilityCondition::CastFromZone { zone } => format!("cast from {}", fmt_zone(zone)),
+        AbilityCondition::WasCast { zone } => match zone {
+            Some(z) => format!("cast from {}", fmt_zone(z)),
+            None => "was cast".into(),
+        },
         AbilityCondition::CastDuringPhase { phases } => {
             let parts: Vec<&str> = phases.iter().map(fmt_phase).collect();
             format!("cast during {}", parts.join(" or "))
@@ -3818,6 +3825,9 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
             format!("dealt damage this turn by {}", fmt_target(source))
         }
         TC::FirstTimeObjectTappedThisTurn => "first time tapped this turn".into(),
+        TC::FirstTimeObjectCountersAddedThisTurn => {
+            "first time counters put on it this turn".into()
+        }
         TC::WasType { card_type } => format!("was a {}", fmt_core_type(card_type)),
         TC::LifeTotalGE { minimum } => format!("life ≥ {minimum}"),
         TC::ControlCount { minimum, filter } => {
@@ -4036,6 +4046,9 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceIsHarnessed => "source is harnessed".into(),
         SC::SourceAttachedToCreature => "source is attached to a creature".into(),
         SC::SourceMatchesFilter { filter } => format!("source is {}", fmt_target(filter)),
+        SC::TopOfLibraryMatches { filter } => {
+            format!("top card of library is {}", fmt_target(filter))
+        }
         SC::RecipientMatchesFilter { filter } => format!("recipient is {}", fmt_target(filter)),
         SC::RecipientAttackingOwnerTarget { .. } => {
             "recipient is attacking its owner's target".into()
@@ -4043,6 +4056,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceIsPaired => "source is paired".into(),
         SC::SourceInZone { zone } => format!("source is in {}", fmt_zone(zone)),
         SC::EnchantedIsFaceDown => "enchanted creature is face-down".into(),
+        SC::SourceIsFaceUp => "source plane is face up".into(),
         SC::AdditionalCostPaid => "additional cost was paid".into(),
         SC::CastingAsVariant { variant } => format!("casting as {variant:?}"),
         SC::None => "none".into(),
@@ -7047,8 +7061,12 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
             EffectOutcomeSignal::Guessed { .. } => ("EffectOutcomeGuessed", Handled),
         },
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
+        AbilityCondition::CoinFlipOutcome { .. } => ("CoinFlipOutcome", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
-        AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
+        // ponytail: coverage tag key intentionally stays "CastFromZone" (decoupled
+        // from the renamed variant) to keep coverage-data byte-stable across the
+        // BB-FU4 WasCast rename — the string is a report key, not the variant name.
+        AbilityCondition::WasCast { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
         AbilityCondition::ObjectsShareQuality { .. } => ("ObjectsShareQuality", Handled),
         AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. } => {
@@ -7448,11 +7466,17 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
         // SourceMatchesFilter resolved by layers::evaluate_condition (layers.rs:1104)
         StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
+        // CR 401.1 + CR 401.5: top-of-library gate, resolved by
+        // layers::evaluate_condition_with_context against the controller's library top.
+        StaticCondition::TopOfLibraryMatches { .. } => ("TopOfLibraryMatches", Handled),
         StaticCondition::SourceIsPaired => ("SourceIsPaired", Handled),
         // CR 113.6b: evaluated by `layers::evaluate_condition` — checks source
         // object's zone against the specified zone. Runtime-handled.
         StaticCondition::SourceInZone { .. } => ("SourceInZone", Handled),
         StaticCondition::EnchantedIsFaceDown => ("EnchantedIsFaceDown", Handled),
+        // CR 311.2 / CR 901.7: evaluated by `layers::evaluate_condition` against
+        // the command-zone active plane. Runtime-handled.
+        StaticCondition::SourceIsFaceUp => ("SourceIsFaceUp", Handled),
         StaticCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
         StaticCondition::CastingAsVariant { .. } => ("CastingAsVariant", Handled),
     }
@@ -7597,6 +7621,7 @@ fn oracle_line_mentions_counter_type(lower: &str, counter_type: &CounterType) ->
         | CounterType::Fade
         | CounterType::Age
         | CounterType::Shield
+        | CounterType::Finality
         | CounterType::Generic(_) => {
             let needle = format!("{} counter", counter_type.as_str()).to_lowercase();
             lower.contains(&needle)

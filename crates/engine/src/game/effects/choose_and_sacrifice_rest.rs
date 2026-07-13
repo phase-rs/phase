@@ -62,6 +62,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseAndSacrificeRest,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -129,6 +130,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseAndSacrificeRest,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -170,6 +172,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ChooseAndSacrificeRest,
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -206,6 +209,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseAndSacrificeRest,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -304,6 +308,7 @@ pub(crate) fn step_total_power(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseAndSacrificeRest,
             source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -360,6 +365,7 @@ pub(crate) fn step_total_power(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseAndSacrificeRest,
         source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -412,6 +418,7 @@ pub(crate) fn advance_to_next_player(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseAndSacrificeRest,
             source_id,
+            subject: None,
         });
         return Ok(());
     }

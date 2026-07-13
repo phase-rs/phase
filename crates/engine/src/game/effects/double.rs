@@ -118,6 +118,7 @@ fn resolve_double_counters(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Double,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -168,6 +169,7 @@ fn resolve_double_life(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Double,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -246,6 +248,7 @@ fn resolve_double_mana(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Double,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())

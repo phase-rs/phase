@@ -136,6 +136,15 @@ snapshots), annotate the line with:
 EOF
 fi
 
+# (B0) The census scanner's own seam suite. Gates (B) and (C) both stand on
+# `strip_noncode` in zone_authority_census.py; a lexer regression there would
+# not fail those gates — it would silently mis-scope them (a swallowed hit
+# reads as migration progress). So the suite that pins the lexer runs here,
+# ahead of the gates it protects.
+if ! python3 "$(dirname "$0")/zone_authority_census_tests.py"; then
+    FAIL=1
+fi
+
 # (B) Raw zone mutation — full-tree ratchet against the frozen baseline.
 if ! python3 "$(dirname "$0")/zone_authority_census.py" --check; then
     FAIL=1
@@ -148,15 +157,24 @@ fi
 # producers is frozen here. The corpus half of this census needs the generated
 # card-data and therefore runs in the card-data CI job, not this one.
 #
-# SCOPE: three crates — engine, engine-wasm, mtgish-import — of a 13-crate
-# workspace. NOT full-tree, and previously mislabelled as such. It is not
-# full-tree because the shared scanner cannot yet read the whole workspace:
-# `strip_noncode` has no branch for Rust RAW strings (`r#"..."#`), so braces
-# inside one are counted, and a genuinely workspace-wide scan dies with
-# `CensusError: crates/draft-wasm/src/suggest.rs:437: brace tracking desynced`.
-# That is the scanner failing loudly rather than mis-scoping, which is correct —
-# but it means "full-tree" is an aspiration, not a description. Teaching
-# `strip_noncode` about raw strings would unlock it.
+# SCOPE: the whole cargo workspace — every `crates/*/src`, 13 crates today,
+# globbed rather than enumerated so crate #14 is in scope the day it lands. This
+# was 3 hand-named crates until the raw-string branch in `strip_noncode` (#5704)
+# lifted the scanner ceiling a workspace-wide scan used to hit (`CensusError:
+# crates/draft-wasm/src/suggest.rs:437: brace tracking desynced`).
+#
+# Widening surfaced ZERO new producers: `ReplacementEvent::Draw` occurs in exactly
+# two crates (engine, mtgish-import). The other ten are not producer-free merely by
+# assumption — phase-ai builds `ReplacementDefinition`s with the same constructor
+# and struct-literal idioms this census matches, just never with `Draw`. So the
+# frozen population is unchanged at 7 rows, and now covers the surface it always
+# claimed to.
+#
+# Outside the workspace, and NOT scanned: `client/src-tauri` and
+# `lobby-worker/broker-wasm` (Cargo `exclude`; 4 `.rs` files, zero mentions of
+# `ReplacementEvent`). `client/src-tauri` also grows a gitignored `target/` on any
+# local Tauri build, which an rglob would descend into — making the scanned
+# population depend on whether a developer had run one.
 if ! python3 "$(dirname "$0")/draw_replacement_census.py" --producers --check; then
     FAIL=1
 fi

@@ -64,6 +64,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -78,6 +79,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id,
+        subject: None,
     });
 
     Ok(())
@@ -137,6 +139,7 @@ pub fn resolve_unattach_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -1294,7 +1297,8 @@ mod tests {
             events.as_slice(),
             [GameEvent::EffectResolved {
                 kind: EffectKind::UnattachAll,
-                source_id: ObjectId(999)
+                source_id: ObjectId(999),
+                ..
             }]
         ));
     }

@@ -392,6 +392,110 @@ pub fn can_pay(pool: &ManaPool, cost: &ManaCost) -> bool {
     )
 }
 
+/// CR 601.2h + CR 702.51a/b: the SINGLE authority for choosing a deterministic,
+/// minimal convoke tap-set that covers the locked post-affinity `remaining_cost` from
+/// `player`'s current pool plus untapped creatures they control. Shares the convoke
+/// eligibility authority (`is_convoke_eligible` + `object_cant_tap`) with the AI
+/// candidate enumeration (`candidates::mana_payment_actions`) — never a second
+/// eligibility path. Both `resolve_pin(ConvokeTaps)` (replay) and the loop-shortcut
+/// injector route through this function.
+///
+/// Deterministic + minimal: for each colored pip the lowest-ObjectId untapped creature
+/// of that color is tapped (CR 702.51a — a colored convoke tap pays a matching colored
+/// pip); each residual generic pip is paid by the lowest-ObjectId untapped creature
+/// (colorless marker). `can_pay` (the same authority the real finalize uses) arbitrates
+/// after each tap, so the returned set is exactly sufficient. Returns `None` when no
+/// legal untapped-creature set can cover the cost (⇒ the replay raises
+/// `ReplayFailure::UnpayableConvoke`, CR 702.51b). Hybrid/Phyrexian/{X}/{C}-only pips
+/// that a colorless marker can't satisfy fail closed here (outside the deterministic
+/// convoke class the offer targets).
+pub(crate) fn select_convoke_taps(
+    state: &GameState,
+    player: PlayerId,
+    remaining_cost: &ManaCost,
+) -> Option<Vec<(ObjectId, ManaType)>> {
+    let ManaCost::Cost { shards, .. } = remaining_cost else {
+        // NoCost / unresolved placeholder: nothing to convoke.
+        return Some(Vec::new());
+    };
+    let pool = state
+        .players
+        .iter()
+        .find(|p| p.id == player)?
+        .mana_pool
+        .clone();
+    let mut sim = pool;
+    let mut taps: Vec<(ObjectId, ManaType)> = Vec::new();
+    let mut used: Vec<ObjectId> = Vec::new();
+
+    // Canonical candidate order: lowest ObjectId first ⇒ reproducible replay.
+    let mut candidates: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.is_convoke_eligible(player))
+        })
+        // CR 701.26a + CR 508.1f: a "can't become tapped" creature can't convoke.
+        .filter(|id| !crate::game::restrictions::object_cant_tap(state, *id))
+        .collect();
+    candidates.sort_by_key(|id| id.0);
+
+    let pick =
+        |used: &[ObjectId], color: Option<crate::types::mana::ManaColor>| -> Option<ObjectId> {
+            candidates.iter().copied().find(|id| {
+                !used.contains(id)
+                    && match color {
+                        Some(c) => state.objects.get(id).is_some_and(|o| o.color.contains(&c)),
+                        None => true,
+                    }
+            })
+        };
+
+    // Colored pips first — each needs a same-color creature (CR 702.51a).
+    for shard in shards {
+        if can_pay(&sim, remaining_cost) {
+            break;
+        }
+        if let Some(color) = shard_single_color(*shard) {
+            let id = pick(&used, Some(color))?;
+            used.push(id);
+            let mt = crate::game::mana_sources::mana_color_to_type(&color);
+            sim.add(ManaUnit::convoke_payment(mt, id));
+            taps.push((id, mt));
+        }
+        // Non-basic-color shards fall through to the generic/colorless while-loop; if a
+        // colorless marker can't satisfy them, `can_pay` stays false and candidates
+        // exhaust ⇒ `None` (fail-closed, e.g. hybrid/Phyrexian/{X}).
+    }
+    // Generic + colorless residual: tap any creature (colorless marker) until payable.
+    while !can_pay(&sim, remaining_cost) {
+        let id = pick(&used, None)?;
+        used.push(id);
+        sim.add(ManaUnit::convoke_payment(ManaType::Colorless, id));
+        taps.push((id, ManaType::Colorless));
+    }
+    Some(taps)
+}
+
+/// CR 702.51a: the single basic color a mana-cost shard requires, or `None` for
+/// generic-like / hybrid / Phyrexian / {X} shards a colored convoke tap can't uniquely
+/// pay.
+fn shard_single_color(shard: ManaCostShard) -> Option<crate::types::mana::ManaColor> {
+    use crate::types::mana::ManaColor;
+    match shard {
+        ManaCostShard::White => Some(ManaColor::White),
+        ManaCostShard::Blue => Some(ManaColor::Blue),
+        ManaCostShard::Black => Some(ManaColor::Black),
+        ManaCostShard::Red => Some(ManaColor::Red),
+        ManaCostShard::Green => Some(ManaColor::Green),
+        _ => None,
+    }
+}
+
 /// Classification of a mana cost for auto-pay eligibility.
 ///
 /// `Unambiguous` means the cost can be paid without a player-level rules decision:
@@ -4138,6 +4242,115 @@ mod tests {
         assert!(
             p1_pool.mana_pool.mana.is_empty(),
             "a non-mana unbounded axis must not trigger any mana top-up"
+        );
+    }
+}
+
+/// PR-7 4d-ii — `select_convoke_taps` is the SINGLE convoke-selection authority shared by
+/// `resolve_pin(ConvokeTaps)` and the recast injector. These prove it is deterministic
+/// (canonical lowest-ObjectId-per-color, CR 702.51b) and fail-closed (`None` = UnpayableConvoke).
+#[cfg(test)]
+mod convoke_selection_tests {
+    use super::select_convoke_taps;
+    use crate::game::scenario::GameScenario;
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
+    use crate::types::phase::Phase;
+    use crate::types::player::PlayerId;
+
+    const P0: PlayerId = PlayerId(0);
+
+    /// Build P0 with `n` untapped GREEN 1/1 creatures on the battlefield; return their ids
+    /// (ascending). Empty pool ⇒ convoke is the only payment source.
+    fn green_board(
+        n: usize,
+    ) -> (
+        crate::types::game_state::GameState,
+        Vec<crate::types::identifiers::ObjectId>,
+    ) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut ids = Vec::new();
+        for _ in 0..n {
+            ids.push(scenario.add_creature(P0, "Saproling", 1, 1).id());
+        }
+        let mut runner = scenario.build();
+        for &id in &ids {
+            runner.state_mut().objects.get_mut(&id).unwrap().color = vec![ManaColor::Green];
+        }
+        (runner.state().clone(), ids)
+    }
+
+    #[test]
+    fn single_green_pip_taps_exactly_one_lowest_id() {
+        let (state, ids) = green_board(3);
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        };
+        let taps = select_convoke_taps(&state, P0, &cost).expect("payable via convoke");
+        assert_eq!(
+            taps.len(),
+            1,
+            "{{G}} needs exactly one tap, not a whole board"
+        );
+        assert_eq!(
+            taps[0].0, ids[0],
+            "CR 702.51b: canonical lowest-ObjectId first"
+        );
+        assert_eq!(
+            taps[0].1,
+            ManaType::Green,
+            "the tapped green creature pays the {{G}} pip"
+        );
+    }
+
+    #[test]
+    fn generic_plus_green_taps_two_deterministically() {
+        let (state, ids) = green_board(3);
+        // {1}{G}: one green for the pip + one colorless for the generic.
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        };
+        let taps = select_convoke_taps(&state, P0, &cost).expect("payable via convoke");
+        assert_eq!(taps.len(), 2, "{{1}}{{G}} needs two taps");
+        assert_eq!(
+            taps[0],
+            (ids[0], ManaType::Green),
+            "green pip first, lowest id"
+        );
+        assert_eq!(
+            taps[1],
+            (ids[1], ManaType::Colorless),
+            "generic paid by next lowest id"
+        );
+    }
+
+    #[test]
+    fn no_untapped_creature_is_unpayable() {
+        // Zero creatures ⇒ a colored {G} pip can't be covered ⇒ None (⇒ UnpayableConvoke).
+        let (state, _ids) = green_board(0);
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        };
+        assert!(
+            select_convoke_taps(&state, P0, &cost).is_none(),
+            "no untapped green creature ⇒ fail-closed None (UnpayableConvoke)"
+        );
+    }
+
+    #[test]
+    fn insufficient_creatures_for_generic_is_unpayable() {
+        // Cost {2} generic but only one creature ⇒ while-loop exhausts candidates ⇒ None.
+        let (state, _ids) = green_board(1);
+        let cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        };
+        assert!(
+            select_convoke_taps(&state, P0, &cost).is_none(),
+            "one creature can't cover {{2}} ⇒ fail-closed None"
         );
     }
 }

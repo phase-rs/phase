@@ -39,6 +39,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Populate,
                 source_id: ability.source_id,
+                subject: None,
             });
         }
         // Exactly one → auto-select, no player choice needed.
@@ -89,6 +90,7 @@ pub fn create_token_copy(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Populate,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())

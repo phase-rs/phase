@@ -4647,15 +4647,26 @@ fn parse_superlative_property_suffix(
     ctx: &mut ParseContext,
 ) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
-    // "with the <greatest|highest> <property> among " — greatest/highest are
-    // synonyms (both AggregateFunction::Max), property is the second axis.
-    // Factor the 2×3 cross product into two alts (PATTERNS.md §8b).
+    // "with the <superlative> <property> among " — the superlative head selects
+    // the aggregate direction and the property is the second axis. Factor the
+    // 2×3 cross product into two alts (PATTERNS.md §8b).
+    // CR 208.1 (power and toughness) + CR 202.3 (mana value): greatest/highest =
+    // Max, least/lowest/smallest = Min. Both directions feed the same generic
+    // superlative_property_filter_prop, so the runtime (values.min()/max() in
+    // game/quantity.rs) and the Sacrifice/Destroy/return resolvers select the
+    // constrained object unchanged.
     let (rest, (function, property)) = (
         tag::<_, _, OracleError<'_>>("with the "),
-        value(
-            AggregateFunction::Max,
-            alt((tag("greatest "), tag("highest "))),
-        ),
+        alt((
+            value(
+                AggregateFunction::Max,
+                alt((tag("greatest "), tag("highest "))),
+            ),
+            value(
+                AggregateFunction::Min,
+                alt((tag("least "), tag("lowest "), tag("smallest "))),
+            ),
+        )),
         alt((
             value(ObjectProperty::Power, tag("power")),
             value(ObjectProperty::Toughness, tag("toughness")),
@@ -6050,7 +6061,7 @@ fn parse_cost_paid_object_reference<'a>(
     Ok((rest, TargetFilter::CostPaidObject))
 }
 
-fn parse_zone_changed_this_turn_suffix(
+pub(crate) fn parse_zone_changed_this_turn_suffix(
     input: &str,
     to: Option<Zone>,
 ) -> Option<(FilterProp, usize)> {
@@ -7625,6 +7636,89 @@ mod tests {
             TargetFilter::And { filters } => filters.iter().find_map(typed_leg),
             _ => None,
         }
+    }
+
+    /// Extract the `AggregateFunction` a superlative-property suffix encodes,
+    /// regardless of whether it landed as a `PtComparison` (power/toughness) or a
+    /// `Cmc` (mana value) filter prop.
+    fn superlative_aggregate_function(text: &str) -> AggregateFunction {
+        let mut ctx = ParseContext::default();
+        let (prop, _consumed) = parse_superlative_property_suffix(text, &mut ctx)
+            .unwrap_or_else(|| panic!("superlative suffix should parse: {text}"));
+        let value = match prop {
+            FilterProp::PtComparison { value, .. } | FilterProp::Cmc { value, .. } => value,
+            other => panic!("expected PtComparison/Cmc, got {other:?}"),
+        };
+        match value {
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate { function, .. },
+            } => function,
+            other => panic!("expected Aggregate quantity, got {other:?}"),
+        }
+    }
+
+    /// CR 208.1 + CR 202.3: the superlative head maps each direction word to an
+    /// `AggregateFunction` — least/lowest/smallest = Min (new), greatest/highest =
+    /// Max (regression). Tests the parameterized `alt` at the building-block level
+    /// across its full input range, not one card.
+    #[test]
+    fn superlative_direction_maps_word_to_aggregate_function() {
+        for word in ["least", "lowest", "smallest"] {
+            let text = format!("with the {word} power among creatures you control");
+            assert_eq!(
+                superlative_aggregate_function(&text),
+                AggregateFunction::Min,
+                "{word} should map to Min"
+            );
+        }
+        for word in ["greatest", "highest"] {
+            let text = format!("with the {word} power among creatures you control");
+            assert_eq!(
+                superlative_aggregate_function(&text),
+                AggregateFunction::Max,
+                "{word} should map to Max"
+            );
+        }
+    }
+
+    /// CR 208.1 + CR 701.21: "with the least toughness among creatures you control"
+    /// (The Dining Car's upkeep sacrifice) → a Min-aggregate toughness
+    /// `PtComparison` over "creatures you control", tie-inclusive (`EQ`).
+    #[test]
+    fn superlative_least_toughness_suffix_emits_min_aggregate_pt_comparison() {
+        let text = "with the least toughness among creatures you control";
+        let mut ctx = ParseContext::default();
+        let (prop, consumed) =
+            parse_power_suffix(text, &mut ctx).expect("least-toughness suffix should parse");
+        assert_eq!(consumed, text.len(), "the whole suffix must be consumed");
+        let FilterProp::PtComparison {
+            stat,
+            comparator,
+            value,
+            ..
+        } = prop
+        else {
+            panic!("expected PtComparison, got {prop:?}");
+        };
+        assert_eq!(stat, PtStat::Toughness);
+        assert_eq!(comparator, Comparator::EQ);
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::Aggregate {
+                    function,
+                    property,
+                    filter,
+                },
+        } = value
+        else {
+            panic!("expected Aggregate quantity, got {value:?}");
+        };
+        assert_eq!(function, AggregateFunction::Min);
+        assert_eq!(property, ObjectProperty::Toughness);
+        // The eligible set is "creatures you control".
+        let tf = typed_leg(&filter).expect("aggregate filter should be a typed creature filter");
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
     }
 
     /// CR 122.1 + CR 702.62b (Clockspinning): "target permanent or suspended

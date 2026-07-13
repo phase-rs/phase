@@ -7242,6 +7242,66 @@ fn static_as_long_as_unrecognized_condition() {
     ));
 }
 
+/// CR 401.1 + CR 401.5: Mul Daya Channelers — a leading "As long as the top card
+/// of your library is a creature card" gate on a self-anthem. The gate assembles
+/// onto the continuous static's `condition` through the same leading-"as long
+/// as" split as the `you control six or more lands` analogue, proving the
+/// `TopOfLibraryMatches` recognizer is reached end-to-end from a real, verbatim
+/// card line — not only from `parse_inner_condition`. Full-shape: the type gate
+/// AND the +3/+3 anthem body both survive lowering.
+#[test]
+fn static_top_of_library_creature_gate_mul_daya_channelers() {
+    let def = parse_static_line(
+        "As long as the top card of your library is a creature card, this creature gets +3/+3.",
+    )
+    .unwrap();
+
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let (creature_filter, _) = crate::parser::oracle_target::parse_type_phrase("creature card");
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::TopOfLibraryMatches {
+            filter: creature_filter
+        })
+    );
+    assert!(def
+        .modifications
+        .iter()
+        .any(|m| m == &ContinuousModification::AddPower { value: 3 }));
+    assert!(def
+        .modifications
+        .iter()
+        .any(|m| m == &ContinuousModification::AddToughness { value: 3 }));
+}
+
+/// CR 401.1 + CR 401.5: Vampire Nocturnus — the marquee "top card of your library
+/// is black" card. Verifies the color gate attaches end-to-end from the verbatim
+/// line; the anthem body (compound subject, "+2/+1 and have flying") is exercised
+/// only enough to confirm the gate rides on top of a lowered body, not instead.
+#[test]
+fn static_top_of_library_black_gate_vampire_nocturnus() {
+    let def = parse_static_line(
+        "As long as the top card of your library is black, this creature and other Vampire creatures you control get +2/+1 and have flying.",
+    )
+    .unwrap();
+
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::TopOfLibraryMatches {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::HasColor {
+                    color: crate::types::mana::ManaColor::Black,
+                }
+            ])),
+        })
+    );
+    assert!(
+        !def.modifications.is_empty(),
+        "anthem body should still lower"
+    );
+}
+
 #[test]
 fn static_enchanted_or_equipped_stays_unrecognized() {
     // Novice Knight: "As long as this creature is enchanted or equipped, ~ has
@@ -12969,6 +13029,7 @@ fn exile_cast_permission_maralen_fae_ascendant() {
             mana_spend_permission: None,
             grants_flash: false,
             extra_cost: None,
+            enters_with_counter: None,
         },
         "expected ExileCastPermission, got {:?}",
         def.mode
@@ -13072,6 +13133,7 @@ fn persistent_exile_play_permission_matrix_form() {
             mana_spend_permission: None,
             grants_flash: false,
             extra_cost: None,
+            enters_with_counter: None,
         },
         "expected persistent your-turn Play permission, got {:?}",
         def.mode
@@ -13103,6 +13165,7 @@ fn persistent_exile_play_permission_evendo_sacrificed_permanent_gate() {
             mana_spend_permission: None,
             grants_flash: false,
             extra_cost: None,
+            enters_with_counter: None,
         },
         "expected persistent your-turn Play permission, got {:?}",
         def.mode
@@ -13180,6 +13243,7 @@ fn persistent_exile_play_permission_look_at_variant() {
             mana_spend_permission: None,
             grants_flash: false,
             extra_cost: None,
+            enters_with_counter: None,
         },
         "expected persistent any-time Play permission, got {:?}",
         def.mode
@@ -13207,6 +13271,7 @@ fn persistent_exile_cast_permission_azula_flash_and_any_mana() {
             mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor),
             grants_flash: true,
             extra_cost: None,
+            enters_with_counter: None,
         },
         "expected persistent Cast permission with flash + any-mana, got {:?}",
         def.mode
@@ -13278,6 +13343,7 @@ fn persistent_exile_play_permission_valgavoth_alternative_pay_life() {
                 },
                 mode: CastCostMode::Alternative,
             }),
+            enters_with_counter: None,
         },
         "expected persistent Play permission with an alternative pay-life cost, got {:?}",
         def.mode
@@ -13356,6 +13422,7 @@ fn exile_cast_permission_soul_jar_persistent_creature_pool() {
             mana_spend_permission: None,
             grants_flash: false,
             extra_cost: None,
+            enters_with_counter: None,
         },
         "expected persistent ExileCastPermission, got {:?}",
         def.mode
@@ -28552,6 +28619,63 @@ fn rayami_flying_grant_is_conditional_on_matching_exiled_card() {
     assert!(
         !runner.state().objects[&rayami_id].has_keyword(&Keyword::Vigilance),
         "Rayami must not gain vigilance — no exiled card has vigilance"
+    );
+}
+
+/// DISPATCH-SITE INVARIANT (pipeline-level): a standalone printed reducer line
+/// (Training Grounds) is claimed by `parse_static_line` as a `ReduceAbilityCost`
+/// static BEFORE `parse_imperative_effect` ever runs. Training Grounds' text and
+/// The Dining Car's chaos body are textually identical at the shared grammar head
+/// (`parse_activated_ability_cost_head`); the ONLY discriminator is the dispatch
+/// site. This test drives the real pipeline (not `parse_imperative_effect` in
+/// isolation) to prove the printed line stays a static and emits NO transient
+/// activation-cost-reduction effect.
+#[test]
+fn training_grounds_standalone_line_stays_static_no_transient_effect() {
+    // 1. The bare line is claimed by the static classifier.
+    let def = parse_static_line(
+        "Activated abilities of creatures you control cost {2} less to activate.",
+    )
+    .expect("standalone reducer line must parse as a static");
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                ref keyword,
+                mode: CostModifyMode::Reduce,
+                amount: 2,
+                ..
+            } if keyword == "activated"
+        ),
+        "expected a ReduceAbilityCost static, got {:?}",
+        def.mode
+    );
+
+    // 2. A full-card parse of Training Grounds yields the ReduceAbilityCost static
+    //    and NO transient effect (no abilities/triggers).
+    let parsed = crate::parser::parse_oracle_text(
+        "Activated abilities of creatures you control cost {2} less to activate.",
+        "Training Grounds",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.statics.len(),
+        1,
+        "Training Grounds should parse to exactly one static, got {:?}",
+        parsed.statics
+    );
+    assert!(matches!(
+        parsed.statics[0].mode,
+        StaticMode::ReduceAbilityCost { .. }
+    ));
+    assert!(
+        parsed.abilities.is_empty() && parsed.triggers.is_empty(),
+        "the printed reducer line is a static, never a transient effect; got \
+         abilities={:?} triggers={:?}",
+        parsed.abilities,
+        parsed.triggers,
     );
 }
 

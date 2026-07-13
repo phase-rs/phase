@@ -186,7 +186,7 @@ function occupiedSeatCount(state: SeatState): number {
   return state.seats.filter((seat) => seat.type !== "WaitingHuman").length;
 }
 
-function aiActorFromWaitingFor(
+export function aiActorFromWaitingFor(
   waitingFor: WaitingFor,
   seats: SeatState["seats"],
   authorizedSubmitter: PlayerId,
@@ -212,7 +212,12 @@ function aiActorFromWaitingFor(
   // multiplayer. This mirrors the `aiController.ts` fix for #2012. With no
   // turn-control effect, `priority_player === data.player` for every
   // single-acting state, so this is a no-op.
-  return "player" in waitingFor.data ? authorizedSubmitter : null;
+  // CR 732.2a: LoopShortcut's data field is `proposer`, not `player`; route to
+  // the engine-derived authorized submitter (priority_player) exactly like the
+  // `player in` states so an AI-owned controller seat drives the declare.
+  return "player" in waitingFor.data || waitingFor.type === "LoopShortcut"
+    ? authorizedSubmitter
+    : null;
 }
 
 export function playerSlotsFromSeatView(view: SeatView): PlayerSlot[] {

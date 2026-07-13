@@ -32,7 +32,8 @@
     "label": "Wykrywacz combosów",
     "title": "Wykrywaj nieskończone pętle: automatycznie kończ obowiązkowe pętle i pokazuj zasoby ∞ (domyślnie wyłączone)",
     "on": "Wł.",
-    "off": "Wył."
+    "off": "Wył.",
+    "interactive": "Interaktywny"
   },
   "gameMenu": {
     "sections": {

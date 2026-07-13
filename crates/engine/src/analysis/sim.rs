@@ -320,6 +320,7 @@ mod tests {
             GameEvent::EffectResolved {
                 kind: EffectKind::ExtraTurn,
                 source_id: ObjectId(9),
+                subject: None,
             },
             // ETB of a land == landfall + etb.
             zone_change(Some(Zone::Hand), Zone::Battlefield, vec![CoreType::Land]),
@@ -565,12 +566,9 @@ mod tests {
         probe.runner.state_mut().players[1].poison_counters = 4;
         let delta = probe.iteration_delta();
 
-        use crate::analysis::resource::{CounterClass, ObjectClass};
+        // CR 704.5c: poison is per-victim in `delta.poison`, read from the state snapshot.
         assert_eq!(
-            delta
-                .counters
-                .get(&(CounterClass::Poison, ObjectClass::Player))
-                .copied(),
+            delta.poison.get(&PlayerId(1)).copied(),
             Some(4),
             "poison is read from the state snapshot, not the event feed"
         );
@@ -688,6 +686,7 @@ mod tests {
             &[GameEvent::EffectResolved {
                 kind: EffectKind::ExtraTurn,
                 source_id: ObjectId(7),
+                subject: None,
             }],
         );
         assert_eq!(
@@ -702,6 +701,7 @@ mod tests {
             &[GameEvent::EffectResolved {
                 kind: EffectKind::DealDamage,
                 source_id: ObjectId(7),
+                subject: None,
             }],
         );
         assert_eq!(

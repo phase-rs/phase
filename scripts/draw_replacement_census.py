@@ -48,7 +48,6 @@ from pathlib import Path
 # free to drift, and their disagreements would be silent in both directions.
 from zone_authority_census import (
     REPO_ROOT,
-    SCOPES as ENGINE_SCOPES,
     TEST_SUPPORT_FILES,
     iter_production_lines,
 )
@@ -58,14 +57,37 @@ CORPUS_BASELINE = REPO_ROOT / "scripts" / "draw-replacement-corpus.tsv"
 CARD_DATA = REPO_ROOT / "data" / "card-data.json"
 
 # The zone census scans the engine, because only the engine mutates zones. A Draw
-# REPLACEMENT DEFINITION, though, can be minted by anything that builds one and
-# hands it to the engine — and `crates/mtgish-import` does exactly that. Scanning
-# it is a READ; nothing here modifies it.
+# REPLACEMENT DEFINITION, though, can be minted by ANY crate that builds one and
+# hands it to the engine, so the population here is the whole workspace: every
+# `crates/*/src`. Scanning is a READ; nothing here modifies any crate.
 #
-# Omitting it is how the first cut of this gate froze 6 producers while a 7th was
-# live: a census is only as honest as the population it admits, and "the engine"
-# was the wrong population for this question.
-SCOPES = ENGINE_SCOPES + ("crates/mtgish-import/src",)
+# History, because the scope of this census has been wrong twice and each time the
+# count was right about the population it looked at and wrong about the question it
+# claimed to answer:
+#   - v1 scanned the engine only, and froze 6 producers while a 7th was live in
+#     mtgish-import.
+#   - v2 added mtgish-import by hand: 3 named crates of a 13-crate workspace. Full
+#     workspace was the intent, but `strip_noncode` had no branch for Rust RAW
+#     strings, so a workspace-wide scan died on `crates/draft-wasm/src/suggest.rs`.
+#     The 3-crate list was a workaround for a scanner ceiling, frozen as if it were
+#     a decision.
+#   - v3 (here): the raw-string ceiling is fixed, so the scope is the workspace.
+#
+# GLOBBED, not enumerated. A hand-written 13-tuple is a list that goes stale the
+# moment crate #14 is added -- which is precisely how v1 and v2 went wrong. The
+# glob cannot go stale, and because the producer baseline is an EXACT-MATCH gate, a
+# Draw producer minted in a brand-new crate fails the build on the day it lands.
+#
+# BOUNDARY, named rather than implied: this is the cargo workspace (`members =
+# ["crates/*"]`). Two Rust trees are excluded from that workspace by Cargo itself
+# -- `client/src-tauri` and `lobby-worker/broker-wasm`, 4 `.rs` files between them
+# -- and they are NOT scanned. Neither mentions `ReplacementEvent` or
+# `ReplacementDefinition` at all (grep-verified), so the omission costs no
+# producer today. They stay out because they are not workspace members and because
+# `client/src-tauri` grows a gitignored `target/` on any local Tauri build, which
+# an `rglob("*.rs")` would happily descend into -- making the scanned population
+# depend on whether a developer had run a Tauri build.
+SCOPES = tuple(sorted(str(p.relative_to(REPO_ROOT)) for p in (REPO_ROOT / "crates").glob("*/src")))
 
 # ---------------------------------------------------------------------------
 # (A) Producer surface
@@ -186,11 +208,18 @@ PRODUCERS_HEADER = """\
 # family=struct-literal  `ReplacementDefinition { .. event: ReplacementEvent::Draw .. }`
 #                        (mtgish-import). Same: no constructor call.
 #
-# SCOPE, stated exactly rather than implied: this scans the engine crates AND
-# crates/mtgish-import/src. It does NOT scan any other crate. The first cut of
-# this gate scanned the engine only, and froze 6 producers while a 7th was live in
-# mtgish-import -- the count was right about the population it looked at and wrong
-# about the question it claimed to answer.
+# SCOPE, stated exactly rather than implied: this scans the whole cargo workspace
+# -- every `crates/*/src` (13 crates today), globbed rather than enumerated so a
+# new crate is in scope the day it is created. It does NOT scan the two Rust trees
+# Cargo excludes from the workspace (`client/src-tauri`, `lobby-worker/broker-wasm`,
+# 4 `.rs` files); neither mentions `ReplacementEvent` at all.
+#
+# Earlier cuts scanned less and said so imprecisely. v1 scanned the engine only and
+# froze 6 producers while a 7th was live in mtgish-import. v2 hand-added
+# mtgish-import, reaching 3 of 13 crates -- not by choice but because the shared
+# scanner could not read raw strings and died on crates/draft-wasm. Both counts were
+# right about the population they looked at and wrong about the question they
+# claimed to answer.
 #
 # COVERAGE BOUNDARY, stated so this is not mistaken for "every possible source":
 # a `ReplacementDefinition` also comes back to life via its plain serde derive

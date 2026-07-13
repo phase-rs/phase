@@ -6731,6 +6731,46 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .unwrap_or_default();
     let convoked_creature_count = convoked_creatures.len();
 
+    // CR 601.2a + CR 702.27a + CR 702.51a: capture the object-growth recast snapshot the
+    // PR-7 Phase 4d-ii loop-shortcut hook replays. Gated to a buyback-paid,
+    // permanent-creating (token) spell so the hook's cheap precondition (`last_recast_context
+    // == Some`) is set ~never. Fail-safe note: a spurious capture from buyback + some OTHER
+    // optional cost only makes the clone-drive run — its cover/abort rejects any non-covering
+    // recast, so this can never false-certify. Cleared (set `None`) on any non-matching cast,
+    // so a stale context never lingers. `ability.effect` is read here before `ability` is
+    // moved into `stack_ability` below.
+    {
+        let is_token_creating =
+            matches!(ability.effect, crate::types::ability::Effect::Token { .. });
+        let (has_buyback, convoke) = state.objects.get(&object_id).map_or((false, None), |obj| {
+            let has_buyback = obj
+                .keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Buyback(_)));
+            let convoke = obj
+                .keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Convoke))
+                .then_some(crate::types::game_state::ConvokeMode::Convoke);
+            (has_buyback, convoke)
+        });
+        // #4603 opt-in gate: OFF (`!samples()`) must be byte-identical to pre-PR-7 on the
+        // SERIALIZED surface too — `last_recast_context` is `skip_serializing_if=is_none`, so a
+        // spurious `Some(..)` in OFF mode would appear in a save/replay/scenario. Gate on the
+        // SAME accessor the consuming hook uses (engine.rs:448) so the mode gate has one source.
+        state.last_recast_context = (state.loop_detection.samples()
+            && additional_cost_paid
+            && has_buyback
+            && is_token_creating)
+            .then_some(crate::types::game_state::RecastContext {
+                card_id,
+                controller: player,
+                from_zone: source_zone,
+                uses_buyback: crate::types::game_state::BuybackUsage::Used,
+                convoke,
+            });
+    }
+
     // Determine whether this spell has a meaningful on-resolve ability.
     // Permanent spells with no Spell-kind AbilityDefinition get a placeholder
     // Unimplemented effect through the cost pipeline (from continue_with_no_ability).
@@ -6898,6 +6938,21 @@ fn finalize_cast_with_phyrexian_choices_inner(
             .push((object_id, counter_type, 1));
     }
 
+    // CR 122.1 + CR 614.1c + CR 607.1: the sibling STATIC-permission path — a
+    // `GraveyardCastPermission` / `ExileCastPermission` whose "If you cast a
+    // spell this way, that <permanent> enters with a [counter] counter on it"
+    // rider (Noctis, Prince of Lucis; Intrepid Paleontologist; Leonardo, Sewer
+    // Samurai) is carried on the static's `enters_with_counter` field. The
+    // authorizing source is embedded in `casting_variant`; register the pending
+    // ETB counter on the same object so it enters carrying the counter.
+    let static_perm_etb_counter =
+        super::casting::selected_static_permission_enters_with_counter(state, &casting_variant);
+    if let Some(counter_type) = static_perm_etb_counter {
+        state
+            .pending_etb_counters
+            .push((object_id, counter_type, 1));
+    }
+
     // CR 205.1b + CR 613.1d: A `CastFromZone` grant whose rider was "… is a
     // [type] in addition to its other types" (The Tomb of Aclazotz) records the
     // additive type-changing modifications on the granted `ExileWithAltCost`.
@@ -6936,6 +6991,19 @@ fn finalize_cast_with_phyrexian_choices_inner(
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.cast_variant_paid = Some((
                 crate::types::ability::CastVariantPaid::Impending,
+                state.turn_number,
+            ));
+        }
+    }
+    // CR 702.187b + CR 608.2c: tag the on-stack spell with the mayhem alt-cost
+    // marker so a resolving sorcery's own "if this spell's mayhem cost was paid,
+    // … instead" modal reads it via `ability.source_id`. Sorceries never enter
+    // the battlefield, so the `stack.rs` ETB re-stamp path does not apply — this
+    // finalize-time stamp is authoritative.
+    if casting_variant == CastingVariant::Mayhem {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.cast_variant_paid = Some((
+                crate::types::ability::CastVariantPaid::Mayhem,
                 state.turn_number,
             ));
         }

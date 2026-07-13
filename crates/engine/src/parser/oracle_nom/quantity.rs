@@ -687,13 +687,57 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_chroma_devotion_ref,
         parse_graveyard_chroma_ref,
         parse_counters_among_ref,
+        // CR 105.1 + CR 105.2: bare "colors among <filter>" — reached after a
+        // parent has consumed "there are N " (Puca's Eye: "there are five colors
+        // among permanents you control"). The tail combinator (`tag("colors
+        // among ") + parse_type_phrase`) is shared with the "the number of
+        // colors among ..." path; registering it here makes it reachable in the
+        // bare-suffix context too.
+        parse_number_of_distinct_colors_among_permanents_tail,
         // CR 402.1: "the player with the {most|fewest} cards in hand" — the
         // cross-player hand-size extremum, the hand-zone peer of the life
         // extremum. Distinctive "the player with the " prefix; no ordering
         // hazard with sibling arms.
         parse_player_with_extremum_cards_in_hand,
+        // CR 118.9 / CR 601.3: bare "<type> on the battlefield" object count.
+        // Placed LAST (lowest priority) so every specific arm — notably
+        // `parse_greatest_commander_mana_value_ref` for "the greatest mana value
+        // of a commander you own on the battlefield" — wins first; this fallback
+        // only claims a bare type phrase nothing else recognized (Blasphemous
+        // Edict's "creatures on the battlefield").
+        parse_type_count_on_battlefield,
     )))
     .parse(input)
+}
+
+/// CR 118.9 + CR 601.3: "<type> on the battlefield" → count of matching objects
+/// on the battlefield. The GE / "N or more" sibling of `parse_no_on_battlefield`
+/// (`oracle_nom/condition.rs`, which emits the `== 0` form); reached after a
+/// parent combinator (`parse_there_are_conditions`) has consumed the "there are
+/// N or more " quantifier, leaving the bare noun phrase (Blasphemous Edict's
+/// "creatures on the battlefield").
+///
+/// The full phrase is decoded by `parse_type_phrase`, so the " on the
+/// battlefield" locative is re-attached as `FilterProp::InZone { Battlefield }`
+/// exactly as the for-each battlefield-count fallback does
+/// (`oracle_quantity::parse_type_phrase_with_ctx`) — this arm therefore produces
+/// byte-identical `ObjectCount` filters for any for-each clause it now intercepts
+/// at the shared `parse_quantity_ref` seam. Guarded two ways so it stays strictly
+/// additive on that high-traffic surface: the phrase must END with the battlefield
+/// locative (rejecting "…on the battlefield or in the command zone", which its
+/// dedicated commander-mana-value arm claims), and the type phrase must fully
+/// consume and be non-`Any`.
+fn parse_type_count_on_battlefield(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (after_anchor, _) = take_until(" on the battlefield").parse(input)?;
+    let (after_anchor, _) = tag(" on the battlefield").parse(after_anchor)?;
+    if !after_anchor.trim().is_empty() {
+        return Err(oracle_err(input));
+    }
+    let (filter, type_rest) = parse_type_phrase(input);
+    if matches!(filter, TargetFilter::Any) || !type_rest.trim().is_empty() {
+        return Err(oracle_err(input));
+    }
+    Ok(("", QuantityRef::ObjectCount { filter }))
 }
 
 /// CR 109.3 + CR 205.3m: Parse "the greatest/fewest/total number of

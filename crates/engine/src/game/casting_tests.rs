@@ -9432,6 +9432,174 @@ fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
     );
 }
 
+/// Helper: an artifact permanent with a pure `{generic_cost}` generic-mana
+/// activated ability (no tap/sacrifice, so affordability is a clean function of
+/// the controller's mana pool).
+fn make_artifact_with_generic_ability(
+    state: &mut GameState,
+    card_id: CardId,
+    owner: PlayerId,
+    name: &str,
+    is_token: bool,
+    generic_cost: u32,
+) -> ObjectId {
+    let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.is_token = is_token;
+    obj.card_types.core_types.push(CoreType::Artifact);
+    Arc::make_mut(&mut obj.abilities).push(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Mana {
+            cost: ManaCost::generic(generic_cost),
+        }),
+    );
+    id
+}
+
+/// CR 611.2 + CR 601.2f + CR 118.7 + CR 514.2: RUNTIME PROOF of The Dining Car's
+/// transient activation-cost reduction, exercised through the REAL mechanism.
+/// Resolving the exact `Effect::GenericEffect` the parser emits installs a
+/// `Duration::UntilEndOfTurn` continuous `ReduceAbilityCost` effect, and the
+/// single cost authority (`apply_static_activated_ability_cost_reduction`, which
+/// the AI's affordability check routes through) reads it off the transient
+/// continuous effect — the same authority that applies printed battlefield
+/// `ReduceAbilityCost` statics. Proves: a controlled artifact TOKEN is
+/// discounted; a controlled NONTOKEN and an OPPONENT's token are not; the
+/// discount applies EXACTLY ONCE (a `{3}` token reduces to `{1}`, not `{0}` — a
+/// double-apply via layer grafting would floor it); and it ends when the
+/// continuous effect is pruned at cleanup.
+#[test]
+fn transient_activation_cost_reduction_hits_only_controlled_artifact_tokens() {
+    let mut state = setup_game_at_main_phase();
+
+    // The Dining Car itself — the reduction's source/anchor.
+    let dining_car = create_object(
+        &mut state,
+        CardId(800),
+        PlayerId(0),
+        "The Dining Car".to_string(),
+        Zone::Battlefield,
+    );
+
+    let controlled_token = make_artifact_with_generic_ability(
+        &mut state,
+        CardId(801),
+        PlayerId(0),
+        "Token A",
+        true,
+        2,
+    );
+    // A {3}-cost controlled token — reduces to {1}, not {0}, so it proves the
+    // discount is applied EXACTLY ONCE (guards against a layer graft double-apply).
+    let controlled_token_three = make_artifact_with_generic_ability(
+        &mut state,
+        CardId(804),
+        PlayerId(0),
+        "Token B",
+        true,
+        3,
+    );
+    let controlled_nontoken = make_artifact_with_generic_ability(
+        &mut state,
+        CardId(802),
+        PlayerId(0),
+        "Nontoken",
+        false,
+        2,
+    );
+    let opponent_token = make_artifact_with_generic_ability(
+        &mut state,
+        CardId(803),
+        PlayerId(1),
+        "Opp Token",
+        true,
+        2,
+    );
+
+    // Resolve the exact GenericEffect the parser emits for the chaos body
+    // "activated abilities of artifact tokens you control cost {2} less to
+    // activate": a Duration::UntilEndOfTurn continuous ReduceAbilityCost carried
+    // as an AddStaticMode modification with the source filter in `affected`.
+    let reduce_mode = StaticMode::ReduceAbilityCost {
+        mode: crate::types::statics::CostModifyMode::Reduce,
+        keyword: "activated".to_string(),
+        amount: 2,
+        minimum_mana: None,
+        dynamic_count: None,
+        exemption: crate::types::statics::ActivationExemption::None,
+        activator: None,
+    };
+    let source_filter = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Artifact],
+        controller: Some(ControllerRef::You),
+        properties: vec![FilterProp::Token],
+    });
+    let effect = Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::new(reduce_mode.clone())
+            .affected(source_filter)
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: reduce_mode,
+            }])],
+        duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
+        target: None,
+    };
+    let ability =
+        crate::types::ability::ResolvedAbility::new(effect, vec![], dining_car, PlayerId(0));
+    let mut events = Vec::new();
+    crate::game::effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
+    // A full layer flush proves the reduction is NOT grafted onto objects (the
+    // layers skip), so the cost hook applies it exactly once — the {3}-token
+    // assertion below would fail (reduce to {0}) if grafting double-applied it.
+    crate::game::layers::flush_layers(&mut state);
+
+    // P0 has ZERO mana. `can_activate_ability_now`'s 4th arg is the ability index,
+    // not available mana — affordability reads the controller's actual pool.
+    assert!(
+        can_activate_ability_now(&state, PlayerId(0), controlled_token, 0),
+        "controlled artifact token's {{2}} cost is reduced to {{0}}, affordable with no mana",
+    );
+    assert!(
+        !can_activate_ability_now(&state, PlayerId(0), controlled_token_three, 0),
+        "single-apply: {{3}} reduces to {{1}} (needs 1 mana), NOT {{0}} — a double-apply would floor it",
+    );
+    assert!(
+        !can_activate_ability_now(&state, PlayerId(0), controlled_nontoken, 0),
+        "artifact NONTOKEN is not a token → not reduced → still {{2}}, unaffordable with no mana",
+    );
+    // P0's reduction must not leak onto P1's artifact token.
+    assert!(
+        !can_activate_ability_now(&state, PlayerId(1), opponent_token, 0),
+        "opponent's artifact token is not controlled by the reduction's 'you' → not reduced",
+    );
+
+    // With exactly {1} mana the {3}-token reduced to {1} is affordable — positive
+    // proof the discount is exactly {2}.
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+    assert!(
+        can_activate_ability_now(&state, PlayerId(0), controlled_token_three, 0),
+        "the {{3}} token reduced to {{1}} is affordable with {{1}} mana",
+    );
+
+    // CR 514.2: the continuous "this turn" reduction is pruned at cleanup, and the
+    // controlled token returns to full {2} cost — unaffordable with the {1} mana
+    // now in the pool (it WAS affordable at {0} mana while the reduction held).
+    crate::game::layers::prune_end_of_turn_effects(&mut state);
+    assert!(
+        !transient_reduce_ability_cost_present(&state),
+        "the UntilEndOfTurn ReduceAbilityCost continuous effect must be pruned at cleanup",
+    );
+    assert!(
+        !can_activate_ability_now(&state, PlayerId(0), controlled_token, 0),
+        "after cleanup the reduction is gone → the token's {{2}} cost is unaffordable with {{1}} mana",
+    );
+}
+
 #[test]
 fn activated_ability_cost_reduction_mana_exemption_skips_mana_abilities() {
     // CR 601.2f + CR 605.1a: A "cost {2} less to activate that aren't mana
@@ -15941,7 +16109,7 @@ fn graveyard_cast_this_way_enters_with_finality_counter() {
     let rider = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::AddPendingETBCounters {
-            counter_type: CounterType::Generic("finality".to_string()),
+            counter_type: CounterType::Finality,
             count: QuantityExpr::Fixed { value: 1 },
         },
     );
@@ -15978,9 +16146,9 @@ fn graveyard_cast_this_way_enters_with_finality_counter() {
             .any(|p| matches!(
                 p,
                 CastingPermission::ExileWithAltCost {
-                    enters_with_counter: Some(CounterType::Generic(ref s)),
+                    enters_with_counter: Some(CounterType::Finality),
                     ..
-                } if s == "finality"
+                }
             )),
         "the enters-with-finality-counter rider must ride the granted permission"
     );
@@ -16014,7 +16182,7 @@ fn graveyard_cast_this_way_enters_with_finality_counter() {
     assert_eq!(
         state.objects[&creature]
             .counters
-            .get(&CounterType::Generic("finality".to_string())),
+            .get(&CounterType::Finality),
         Some(&1),
         "the creature cast this way must enter with a finality counter"
     );
@@ -16085,7 +16253,7 @@ fn graveyard_cast_without_rider_has_no_finality_counter() {
     assert_eq!(
         state.objects[&creature]
             .counters
-            .get(&CounterType::Generic("finality".to_string())),
+            .get(&CounterType::Finality),
         None,
         "a graveyard cast without the rider must not gain a finality counter"
     );
@@ -16131,7 +16299,7 @@ fn graveyard_cast_this_way_enters_with_type_grant_rider() {
     // sub-ability is the `AddPendingEntersModifications` type grant.
     let mut counter_rider = ResolvedAbility::new(
         Effect::AddPendingETBCounters {
-            counter_type: CounterType::Generic("finality".to_string()),
+            counter_type: CounterType::Finality,
             count: QuantityExpr::Fixed { value: 1 },
         },
         vec![],
@@ -16176,11 +16344,10 @@ fn graveyard_cast_this_way_enters_with_type_grant_rider() {
             .any(|p| matches!(
                 p,
                 CastingPermission::ExileWithAltCost {
-                    enters_with_counter: Some(CounterType::Generic(ref s)),
+                    enters_with_counter: Some(CounterType::Finality),
                     enters_with_modifications,
                     ..
-                } if s == "finality"
-                    && enters_with_modifications
+                } if enters_with_modifications
                         == &[ContinuousModification::AddSubtype {
                             subtype: "Vampire".to_string(),
                         }]
@@ -16216,7 +16383,7 @@ fn graveyard_cast_this_way_enters_with_type_grant_rider() {
     assert_eq!(
         state.objects[&creature]
             .counters
-            .get(&CounterType::Generic("finality".to_string())),
+            .get(&CounterType::Finality),
         Some(&1),
         "the creature must enter with a finality counter"
     );
@@ -16377,7 +16544,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
                     duration: Some(Duration::UntilEndOfTurn),
                     graveyard_replacement: None,
                     mana_spend_permission: None,
-                    enters_with_counter: Some(CounterType::Generic("finality".to_string())),
+                    enters_with_counter: Some(CounterType::Finality),
                     enters_with_modifications: Vec::new(),
                 });
         }
@@ -16405,7 +16572,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
         );
         state.objects[&creature]
             .counters
-            .get(&CounterType::Generic("finality".to_string()))
+            .get(&CounterType::Finality)
             .copied()
     }
 
@@ -16418,7 +16585,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
 
     // Positive twin: move the rider onto the CONSUMED P1 → must apply exactly once.
     assert_eq!(
-        run_two_permission_cast(Some(CounterType::Generic("finality".to_string()))),
+        run_two_permission_cast(Some(CounterType::Finality)),
         Some(1),
         "the rider on the consumed permission must apply exactly one finality counter"
     );
@@ -37539,6 +37706,7 @@ fn add_exile_cast_permission_source_with(
         mana_spend_permission: None,
         grants_flash: false,
         extra_cost: None,
+        enters_with_counter: None,
     })
     .affected(affected);
     let obj = state.objects.get_mut(&source).unwrap();
@@ -37646,6 +37814,99 @@ fn exile_cast_permission_rejects_card_outside_per_turn_pool() {
     );
 }
 
+/// CR 601.2a + CR 118.9a: A static `ExileCastPermission` (Maralen, Fae
+/// Ascendant) where the exiled card is the ONLY cast option yields exactly one
+/// casting-variant candidate, so `casting_variant_choice_set.had_multiple_
+/// candidates` is false. `handle_cast_spell_with_payment_mode` must STILL elect
+/// that single `ExilePermission` variant — otherwise the cast falls through to a
+/// `Normal` cast that drops the permission context: the `WithoutPayingManaCost`
+/// mana zeroing (CR 118.9a) and the `OncePerTurn` per-source slot (CR 601.2a).
+///
+/// DISCRIMINATING: with P0 holding NO mana and the exiled card costing {2}, the
+/// cast can only resolve if the mana cost was zeroed (proving ExilePermission was
+/// elected); the consumed slot is the second, independent proof. Reverting the
+/// single-candidate `ExilePermission` election block in
+/// `handle_cast_spell_with_payment_mode` re-elects `Normal`: the {2} becomes
+/// payable-only (no mana) so the card never reaches the battlefield AND the slot
+/// is never stamped — both assertions flip to fail.
+#[test]
+fn single_candidate_exile_permission_elects_permission_and_zeros_mana() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let maralen =
+        add_exile_cast_permission_source(&mut state, player, "Maralen", TargetFilter::Any);
+    let exiled = add_exiled_card(&mut state, player, "Exiled Bear");
+    {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        // {2} with P0 holding no mana — only the WithoutPayingManaCost election
+        // (CR 118.9a) lets this resolve. Positive toughness survives SBA.
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        };
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.base_card_types = obj.card_types.clone();
+    }
+    state
+        .cards_exiled_with_source_this_turn
+        .insert(maralen, vec![exiled]);
+
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+    let outcome = runner.cast(exiled).resolve();
+
+    // WithoutPayingManaCost applied → the {2} spell resolves with no mana.
+    outcome.assert_zone(&[exiled], Zone::Battlefield);
+    // OncePerTurn slot consumed → ExilePermission was elected, not Normal.
+    assert!(
+        outcome
+            .state()
+            .exile_cast_permissions_used
+            .contains(&maralen),
+        "the OncePerTurn slot must be consumed — proving ExilePermission was elected, not Normal"
+    );
+}
+
+/// ELEVATION guard (whole-engine regression axis): the single-candidate
+/// `ExilePermission` election added to `handle_cast_spell_with_payment_mode` is
+/// SCOPED to `ExilePermission` and must NOT perturb the ordinary single-candidate
+/// `Normal` cast path taken by every vanilla hand spell. A hand creature's only
+/// candidate is `Normal`; it must still cast via the default flow with no
+/// exile-permission election leaking (no per-source slot stamped).
+#[test]
+fn single_candidate_normal_hand_cast_unchanged_by_exile_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let card_id = crate::types::identifiers::CardId(state.next_object_id);
+    let creature = create_object(
+        &mut state,
+        card_id,
+        player,
+        "Vanilla Bear".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.card_types.core_types = vec![CoreType::Creature];
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        };
+        obj.base_card_types = obj.card_types.clone();
+    }
+
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+    let outcome = runner.cast(creature).resolve();
+
+    outcome.assert_zone(&[creature], Zone::Battlefield);
+    assert!(
+        outcome.state().exile_cast_permissions_used.is_empty(),
+        "a Normal hand cast must not stamp any exile-permission slot"
+    );
+}
+
 /// Build a battlefield `ExileCastPermission` source carrying a specific
 /// `extra_cost` rider (Valgavoth alternative pay-life; `None` for a
 /// plain Maralen-style permission). `Unlimited` frequency keeps the source
@@ -37669,6 +37930,7 @@ fn add_exile_cast_permission_source_with_extra_cost(
         mana_spend_permission: None,
         grants_flash: false,
         extra_cost,
+        enters_with_counter: None,
     })
     .affected(TargetFilter::Any);
     state
@@ -38374,6 +38636,7 @@ fn add_azula_exile_cast_source(state: &mut GameState, player: PlayerId) -> Objec
         mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
         grants_flash: true,
         extra_cost: None,
+        enters_with_counter: None,
     })
     .affected(TargetFilter::Any);
     state
@@ -38414,6 +38677,7 @@ fn add_valgavoth_exile_cast_source(state: &mut GameState, player: PlayerId) -> O
             },
             mode: crate::types::statics::CastCostMode::Alternative,
         }),
+        enters_with_counter: None,
     })
     .affected(TargetFilter::Any);
     state
@@ -38748,6 +39012,58 @@ fn valgavoth_exile_static_alternative_cost_gated_on_life() {
     assert!(
         !can_cast_object_now(&state, player, spell),
         "a pay-life alternative cast must be illegal at 0 life even with {{2}} in pool"
+    );
+}
+
+/// CR 118.9 vs CR 601.2f: the L02 swallow suppression
+/// (`parser::swallow_check::cast_this_way_alt_cost_is_only_if_marker`) exempts the
+/// "if you cast a spell this way, pay [cost] rather than pay its mana cost" rider
+/// ONLY when `CastCostMode::Alternative`. This test pins the runtime semantics
+/// that make that key sound: an `Alternative` pay-life extra cost ZEROES the
+/// exiled spell's mana cost (pay life = mana value, 0 mana), whereas the SAME
+/// cost in `Additional` mode leaves the printed mana cost DUE (mana still owed on
+/// top of the life). Reverting the marker's `Alternative` keying would wrongly
+/// suppress swallow for `Additional`-mode riders (Festival of Embers), whose mana
+/// cost is not replaced — this asymmetry is exactly why the key is mode-scoped.
+///
+/// DISCRIMINATING: flipping the source's `extra_cost.mode` from `Alternative` to
+/// `Additional` flips `effective_spell_cost` from without-paying-mana (0 mana) to
+/// mana-due — the assertion pair fails if the runtime stopped distinguishing the
+/// modes.
+#[test]
+fn valgavoth_alternative_cost_zeroes_mana_but_additional_keeps_it() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    state.players[0].life = 20;
+    let source = add_valgavoth_exile_cast_source(&mut state, player); // Alternative
+    let spell = add_linked_two_generic_sorcery(&mut state, player, source, "Exiled Big Spell");
+
+    // Alternative: MV-2 sorcery's printed {2} mana cost is zeroed (pay life = MV).
+    let effective = effective_spell_cost(&state, player, spell)
+        .expect("effective cost must resolve under Alternative mode");
+    assert!(
+        effective.is_without_paying_mana(),
+        "Alternative pay-life cost must zero the {{2}} mana cost (0 mana), got {effective:?}"
+    );
+
+    // Revert-probe: flip the elected source's rider to Additional. The printed
+    // {2} mana cost must now remain DUE (the life cost rides on top of the mana).
+    if let StaticMode::ExileCastPermission {
+        extra_cost: Some(extra),
+        ..
+    } = &mut state.objects.get_mut(&source).unwrap().static_definitions[0].mode
+    {
+        extra.mode = crate::types::statics::CastCostMode::Additional;
+    } else {
+        panic!("Valgavoth source must carry an ExileCastPermission extra_cost");
+    }
+
+    let effective_additional = effective_spell_cost(&state, player, spell)
+        .expect("effective cost must resolve under Additional mode");
+    assert!(
+        !effective_additional.is_without_paying_mana(),
+        "Additional mode must leave the {{2}} mana cost due (mana + life), got \
+         {effective_additional:?}"
     );
 }
 

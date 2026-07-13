@@ -993,7 +993,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         // (LosesAbilities) that grants an ability that conjures. The Destroy
         // rider carries no static.
         Effect::Counter { source_rider, .. } => {
-            if let Some(CounterSourceRider::LosesAbilities { static_def }) = source_rider {
+            if let Some(CounterSourceRider::LosesAbilities { static_def, .. }) = source_rider {
                 walk_static(static_def, out);
             }
         }
@@ -3014,6 +3014,7 @@ mod tests {
             target: TargetFilter::Any,
             source_rider: Some(CounterSourceRider::LosesAbilities {
                 static_def: Box::new(counter_static),
+                duration: Box::new(crate::types::ability::Duration::UntilHostLeavesPlay),
             }),
             countered_spell_zone: None,
         };

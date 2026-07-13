@@ -4061,6 +4061,86 @@ mod tests {
     }
 
     #[test]
+    fn find_copy_targets_gates_on_zone_changed_this_turn_predicate() {
+        // CR 400.7 + CR 707.9: The Fourteenth Doctor copies "a Doctor card in
+        // your graveyard that was put there from your library this turn". Only a
+        // Doctor milled Library->Graveyard THIS turn is a legal source — a
+        // Doctor already in the graveyard from a prior turn (no zone-change
+        // record) and a Doctor on the battlefield are both excluded. This proves
+        // the Fix A (mill records the Library->Graveyard change) <-> Fix B (copy
+        // source predicate reads it) runtime seam that couples the card's two
+        // abilities.
+        use crate::types::ability::{FilterProp, TypeFilter, TypedFilter};
+        use crate::types::game_state::ZoneChangeRecord;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        let make_doctor = |state: &mut GameState, cid: u64, zone: Zone| -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(cid),
+                PlayerId(0),
+                format!("Doctor {cid}"),
+                zone,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types.subtypes = vec!["Doctor".to_string()];
+            obj.card_types.subtypes = vec!["Doctor".to_string()];
+            id
+        };
+
+        let milled = make_doctor(&mut state, 1, Zone::Graveyard);
+        let prior_turn = make_doctor(&mut state, 2, Zone::Graveyard);
+        let on_battlefield = make_doctor(&mut state, 3, Zone::Battlefield);
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "The Fourteenth Doctor".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Only `milled` carries a Library->Graveyard record this turn.
+        state
+            .zone_changes_this_turn
+            .push(ZoneChangeRecord::test_minimal(
+                milled,
+                Some(Zone::Library),
+                Zone::Graveyard,
+            ));
+
+        // The exact filter The Fourteenth Doctor's replacement produces.
+        let filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Subtype("Doctor".to_string())).properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+                FilterProp::ZoneChangedThisTurn {
+                    from: Some(Zone::Library),
+                    to: Some(Zone::Graveyard),
+                },
+            ]),
+        );
+
+        let targets = find_copy_targets(&state, &filter, source, PlayerId(0), None);
+        assert!(
+            targets.contains(&milled),
+            "Doctor milled from library this turn must be a legal copy source"
+        );
+        assert!(
+            !targets.contains(&prior_turn),
+            "Doctor in graveyard from a prior turn (no zone-change record) must be excluded"
+        );
+        assert!(
+            !targets.contains(&on_battlefield),
+            "Doctor on the battlefield must be excluded (wrong zone)"
+        );
+    }
+
+    #[test]
     fn find_copy_targets_defaults_to_battlefield_for_classic_clone_filter() {
         use crate::types::ability::{TypeFilter, TypedFilter};
         use crate::types::zones::Zone;

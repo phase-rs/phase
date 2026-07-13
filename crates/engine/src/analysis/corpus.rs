@@ -1154,6 +1154,16 @@ pub(crate) fn resolve_to_priority(probe: &mut LoopProbe, prefer_target: Option<T
                     break;
                 }
             }
+            // CR 701.34a: proliferate — choose EVERY eligible counter-bearer
+            // (maximal proliferate). A preserved-`Generic` growth loop (Pentad
+            // Prism charge / The One Ring burden) grows all its markers each cycle;
+            // selecting the full eligible set is the general, card-agnostic answer.
+            WaitingFor::ProliferateChoice { eligible, .. } => {
+                let targets = eligible.clone();
+                if probe.act(GameAction::SelectTargets { targets }).is_err() {
+                    break;
+                }
+            }
             _ => break,
         }
     }
@@ -1556,6 +1566,209 @@ pub(crate) fn drive_offline_kilo_freed_relic(db: &CardDatabase) -> Option<LoopCe
     })
 }
 
+/// PR-7 acceptance — PENTAD PRISM under the KILO + FREED + RELIC proliferate engine.
+/// The same mana-neutral proliferate loop as [`drive_offline_kilo_freed_relic`], but
+/// with a real Pentad Prism seeded with one charge counter on the board. Each cycle's
+/// proliferate (CR 701.34a) drives the preserved-`Generic` charge counter (CR 122.1)
+/// strictly upward by one; the board is otherwise identical, so the cycle is certified
+/// via `loop_states_cover_modulo_counter_growth` (the constant-depth equality path
+/// fails on the growing charge). Certificate classifies `WinKind::Advantage`
+/// (CR 104.4b optional loop), naming the counter axis `Counter(Other, Other)`.
+pub(crate) fn drive_offline_pentad_prism(db: &CardDatabase) -> Option<LoopCertificate> {
+    drive_offline_pentad_prism_seeded(db, 1)
+}
+
+/// Seeded core of [`drive_offline_pentad_prism`]. `seed_charge` is the number of charge
+/// counters directly placed on the installed Pentad Prism (Sunburst, CR 702.44a, only
+/// runs as an enters replacement for a CAST spell, so a directly-installed Pentad enters
+/// with zero). `seed_charge == 0` is the dead-loop CONTROL: proliferate finds no eligible
+/// counter to grow, so the cycle degrades to the pure Kilo proliferate loop (board
+/// identical, cert carries the proliferate trigger axis but NO counter axis).
+pub(crate) fn drive_offline_pentad_prism_seeded(
+    db: &CardDatabase,
+    seed_charge: u32,
+) -> Option<LoopCertificate> {
+    let mut board = build_board(db, CORPUS[1].cards)?;
+    let kilo = board.ids[0];
+    let freed = board.ids[1];
+    let relic = board.ids[2];
+    attach_aura(board.runner.state_mut(), freed, kilo);
+    let pentad = install_on_battlefield(board.runner.state_mut(), db, "Pentad Prism", P0)?;
+    {
+        let state = board.runner.state_mut();
+        if seed_charge > 0 {
+            if let Some(o) = state.objects.get_mut(&pentad) {
+                o.counters.insert(
+                    crate::types::counter::CounterType::Generic("charge".to_string()),
+                    seed_charge,
+                );
+            }
+        }
+        settle_layers(state);
+    }
+    let relic_tap_creature = board.runner.state().objects[&relic]
+        .abilities
+        .iter()
+        .position(|a| {
+            matches!(
+                a.cost,
+                Some(crate::types::ability::AbilityCost::TapCreatures { .. })
+            )
+        })?;
+    let freed_untap = ability_index_where(board.runner.state(), freed, is_untap_effect)?;
+    run_combo(board, |probe| {
+        // Tap Kilo via Relic's tap-a-creature cost (fires Kilo's proliferate trigger,
+        // which grows Pentad's charge), resolve, then untap Kilo via Freed.
+        activate_and_resolve(
+            probe,
+            relic,
+            relic_tap_creature,
+            Some(TargetRef::Object(kilo)),
+        );
+        activate_and_resolve(probe, freed, freed_untap, Some(TargetRef::Object(kilo)));
+    })
+}
+
+/// PR-7 54th — WALKING BALLISTA under the KILO + FREED + RELIC proliferate engine
+/// (mana-neutral). The 52nd/53rd/54th trilogy on one engine: 52nd poison, 53rd mana,
+/// 54th DAMAGE. Each cycle: Relic taps Kilo → Kilo's "becomes tapped: proliferate"
+/// grows Ballista's monotone +1/+1 counter (CR 701.34a / CR 122.1a); Freed untaps
+/// Kilo for {U} (mana net 0); Ballista removes a +1/+1 counter to deal 1 to the
+/// opponent (CR 120.3a). Proliferate runs BEFORE the ping so the count is ≥ seed at
+/// every intra-cycle frame (seed 1 → 2 → 1), keeping Ballista a live ≥1/1 (never a
+/// 0/0 that would die to CR 704.5f). Board identical modulo the monotone +1/+1
+/// (projected out, resource.rs:2481), +1 damage/cycle ⇒ `detect_loop` certifies
+/// `WinKind::LethalDamage`, naming `DamageDealt(P1)`.
+///
+/// `seed_counters == 0` is the X=0 dead-loop CONTROL: Ballista enters a 0/0 with no
+/// counter to remove, dies to the SBA (CR 704.5f) during the first activation, so the
+/// ping activation is rejected (`activate_and_resolve` returns `false`, a graceful
+/// no-op — NOT `drive_ballista_ping`, which `.expect()`s and would panic here) and the
+/// cycle degrades to the pure Kilo/Freed/Relic proliferate loop: a `Some` cert with
+/// `WinKind::Advantage` and NO damage axis. Standalone (not in `DRIVERS`, no `CORPUS`
+/// row) — mirrors `drive_offline_pentad_prism_seeded`; the Damage/`LethalDamage` family
+/// is already the corpus's row 0 (Heliod+Ballista), so no new row is warranted.
+pub(crate) fn drive_offline_kilo_freed_relic_ballista(
+    db: &CardDatabase,
+    seed_counters: u32,
+) -> Option<LoopCertificate> {
+    use crate::types::ability::{AbilityCost, Effect};
+
+    let mut board = build_board(db, CORPUS[1].cards)?;
+    let kilo = board.ids[0];
+    let freed = board.ids[1];
+    let relic = board.ids[2];
+    attach_aura(board.runner.state_mut(), freed, kilo);
+    let ballista = install_on_battlefield(board.runner.state_mut(), db, "Walking Ballista", P0)?;
+    {
+        let state = board.runner.state_mut();
+        if seed_counters > 0 {
+            if let Some(o) = state.objects.get_mut(&ballista) {
+                // CR 122.1a: +1/+1 counters (the X counters a cast Ballista enters with)
+                // set its P/T; seeded directly since a directly-installed permanent runs
+                // no enters replacement.
+                o.counters.insert(
+                    crate::types::counter::CounterType::Plus1Plus1,
+                    seed_counters,
+                );
+            }
+        }
+        settle_layers(state);
+    }
+    // Relic's "tap a creature: add mana" ability (the one that taps Kilo, firing its
+    // proliferate trigger) — found by its `TapCreatures` cost, not a literal index.
+    let relic_tap_creature = board.runner.state().objects[&relic]
+        .abilities
+        .iter()
+        .position(|a| matches!(a.cost, Some(AbilityCost::TapCreatures { .. })))?;
+    let freed_untap = ability_index_where(board.runner.state(), freed, is_untap_effect)?;
+    // Ballista's "Remove a +1/+1 counter: deal 1 to any target" ability, found by its
+    // deal-damage effect (a card-data re-parse that reorders abilities won't break it).
+    let ballista_ping = ability_index_where(board.runner.state(), ballista, |e| {
+        matches!(e, Effect::DealDamage { .. })
+    })?;
+    run_combo(board, |probe| {
+        // Tap Kilo via Relic (fires Kilo's proliferate trigger → grows Ballista +1),
+        // untap Kilo via Freed, then remove a +1/+1 counter to ping the opponent.
+        // The ping uses `activate_and_resolve` (bool-returning, `ChooseTarget`-shape
+        // target answer): at seed 0 the dead Ballista's activation is rejected and this
+        // degrades to the pure proliferate loop instead of panicking.
+        activate_and_resolve(
+            probe,
+            relic,
+            relic_tap_creature,
+            Some(TargetRef::Object(kilo)),
+        );
+        activate_and_resolve(probe, freed, freed_untap, Some(TargetRef::Object(kilo)));
+        activate_and_resolve(probe, ballista, ballista_ping, Some(TargetRef::Player(P1)));
+    })
+}
+
+/// PR-7 "One-Ring" — THE ONE RING under the KILO + FREED + RELIC proliferate
+/// engine (mana-neutral). Structural twin of `drive_offline_pentad_prism_seeded`:
+/// a REAL The One Ring (installed on the OPPONENT P1) is a passive proliferate
+/// target. Each cycle Relic taps Kilo → Kilo's "becomes tapped: proliferate"
+/// (CR 701.34a) grows the preserved `Generic("burden")` counter by one; Freed
+/// untaps Kilo for {U} (mana net 0). The board is otherwise identical, so the
+/// constant-depth `loop_states_equal_modulo_resources` FAILS on the growing
+/// burden and certification rides `loop_states_cover_modulo_counter_growth`.
+/// Certificate: `WinKind::Advantage` (CR 104.4b: an optional loop is not a draw;
+/// the burden is an eventual-payoff engine, not a direct win — loop_check.rs),
+/// naming `Counter(Other, Other)` (colorless artifact ⇒ ObjectClass::Other;
+/// Generic burden ⇒ CounterClass::Other; the axis carries no PlayerId, so P1
+/// ownership does not change it — resource.rs).
+///
+/// `seed_burden == 0` is the dead-loop CONTROL: no burden for proliferate to grow,
+/// so the cycle degrades to the pure Kilo/Freed/Relic proliferate loop — cert still
+/// `Some(Advantage)` (board identical, equality path) but names NO counter axis.
+/// Standalone (NOT in `DRIVERS`, no `CORPUS` row) — the Counter/Advantage family is
+/// already the 53rd Pentad row; no new row is warranted.
+pub(crate) fn drive_offline_kilo_freed_relic_one_ring(
+    db: &CardDatabase,
+    seed_burden: u32,
+) -> Option<LoopCertificate> {
+    use crate::types::ability::AbilityCost;
+
+    let mut board = build_board(db, CORPUS[1].cards)?; // Kilo/Freed/Relic on P0
+    let kilo = board.ids[0];
+    let freed = board.ids[1];
+    let relic = board.ids[2];
+    attach_aura(board.runner.state_mut(), freed, kilo);
+    // The One Ring on the OPPONENT P1's battlefield (passive proliferate target).
+    let ring = install_on_battlefield(board.runner.state_mut(), db, "The One Ring", P1)?;
+    {
+        let state = board.runner.state_mut();
+        if seed_burden > 0 {
+            if let Some(o) = state.objects.get_mut(&ring) {
+                // CR 122.1: burden is a Generic counter; seeded directly (a
+                // directly-installed permanent runs no enters replacement) — the
+                // established Pentad/Ballista driver idiom.
+                o.counters.insert(
+                    crate::types::counter::CounterType::Generic("burden".to_string()),
+                    seed_burden,
+                );
+            }
+        }
+        settle_layers(state);
+    }
+    let relic_tap_creature = board.runner.state().objects[&relic]
+        .abilities
+        .iter()
+        .position(|a| matches!(a.cost, Some(AbilityCost::TapCreatures { .. })))?;
+    let freed_untap = ability_index_where(board.runner.state(), freed, is_untap_effect)?;
+    run_combo(board, |probe| {
+        // Identical 2-step cycle to the Pentad driver; the Ring accrues burden
+        // passively from Kilo's proliferate (no active step on the Ring).
+        activate_and_resolve(
+            probe,
+            relic,
+            relic_tap_creature,
+            Some(TargetRef::Object(kilo)),
+        );
+        activate_and_resolve(probe, freed, freed_untap, Some(TargetRef::Object(kilo)));
+    })
+}
+
 /// #10 PRIEST OF TITANIA + UMBRAL MANTLE — infinite green mana. Priest taps for
 /// {G} per Elf; Umbral Mantle's "{3}, {Q}" pump untaps Priest. With ≥4 Elves one
 /// cycle is net mana-positive after the {3} untap cost (paid from green).
@@ -1740,6 +1953,56 @@ pub(crate) fn drive_pass_priority(board: &mut ComboBoard, max_beats: usize) -> V
             break;
         }
         if board.runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+        let s = board.runner.state();
+        trace.push(BeatTrace {
+            beat,
+            wf: s.waiting_for.clone(),
+            stack_len: s.stack.len(),
+            ring_len: s.loop_detect_ring.len(),
+            lives: s.players.iter().map(|p| p.life).collect(),
+        });
+        if matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::GameOver { .. }
+        ) {
+            break;
+        }
+    }
+    trace
+}
+
+/// Like [`drive_pass_priority`], but responds to a mandatory `WaitingFor::OrderTriggers`
+/// window with the identity `OrderTriggers` order instead of erroring (CR 603.3b — a
+/// mandatory simultaneous-trigger group never declines a trigger, so any legal
+/// permutation is sound); every other window still gets `PassPriority`. Records the same
+/// post-action [`BeatTrace`] per beat — the `OrderTriggers` window surfaces as the
+/// post-state of the beat that produced it (so `trace` reveals it) and terminal
+/// `GameOver` is recorded like `drive_pass_priority`, so [`first_gameover_beat`] works.
+/// `drive_pass_priority` errors out at an `OrderTriggers` window, so a self-refilling
+/// MULTI-trigger loop needs this driver instead.
+pub(crate) fn drive_with_trigger_ordering(
+    board: &mut ComboBoard,
+    max_beats: usize,
+) -> Vec<BeatTrace> {
+    let mut trace = Vec::new();
+    for beat in 1..=max_beats {
+        if matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::GameOver { .. }
+        ) {
+            break;
+        }
+        // Respond to the CURRENT window: identity ordering at an OrderTriggers prompt,
+        // else pass. The owned `order` vec ends the state borrow before `act`.
+        let action = match &board.runner.state().waiting_for {
+            WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+                order: (0..triggers.len()).collect(),
+            },
+            _ => GameAction::PassPriority,
+        };
+        if board.runner.act(action).is_err() {
             break;
         }
         let s = board.runner.state();

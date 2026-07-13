@@ -1614,6 +1614,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                enters_with_counter: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -1697,6 +1698,13 @@ pub(crate) fn try_parse_graveyard_cast_permission(
 
     let (filter, self_ref_permission) = parse_graveyard_permission_filter(&cleaned);
 
+    // CR 607.1 + CR 122.1 + CR 614.1c: peel the linked "if you cast a spell this
+    // way, that <permanent> enters with a [counter] counter on it" rider off the
+    // trailing text so the enters-with counter rides the permission and the
+    // remaining riders (extra_cost, condition) parse against the counter-free
+    // tail (Noctis, Prince of Lucis; Leonardo, Sewer Samurai — both finality).
+    let (trailing, enters_with_counter) = split_cast_this_way_enters_rider(trailing);
+
     // Parse optional alt-cost rider from the text after "from your graveyard".
     let rider_kind = parse_alt_cost_rider(trailing).ok().map(|(_, k)| k);
     let graveyard_destination_replacement = parse_exile_spell_cast_this_way_rider(trailing)
@@ -1710,9 +1718,13 @@ pub(crate) fn try_parse_graveyard_cast_permission(
             cost,
             mode: CastCostMode::Additional,
         });
+    // `.trim()` (not `.is_empty()`): after the enters-with rider is split off, a
+    // two-sentence "if X. If you do, Y." permission leaves a whitespace-only
+    // residual (Undead Sprinter) that must still be treated as fully consumed so
+    // the gate condition is not re-dropped. Matches the other trim checks here.
     let condition = parse_graveyard_permission_condition(trailing)
         .ok()
-        .and_then(|(rest, condition)| rest.is_empty().then_some(condition));
+        .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition));
 
     let affected = if let Some(kind) = rider_kind {
         inject_keyword_kind_filter_prop(filter, kind)
@@ -1725,6 +1737,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         play_mode,
         graveyard_destination_replacement,
         extra_cost,
+        enters_with_counter,
     })
     .affected(affected)
     .description(text.to_string());
@@ -1767,6 +1780,12 @@ fn parse_cast_permission_additional_cost_rider(
     // closer — anything else is an unmodeled shape.
     let after_life = after_life.trim_start();
     let after_in_addition = nom_tag_lower(after_life, after_life, "in addition to ")?;
+    // CR 601.2f: tolerate the optional "paying" gerund — "in addition to PAYING
+    // their other costs" (Noctis, Prince of Lucis) alongside the bare "in
+    // addition to their other costs" (Festival of Embers). Additive `opt` strip:
+    // Festival (no gerund) keeps the original slice unchanged.
+    let after_in_addition =
+        nom_tag_lower(after_in_addition, after_in_addition, "paying ").unwrap_or(after_in_addition);
     let after_pronoun = nom_tag_lower(after_in_addition, after_in_addition, "their other costs")
         .or_else(|| nom_tag_lower(after_in_addition, after_in_addition, "its other costs"))?;
     // allow-noncombinator: punctuation cleanup (drop the sentence terminator) on a pre-tokenized chunk, not parsing dispatch.
@@ -1778,6 +1797,62 @@ fn parse_cast_permission_additional_cost_rider(
     Some(crate::types::ability::AbilityCost::PayLife {
         amount: QuantityExpr::Fixed { value: n as i32 },
     })
+}
+
+/// CR 607.1 + CR 122.1 + CR 614.1c: Peel the linked "if you cast a spell this
+/// way, that <permanent> enters with a [counter] counter on it" rider off a
+/// trailing text run, returning `(text-before-rider, Some(counter))`. The rider
+/// is a CR 607.1 linked-permission back-reference — the enters-with counter
+/// rides the cast permission (carried on the static's `enters_with_counter`
+/// field), so it must be split off before the extra_cost / condition / pool
+/// parsers consume the trailing text. Delegates the counter-subject grammar to
+/// the shared `oracle_effect::parse_cast_this_way_enters_with_counter` authority
+/// so the effect path (Osteomancer/Tomb) and the static path recognize the same
+/// shapes. Returns `(trailing, None)` unchanged when no such rider is present.
+fn split_cast_this_way_enters_rider(
+    trailing: &str,
+) -> (&str, Option<crate::types::counter::CounterType>) {
+    // "if you do" covers the self-granting shape (Undead Sprinter's "If you do,
+    // this creature enters with a +1/+1 counter on it"). The slice is
+    // recognizer-guarded below (only commits when the shared enters-with-counter
+    // recognizer succeeds), so "if you do" cannot over-split an unrelated rider —
+    // "if you don't …" fails the recognizer and returns the trailing unchanged.
+    for marker in [
+        "if you cast a spell this way",
+        "if you cast it this way",
+        "if you do",
+    ] {
+        if let Ok((_, (before, _after))) = nom_primitives::split_once_on(trailing, marker) {
+            // allow-noncombinator: structural offset back to the rider start (the
+            // `text.len() - rest.len()` idiom) so the shared recognizer sees the
+            // full "if you cast … this way, …" clause including its marker.
+            let rider = &trailing[before.len()..];
+            if let Some((counter_type, _rest)) =
+                super::oracle_effect::parse_cast_this_way_enters_with_counter(rider)
+            {
+                return (before, Some(counter_type));
+            }
+        }
+    }
+    (trailing, None)
+}
+
+/// CR 108.3 + CR 109.5: Attach a "cards you own" ownership constraint to a typed
+/// affected filter — the card's owner must be the permission's controller
+/// (`you`). Returns `None` when the filter is not a `Typed` shape that can carry
+/// the `FilterProp::Owned` constraint, so the caller declines rather than
+/// silently dropping the ownership gate (Intrepid Paleontologist can exile an
+/// opponent's graveyard card; only owned cards may be cast via the permission).
+fn inject_owner_you_filter_prop(filter: TargetFilter) -> Option<TargetFilter> {
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.properties.push(FilterProp::Owned {
+                controller: ControllerRef::You,
+            });
+            Some(TargetFilter::Typed(tf))
+        }
+        _ => None,
+    }
 }
 
 /// CR 305.1 + CR 601.2a + CR 700.6: Parse the disjunctive once-per-turn
@@ -1858,6 +1933,7 @@ fn try_parse_disjunctive_graveyard_cast_permission(
             // rider (see doc comment); leave it unset.
             graveyard_destination_replacement: None,
             extra_cost: None,
+            enters_with_counter: None,
         })
         .affected(affected)
         .description(text.to_string()),
@@ -1898,6 +1974,7 @@ fn try_parse_unlimited_combined_graveyard_permission(
             play_mode: CardPlayMode::Play,
             graveyard_destination_replacement: None,
             extra_cost: None,
+            enters_with_counter: None,
         })
         .affected(affected)
         .description(text.to_string()),
@@ -2085,42 +2162,62 @@ fn parse_excluded_zone_list(rest: &str) -> Option<Vec<Zone>> {
 /// Accepted shapes:
 /// - "once each turn, you may cast a spell with mana value less than or equal
 ///   to <quantity_ref> from among cards exiled with ~ this turn without paying
-///   its mana cost." (Maralen, Fae Ascendant)
+///   its mana cost." (Maralen, Fae Ascendant → `OncePerTurn`, `ThisTurn`)
 /// - The longer "once during each of your turns, you may cast …" synonym.
-/// - Unlimited shape ("you may cast …") is left for a future printing — Maralen
-///   is the only shipping card today so the `Unlimited` branch is not gated on
-///   any anchor; adding it requires an Oracle-confirmed sibling printing first.
+/// - Unlimited shape "you may cast <filter> from among cards you own exiled with
+///   ~[.] [If you cast a spell this way, that <permanent> enters with a
+///   [counter] counter on it.]" (Intrepid Paleontologist → `Unlimited`,
+///   `Persistent`, owner=You constraint, finality `enters_with_counter`).
 ///
 /// Returns `None` for shapes outside this class (graveyard/top-of-library/hand
 /// permissions all anchor on different phrases earlier in the dispatch chain).
+/// A non-finality trailing extra-cost (Dawnhand Dissident's "by removing three
+/// counters …") is not a finality rider, so it survives the peel, trips the
+/// strict Persistent empty-tail check, and declines cleanly (no misparse).
 pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
     // CR 601.2a: Frequency prefix. Both "once each turn" (Maralen) and the
-    // longer "once during each of your turns" synonym map to `OncePerTurn`.
-    // Both prefixes are tried via the file-wide `or_else` chain — adding an
-    // `Unlimited` ("you may cast …") sibling needs an Oracle-confirmed
-    // printing to disambiguate from the existing graveyard / hand handlers.
-    let rest = nom_tag_lower(lower, lower, "once each turn, you may cast ").or_else(|| {
-        nom_tag_lower(
-            lower,
-            lower,
-            "once during each of your turns, you may cast ",
-        )
-    })?;
-    let frequency = CastFrequency::OncePerTurn;
+    // longer "once during each of your turns" synonym map to `OncePerTurn`; the
+    // bare "you may cast" lead (Intrepid Paleontologist) has no per-turn cap →
+    // `Unlimited`. The bare branch is safe: the mandatory " from among cards
+    // [you own ]exiled with " anchor below gates it to this exile-pool class, so
+    // a "you may cast … from your graveyard/hand" line still declines here.
+    let (rest, frequency) = if let Some(rest) =
+        nom_tag_lower(lower, lower, "once each turn, you may cast ").or_else(|| {
+            nom_tag_lower(
+                lower,
+                lower,
+                "once during each of your turns, you may cast ",
+            )
+        }) {
+        (rest, CastFrequency::OncePerTurn)
+    } else {
+        // Bare "you may cast" lead (Intrepid Paleontologist) → Unlimited.
+        let rest = nom_tag_lower(lower, lower, "you may cast ")?;
+        (rest, CastFrequency::Unlimited)
+    };
 
     // Strip the leading article — `parse_type_phrase` expects the bare noun.
     let rest = nom_tag_lower(rest, rest, "a ")
         .or_else(|| nom_tag_lower(rest, rest, "an "))
         .unwrap_or(rest);
 
-    // CR 113.6b: Anchor on " from among cards exiled with " — the
+    // CR 113.6b: Anchor on " from among cards [you own ]exiled with " — the
     // class-defining phrase. Anything before is the affected filter; anything
-    // after is the source self-reference plus optional alt-cost / "this turn"
-    // markers.
-    let (filter_text, trailing) =
+    // after is the source self-reference plus optional finality / alt-cost /
+    // "this turn" markers. CR 108.3: the "you own" ownership infix (Intrepid
+    // Paleontologist) restricts eligibility to owned cards — recorded in
+    // `owned_only` and applied as a `FilterProp::Owned` constraint below.
+    let (filter_text, trailing, owned_only) = if let Ok((_, (f, t))) =
+        nom_primitives::split_once_on(rest, " from among cards you own exiled with ")
+    {
+        (f, t, true)
+    } else if let Ok((_, (f, t))) =
         nom_primitives::split_once_on(rest, " from among cards exiled with ")
-            .ok()
-            .map(|(_, pair)| pair)?;
+    {
+        (f, t, false)
+    } else {
+        return None;
+    };
 
     // Drop trailing " spell"/" spells" so `parse_type_phrase` sees the bare
     // type. Mirrors the graveyard / top-of-library / hand sibling parsers.
@@ -2151,6 +2248,24 @@ pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option
     // verbatim for `SELF_REF_PARSE_ONLY_PHRASES` ("this card"). Accept either
     // form so the static covers future cards that lean on the parse-only set.
     let after_source = strip_self_reference(trailing)?;
+
+    // CR 607.1 + CR 122.1 + CR 614.1c: peel the linked "if you cast a spell this
+    // way, that <permanent> enters with a [counter] counter on it" rider off the
+    // trailing text (Intrepid Paleontologist — finality) so the enters-with
+    // counter rides the permission and the Persistent strict-remainder check
+    // below sees the counter-free tail. Also gates Dawnhand Dissident cleanly:
+    // its "by removing three counters … in addition to paying their other costs"
+    // tail is NOT a finality rider, stays in the remainder, and trips the
+    // strict Persistent empty-tail check → declines (clean gap, not a misparse).
+    let (after_source, enters_with_counter) = split_cast_this_way_enters_rider(after_source);
+
+    // CR 108.3 + CR 109.5: apply the "cards you own" ownership constraint to the
+    // affected filter — the card's owner must be the permission's controller.
+    let filter = if owned_only {
+        inject_owner_you_filter_prop(filter)?
+    } else {
+        filter
+    };
 
     // CR 113.6b: Optional "this turn" suffix selects the per-turn rolling pool
     // (Maralen). Without it the permission reads the persistent `exile_links`
@@ -2195,6 +2310,9 @@ pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option
             // CR 118.9 / CR 601.2f: Maralen casts at its alt-cost shape via
             // `cost`, not an extra non-mana rider.
             extra_cost: None,
+            // CR 122.1 + CR 614.1c: linked enters-with counter rider peeled off
+            // the trailing text above (Intrepid Paleontologist — finality).
+            enters_with_counter,
         })
         .affected(filter)
         .description(text.to_string()),
@@ -2325,6 +2443,12 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
         grants_flash,
         // CR 118.9: Valgavoth's alternative pay-life cost (or None).
         extra_cost,
+        // CR 122.1: no printed persistent exile-PLAY permission (The Matrix of
+        // Time, Prosper/Tibalt, Azula, Valgavoth) carries an enters-with counter
+        // rider — those riders appear only on the Cast-mode Maralen/Intrepid
+        // class. Left `None`; the shared recognizer would slot here if such a
+        // card ships.
+        enters_with_counter: None,
     })
     // CR 305.1: The permission applies to every card in the source's exile
     // pool; the pool itself is the scope, so no type/MV constraint.

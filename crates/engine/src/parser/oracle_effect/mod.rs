@@ -2367,26 +2367,21 @@ fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefin
     ))
 }
 
-/// CR 614.1c + CR 122.1 + CR 205.1b: Parse the "the creature cast this way
-/// enters with a [counter] counter on it [and is a [type] in addition to its
-/// other types]" rider that follows a graveyard cast-permission grant
-/// (Osteomancer Adept "that creature enters with a finality counter on it"; The
-/// Tomb of Aclazotz "it enters with a finality counter on it and is a Vampire in
-/// addition to its other types"). The counter clause lowers to
-/// `Effect::AddPendingETBCounters`; an optional additive type-grant tail lowers
-/// to `Effect::AddPendingEntersModifications` carried as the counter clause's
-/// `sub_ability`. The runtime `CastFromZone` resolver consumes both as
-/// permission metadata (see `cast_from_zone::grant_lingering_permissions`)
-/// rather than against the current trigger event, so the riders ride the
-/// *future* graveyard cast.
+/// CR 614.1c + CR 122.1 + CR 607.1: Shared recognizer for the linked "if you
+/// cast a spell this way, that <permanent> enters with a [counter] counter on
+/// it" rider. Returns the parsed `CounterType` plus the unconsumed remainder
+/// (an optional " and is a <type>" additive type-grant tail). The subject is
+/// anaphoric ("that creature"/"that permanent"/"that artifact"/"it"), the count
+/// is always one ("a [counter]").
 ///
-/// The subject is anaphoric ("that creature"/"that permanent"/"it"), the count
-/// is always one ("a [counter] counter"), and the type tail delegates to the
-/// shared `parse_becomes_type_modifications` building block (which consumes the
-/// "in addition to its other types" suffix and covers subtypes CR 205.3, core
-/// types CR 205.2, and supertypes CR 205.4). A tail present but unclassifiable
-/// returns `None` — honestly `Effect::Unimplemented`, never a silent type drop.
-fn try_parse_cast_this_way_enters_rider(lower: &str) -> Option<ParsedEffectClause> {
+/// Single authority for the counter-subject grammar, shared by the one-shot
+/// effect path (graveyard `CastFromZone` grant — Osteomancer Adept, The Tomb of
+/// Aclazotz) and the static cast-permission builders (Noctis, Prince of Lucis;
+/// Intrepid Paleontologist; Leonardo, Sewer Samurai). The effect path wraps the
+/// result into `Effect::AddPendingETBCounters` (+ optional type-grant tail); the
+/// static builders take only the `CounterType` to set
+/// `StaticMode::{Graveyard,Exile}CastPermission.enters_with_counter`.
+pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(CounterType, &str)> {
     // CR 608.2c: optional "if you cast a spell this way," / "if you do," gate.
     // The rider only fires for a spell cast via the granted permission; the
     // runtime gates on the actual cast, so the condition prefix carries no
@@ -2405,6 +2400,12 @@ fn try_parse_cast_this_way_enters_rider(lower: &str) -> Option<ParsedEffectClaus
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("that creature enters with "),
         tag("that permanent enters with "),
+        tag("that artifact enters with "),
+        // Self-granting permission (Undead Sprinter) refers to itself as "this
+        // creature", normalized to the `~` self-reference token upstream before
+        // this parser runs — distinct from the anaphoric "that creature" a
+        // separate-source grant uses.
+        tag("~ enters with "),
         tag("it enters with "),
     ))
     .parse(lower)
@@ -2417,6 +2418,30 @@ fn try_parse_cast_this_way_enters_rider(lower: &str) -> Option<ParsedEffectClaus
     let (rest, _) = tag::<_, _, OracleError<'_>>(" counter on it")
         .parse(rest)
         .ok()?;
+    Some((counter_type, rest))
+}
+
+/// CR 614.1c + CR 122.1 + CR 205.1b: Parse the "the creature cast this way
+/// enters with a [counter] counter on it [and is a [type] in addition to its
+/// other types]" rider that follows a graveyard cast-permission grant
+/// (Osteomancer Adept "that creature enters with a finality counter on it"; The
+/// Tomb of Aclazotz "it enters with a finality counter on it and is a Vampire in
+/// addition to its other types"). The counter-subject grammar delegates to the
+/// shared `parse_cast_this_way_enters_with_counter`; the counter clause lowers to
+/// `Effect::AddPendingETBCounters`; an optional additive type-grant tail lowers
+/// to `Effect::AddPendingEntersModifications` carried as the counter clause's
+/// `sub_ability`. The runtime `CastFromZone` resolver consumes both as
+/// permission metadata (see `cast_from_zone::grant_lingering_permissions`)
+/// rather than against the current trigger event, so the riders ride the
+/// *future* graveyard cast.
+///
+/// The type tail delegates to the shared `parse_becomes_type_modifications`
+/// building block (which consumes the "in addition to its other types" suffix
+/// and covers subtypes CR 205.3, core types CR 205.2, and supertypes CR 205.4).
+/// A tail present but unclassifiable returns `None` — honestly
+/// `Effect::Unimplemented`, never a silent type drop.
+fn try_parse_cast_this_way_enters_rider(lower: &str) -> Option<ParsedEffectClause> {
+    let (counter_type, rest) = parse_cast_this_way_enters_with_counter(lower)?;
     let counter_effect = Effect::AddPendingETBCounters {
         counter_type,
         count: QuantityExpr::Fixed { value: 1 },
@@ -12431,33 +12456,49 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
         } else {
             after_counter_on
         };
-        // CR 608.2c: "put a counter on that <type> for each X" — when the
-        // counter target is an anaphoric back-reference (`that creature`,
-        // `that permanent`, etc.), `parse_subject_application` signals it
-        // with `inherits_parent: true` and returns the type filter as a
-        // suggestion. The contract documented inside `parse_subject_application`
-        // is that the call site must lower this to `TargetFilter::ParentTarget`
-        // so the counter lands on the inherited parent target (or, in passive
-        // contexts where there is no parent, on the post-replacement event
-        // recipient via the caller's post-parse rewrite). Without this, the
-        // typed `Creature` filter leaks through and the counter is placed on
-        // an unrelated creature.
-        let target = parse_subject_application(counter_target_text, &mut ParseContext::default())
-            .map(|app| {
-                if app.inherits_parent {
-                    TargetFilter::ParentTarget
-                } else {
-                    app.affected
-                }
-            })
-            .unwrap_or_else(|| {
-                ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
-                    context: "unrecognized counter target".into(),
-                    text: after_counter_on.trim().into(),
-                    line_index: 0,
-                });
-                TargetFilter::Any
-            });
+        // CR 608.2c + CR 111.10: a same-chain counter anaphor ("it"/"that token"/
+        // "the token"/…) placed after a token-creating clause binds to the
+        // just-created token (`LastCreated`). The for-each counter dispatch
+        // intercepts these clauses before the shared put-counter path, so it must
+        // consult the SAME binding helper as `resolve_counter_placement_target`,
+        // using the REAL seeded `ctx` (not a fresh default) so
+        // `token_created_in_chain` reaches it. Match the Odds ("... on it for each
+        // creature your opponents control") and the "that token" for-each cluster
+        // flip from SelfRef/ParentTarget to the created token. `None` ⇒ keep the
+        // `parse_subject_application` path, which correctly yields explicit typed
+        // targets (Immaculate Magistrate's "target creature" stays `Typed`).
+        let counter_target_text_lower = counter_target_text.to_lowercase();
+        let created_token_binding =
+            counter::counter_anaphor_created_token_binding(&counter_target_text_lower, ctx);
+        let target = created_token_binding.unwrap_or_else(|| {
+            // CR 608.2c: "put a counter on that <type> for each X" — when the
+            // counter target is an anaphoric back-reference (`that creature`,
+            // `that permanent`, etc.), `parse_subject_application` signals it
+            // with `inherits_parent: true` and returns the type filter as a
+            // suggestion. The contract documented inside `parse_subject_application`
+            // is that the call site must lower this to `TargetFilter::ParentTarget`
+            // so the counter lands on the inherited parent target (or, in passive
+            // contexts where there is no parent, on the post-replacement event
+            // recipient via the caller's post-parse rewrite). Without this, the
+            // typed `Creature` filter leaks through and the counter is placed on
+            // an unrelated creature.
+            parse_subject_application(counter_target_text, &mut ParseContext::default())
+                .map(|app| {
+                    if app.inherits_parent {
+                        TargetFilter::ParentTarget
+                    } else {
+                        app.affected
+                    }
+                })
+                .unwrap_or_else(|| {
+                    ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+                        context: "unrecognized counter target".into(),
+                        text: after_counter_on.trim().into(),
+                        line_index: 0,
+                    });
+                    TargetFilter::Any
+                })
+        });
         return Some(parsed_clause(Effect::PutCounter {
             counter_type,
             count: quantity,
@@ -18012,7 +18053,7 @@ fn lift_effect_player_class_to_scope(effect: &mut Effect) -> Option<PlayerFilter
     }
 }
 
-/// CR 701.16a + CR 115.1: Unconditionally set the controller constraint on a
+/// CR 701.21a + CR 115.1: Unconditionally set the controller constraint on a
 /// typed object filter, overwriting any existing value. Used when a targeted
 /// subject ("target opponent sacrifices...") must override a pre-parsed "they
 /// control" → `ControllerRef::You` with `ControllerRef::TargetPlayer`.
@@ -20285,8 +20326,29 @@ pub(super) fn def_is_dig_or_mill(def: &AbilityDefinition) -> bool {
 /// unconditionally and then overwrote the field. Folding "not yet written" in here
 /// would resume the walk past an already-written def and bind an earlier one the old
 /// code never reached — the overwrite is the MUTATION's business, not the selector's.
+///
+/// Unwraps a `TargetOnly` head the same way `intrinsic_continuation_effect`
+/// does: "Target creature you control deals damage..." (Ram Through-class)
+/// lowers to a `TargetOnly` clause with `DealDamage` as its own `sub_ability`
+/// (assembly.rs's `is_target_only` handling), so the damage-dealer role must
+/// look past the head to find it.
 pub(super) fn def_is_damage_dealer(def: &AbilityDefinition) -> bool {
-    matches!(&*def.effect, Effect::DealDamage { .. })
+    matches!(
+        intrinsic_continuation_effect(def),
+        Effect::DealDamage { .. }
+    )
+}
+
+/// Mutable counterpart to `def_is_damage_dealer` — the effect to patch when a
+/// rider binds to the `DamageDealer` role, unwrapping the same `TargetOnly`
+/// head.
+pub(super) fn damage_dealer_effect_mut(def: &mut AbilityDefinition) -> &mut Effect {
+    if matches!(*def.effect, Effect::TargetOnly { .. }) {
+        if let Some(sub_ability) = def.sub_ability.as_deref_mut() {
+            return &mut sub_ability.effect;
+        }
+    }
+    &mut def.effect
 }
 
 /// Membership mirror for `AntecedentRole::DigLook` — the `Dig` anchor that both
@@ -20462,6 +20524,13 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
 
     // CR 115.7: "change the target of" / "you may choose new targets for"
     if let Some(effect) = try_parse_change_targets(tp.lower) {
+        return parsed_clause(effect);
+    }
+
+    // CR 611.2 + CR 602.1: transient (this-turn) activated-ability cost reduction —
+    // "activated abilities of <subject> cost {N} less to activate [this turn]"
+    // (The Dining Car's chaos ability). Reuses the shared static grammar head.
+    if let Some(effect) = imperative::try_parse_activated_ability_cost_reduction_effect(tp, ctx) {
         return parsed_clause(effect);
     }
 
@@ -21586,7 +21655,10 @@ fn chain_clause_is_exile_producer(effect: &Effect) -> bool {
 fn continuation_is_exile_producer(continuation: Option<&ContinuationAst>) -> bool {
     matches!(
         continuation,
-        Some(ContinuationAst::ExileOneOfThemFaceDown | ContinuationAst::ExileLookedAtCard { .. })
+        Some(
+            ContinuationAst::ExileOneOfThemFaceDown { .. }
+                | ContinuationAst::ExileLookedAtCard { .. }
+        )
     )
 }
 
@@ -23194,11 +23266,21 @@ fn try_parse_repeat_process_directive(
     // predicates ("then if an opponent controls more lands than you") fall through
     // to the general inner-condition path.
     let (condition, body) = {
-        let (card_type, rest) = strip_card_type_conditional(text);
-        if card_type.is_some() {
-            (card_type, rest)
+        // CR 705.2 + CR 608.2c: "if you {win|lose} the flip, repeat this process"
+        // reads the process's own coin flip (`CoinFlipOutcome`), so the flip
+        // stripper runs FIRST. It is body-gated: if the trailing body is not
+        // "repeat this process", this whole function returns None and the chunk
+        // falls through to the inline coin-flip fold (Krark / Desperate Gambit).
+        let (flip, rest) = strip_coin_flip_conditional(text);
+        if flip.is_some() {
+            (flip, rest)
         } else {
-            strip_leading_general_conditional(text, ctx)
+            let (card_type, rest) = strip_card_type_conditional(text);
+            if card_type.is_some() {
+                (card_type, rest)
+            } else {
+                strip_leading_general_conditional(text, ctx)
+            }
         }
     };
 
@@ -27075,6 +27157,22 @@ pub(crate) fn parse_effect_chain_ir(
                 None
             }
         });
+        // CR 608.2c: A clause's own `parsed.effect` is only its HEAD — a clause
+        // like "Target creature you control deals damage ... to target creature
+        // you don't control" lowers to a `TargetOnly` head with `DealDamage` as
+        // its own internal `sub_ability`. In the old flat-`defs` model,
+        // `defs.last()` after such a clause would be the DealDamage entry (the
+        // last one pushed), not the TargetOnly head — so lookback must walk to
+        // the deepest effect in the clause's own chain, mirroring
+        // `sequence::deepest_effect`, or a later followup rider (e.g. an
+        // excess-damage redirect) targeting the DealDamage never matches and
+        // silently falls back to `Effect::Unimplemented`.
+        fn deepest_clause_effect(clause: &ClauseIr) -> Effect {
+            match clause.parsed.sub_ability.as_deref() {
+                Some(sub) => sequence::deepest_effect(sub).clone(),
+                None => clause.parsed.effect.clone(),
+            }
+        }
         // "Effective effect" of a non-absorbed clause — what `defs.last()` would
         // be after intrinsic/followup continuation application. Shared by the
         // nearest-clause lookback and the CR 608.2c deeper-clause lookback.
@@ -27111,11 +27209,14 @@ pub(crate) fn parse_effect_chain_ir(
                         }
                     }
                     // Simple patch-in-place continuations leave the previous
-                    // effect type as the effective lookback target.
-                    _ => previous.parsed.effect.clone(),
+                    // effect type as the effective lookback target — but that
+                    // clause may itself carry its own internal sub_ability
+                    // chain (see below), so route through the same deepest-effect
+                    // walk rather than the bare head effect.
+                    _ => deepest_clause_effect(previous),
                 }
             } else {
-                previous.parsed.effect.clone()
+                deepest_clause_effect(previous)
             }
         };
         // Non-absorbed clauses, nearest-first — the lookback search space.
@@ -28738,6 +28839,27 @@ fn parse_put_rest_destination(lower: &str) -> Option<Zone> {
     {
         // CR 401.x: "on the bottom/top of ... library" / "into ... library".
         Some(Zone::Library)
+    } else {
+        None
+    }
+}
+
+/// CR 401.4: When "the rest" returns to the library, capture whether it goes to
+/// the bottom or top so the complement move can suppress the default shuffle and
+/// place at that position (The Fourteenth Doctor — "on the bottom … in a random
+/// order"; Garruk / Goblin Ringleader — "on the bottom … in any order"). Scoped
+/// to the "the rest" tail (mirrors `parse_put_rest_destination`) so the primary
+/// clause's position never leaks in. This is a tail-scan pre-filter, not the
+/// classifier — the structural classification already happened in
+/// `try_parse_put_zone_change_parts`.
+fn parse_put_rest_library_position(lower: &str) -> Option<LibraryPosition> {
+    let (after_rest, _) = take_until::<_, _, OracleError<'_>>("the rest")
+        .parse(lower)
+        .ok()?;
+    if scan_contains_phrase(after_rest, "on the bottom") {
+        Some(LibraryPosition::Bottom)
+    } else if scan_contains_phrase(after_rest, "on top") {
+        Some(LibraryPosition::Top)
     } else {
         None
     }
