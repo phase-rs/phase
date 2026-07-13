@@ -250,6 +250,8 @@ fn parse_event_history_conditions(input: &str) -> OracleResult<'_, StaticConditi
         parse_source_didnt_this_turn,
         parse_was_cast_condition,
         parse_entered_this_turn,
+        // CR 102.2 + CR 608.2h: opponent-scoped entry tally (Zendikar trap cycle).
+        parse_opponent_had_entered_this_turn,
         parse_opponent_cast_spell_this_turn,
         parse_youve_this_turn,
         parse_first_spell_this_game_condition,
@@ -2470,6 +2472,35 @@ fn consume_cards_in_hand_suffix(input: &str) -> Option<&str> {
         })
 }
 
+/// CR 107.1 + CR 402.1: a hand-size count word, INCLUDING "zero".
+///
+/// `parse_number`'s English table starts at "one" — it does not know "zero" (the
+/// retired restriction fallback special-cased the word for exactly this reason).
+/// "Zero" is only ever printed as an EXACT size ("exactly zero or seven cards in
+/// hand" — The Biblioplex); a threshold never says "zero or more", so widening the
+/// shared `parse_number` primitive would change every numeric call site in the
+/// parser to buy one word. The zero-awareness stays local to the predicate that
+/// actually prints it.
+fn parse_hand_size_count(input: &str) -> OracleResult<'_, u32> {
+    alt((value(0u32, tag("zero")), parse_number)).parse(input)
+}
+
+/// CR 402.1: Parse the count list of an "exactly …" hand-size predicate — one or
+/// more counts joined by " or ", terminated by the cards-in-hand suffix.
+///
+/// `separated_list1` is the general shape: "exactly seven cards in hand" yields
+/// `[7]`, "exactly zero or seven cards in hand" yields `[0, 7]`. The caller turns
+/// arity 1 into a plain `EQ` and arity >= 2 into an `Or` over `EQ`s, so a card
+/// printing a three-way disjunction would need no further parser change.
+fn parse_exact_hand_size_disjunction(input: &str) -> Option<(&str, Vec<u32>)> {
+    let (rest, counts) =
+        nom::multi::separated_list1(tag::<_, _, OracleError<'_>>(" or "), parse_hand_size_count)
+            .parse(input)
+            .ok()?;
+    let rest = consume_cards_in_hand_suffix(rest)?;
+    Some((rest, counts))
+}
+
 fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, StaticCondition)> {
     // "no cards in hand" → HandSize EQ 0
     if let Ok((rest, _)) = alt((
@@ -2506,14 +2537,33 @@ fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, S
     }
 
     // "exactly N cards in hand" → HandSize EQ N (Triskaidekaphile).
+    //
+    // CR 402.1 + CR 608.2c: the threshold may be a DISJUNCTION of exact sizes —
+    // "exactly zero or seven cards in hand" (The Biblioplex). One "exactly" arm
+    // owns both surfaces: parse a `" or "`-separated list of counts, then emit a
+    // bare `EQ` for the single-count case (unchanged) and an `Or` over per-count
+    // `EQ`s for the disjunction. The list is the general shape; arity 1 is just
+    // its degenerate case, so no card-specific "zero or seven" literal is needed.
     if let Ok((after_exactly, _)) = tag::<_, _, OracleError<'_>>("exactly ").parse(rest) {
-        if let Ok((after_n, n)) = parse_number(after_exactly) {
-            if let Some(rest) = consume_cards_in_hand_suffix(after_n) {
-                return Some((
-                    rest,
-                    make_quantity_comparison(QuantityRef::HandSize { player }, Comparator::EQ, n),
-                ));
-            }
+        if let Some((rest, counts)) = parse_exact_hand_size_disjunction(after_exactly) {
+            let conditions: Vec<StaticCondition> = counts
+                .into_iter()
+                .map(|n| {
+                    make_quantity_comparison(
+                        QuantityRef::HandSize {
+                            player: player.clone(),
+                        },
+                        Comparator::EQ,
+                        n,
+                    )
+                })
+                .collect();
+            let mut conditions = conditions;
+            return match conditions.len() {
+                0 => None,
+                1 => Some((rest, conditions.remove(0))),
+                _ => Some((rest, StaticCondition::Or { conditions })),
+            };
         }
     }
 
@@ -3473,6 +3523,13 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
         // plain ObjectCount arm so the `with different names` suffix is not
         // mis-classified as a raw count threshold. Field of the Dead canonical.
         parse_control_count_ge_distinct_quality,
+        // CR 201.2 + CR 109.3: the SAME-quality mirror of the arm above — "you
+        // control N or more [type] with the same name" (Endless Atlas, Sceptre of
+        // Eternal Glory). Shares its ordering constraint: it must precede the plain
+        // `parse_control_count_ge` arm, which would otherwise consume "three or more
+        // lands" and silently DROP the shared-name constraint, turning a
+        // three-same-named-lands gate into a bare three-lands gate.
+        parse_control_count_ge_shared_quality,
         parse_control_count_ge_toughness_gt_power,
         parse_control_count_ge_subtype_disjunction,
         // "you control N or more [type]" → QuantityComparison(ObjectCount >= N)
@@ -3578,6 +3635,55 @@ fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, Stat
                 qty: QuantityRef::ObjectCountDistinct {
                     filter,
                     qualities: vec![quality],
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 201.2 + CR 109.3: Parse "you control N or more [type] with the same name"
+/// → `QuantityComparison(ObjectCountBySharedQuality[Name, Max] >= N)`.
+///
+/// The same-quality mirror of `parse_control_count_ge_distinct_quality`. Both read
+/// "you control " + a GE threshold + a type phrase + a shared-characteristic
+/// suffix; they differ only on the RELATION over that characteristic (`different`
+/// → count the distinct values; `the same` → group by value and take the largest
+/// group). `aggregate: Max` is what makes "three or more lands with the same name"
+/// mean "some ONE name is shared by at least three of your lands" rather than
+/// "you have at least three lands in total".
+///
+/// Name is the only quality printed with this relation today (Endless Atlas,
+/// Sceptre of Eternal Glory); the `alt` is the extension point for the rest of
+/// `SharedQuality` when a card prints one.
+fn parse_control_count_ge_shared_quality(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you control ").parse(input)?;
+    let (rest, n) = parse_ge_threshold(rest)?;
+    let type_text = rest.trim_end_matches('.');
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let trimmed = remainder.trim_start();
+    let (after_suffix, quality) = preceded(
+        tag("with the same "),
+        alt((value(SharedQuality::Name, tag("name")),)),
+    )
+    .parse(trimmed)?;
+    let filter = inject_controller_you(filter);
+    let consumed = after_suffix.as_ptr() as usize - input.as_ptr() as usize;
+    Ok((
+        &input[consumed..],
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCountBySharedQuality {
+                    filter,
+                    quality,
+                    aggregate: AggregateFunction::Max,
                 },
             },
             comparator: Comparator::GE,
@@ -5069,7 +5175,7 @@ fn parse_youve_player_action_history_condition(input: &str) -> OracleResult<'_, 
             make_quantity_ge(QuantityRef::CrimesCommittedThisTurn, 1),
             tag("committed a crime this turn"),
         ),
-        parse_player_action_this_turn_body,
+        |i| parse_player_action_this_turn_body(i, PlayerScope::Controller),
     ))
     .parse(input)
 }
@@ -5651,7 +5757,13 @@ fn parse_discard_history_condition(input: &str) -> OracleResult<'_, StaticCondit
 
 fn parse_combat_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
-        // "you attacked this turn" (without "you've" prefix)
+        // "you attacked this turn" (without "you've" prefix).
+        //
+        // Ordering is load-bearing: the untyped surfaces are matched here FIRST so
+        // they keep producing `filter: None`. "a creature" is not a type QUALIFIER
+        // on these cards — it is the generic attacker noun (only creatures attack,
+        // CR 508.1a), so re-reading it as `Some(Creature)` would change the tree of
+        // every card already using this phrasing for no semantic gain.
         value(
             make_quantity_ge(
                 QuantityRef::AttackedThisTurn {
@@ -5665,8 +5777,86 @@ fn parse_combat_history_condition(input: &str) -> OracleResult<'_, StaticConditi
                 tag("you attacked this turn"),
             )),
         ),
+        parse_you_attacked_with_quantity,
     ))
     .parse(input)
+}
+
+/// CR 508.1a: "you attacked with [N | N or more] creatures this turn" (the
+/// numeric-threshold surface) and "you attacked with a/an <type> this turn" (the
+/// typed-attacker surface — Thaumaton Torpedo's "if you attacked with a
+/// Spacecraft this turn").
+///
+/// Both surfaces denote the same this-turn attack tally, so the only axes that
+/// vary are the threshold and the attacker filter — exactly the two fields
+/// `QuantityRef::AttackedThisTurn` already carries. The count arm is tried first
+/// because "three or more creatures" would otherwise be misread by the type-phrase
+/// parser as a bare Creature qualifier.
+fn parse_you_attacked_with_quantity(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you attacked with ").parse(input)?;
+    alt((
+        parse_attacked_with_creature_count,
+        parse_attacked_with_typed_filter,
+    ))
+    .parse(rest)
+}
+
+/// CR 508.1a: "[N | N or more] creatures this turn" — the untyped numeric
+/// threshold. Carries no type qualifier (`filter: None`), matching the bare
+/// surfaces above.
+fn parse_attacked_with_creature_count(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, n) = parse_number(input)?;
+    let (rest, _) = opt(tag(" or more")).parse(rest)?;
+    let (rest, _) = tag(" creatures this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: None,
+            },
+            n,
+        ),
+    ))
+}
+
+/// CR 508.1a: "a/an <type>[ this turn]" — the typed-attacker surface. The qualifier
+/// is delegated to `parse_type_phrase` so the whole class of attacker types
+/// (Spacecraft, Vehicle, any creature type) is covered by the shared combinator
+/// rather than a per-card literal. An unrecognized qualifier yields
+/// `TargetFilter::Any`, which is REJECTED so the phrase stays an honest gap
+/// instead of silently widening to "attacked with anything".
+///
+/// The trailing " this turn" is OPTIONAL: an activated-ability duration parser can
+/// peel it upstream before the cost-reduction condition is re-parsed, so Thaumaton
+/// Torpedo reaches this combinator in both the suffixed and the bare shape. The
+/// phrase must otherwise be consumed in full, so an unabsorbed qualifying clause
+/// stays an honest gap rather than being silently truncated.
+fn parse_attacked_with_typed_filter(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (filter, leftover) = parse_type_phrase(input);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, _) = opt(tag("this turn")).parse(leftover.trim_start())?;
+    if !rest.trim().is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::AttackedThisTurn {
+                scope: CountScope::Controller,
+                filter: Some(filter),
+            },
+            1,
+        ),
+    ))
 }
 
 /// Parse "no [type] attacked this turn" → global AttackedThisTurn count EQ 0.
@@ -5764,29 +5954,41 @@ fn parse_board_state_condition(input: &str) -> OracleResult<'_, StaticCondition>
     parse_no_on_battlefield(input)
 }
 
-fn player_action_this_turn_condition(action: PlayerActionKind) -> StaticCondition {
-    make_quantity_ge(
-        QuantityRef::PlayerActionsThisTurn {
-            player: PlayerScope::Controller,
-            action,
-        },
-        1,
-    )
+fn player_action_this_turn_condition(
+    action: PlayerActionKind,
+    player: PlayerScope,
+) -> StaticCondition {
+    make_quantity_ge(QuantityRef::PlayerActionsThisTurn { player, action }, 1)
 }
 
-fn parse_player_action_this_turn_body(input: &str) -> OracleResult<'_, StaticCondition> {
+/// CR 603.4: The player-action history predicates, parameterized by WHOSE history
+/// is read. The subject dispatchers below bind `player`; the verb vocabulary is
+/// shared, so "an opponent searched their library this turn" and "you surveilled
+/// this turn" differ only on that scope — no duplicated verb list.
+fn parse_player_action_this_turn_body(
+    input: &str,
+    player: PlayerScope,
+) -> OracleResult<'_, StaticCondition> {
     alt((
         value(
-            player_action_this_turn_condition(PlayerActionKind::Surveil),
+            player_action_this_turn_condition(PlayerActionKind::Surveil, player.clone()),
             tag("surveilled this turn"),
         ),
         value(
-            player_action_this_turn_condition(PlayerActionKind::Scry),
+            player_action_this_turn_condition(PlayerActionKind::Scry, player.clone()),
             alt((tag("scried this turn"), tag("scryed this turn"))),
         ),
         value(
-            player_action_this_turn_condition(PlayerActionKind::CollectEvidence),
+            player_action_this_turn_condition(PlayerActionKind::CollectEvidence, player.clone()),
             tag("collected evidence this turn"),
+        ),
+        // CR 701.23a: "searched their/a library this turn" (Archive Trap).
+        value(
+            player_action_this_turn_condition(PlayerActionKind::SearchedLibrary, player.clone()),
+            alt((
+                tag("searched their library this turn"),
+                tag("searched a library this turn"),
+            )),
         ),
     ))
     .parse(input)
@@ -5800,11 +6002,35 @@ fn parse_player_action_this_turn_body(input: &str) -> OracleResult<'_, StaticCon
 /// because the apostrophe follows `you` directly, but it is ordered first for
 /// consistency.)
 fn parse_player_action_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    preceded(
-        alt((tag("you've "), tag("you have "), tag("you "))),
-        parse_player_action_this_turn_body,
-    )
+    alt((
+        parse_opponent_action_this_turn,
+        preceded(alt((tag("you've "), tag("you have "), tag("you "))), |i| {
+            parse_player_action_this_turn_body(i, PlayerScope::Controller)
+        }),
+    ))
     .parse(input)
+}
+
+/// CR 102.2 + CR 102.3 + CR 603.4: "an opponent [has] <action> this turn" — the
+/// opponent-scoped surface of the same action history (Archive Trap's "if an
+/// opponent searched their library this turn").
+///
+/// `PlayerScope::Opponent { aggregate: Max }` is the EXISTENTIAL reading of "an
+/// opponent": the predicate holds when the action count of the single
+/// highest-scoring opponent clears the threshold, i.e. when SOME opponent did it.
+/// Summing across opponents instead would let two opponents' separate actions add
+/// up to satisfy a threshold neither of them met alone. (The shared grammar uses
+/// the same idiom in the other direction — "more life than an opponent" takes Min
+/// for its existential "an".)
+fn parse_opponent_action_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("an opponent ").parse(input)?;
+    let (rest, _) = opt(tag("has ")).parse(rest)?;
+    parse_player_action_this_turn_body(
+        rest,
+        PlayerScope::Opponent {
+            aggregate: AggregateFunction::Max,
+        },
+    )
 }
 
 /// CR 305.1 + CR 305.2a: "you[ have] played a land this turn" — the simple-past
@@ -7168,10 +7394,12 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         // "you had N or more [type] enter ..." (counted threshold, GE) — the
         // "you had" auxiliary reads the present-tense "enter" surface. Falls
         // back to the singular "you had a/an/another [type] enter ..." form.
-        if let Ok(result) = parse_or_more_entered_count(rest, had_enter_suffix) {
+        if let Ok(result) =
+            parse_or_more_entered_count(rest, had_enter_suffix, PlayerScope::Controller)
+        {
             return Ok(result);
         }
-        return parse_entered_this_turn_subject(rest, had_enter_suffix, 1);
+        return parse_entered_this_turn_subject(rest, had_enter_suffix, 1, PlayerScope::Controller);
     }
 
     // CR 403.3 + CR 608.2h: self-inclusive disjunct "~ or another/a <type>
@@ -7215,12 +7443,13 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     }
 
     // Branch 1: "N or more [type] entered..."
-    if let Ok(result) = parse_or_more_entered_count(input, entered_suffix) {
+    if let Ok(result) = parse_or_more_entered_count(input, entered_suffix, PlayerScope::Controller)
+    {
         return Ok(result);
     }
 
     // Branch 2: "a/an/another [type] entered..."
-    parse_entered_this_turn_subject(input, entered_suffix, 1)
+    parse_entered_this_turn_subject(input, entered_suffix, 1, PlayerScope::Controller)
 }
 
 /// CR 403.3 + CR 608.2h: Parse "N or more [type] <suffix>" into a GE threshold
@@ -7243,6 +7472,7 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
 fn parse_or_more_entered_count<'a>(
     input: &'a str,
     suffix: &'static str,
+    player: PlayerScope,
 ) -> OracleResult<'a, StaticCondition> {
     let (after_n, n) = parse_number(input)?;
     let (type_and_rest, _) = tag("or more ").parse(after_n.trim_start())?;
@@ -7252,10 +7482,7 @@ fn parse_or_more_entered_count<'a>(
     Ok((
         rest,
         make_quantity_ge(
-            QuantityRef::BattlefieldEntriesThisTurn {
-                player: PlayerScope::Controller,
-                filter,
-            },
+            QuantityRef::BattlefieldEntriesThisTurn { player, filter },
             n,
         ),
     ))
@@ -7265,6 +7492,7 @@ fn parse_entered_this_turn_subject<'a>(
     input: &'a str,
     suffix: &'static str,
     count: u32,
+    player: PlayerScope,
 ) -> OracleResult<'a, StaticCondition> {
     let (rest, type_text) = take_until(suffix).parse(input)?;
     let (rest, _) = tag(suffix).parse(rest)?;
@@ -7275,20 +7503,53 @@ fn parse_entered_this_turn_subject<'a>(
         rest,
         make_quantity_ge(
             // CR 608.2i: "entered ... this turn" is a look-back count — a permanent
-            // that entered under your control this turn still counts after it has
-            // left the battlefield (died, was bounced, or sacrificed). The
-            // BattlefieldEntriesThisTurn snapshot survives departure; the live-board
-            // EnteredThisTurn read did not. PlayerScope::Controller supplies "under
-            // your control" (the runtime keys on record.controller); the filter
-            // carries no controller of its own — mirroring parse_or_more_entered_count,
-            // the count-shape sibling, which likewise omits inject_controller_you.
-            QuantityRef::BattlefieldEntriesThisTurn {
-                player: PlayerScope::Controller,
-                filter,
-            },
+            // that entered under the scoped player's control this turn still counts
+            // after it has left the battlefield (died, was bounced, or sacrificed).
+            // The BattlefieldEntriesThisTurn snapshot survives departure; the live-
+            // board EnteredThisTurn read did not. `player` supplies the "under
+            // <whose> control" scope (the runtime keys on record.controller); the
+            // filter carries no controller of its own — mirroring
+            // parse_or_more_entered_count, the count-shape sibling, which likewise
+            // omits inject_controller_you.
+            QuantityRef::BattlefieldEntriesThisTurn { player, filter },
             count,
         ),
     ))
+}
+
+/// CR 102.2 + CR 102.3 + CR 608.2h: "an opponent had [N or more] <type> enter the
+/// battlefield under their control this turn" — the opponent-scoped mirror of
+/// `parse_entered_this_turn`'s "you had …" auxiliary surface (the Zendikar trap
+/// cycle: Baloth Cage Trap, Lavaball Trap, Permafrost Trap, Whiplash Trap).
+///
+/// The scope is carried by `PlayerScope::Opponent { aggregate: Max }`, NOT by a
+/// `controller: Opponent` injected into the type filter. That distinction is
+/// load-bearing and is the whole point of routing this phrase through the shared
+/// grammar:
+///
+/// - A filter-carried controller makes the runtime count every matching entry
+///   under ANY opponent's control and compare the SUM to the threshold. In a
+///   multiplayer game two DIFFERENT opponents each having one creature enter
+///   would then satisfy "an opponent had TWO OR MORE creatures enter" — but no
+///   single opponent had two.
+/// - `Opponent { Max }` counts per opponent and takes the largest tally, which is
+///   the existential reading the card actually prints: "an opponent" binds one
+///   player, and "their control" binds the count to that same player.
+///
+/// The two readings coincide in a two-player game, so this is invisible there and
+/// only bites at three or more players. (The shared grammar already uses this
+/// aggregate idiom in the other direction — "more life than an opponent" takes
+/// `Min` for its existential "an".)
+fn parse_opponent_had_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("an opponent had ").parse(input)?;
+    let suffix = "enter the battlefield under their control this turn";
+    let player = PlayerScope::Opponent {
+        aggregate: AggregateFunction::Max,
+    };
+    if let Ok(result) = parse_or_more_entered_count(rest, suffix, player.clone()) {
+        return Ok(result);
+    }
+    parse_entered_this_turn_subject(rest, suffix, 1, player)
 }
 
 /// Parse "there are N [or more] [things] ..." conditions.
