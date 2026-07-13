@@ -45306,3 +45306,94 @@ fn transient_cost_reduction_arm_rejects_unsupported_shapes() {
         Effect::Unimplemented { .. }
     ));
 }
+
+// ── CR 614.1a + CR 614.6: an "instead" override is a BRANCH, never a sequel ──
+
+/// CR 614.6: "If an event is replaced, it never happens." An "instead" override
+/// whose CR 608.2c state condition has no typed variant must never be emitted as
+/// an ordinary chain clause — that makes the engine run the replaced effect AND
+/// its replacement. It fails honestly instead.
+///
+/// Anax, Hardened in the Forge is the witness: its base parse was
+/// `Token{count:1} -> sub_ability Token{count:2}` with no condition on either
+/// def, so every nontoken creature death created three Satyrs regardless of
+/// power. The building-block assertion is stronger than "Anax is fixed": NO
+/// second `Token` may appear anywhere in the chain as an unconditional sibling.
+#[test]
+fn instead_override_with_unlowerable_state_condition_is_not_an_unconditional_sibling() {
+    let def = parse_effect_chain(
+        "Create a 1/1 red Satyr creature token. If the creature had power 4 or greater, create two of those tokens instead.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Token { .. }),
+        "the printed base clause still lowers to the token, got {:?}",
+        def.effect
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("the override clause still produces a def");
+    assert!(
+        matches!(&*sub.effect, Effect::Unimplemented { name, .. } if name == "instead_condition"),
+        "CR 614.6: an override whose condition cannot be lowered must be honestly \
+         Unimplemented, never a second Token that runs unconditionally — got {:?}",
+        sub.effect
+    );
+}
+
+/// CR 614.1: replacement effects "watch for a particular event that WOULD happen."
+/// The modal "would" marks the CR 614.1a EVENT reading, which is owned by the
+/// replacement machinery — here, by the structural cast-then-exile rider chain.
+/// Torrential Gearhulk must keep that chained `ChangeZone`-to-Exile rider: the
+/// honest-failure path must NOT swallow it.
+#[test]
+fn instead_override_naming_an_event_defers_to_the_replacement_machinery() {
+    let def = parse_effect_chain(
+        "You may cast target instant card from your graveyard without paying its mana cost. If that spell would be put into your graveyard, exile it instead.",
+        AbilityKind::Spell,
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("the exile rider must survive as a chained def");
+    assert!(
+        matches!(
+            &*sub.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "CR 614.1a: a \"would\"-conditioned instead is an EVENT replacement owned by \
+         the exile-rider encoding — it must not be rewritten to Unimplemented, got {:?}",
+        sub.effect
+    );
+}
+
+/// The honest-failure path is a LAST resort: handlers further down the chunk
+/// ladder still own "instead" clauses and recover a typed condition for them.
+/// Porcelain Zealot's "If that creature has toxic, instead it gets +2/+2" is
+/// owned by `strip_target_keyword_instead`, so it must keep its real branch.
+#[test]
+fn instead_override_owned_by_a_later_handler_keeps_its_branch() {
+    let def = parse_effect_chain(
+        "Target creature you control gets +1/+1 until end of turn. If that creature has toxic, instead it gets +2/+2 until end of turn.",
+        AbilityKind::Spell,
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("the override clause must still produce a def");
+    assert!(
+        matches!(
+            sub.condition.as_ref(),
+            Some(AbilityCondition::TargetHasKeywordInstead {
+                keyword: Keyword::Toxic(_)
+            })
+        ),
+        "the later-handler branch (TargetHasKeywordInstead) must survive the \
+         honest-failure guard, got {:?}",
+        sub.condition
+    );
+}

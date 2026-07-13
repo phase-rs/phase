@@ -3765,11 +3765,34 @@ fn parse_paid_x_condition_text(text: &str) -> Option<AbilityCondition> {
     })
 }
 
+/// CR 614.1a + CR 614.6: the outcome of lowering an "instead" override clause.
+///
+/// The three-way split is load-bearing, and the middle arm is why this is not an
+/// `Option`. CR 614.6 ("If an event is replaced, it never happens") makes an
+/// "instead" override a **branch**, never a sequel: the engine does the override
+/// or the printed effect, never both. When the override grammar matches but its
+/// condition has no typed representation, returning a bare `None` let the caller
+/// fall through and re-emit the override BODY as an ordinary unconditional chain
+/// clause — so the engine ran the replaced effect AND its replacement, with the
+/// condition dropped (Anax, Hardened in the Forge: a 2/2 dying produced three
+/// Satyrs instead of one). `ConditionUnlowerable` forces the caller to fail
+/// honestly instead.
+pub(super) enum InsteadLowering {
+    /// The override lowered to a conditional branch (`AbilityCondition::ConditionInstead`).
+    Branch(Box<AbilityDefinition>),
+    /// The text IS an "instead" override, but its condition has no typed variant
+    /// yet. The caller MUST emit `Effect::unimplemented` — never the body.
+    ConditionUnlowerable,
+    /// Not the generic "instead" grammar, or deliberately owned by a more
+    /// specific lowering (see the additional-cost deferral in `build_instead_def`).
+    NotOwned,
+}
+
 pub(super) fn try_parse_generic_instead_clause(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
-) -> Option<AbilityDefinition> {
+) -> InsteadLowering {
     // Forward form: "If <cond>, [body] instead." — split on the leading "If, "
     // and strip a trailing/leading "instead" from the body.
     if let Some((cond_text, effect_text)) = split_forward_instead_clause(text) {
@@ -3785,7 +3808,7 @@ pub(super) fn try_parse_generic_instead_clause(
         return build_instead_def(cond_text, effect_text, kind, ctx);
     }
 
-    None
+    InsteadLowering::NotOwned
 }
 
 /// Forward instead form: "If <cond>, [body] instead." Returns the trimmed
@@ -3833,6 +3856,32 @@ fn split_inverted_instead_clause(text: &str) -> Option<(String, String)> {
     Some((cond_text.to_string(), effect_text.to_string()))
 }
 
+/// CR 614.1: replacement effects "watch for a particular event that **would**
+/// happen and completely or partially replace that event." The modal "would" is
+/// the Comprehensive Rules' own marker for the EVENT reading of an "instead"
+/// clause, and it splits the grammar in two:
+///
+/// - **CR 614.1a EVENT replacement** — "If that spell *would* be put into your
+///   graveyard, exile it instead" (Torrential Gearhulk, Goblin Dark-Dwellers,
+///   Mission Briefing; ~68 faces). The clause names an event, not a game state.
+///   These are owned elsewhere — by a `ReplacementDefinition`, by the line-level
+///   replacement parser, or by the structural cast-then-exile rider chain that
+///   `swallow_check::any_ability_has_exile_parent_rider` recognizes as the "exile
+///   it instead" encoding. An unlowerable EVENT condition must therefore fall
+///   through UNCHANGED: reporting it as `ConditionUnlowerable` would make the
+///   caller replace a *working* rider encoding with `Effect::unimplemented`.
+///
+/// - **CR 608.2c STATE override** — "If the creature had power 4 or greater,
+///   create two of those tokens instead" (Anax, Hardened in the Forge). The
+///   clause is a game-state predicate evaluated as the ability resolves. These,
+///   and only these, are `ConditionUnlowerable` when they fail to lower.
+///
+/// The scan is word-boundary anchored (`scan_contains`), so "would" is matched
+/// as a word and never as a fragment of a longer token.
+fn condition_names_an_event(cond_text: &str) -> bool {
+    nom_primitives::scan_contains(&cond_text.to_lowercase(), "would")
+}
+
 /// Shared assembly: build an `AbilityDefinition` for an instead override.
 /// Tries the three condition parsers in priority order; bails if none match
 /// (so the chunk can fall through to other dispatch paths). Wraps the result
@@ -3843,20 +3892,35 @@ fn build_instead_def(
     effect_text: String,
     kind: AbilityKind,
     ctx: &mut ParseContext,
-) -> Option<AbilityDefinition> {
+) -> InsteadLowering {
     // CR 608.2c: An additional-cost-paid "instead" fold ("if it/this spell was
     // kicked, ... instead") is owned by `strip_additional_cost_conditional`,
     // which folds it to the dedicated `AdditionalCostPaidInstead`. Defer here so
     // the generic `parse_condition_text` recognizer (which now classifies "was
     // kicked" as the bare `AdditionalCostPaid`) does not pre-empt that fold by
     // producing a `ConditionInstead { inner: AdditionalCostPaid }` wrapper.
+    // This deferral is `NotOwned`, NOT `ConditionUnlowerable`: the clause has a
+    // typed home, just not this one, so the caller must fall through to it.
     if parse_additional_cost_instead_condition_fragment(&cond_text).is_some() {
-        return None;
+        return InsteadLowering::NotOwned;
     }
 
-    let condition = try_nom_condition_as_ability_condition(&cond_text, ctx)
+    // CR 614.6: a replaced event never happens. If the override's condition has
+    // no typed representation, the branch cannot be built — and emitting the
+    // override body anyway would run BOTH the replaced effect and its
+    // replacement. Everything that lowers today still lowers; only the failure
+    // path is split, by `condition_names_an_event`, into "defer" vs "fail
+    // honestly".
+    let Some(condition) = try_nom_condition_as_ability_condition(&cond_text, ctx)
         .or_else(|| parse_condition_text(&cond_text))
-        .or_else(|| parse_control_count_as_ability_condition(&cond_text))?;
+        .or_else(|| parse_control_count_as_ability_condition(&cond_text))
+    else {
+        return if condition_names_an_event(&cond_text) {
+            InsteadLowering::NotOwned
+        } else {
+            InsteadLowering::ConditionUnlowerable
+        };
+    };
 
     let instead_def = parse_effect_chain(&effect_text, kind);
     let mut result = instead_def;
@@ -3870,7 +3934,7 @@ fn build_instead_def(
     {
         super::rewrite_cost_paid_object_quantities_in_definition(&mut result);
     }
-    Some(result)
+    InsteadLowering::Branch(Box::new(result))
 }
 
 /// CR 608.2c: "If <cond>, you may instead <reveal-N-from-among-body>" — conditional
@@ -9218,12 +9282,13 @@ mod tests {
     /// CR 608.2c: Full instead-clause assembly for Fblthp's ETB draw rider.
     #[test]
     fn fblthp_library_origin_instead_clause() {
-        let instead = try_parse_generic_instead_clause(
+        let InsteadLowering::Branch(instead) = try_parse_generic_instead_clause(
             "If it entered from your library or was cast from your library, draw two cards instead.",
             AbilityKind::Spell,
             &mut ParseContext::default(),
-        )
-        .expect("instead clause must parse");
+        ) else {
+            panic!("instead clause must lower to a conditional branch");
+        };
         assert!(matches!(&*instead.effect, Effect::Draw { .. }));
         let cond = instead
             .condition

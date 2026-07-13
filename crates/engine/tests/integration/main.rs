@@ -7,6 +7,7 @@ mod ajani_nacatl_pariah_transform;
 mod alchemists_gift_pump_modal_keyword_choice;
 mod ambuscade_one_sided_fight_anaphoric;
 mod amphin_mutineer_regression;
+mod anax_instead_branch_not_chain;
 mod ancient_brass_dragon_roll_d20;
 mod ancient_bronze_dragon_roll_d20;
 mod ancient_copper_dragon_roll_d20;
