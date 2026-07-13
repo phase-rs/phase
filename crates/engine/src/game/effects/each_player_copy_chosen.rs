@@ -199,6 +199,7 @@ pub(crate) fn drive_choices(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::EachPlayerCopyChosen,
             source_id: params.source_id,
+            subject: None,
         });
         return Ok(());
     };

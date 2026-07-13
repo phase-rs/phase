@@ -37,6 +37,7 @@ fn open_private_zone_cast_selection(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -214,6 +215,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -324,6 +326,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,
             source_id: ability.source_id,
+            subject: None,
         });
         state.waiting_for = WaitingFor::CastOffer {
             player: ability.controller,
@@ -361,6 +364,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CastFromZone,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -424,6 +428,7 @@ pub(crate) fn complete_hand_pick_cast_from_zone(
                     events.push(GameEvent::EffectResolved {
                         kind: EffectKind::CastFromZone,
                         source_id: ability.source_id,
+                        subject: None,
                     });
                     return Ok(false);
                 };
@@ -490,6 +495,7 @@ fn cast_stack_spell_copy_during_resolution(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CastFromZone,
         source_id: ability.source_id,
+        subject: None,
     });
 
     let Some(obj) = state.objects.get(&copy_id).cloned() else {
@@ -558,6 +564,7 @@ fn cast_single_target_during_resolution(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CastFromZone,
         source_id: ability.source_id,
+        subject: None,
     });
     // CR 702.62a's "if you don't, it remains exiled" disposition is `RemainExiled`
     // (only reached if a future free-cast adds an MV gate; these carry none).

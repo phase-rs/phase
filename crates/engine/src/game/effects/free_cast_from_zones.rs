@@ -60,6 +60,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::FreeCastFromZones,
         source_id: ability.source_id,
+        subject: None,
     });
 
     // CR 601.2: "Up to N" — with no eligible candidate the window opens to zero

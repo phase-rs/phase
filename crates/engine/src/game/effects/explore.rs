@@ -175,6 +175,7 @@ fn advance_explore_all(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -198,6 +199,7 @@ fn advance_explore_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -244,6 +246,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -285,6 +288,7 @@ pub(crate) fn resolve_explore_effect(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: explorer_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -316,6 +320,7 @@ pub(crate) fn resolve_explore_effect(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: explorer_id,
+            subject: None,
         });
     } else {
         // CR 701.44a: Nonland revealed — put a +1/+1 counter on the creature,
@@ -344,6 +349,7 @@ pub(crate) fn resolve_explore_effect(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: explorer_id,
+            subject: None,
         });
     }
 
@@ -1198,7 +1204,7 @@ mod tests {
                 GameEvent::EffectResolved {
                     kind: EffectKind::Explore,
                     source_id
-                } if *source_id == target
+                , ..} if *source_id == target
             )),
             "explore completion event should identify the exploring permanent"
         );

@@ -262,6 +262,7 @@ fn winter_soldier_hero_counter_is_entry_time_not_post_move_put_counter() {
                 GameEvent::EffectResolved {
                     kind: EffectKind::PutCounter,
                     source_id,
+                    ..
                 } if *source_id == soldier
             )
         }),

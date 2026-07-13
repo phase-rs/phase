@@ -320,6 +320,7 @@ mod tests {
             GameEvent::EffectResolved {
                 kind: EffectKind::ExtraTurn,
                 source_id: ObjectId(9),
+                subject: None,
             },
             // ETB of a land == landfall + etb.
             zone_change(Some(Zone::Hand), Zone::Battlefield, vec![CoreType::Land]),
@@ -685,6 +686,7 @@ mod tests {
             &[GameEvent::EffectResolved {
                 kind: EffectKind::ExtraTurn,
                 source_id: ObjectId(7),
+                subject: None,
             }],
         );
         assert_eq!(
@@ -699,6 +701,7 @@ mod tests {
             &[GameEvent::EffectResolved {
                 kind: EffectKind::DealDamage,
                 source_id: ObjectId(7),
+                subject: None,
             }],
         );
         assert_eq!(

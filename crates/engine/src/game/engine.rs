@@ -2642,6 +2642,7 @@ fn finalize_copy_retarget(
         // Pre-metadata CopyRetarget saves omitted this field; those states were
         // generic copy-spell choices whose completion source is the copy.
         source_id: effect_source_id.unwrap_or(copy_id),
+        subject: None,
     });
     // CR 707.10c + CR 603.2: Copy observers (Magecraft) must drain only after
     // the copy's targets are finalized, not while `CopyRetarget` is still open.
@@ -4260,7 +4261,7 @@ fn apply_action(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::PairWith,
                 source_id: *source_id,
-            });
+            subject: None,});
             state.waiting_for = WaitingFor::Priority { player: *player };
             state.priority_player = *player;
             effects::drain_pending_continuation(state, &mut events);
@@ -5418,7 +5419,7 @@ fn apply_action(
                         events.push(crate::types::events::GameEvent::EffectResolved {
                             kind: crate::types::ability::EffectKind::ChangeZone,
                             source_id: pending.source_id,
-                        });
+                        subject: None,});
                     }
                     state.waiting_for = WaitingFor::Priority {
                         player: active_player,
@@ -6228,7 +6229,7 @@ fn apply_action(
             events.push(GameEvent::EffectResolved {
                 kind: crate::types::ability::EffectKind::Proliferate,
                 source_id: completion_source,
-            });
+            subject: None,});
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
             effects::drain_pending_continuation(state, &mut events);
@@ -6276,7 +6277,7 @@ fn apply_action(
                     events.push(GameEvent::EffectResolved {
                         kind: crate::types::ability::EffectKind::TimeTravel,
                         source_id: ObjectId(0),
-                    });
+                    subject: None,});
                     state.waiting_for = WaitingFor::Priority { player: p };
                     state.priority_player = p;
                     effects::drain_pending_continuation(state, &mut events);
@@ -6286,7 +6287,7 @@ fn apply_action(
                 events.push(GameEvent::EffectResolved {
                     kind: crate::types::ability::EffectKind::TimeTravel,
                     source_id: ObjectId(0),
-                });
+                subject: None,});
                 state.waiting_for = WaitingFor::Priority { player: p };
                 state.priority_player = p;
                 effects::drain_pending_continuation(state, &mut events);
@@ -6332,6 +6333,7 @@ fn apply_action(
             events.push(GameEvent::EffectResolved {
                 kind: crate::types::ability::EffectKind::ChooseObjectsIntoTrackedSet,
                 source_id: ObjectId(0), // Source not tracked through choice state
+                subject: None,
             });
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
@@ -6921,6 +6923,7 @@ fn apply_retarget(
             .get(stack_entry_index)
             .map(|e| e.source_id)
             .unwrap_or(ObjectId(0)),
+        subject: None,
     });
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;

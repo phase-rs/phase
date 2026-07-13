@@ -105,6 +105,7 @@ pub fn perform_clash(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Clash,
         source_id: ability.source_id,
+        subject: None,
     });
 
     // Build the sub_ability chain with updated context for optional_effect_performed.

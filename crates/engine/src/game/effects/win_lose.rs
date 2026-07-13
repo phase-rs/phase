@@ -71,6 +71,7 @@ pub fn resolve_lose(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::LoseTheGame,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -118,6 +119,7 @@ pub fn resolve_win(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::WinTheGame,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -135,6 +137,7 @@ pub fn resolve_win(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::WinTheGame,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }

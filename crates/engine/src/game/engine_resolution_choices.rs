@@ -1292,6 +1292,7 @@ pub(super) fn handle_resolution_choice(
                         events.push(GameEvent::EffectResolved {
                             kind: EffectKind::Learn,
                             source_id: ObjectId(0),
+                            subject: None,
                         });
                         state.waiting_for = super::replacement::replacement_choice_waiting_for(
                             choice_player,
@@ -1316,6 +1317,7 @@ pub(super) fn handle_resolution_choice(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Learn,
                 source_id: ObjectId(0),
+                subject: None,
             });
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
@@ -2881,6 +2883,7 @@ pub(super) fn handle_resolution_choice(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Connive,
                 source_id: conniver_id,
+                subject: None,
             });
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
@@ -3040,6 +3043,7 @@ pub(super) fn handle_resolution_choice(
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
                 source_id,
+                subject: None,
             });
 
             // CR 614.12a: this `DiscardChoice` was the interactive payment of an
@@ -3260,6 +3264,7 @@ pub(super) fn handle_resolution_choice(
                 events.push(GameEvent::EffectResolved {
                     kind: effect_kind,
                     source_id,
+                    subject: None,
                 });
                 set_priority(state, player);
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3285,6 +3290,7 @@ pub(super) fn handle_resolution_choice(
                 events.push(GameEvent::EffectResolved {
                     kind: effect_kind,
                     source_id,
+                    subject: None,
                 });
                 set_priority(state, player);
                 resume_with_error_propagation(state, events)?;
@@ -3822,6 +3828,7 @@ pub(super) fn handle_resolution_choice(
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
                 source_id,
+                subject: None,
             });
             // Mark the end of the battlefield-exit events produced by this
             // handler (Sacrifice / ChangeZone / BounceAll) — the slice
@@ -4978,6 +4985,7 @@ pub(crate) fn run_batch_completion(
                 events.push(crate::types::events::GameEvent::EffectResolved {
                     kind: crate::types::ability::EffectKind::RevealUntil,
                     source_id,
+                    subject: None,
                 });
             }
             finish_with_continuation(state, player, events);

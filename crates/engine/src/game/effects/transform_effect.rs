@@ -36,6 +36,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Transform,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -136,7 +137,7 @@ mod tests {
             GameEvent::EffectResolved {
                 kind: EffectKind::Transform,
                 source_id: emitted_source,
-            } if *emitted_source == source_id
+            ..} if *emitted_source == source_id
         )));
     }
 

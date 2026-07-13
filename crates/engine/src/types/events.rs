@@ -1020,7 +1020,19 @@ pub enum GameEvent {
     },
     EffectResolved {
         kind: EffectKind,
+        /// The raw storage id of the effect's source. Retained as the compatibility and
+        /// trigger-index key, but it is NOT the candidate authority for an event whose
+        /// subject can leave or be replaced — see `subject`.
         source_id: ObjectId,
+        /// CR 400.7 + CR 608.2b: the identity-exact projection of the object this effect
+        /// happened *to*, frozen at the instruction that caused it.
+        ///
+        /// `None` for ordinary completions, whose observers do not interrogate a subject.
+        /// `Some` for Connive (CR 701.50a), where the conniver may leave the battlefield —
+        /// or return as a new incarnation at the same `source_id` — before the completion
+        /// event's triggers are matched. Boxed to keep `GameEvent`'s size down.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<Box<EventObjectSnapshot>>,
     },
     /// CR 701.3d: An Aura, Equipment, or Fortification became unattached from
     /// the object or player it was attached to.
@@ -1604,6 +1616,7 @@ mod tests {
         let event = GameEvent::EffectResolved {
             kind: EffectKind::DealDamage,
             source_id: ObjectId(5),
+            subject: None,
         };
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();

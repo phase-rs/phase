@@ -2703,6 +2703,7 @@ pub(super) fn match_attached(
         GameEvent::EffectResolved {
             kind: EffectKind::Attach | EffectKind::AttachAll | EffectKind::Equip,
             source_id: event_source_id,
+            ..
         } => {
             let attachment_id = if matches!(
                 event,
@@ -3084,6 +3085,7 @@ pub(super) fn match_explored(
     if let GameEvent::EffectResolved {
         kind: EffectKind::Explore,
         source_id: explorer_id,
+        ..
     } = event
     {
         if trigger.valid_card.is_some() {
@@ -3106,6 +3108,7 @@ pub(super) fn match_discover(
     let GameEvent::EffectResolved {
         kind: EffectKind::Discover,
         source_id: discoverer_id,
+        ..
     } = event
     else {
         return false;
@@ -3127,6 +3130,7 @@ pub(super) fn match_adapt(
     let GameEvent::EffectResolved {
         kind: EffectKind::Adapt,
         source_id: adapted_id,
+        ..
     } = event
     else {
         return false;
@@ -3151,6 +3155,7 @@ pub(super) fn match_connives(
     let GameEvent::EffectResolved {
         kind: EffectKind::Connive,
         source_id: conniver_id,
+        ..
     } = event
     else {
         return false;
@@ -3257,6 +3262,7 @@ pub(super) fn match_become_renowned(
     let GameEvent::EffectResolved {
         kind: EffectKind::Renown,
         source_id: renowned_id,
+        ..
     } = event
     else {
         return false;
@@ -3284,7 +3290,7 @@ pub(super) fn match_become_monstrous(
         GameEvent::EffectResolved {
             kind: EffectKind::Monstrosity,
             source_id: sid,
-        } if *sid == source_id
+        ..} if *sid == source_id
     )
 }
 
@@ -3336,6 +3342,7 @@ pub(super) fn match_manifest_dread(
     let GameEvent::EffectResolved {
         kind: EffectKind::ManifestDread,
         source_id: triggering_source,
+        ..
     } = event
     else {
         return false;
@@ -5489,6 +5496,7 @@ mod tests {
         let event = GameEvent::EffectResolved {
             kind: EffectKind::Equip,
             source_id: equipment,
+            subject: None,
         };
 
         assert!(match_attached(&event, &trigger, equipment, &state));
@@ -5526,6 +5534,7 @@ mod tests {
         let event = GameEvent::EffectResolved {
             kind: EffectKind::Equip,
             source_id: equipment,
+            subject: None,
         };
 
         assert!(!match_attached(&event, &trigger, equipment, &state));
@@ -5568,6 +5577,7 @@ mod tests {
         let event = GameEvent::EffectResolved {
             kind: EffectKind::Equip,
             source_id: other_equipment,
+            subject: None,
         };
 
         assert!(!match_attached(&event, &trigger, equipment, &state));
@@ -5614,6 +5624,7 @@ mod tests {
         let event = GameEvent::EffectResolved {
             kind: EffectKind::Attach,
             source_id: aura,
+            subject: None,
         };
         assert!(
             match_attached(&event, &trigger, host, &state),
@@ -9764,6 +9775,7 @@ mod tests {
         let event = GameEvent::EffectResolved {
             kind: EffectKind::Shuffle,
             source_id: ObjectId(1),
+            subject: None,
         };
         let trigger = make_trigger(TriggerMode::Shuffled);
         assert!(!match_shuffled(&event, &trigger, ObjectId(1), &state));
@@ -13554,6 +13566,7 @@ mod tests {
         let controlled_event = GameEvent::EffectResolved {
             kind: EffectKind::Explore,
             source_id: controlled_explorer,
+            subject: None,
         };
         assert!(match_explored(
             &controlled_event,
@@ -13565,6 +13578,7 @@ mod tests {
         let opponent_event = GameEvent::EffectResolved {
             kind: EffectKind::Explore,
             source_id: opponent_explorer,
+            subject: None,
         };
         assert!(!match_explored(
             &opponent_event,
@@ -13609,6 +13623,7 @@ mod tests {
         let controlled_event = GameEvent::EffectResolved {
             kind: EffectKind::Renown,
             source_id: controlled,
+            subject: None,
         };
         assert!(match_become_renowned(
             &controlled_event,
@@ -13620,6 +13635,7 @@ mod tests {
         let opponent_event = GameEvent::EffectResolved {
             kind: EffectKind::Renown,
             source_id: opponent,
+            subject: None,
         };
         assert!(!match_become_renowned(
             &opponent_event,
@@ -13654,6 +13670,7 @@ mod tests {
             &GameEvent::EffectResolved {
                 kind: EffectKind::Renown,
                 source_id,
+                subject: None,
             },
             &trigger,
             source_id,
@@ -13663,6 +13680,7 @@ mod tests {
             &GameEvent::EffectResolved {
                 kind: EffectKind::Renown,
                 source_id: other,
+                subject: None,
             },
             &trigger,
             source_id,
@@ -13751,6 +13769,7 @@ mod tests {
         let event = GameEvent::EffectResolved {
             kind: EffectKind::ManifestDread,
             source_id: dread_source,
+            subject: None,
         };
         assert!(match_manifest_dread(
             &event,
@@ -13763,6 +13782,7 @@ mod tests {
         let other = GameEvent::EffectResolved {
             kind: EffectKind::Manifest,
             source_id: dread_source,
+            subject: None,
         };
         assert!(!match_manifest_dread(
             &other,
@@ -13796,6 +13816,7 @@ mod tests {
         let event = GameEvent::EffectResolved {
             kind: EffectKind::ManifestDread,
             source_id: opp_source,
+            subject: None,
         };
         // "Whenever you manifest dread" should not fire when the opponent
         // triggers the effect.
@@ -14298,6 +14319,7 @@ mod tests {
         let non_lost = GameEvent::EffectResolved {
             kind: EffectKind::Draw,
             source_id: source,
+            subject: None,
         };
         assert!(
             !match_loses_game(&non_lost, &trigger, source, &state),

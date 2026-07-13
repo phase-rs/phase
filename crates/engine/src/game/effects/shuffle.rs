@@ -44,6 +44,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Shuffle,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -87,6 +88,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Shuffle,
         source_id: ability.source_id,
+        subject: None,
     });
 
     // CR 701.24a: Emit player-action event so trigger matchers (e.g.

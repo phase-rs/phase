@@ -146,6 +146,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ExileFromTopUntil,
         source_id: ability.source_id,
+        subject: None,
     });
 
     // CR 400.7: An object that moves from one zone to another becomes a new
