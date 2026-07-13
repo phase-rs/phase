@@ -3612,7 +3612,12 @@ pub(super) fn handle_resolution_choice(
                         "Selected card not in eligible set".to_string(),
                     ));
                 }
-                if state.objects.get(card_id).map(|obj| obj.zone) != Some(zone) {
+                // CR 400.7: a multi-origin ChangeZone choice freezes its
+                // eligible IDs when the prompt is created; the cards can be
+                // in different zones, so there is no single zone to recheck.
+                if !matches!(effect_kind, EffectKind::ChangeZone)
+                    && state.objects.get(card_id).map(|obj| obj.zone) != Some(zone)
+                {
                     return Err(EngineError::InvalidAction(format!(
                         "Selected card is no longer in {:?}",
                         zone
@@ -3763,6 +3768,11 @@ pub(super) fn handle_resolution_choice(
                     })?;
                     let chosen_ids: Vec<_> = chosen.to_vec();
                     for (i, card_id) in chosen_ids.iter().enumerate() {
+                        let origin = state
+                            .objects
+                            .get(card_id)
+                            .map(|object| object.zone)
+                            .unwrap_or(zone);
                         let per_obj_enter_counters =
                             effects::change_zone::enter_with_counters_for_pending_object(
                                 state,
@@ -3774,7 +3784,7 @@ pub(super) fn handle_resolution_choice(
                         let ctx = effects::change_zone::ChangeZoneIterationCtx {
                             source_id,
                             controller: player,
-                            origin: Some(zone),
+                            origin: Some(origin),
                             destination: dest_zone,
                             enter_transformed,
                             enter_tapped,

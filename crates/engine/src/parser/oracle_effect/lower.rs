@@ -1648,14 +1648,15 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
         }
     }
 
-    let Effect::ChangeZone {
-        origin: Some(origin),
-        ..
-    } = &clause_ir.parsed.effect
-    else {
+    let Effect::ChangeZone { origin, target, .. } = &clause_ir.parsed.effect else {
         return TargetChoiceTiming::Stack;
     };
-    if *origin == Zone::Battlefield {
+    let off_battlefield_origin = origin.is_some_and(|zone| zone != Zone::Battlefield)
+        || target
+            .extract_zones()
+            .iter()
+            .any(|zone| *zone != Zone::Battlefield);
+    if !off_battlefield_origin {
         return TargetChoiceTiming::Stack;
     }
 

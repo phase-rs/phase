@@ -542,17 +542,23 @@ pub fn resolve(
         // there is no fixed `InZone` constraint to extract — so derive the scan
         // zone from the members' actual zone rather than defaulting to the
         // battlefield.
-        let scan_zone = if exile_tracked_set_library_only {
-            Zone::Library
+        let scan_zones = if exile_tracked_set_library_only {
+            vec![Zone::Library]
         } else {
-            origin
-                .or_else(|| target_filter.extract_in_zone())
-                .or_else(|| {
-                    tracked_set_member_zones(state, target_filter)
-                        .and_then(|zones| zones.into_iter().next())
-                })
-                .unwrap_or(Zone::Battlefield)
+            let extracted = target_filter.extract_zones();
+            if extracted.len() > 1 {
+                extracted
+            } else if let Some(origin) = origin {
+                vec![origin]
+            } else if let Some(zone) = target_filter.extract_in_zone() {
+                vec![zone]
+            } else if let Some(zones) = tracked_set_member_zones(state, target_filter) {
+                zones
+            } else {
+                vec![Zone::Battlefield]
+            }
         };
+        let scan_zone = scan_zones[0];
         // Filter-controller override is primary here: when a filter like
         // "creature you control" needs "you" to resolve to the *target* player
         // (not the caster), we pass `filter_controller` explicitly. Include the
@@ -565,7 +571,7 @@ pub fn resolve(
             .objects
             .iter()
             .filter(|(id, obj)| {
-                obj.zone == scan_zone
+                scan_zones.contains(&obj.zone)
                     && !obj.is_emblem
                     && crate::game::filter::matches_target_filter(state, **id, target_filter, &ctx)
             })
@@ -2821,6 +2827,95 @@ mod tests {
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn change_zone_choice_can_move_cards_from_hand_and_graveyard() {
+        let mut state = GameState::new_two_player(42);
+        let hand_land = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        let graveyard_land = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Graveyard,
+        );
+        let opposing_land = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(1),
+            "Mountain".to_string(),
+            Zone::Graveyard,
+        );
+        for id in [hand_land, graveyard_land, opposing_land] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Land],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::InAnyZone {
+                        zones: vec![Zone::Hand, Zone::Graveyard],
+                    }],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(0, 2));
+        ability.target_choice_timing = crate::types::ability::TargetChoiceTiming::Resolution;
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { cards, count, .. } => {
+                assert_eq!(*count, 2);
+                assert!(cards.contains(&hand_land));
+                assert!(cards.contains(&graveyard_land));
+                assert!(!cards.contains(&opposing_land));
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![hand_land, graveyard_land],
+            },
+        )
+        .expect("one resolution-time choice must be able to select both source zones");
+
+        for id in [hand_land, graveyard_land] {
+            assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+            assert!(state.objects[&id].tapped);
+        }
+        assert_eq!(state.objects[&opposing_land].zone, Zone::Graveyard);
     }
 
     /// CR 614.12: `effective_enter_mods` applies the tapped/attacking riders
