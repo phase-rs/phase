@@ -1639,6 +1639,7 @@ impl GameRunner {
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
+            WaitingFor::PregameChooseColor { .. } => "PregameChooseColor",
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
             WaitingFor::ChooseRoomDoor { .. } => "ChooseRoomDoor",
             WaitingFor::PayCost { .. } => "PayCost",

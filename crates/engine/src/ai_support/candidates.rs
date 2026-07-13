@@ -2455,6 +2455,19 @@ pub fn candidate_actions_broad_with_probe(
             ));
             actions
         }
+        // CR 103.2c + CR 903.4b: pre-game commander color choice. Every color is
+        // legal; emit one candidate per color. (Deck-aware color weighting is a
+        // follow-up refinement — see the cluster-110 AI-quality note.)
+        WaitingFor::PregameChooseColor { player, .. } => crate::types::mana::ManaColor::ALL
+            .iter()
+            .map(|&color| {
+                candidate(
+                    GameAction::ChoosePregameColor { color },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 701.34a: Proliferate — choose any subset of eligible permanents/players.
         WaitingFor::ProliferateChoice { player, eligible } => {
             let mut actions = vec![

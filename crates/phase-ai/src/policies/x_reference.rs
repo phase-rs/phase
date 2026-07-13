@@ -199,6 +199,7 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor
+        | ContinuousModification::SetPregameChosenColor
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }

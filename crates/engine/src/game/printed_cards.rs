@@ -779,6 +779,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor
+        | ContinuousModification::SetPregameChosenColor
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }

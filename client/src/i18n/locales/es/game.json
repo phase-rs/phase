@@ -1019,6 +1019,13 @@
     "debug": {
       "modeBanner": "MODO DEPURACIÓN - Haz clic en cualquier carta",
       "modeButtonOff": "MODO CLIC DESACTIVADO"
+    },
+    "pregameColor": {
+      "eyebrow": "Antes de la partida",
+      "title": "Elige un color",
+      "subtitle": "Elige un color para {{name}} antes de que empiece la partida. {{name}} será de ese color, y la elección cuenta para tu identidad de color.",
+      "chooseAria": "Elegir {{color}} para {{name}}",
+      "confirm": "Confirmar"
     }
   },
   "gameProvider": {
@@ -2103,7 +2110,8 @@
       "priorityCombat": "combat",
       "priorityMain": "main phase",
       "priority": "priority",
-      "thinking": "deciding"
+      "thinking": "deciding",
+      "pregameColor": "choosing a color"
     },
     "seat": {
       "declareAttackers": "Declaring attackers",
@@ -2118,7 +2126,8 @@
       "priorityCombat": "Combat",
       "priorityMain": "Main phase",
       "priority": "Priority",
-      "thinking": "Thinking"
+      "thinking": "Thinking",
+      "pregameColor": "Choosing color"
     }
   }
 }

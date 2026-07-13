@@ -1392,6 +1392,13 @@ pub enum GameEvent {
         player: PlayerId,
         card_name: String,
     },
+    /// CR 103.2c + CR 903.4b: A commander's pre-game color choice was made as it
+    /// was placed into the command zone (Clara Oswald's "Impossible Girl").
+    PregameColorChosen {
+        player: PlayerId,
+        commander_id: ObjectId,
+        color: crate::types::mana::ManaColor,
+    },
     /// CR 702.139a: Companion moved to hand via {3} special action.
     CompanionMovedToHand {
         player: PlayerId,

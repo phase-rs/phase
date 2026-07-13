@@ -168,6 +168,29 @@ pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId
 /// undefined if that player doesn't have a commander."
 pub fn commander_color_identity(state: &GameState, player: PlayerId) -> Vec<ManaColor> {
     let mut identity: Vec<ManaColor> = Vec::new();
+
+    // CR 903.4b: a pre-game chosen color is part of the commander's color
+    // identity, applied during deck construction and throughout the game as the
+    // commander changes zones (CR 903.3e: readable in ALL zones). Fold it in
+    // FIRST — before the deck-pool early return below — so a *partner* commander
+    // with a printed color identity (e.g. a colored Doctor paired via Doctor's
+    // companion) cannot make `identity` non-empty and shadow Clara Oswald's
+    // colorless-base chosen color. The `.is_empty()` guard keeps the common
+    // (no pre-game choice) path allocation- and scan-free.
+    if !state.pregame_chosen_colors.is_empty() {
+        for obj in state
+            .objects
+            .values()
+            .filter(|obj| obj.is_commander && obj.owner == player)
+        {
+            if let Some(colors) = state.pregame_chosen_colors.get(&obj.id) {
+                for &c in colors {
+                    push_identity_color(&mut identity, c);
+                }
+            }
+        }
+    }
+
     if let Some(pool) = state.deck_pools.iter().find(|pool| pool.player == player) {
         for entry in pool.current_commander.iter() {
             for color in card_face_color_identity(&entry.card) {
@@ -751,6 +774,85 @@ mod tests {
         assert_eq!(identity.len(), 2);
         assert!(identity.contains(&ManaColor::White));
         assert!(identity.contains(&ManaColor::Black));
+    }
+
+    #[test]
+    fn commander_color_identity_includes_pregame_chosen_color() {
+        // CR 903.4b: a pre-game chosen color is part of color identity even while
+        // the commander is in the command zone (CR 903.3e) with a colorless base.
+        let mut state = setup_commander_game();
+        let clara =
+            create_commander_in_command_zone(&mut state, PlayerId(0), "Clara Oswald", vec![]);
+        state
+            .pregame_chosen_colors
+            .insert(clara, vec![ManaColor::Blue]);
+
+        let identity = commander_color_identity(&state, PlayerId(0));
+        assert_eq!(identity, vec![ManaColor::Blue]);
+    }
+
+    #[test]
+    fn commander_color_identity_pregame_color_survives_partner_shadow() {
+        // CR 903.4b regression (cluster-110 BLOCKING finding): a colored partner
+        // commander (a Doctor paired via Doctor's companion) must NOT shadow
+        // Clara's colorless-base pre-game chosen color. The deck-pool early
+        // return runs only AFTER the pre-game fold, so the chosen color survives.
+        let mut state = setup_commander_game();
+        let clara =
+            create_commander_in_command_zone(&mut state, PlayerId(0), "Clara Oswald", vec![]);
+        state
+            .pregame_chosen_colors
+            .insert(clara, vec![ManaColor::Red]);
+
+        // Registered deck pool holds BOTH commanders; the colored Doctor makes
+        // the deck-pool identity non-empty (which, before the fix, triggered the
+        // early return before Clara's chosen color was folded in).
+        state.deck_pools.push(PlayerDeckPool {
+            player: PlayerId(0),
+            current_commander: std::sync::Arc::new(vec![
+                DeckEntry {
+                    card: CardFace {
+                        name: "Clara Oswald".to_string(),
+                        color_identity: vec![], // colorless base
+                        ..CardFace::default()
+                    },
+                    count: 1,
+                },
+                DeckEntry {
+                    card: CardFace {
+                        name: "The Doctor".to_string(),
+                        color_identity: vec![ManaColor::Green],
+                        ..CardFace::default()
+                    },
+                    count: 1,
+                },
+            ]),
+            ..PlayerDeckPool::default()
+        });
+
+        let identity = commander_color_identity(&state, PlayerId(0));
+        assert!(
+            identity.contains(&ManaColor::Red),
+            "pre-game chosen color must survive the partner shadow: {identity:?}"
+        );
+        assert!(
+            identity.contains(&ManaColor::Green),
+            "partner identity must still be present: {identity:?}"
+        );
+    }
+
+    #[test]
+    fn commander_color_identity_ignores_pregame_color_of_other_player() {
+        // The fold is scoped to `owner == player`: player 1's pre-game color
+        // must not leak into player 0's identity.
+        let mut state = setup_commander_game();
+        let other_clara =
+            create_commander_in_command_zone(&mut state, PlayerId(1), "Clara Oswald", vec![]);
+        state
+            .pregame_chosen_colors
+            .insert(other_clara, vec![ManaColor::Blue]);
+
+        assert!(commander_color_identity(&state, PlayerId(0)).is_empty());
     }
 
     #[test]

@@ -954,6 +954,13 @@
       "decline": "Decline",
       "reveal": "Reveal {{name}}"
     },
+    "pregameColor": {
+      "eyebrow": "Pre-Game",
+      "title": "Choose a Color",
+      "subtitle": "Choose a color for {{name}} before the game begins. {{name}} will be that color, and the choice counts toward your color identity.",
+      "chooseAria": "Choose {{color}} for {{name}}",
+      "confirm": "Confirm"
+    },
     "bottomCards": {
       "eyebrowTinyLeaders": "Tiny Leaders",
       "eyebrowLondon": "London Mulligan",
@@ -2097,6 +2104,7 @@
       "choosingTargets": "choosing targets",
       "payingCost": "paying a cost",
       "mulligan": "mulligan decision",
+      "pregameColor": "choosing a color",
       "discarding": "discarding",
       "orderingTriggers": "ordering triggers",
       "respondingToStack": "responding to the stack",
@@ -2112,6 +2120,7 @@
       "choosingTargets": "Choosing targets",
       "payingCost": "Paying a cost",
       "mulligan": "Mulligan",
+      "pregameColor": "Choosing color",
       "discarding": "Discarding",
       "orderingTriggers": "Ordering triggers",
       "respondingToStack": "Responding",

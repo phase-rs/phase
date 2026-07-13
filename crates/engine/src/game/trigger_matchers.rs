@@ -1012,6 +1012,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::Waterbend { .. }
         | GameEvent::CompanionRevealed { .. }
         | GameEvent::CompanionMovedToHand { .. }
+        | GameEvent::PregameColorChosen { .. }
         | GameEvent::NinjutsuActivated { .. }
         | GameEvent::KeywordAbilityActivated { .. }
         | GameEvent::CreatureExploited { .. }

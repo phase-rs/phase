@@ -4818,6 +4818,16 @@ pub enum WaitingFor {
         /// Eligible companion cards from sideboard: (card_name, sideboard_index).
         eligible_companions: Vec<(String, usize)>,
     },
+    /// CR 103.2c + CR 903.4b + CR 607.2p: Pre-game "choose a color before the game
+    /// begins" prompt for a commander with a linked color CDA (Clara Oswald,
+    /// The Prismatic Piper, Faceless One). Revealed as the commander is placed
+    /// into the command zone, after the companion reveal and before mulligans.
+    /// Mirrors `CompanionReveal`. The chosen color is written to
+    /// `GameState::pregame_chosen_colors[commander_id]`.
+    PregameChooseColor {
+        player: PlayerId,
+        commander_id: ObjectId,
+    },
     /// CR 704.5j: Player chooses which legendary permanent to keep.
     /// The rest are put into their owners' graveyards (not destroyed — indestructible does not apply).
     ChooseLegend {
@@ -5335,6 +5345,7 @@ impl WaitingFor {
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
+            WaitingFor::PregameChooseColor { .. } => "PregameChooseColor",
             WaitingFor::ChooseLegend { .. } => "ChooseLegend",
             WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
             WaitingFor::BattleProtectorChoice { .. } => "BattleProtectorChoice",
@@ -5464,6 +5475,7 @@ impl WaitingFor {
             | WaitingFor::ClashChooseOpponent { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
+            | WaitingFor::PregameChooseColor { player, .. }
             | WaitingFor::ChooseLegend { player, .. }
             | WaitingFor::BattleProtectorChoice { player, .. }
             | WaitingFor::ProliferateChoice { player, .. }
@@ -7085,6 +7097,17 @@ pub struct GameState {
     // Commander support
     #[serde(default)]
     pub commander_cast_count: HashMap<ObjectId, u32>,
+
+    /// CR 607.2p + CR 604.3 + CR 903.4b: Pre-game linked-CDA color choices, keyed
+    /// on the commander's stable `ObjectId`. Seeded once during the pre-game
+    /// window (as the commander is placed into the command zone, CR 103.2c) and
+    /// NEVER cleared on zone change — unlike `chosen_attributes` (CR 400.7) — so
+    /// the linked `SetPregameChosenColor` CDA keeps reading it as the commander
+    /// moves between zones. Also folded into `commander_color_identity`
+    /// (CR 903.4b). `Vec` to accommodate a future "color or colors of your
+    /// choice" without a shape change.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub pregame_chosen_colors: HashMap<ObjectId, Vec<ManaColor>>,
 
     /// Owner stamped when a commander cast from the command zone is recorded.
     /// CR 903.8: `commander_casts_from_command_zone` must count committed casts
@@ -9549,6 +9572,7 @@ impl GameState {
             chain_tracked_set_id: None,
             tracked_set_member_causes: HashMap::new(),
             commander_cast_count: HashMap::new(),
+            pregame_chosen_colors: HashMap::new(),
             commander_cast_owners: HashMap::new(),
             extra_turns: Vec::new(),
             turns_to_skip: vec![0; player_count as usize],
@@ -10545,6 +10569,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         chain_tracked_set_id: _,
         tracked_set_member_causes: _,
         commander_cast_count: _,
+        pregame_chosen_colors: _,
         commander_cast_owners: _,
         commander_declined_zone_return: _,
         objects_that_dealt_damage: _,
@@ -10844,6 +10869,7 @@ impl PartialEq for GameState {
             && self.chain_tracked_set_id == other.chain_tracked_set_id
             && self.tracked_set_member_causes == other.tracked_set_member_causes
             && self.commander_cast_count == other.commander_cast_count
+            && self.pregame_chosen_colors == other.pregame_chosen_colors
             && self.commander_cast_owners == other.commander_cast_owners
             && self.commander_declined_zone_return == other.commander_declined_zone_return
             && self.objects_that_dealt_damage == other.objects_that_dealt_damage

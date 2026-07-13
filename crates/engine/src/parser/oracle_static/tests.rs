@@ -28739,3 +28739,82 @@ fn dynamic_pt_pump_scales_by_source_intensity() {
         s[0].modifications
     );
 }
+
+/// CR 604.3 + CR 607.2p + CR 903.4b (cluster-110): Clara Oswald's "Impossible
+/// Girl" two-sentence pre-game color paragraph must parse to ONE unconditional
+/// color CDA carrying `SetPregameChosenColor` — never a `Spell/Unimplemented`,
+/// and never the zone-fragile transient `AddChosenColor`. The Doctor-scoped
+/// `DoubleTriggers` static on the next line must be unaffected.
+#[test]
+fn clara_oswald_impossible_girl_is_pregame_color_cda() {
+    use crate::types::ability::{AbilityKind, ContinuousModification};
+
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Impossible Girl — If Clara Oswald is your commander, choose a color before the game begins. Clara Oswald is the chosen color.\n\
+         If a triggered ability of a Doctor you control triggers, that ability triggers an additional time.\n\
+         Doctor's companion (You can have two commanders if the other is the Doctor.)",
+        "Clara Oswald",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Human".to_string()],
+    );
+
+    // Exactly one pre-game color CDA, and it is characteristic-defining.
+    let pregame: Vec<_> = parsed
+        .statics
+        .iter()
+        .filter(|d| {
+            d.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::SetPregameChosenColor))
+        })
+        .collect();
+    assert_eq!(
+        pregame.len(),
+        1,
+        "expected exactly one SetPregameChosenColor CDA, got statics={:?}",
+        parsed.statics
+    );
+    assert!(
+        pregame[0].characteristic_defining,
+        "pre-game color static must be a CDA"
+    );
+
+    // The transient AddChosenColor must NOT appear (it would be wiped on zone
+    // change per CR 400.7, the exact bug the pre-parser forecloses).
+    assert!(
+        !parsed.statics.iter().any(|d| d
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddChosenColor))),
+        "the second sentence must not be re-dispatched to AddChosenColor: {:?}",
+        parsed.statics
+    );
+
+    // The prior Spell/Unimplemented mis-emission of the *pre-game paragraph* is
+    // gone. (An unrelated "Doctor's companion" keyword line still lowers to an
+    // Unimplemented spell here only because this isolated parse passes no MTGJSON
+    // keyword names; in production that keyword is recognized. So target the
+    // pre-game paragraph precisely by its "chosen color" signature.)
+    assert!(
+        !parsed.abilities.iter().any(|a| a.kind == AbilityKind::Spell
+            && matches!(a.effect.as_ref(), Effect::Unimplemented { .. })
+            && a.description
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains("chosen color")),
+        "the pre-game paragraph must not emit a Spell/Unimplemented: {:?}",
+        parsed.abilities
+    );
+
+    // The Doctor-scoped DoubleTriggers static on line 2 is untouched.
+    assert!(
+        parsed.statics.iter().any(|d| matches!(
+            &d.mode,
+            crate::types::statics::StaticMode::DoubleTriggers { .. }
+        )),
+        "Doctor trigger-doubler static must still parse: {:?}",
+        parsed.statics
+    );
+}

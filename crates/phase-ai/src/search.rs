@@ -1426,6 +1426,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::DeclareCompanion { card_index: None })
         }
 
+        // CR 903.4b: pre-game commander color choice — every color is a legal
+        // choice; default to white (a deck-aware pick is a follow-up refinement).
+        WaitingFor::PregameChooseColor { .. } => Some(GameAction::ChoosePregameColor {
+            color: engine::types::mana::ManaColor::White,
+        }),
+
         // Explore choice: pick the first choosable creature.
         WaitingFor::ExploreChoice { choosable, .. } => {
             choosable.first().map(|&id| GameAction::ChooseTarget {

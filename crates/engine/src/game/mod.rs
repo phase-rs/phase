@@ -108,6 +108,7 @@ pub mod mulligan;
 pub(crate) mod off_zone_characteristics;
 pub mod pairing;
 pub mod perf_counters;
+pub mod pregame_choices;
 // Tests for `archenemy` live in a sibling file (declared here, not in
 // `archenemy.rs`, so `archenemy.rs` stays implementation-only).
 #[cfg(test)]

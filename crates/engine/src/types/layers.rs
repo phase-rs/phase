@@ -151,7 +151,8 @@ impl ContinuousModification {
             ),
             ContinuousModification::SetColor { .. }
             | ContinuousModification::AddColor { .. }
-            | ContinuousModification::AddChosenColor => Layer::Color,
+            | ContinuousModification::AddChosenColor
+            | ContinuousModification::SetPregameChosenColor => Layer::Color,
             // CR 613.4d: Switch P/T is applied in layer 7d.
             ContinuousModification::SwitchPowerToughness => Layer::SwitchPT,
             ContinuousModification::AssignDamageFromToughness

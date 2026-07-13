@@ -663,7 +663,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::Airbend { .. }
         | GameEvent::Earthbend { .. }
         | GameEvent::Waterbend { .. } => push(TriggerEventKey::Bending),
-        GameEvent::CompanionRevealed { .. } | GameEvent::CompanionMovedToHand { .. } => {}
+        GameEvent::CompanionRevealed { .. }
+        | GameEvent::CompanionMovedToHand { .. }
+        | GameEvent::PregameColorChosen { .. } => {}
         GameEvent::NinjutsuActivated { .. } | GameEvent::KeywordAbilityActivated { .. } => {
             push(TriggerEventKey::AbilityOrCopyActivated);
         }

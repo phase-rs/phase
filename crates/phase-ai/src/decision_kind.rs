@@ -152,6 +152,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::SeparatePilesPartition { .. }
         | WaitingFor::SeparatePilesChoice { .. }
         | WaitingFor::CompanionReveal { .. }
+        // CR 103.2c + CR 903.4b: pre-game commander color choice — a forced
+        // pre-game selection; route to the ability catch-all like companion.
+        | WaitingFor::PregameChooseColor { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::BattleProtectorChoice { .. }

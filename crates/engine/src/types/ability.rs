@@ -19422,6 +19422,17 @@ pub enum ContinuousModification {
     /// CR 105.3: Set the object's color to the chosen color.
     /// Reads from `chosen_attributes` at layer evaluation time.
     AddChosenColor,
+    /// CR 604.3 + CR 607.2p + CR 105.3: Layer-5 color CDA that sets the object's
+    /// color to the color(s) it chose before the game began — the linked pre-game
+    /// choice on Clara Oswald / The Prismatic Piper / Faceless One ("If ~ is your
+    /// commander, choose a color before the game begins. ~ is the chosen color.").
+    /// Reads `GameState::pregame_chosen_colors[source_id]` at layer-evaluation
+    /// time — NOT `chosen_attributes` (as `AddChosenColor` does), because
+    /// CR 607.2p requires the choice to persist across every zone change whereas
+    /// CR 400.7 clears `chosen_attributes` on each battlefield entry. An
+    /// empty/absent entry is a no-op (the card is not that player's commander,
+    /// so no pre-game choice was seeded).
+    SetPregameChosenColor,
     /// CR 608.2d + CR 613.1f: Strip the chosen keyword (read from the granting
     /// source's `chosen_attributes`) from the affected object. Mirrors
     /// `RemoveKeyword`'s discriminant-based stripping so parameterized

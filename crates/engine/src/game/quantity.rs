@@ -488,6 +488,7 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor
+        | ContinuousModification::SetPregameChosenColor
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }

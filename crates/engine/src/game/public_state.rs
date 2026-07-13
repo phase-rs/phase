@@ -467,6 +467,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::Waterbend { .. }
             | GameEvent::CompanionRevealed { .. }
             | GameEvent::CompanionMovedToHand { .. }
+            | GameEvent::PregameColorChosen { .. }
             | GameEvent::NinjutsuActivated { .. }
             | GameEvent::KeywordAbilityActivated { .. }
             | GameEvent::CreatureExploited { .. }

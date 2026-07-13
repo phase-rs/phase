@@ -93,9 +93,10 @@ use super::oracle_static::{
     parse_cast_spells_alternative_cost_multi, parse_chosen_creature_type_static_prefix,
     parse_collect_evidence_alt_cost, parse_compound_you_control_chosen_type_static_prefix,
     parse_every_creature_type_static_prefix, parse_flashback_trailing_self_spell_cost_reduction,
-    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
-    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
-    try_parse_top_of_library_cast_permission, GrantedCastKeywordKind,
+    parse_pregame_chosen_color_cda, parse_spells_alternative_cost, parse_static_line,
+    parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
+    try_parse_graveyard_keyword_grant_static, try_parse_top_of_library_cast_permission,
+    GrantedCastKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -3473,6 +3474,56 @@ pub(crate) fn parse_oracle_ir(
             emitter.trigger_at(line, trigger);
         }
         preparsed_consumed.extend(consumed);
+    }
+
+    // CR 604.3 + CR 607.2p + CR 903.4b: Pre-parse the two-sentence pre-game
+    // linked-CDA color template ("If ~ is your commander, choose a color before
+    // the game begins. ~ is the chosen color." — Clara Oswald, The Prismatic
+    // Piper, Faceless One) into ONE unconditional color CDA carrying
+    // `SetPregameChosenColor`. Consuming the whole paragraph here (its single
+    // `\n`-delimited line index) forecloses (a) the spell-resolution path
+    // emitting a `Spell/Unimplemented` for it, and (b) the second sentence being
+    // re-dispatched in isolation to `AddChosenColor` — a zone-fragile,
+    // CR 400.7-cleared read. Mirrors the saga/attraction/leveler pre-parsers.
+    for idx in 0..lines.len() {
+        if preparsed_consumed.contains(&idx) {
+            continue;
+        }
+        let stripped = strip_reminder_text(lines[idx].trim());
+        if stripped.is_empty() {
+            continue;
+        }
+        // Strip an "Impossible Girl — " ability-word prefix (Prismatic Piper /
+        // Faceless One have none); the CDA description keeps the original line.
+        let body = strip_ability_word_with_name(&stripped)
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| stripped.clone());
+        let body_lower = body.to_lowercase();
+
+        // Single-line case (all three current cards print both sentences on one
+        // line): recognize and consume this one line index.
+        if let Some(def) = parse_pregame_chosen_color_cda(&body_lower, &stripped) {
+            emitter.static_at(idx, def);
+            preparsed_consumed.insert(idx);
+            break;
+        }
+
+        // Robustness: a future printing that splits the two sentences across two
+        // `\n`-delimited lines is recognized by trying the combinator on the
+        // joined pair; both line indices are then consumed.
+        if idx + 1 < lines.len() && !preparsed_consumed.contains(&(idx + 1)) {
+            let next = strip_reminder_text(lines[idx + 1].trim());
+            if !next.is_empty() {
+                let joined = format!("{body_lower} {}", next.to_lowercase());
+                let description = format!("{stripped} {next}");
+                if let Some(def) = parse_pregame_chosen_color_cda(&joined, &description) {
+                    emitter.static_at(idx, def);
+                    preparsed_consumed.insert(idx);
+                    preparsed_consumed.insert(idx + 1);
+                    break;
+                }
+            }
+        }
     }
 
     // CR 711: Pre-parse leveler LEVEL blocks into counter-gated static abilities,

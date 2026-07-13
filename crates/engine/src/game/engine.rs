@@ -6093,6 +6093,12 @@ fn apply_action(
             WaitingFor::CompanionReveal { player, .. },
             GameAction::DeclareCompanion { card_index },
         ) => super::companion::handle_declare_companion(state, *player, card_index, &mut events),
+        // CR 103.2c + CR 903.4b: Pre-game color choice for a commander's linked
+        // color CDA (Clara Oswald's "Impossible Girl").
+        (
+            WaitingFor::PregameChooseColor { .. },
+            GameAction::ChoosePregameColor { color },
+        ) => super::pregame_choices::handle_choose_pregame_color(state, color, &mut events),
         // CR 702.139a: Special action — pay {3} to put companion into hand (see rule 116.2g).
         (WaitingFor::Priority { player }, GameAction::CompanionToHand) => {
             state.lands_tapped_for_mana.remove(player);
@@ -8936,11 +8942,13 @@ pub fn start_game_with_starting_player(
     // If players have cards in their libraries, start mulligan flow
     let has_libraries = state.players.iter().any(|p| !p.library.is_empty());
     let waiting_for = if has_libraries {
-        // CR 702.139a: Check for eligible companions before mulligans.
+        // CR 702.139a: Check for eligible companions before mulligans. After the
+        // companion reveals (or immediately, when none are eligible) the pre-game
+        // color choices (CR 103.2c + CR 903.4b) run before mulligans.
         if let Some(companion_wf) = super::companion::check_all_companion_reveals(state) {
             companion_wf
         } else {
-            mulligan::start_mulligan(state, &mut events)
+            super::pregame_choices::begin_pregame_color_or_mulligan(state, &mut events)
         }
     } else {
         // No cards to mulligan with, skip straight to game

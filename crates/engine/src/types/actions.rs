@@ -550,6 +550,11 @@ pub enum GameAction {
     },
     /// CR 702.139a: Pay {3} to put companion into hand (special action, see rule 116.2g).
     CompanionToHand,
+    /// CR 103.2c + CR 903.4b + CR 105.3: Submit the pre-game color for a
+    /// commander's linked color CDA (`WaitingFor::PregameChooseColor`).
+    ChoosePregameColor {
+        color: super::mana::ManaColor,
+    },
     /// CR 701.57a: Choose to cast discovered card or put it to hand.
     DiscoverChoice {
         choice: CastChoice,
@@ -1474,6 +1479,7 @@ impl GameAction {
             | GameAction::HarmonizeTap { .. }
             | GameAction::DeclareCompanion { .. }
             | GameAction::CompanionToHand
+            | GameAction::ChoosePregameColor { .. }
             | GameAction::DiscoverChoice { .. }
             | GameAction::GraveyardPaidCastChoice { .. }
             | GameAction::CascadeChoice { .. }

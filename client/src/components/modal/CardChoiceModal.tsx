@@ -37,6 +37,7 @@ import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
+import { PregameChooseColorModal } from "./PregameChooseColorModal.tsx";
 import { RoomDoorChoiceModal } from "./RoomDoorChoiceModal.tsx";
 import {
   SeparatePilesChoiceModal,
@@ -368,6 +369,13 @@ export function CardChoiceModal() {
     case "SpecializeColor":
       if (!canActForWaitingState) return null;
       return <SpecializeColorModal data={waitingFor.data} />;
+    case "PregameChooseColor":
+      if (!canActForWaitingState) return null;
+      return (
+        <PregameChooseColorModal
+          commanderName={objects?.[waitingFor.data.commander_id]?.name ?? ""}
+        />
+      );
     case "ChooseRoomDoor":
       if (!canActForWaitingState) return null;
       return <RoomDoorChoiceModal data={waitingFor.data} />;

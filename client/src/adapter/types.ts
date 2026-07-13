@@ -1450,6 +1450,7 @@ export type WaitingFor =
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }
   | { type: "PopulateChoice"; data: { player: PlayerId; source_id: ObjectId; valid_tokens: ObjectId[] } }
   | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: [string, number][] } }
+  | { type: "PregameChooseColor"; data: { player: PlayerId; commander_id: ObjectId } }
   | { type: "ChooseLegend"; data: { player: PlayerId; legend_name: string; candidates: ObjectId[] } }
   | { type: "CommanderZoneChoice"; data: { player: PlayerId; commander_id: ObjectId; current_zone: string } }
   | { type: "BattleProtectorChoice"; data: { player: PlayerId; battle_id: ObjectId; candidates: PlayerId[] } }
@@ -1895,6 +1896,7 @@ export type GameAction =
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
   | { type: "DeclareCompanion"; data: { card_index: number | null } }
   | { type: "CompanionToHand" }
+  | { type: "ChoosePregameColor"; data: { color: ManaColor } }
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
   | { type: "GraveyardPaidCastChoice"; data: { choice: CastChoice } }
   | { type: "CascadeChoice"; data: { choice: CastChoice } }
@@ -2051,6 +2053,7 @@ export type GameEvent =
   | { type: "RingTemptsYou"; data: { player_id: PlayerId } }
   | { type: "CompanionRevealed"; data: { player: PlayerId; card_name: string } }
   | { type: "CompanionMovedToHand"; data: { player: PlayerId; card_name: string } }
+  | { type: "PregameColorChosen"; data: { player: PlayerId; commander_id: ObjectId; color: ManaColor } }
   | { type: "EnergyChanged"; data: { player: PlayerId; delta: number } }
   | { type: "PlayerCounterChanged"; data: { player: PlayerId; counter_kind: PlayerCounterKind; delta: number } }
   | { type: "SpeedChanged"; data: { player: PlayerId; old_speed: number | null; new_speed: number | null } }

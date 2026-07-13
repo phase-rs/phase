@@ -212,6 +212,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::Waterbend { .. }
         | GameEvent::CompanionRevealed { .. }
         | GameEvent::CompanionMovedToHand { .. }
+        | GameEvent::PregameColorChosen { .. }
         | GameEvent::EnergyChanged { .. }
         | GameEvent::PlayerCounterChanged { .. }
         | GameEvent::ManaExpended { .. }
@@ -1008,6 +1009,23 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(card_name),
             text(" as their companion"),
         ],
+
+        // CR 903.4b: pre-game commander color choice.
+        GameEvent::PregameColorChosen { player, color, .. } => {
+            let color_name = match color {
+                crate::types::mana::ManaColor::White => "white",
+                crate::types::mana::ManaColor::Blue => "blue",
+                crate::types::mana::ManaColor::Black => "black",
+                crate::types::mana::ManaColor::Red => "red",
+                crate::types::mana::ManaColor::Green => "green",
+            };
+            vec![
+                player_seg(state, *player),
+                text(" chooses "),
+                text(color_name),
+                text(" for their commander"),
+            ]
+        }
 
         GameEvent::CompanionMovedToHand {
             player, card_name, ..

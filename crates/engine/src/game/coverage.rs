@@ -4139,6 +4139,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::AddAllLandTypes => "all land types".into(),
         ContinuousModification::AddChosenSubtype { .. } => "add chosen subtype".into(),
         ContinuousModification::AddChosenColor => "add chosen color".into(),
+        // CR 604.3 + CR 607.2p: Clara Oswald / The Prismatic Piper / Faceless One
+        // — set color to the pre-game-chosen color.
+        ContinuousModification::SetPregameChosenColor => "set pre-game chosen color".into(),
         // CR 608.2d + CR 613.1f: Urborg / Walking Sponge — strip the
         // keyword chosen at resolution time.
         ContinuousModification::RemoveChosenKeyword => "remove chosen keyword".into(),

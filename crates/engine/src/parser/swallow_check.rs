@@ -1691,6 +1691,24 @@ fn any_static_has_target_gated_cost_modification(parsed: &ParsedAbilities) -> bo
         .any(static_has_target_gated_cost_modification)
 }
 
+/// CR 604.3a(5) + CR 607.2p: True when a `SetPregameChosenColor` linked color CDA
+/// is present (Clara Oswald, The Prismatic Piper, Faceless One). The leading
+/// "If ~ is your commander, choose a color before the game begins." clause is
+/// the pre-game choice-making marker, NOT a runtime condition — per CR 604.3a(5)
+/// the linked CDA is unconditional (the commander gate lives in the pre-game
+/// orchestrator), so this "if" is represented by the whole pre-game architecture
+/// rather than by a `condition` field.
+fn any_static_is_pregame_chosen_color_cda(parsed: &ParsedAbilities) -> bool {
+    parsed.statics.iter().any(|def| {
+        def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                crate::types::ability::ContinuousModification::SetPregameChosenColor
+            )
+        })
+    })
+}
+
 fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
     parsed.abilities.iter().any(def_tree_has_optional)
         // CR 603.3: Triggers carry their own optional flag for the outer
@@ -2996,6 +3014,16 @@ fn detect_condition_if(
         return;
     }
     if any_static_has_target_gated_cost_modification(parsed) {
+        return;
+    }
+    // CR 604.3a(5) + CR 607.2p: "If ~ is your commander, choose a color before
+    // the game begins." is the pre-game linked-CDA choice-making clause. The
+    // linked color CDA is UNCONDITIONAL (the "if you're the commander" gate is
+    // enforced by the pre-game orchestrator, which only prompts for is_commander
+    // objects — not by a runtime `condition`), so this leading "if" is a
+    // represented pre-game marker, not a swallowed game-state condition. Clara
+    // Oswald / The Prismatic Piper / Faceless One.
+    if any_static_is_pregame_chosen_color_cda(parsed) {
         return;
     }
     // Strip CR-implicit "if" phrases that aren't real conditional gates

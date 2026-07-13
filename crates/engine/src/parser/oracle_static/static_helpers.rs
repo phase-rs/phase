@@ -1335,6 +1335,70 @@ pub(crate) fn parse_self_ref_type_subject(input: &str) -> OracleResult<'_, ()> {
     )))
 }
 
+/// CR 604.3 + CR 607.2p + CR 903.4b + CR 105.3: Recognize the two-sentence
+/// pre-game linked-CDA color template shared verbatim by Clara Oswald,
+/// The Prismatic Piper, and Faceless One:
+///
+///   "If ~ is your commander, choose a color before the game begins.
+///    ~ is the chosen color."
+///
+/// `input` must be lowercased with any ability-word / reminder prefix already
+/// stripped (the pre-parser in `oracle.rs` does this). Composed by axis — the
+/// self-subject variants come free from `parse_self_color_subject`, so this is
+/// not a verbatim string match. Returns `()` on a full match; the concrete color
+/// is chosen at runtime per CR 103.2c, so this only classifies the paragraph.
+pub(crate) fn parse_pregame_chosen_color_cda_line(input: &str) -> OracleResult<'_, ()> {
+    // Sentence 1 (CR 607.2p first ability — the pre-game choice-making static):
+    // "if " <self> " is " "your commander" ", choose a color before the game begins. "
+    let (input, _) = tag::<_, _, OracleError<'_>>("if ").parse(input)?;
+    let (input, _) = parse_self_color_subject(input)?; // consumes "<self> is "
+    let (input, _) = tag("your commander").parse(input)?;
+    let (input, _) = alt((
+        tag(", choose a color before the game begins. "),
+        tag(" choose a color before the game begins. "),
+    ))
+    .parse(input)?;
+    // Sentence 2 (CR 607.2p second ability — the linked CDA, same paragraph):
+    // <self> " is " "the chosen color" "."?
+    let (input, _) = parse_self_color_subject(input)?; // consumes "<self> is "
+    let (input, _) = all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("the chosen color"),
+        opt(tag(".")),
+    ))
+    .parse(input)?;
+    Ok((input, ()))
+}
+
+/// CR 604.3 + CR 607.2p + CR 105.3 + CR 903.4b: Build the unconditional color CDA
+/// that reads the pre-game color choice, if `body_lower` matches the pre-game
+/// color template. The CDA is characteristic-defining and active in every zone
+/// (CR 604.3: CDAs function in all zones). `description` is the original,
+/// case-preserving line (ability-word prefix preserved for display). Per
+/// CR 604.3a(5) the CDA carries NO commander condition — the gate lives entirely
+/// in the pre-game orchestrator, which only prompts for `is_commander` objects.
+pub(crate) fn parse_pregame_chosen_color_cda(
+    body_lower: &str,
+    description: &str,
+) -> Option<StaticDefinition> {
+    parse_pregame_chosen_color_cda_line(body_lower).ok()?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::SetPregameChosenColor])
+            .active_zones(vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Stack,
+                Zone::Exile,
+                Zone::Command,
+            ])
+            .cda()
+            .description(description.to_string()),
+    )
+}
+
 /// CR 205.3 + CR 122.1: Parse "[each] nonland creature with an everything
 /// counter on it" into a creature `TypedFilter` carrying
 /// `TypeFilter::Non(Land)` plus the counter `FilterProp` produced by the shared

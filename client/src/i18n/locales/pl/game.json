@@ -1019,6 +1019,13 @@
     "debug": {
       "modeBanner": "TRYB DEBUGOWANIA - Kliknij dowolną kartę",
       "modeButtonOff": "TRYB KLIKNIĘCIA WYŁĄCZONY"
+    },
+    "pregameColor": {
+      "eyebrow": "Przed grą",
+      "title": "Wybierz kolor",
+      "subtitle": "Wybierz kolor dla {{name}} przed rozpoczęciem gry. {{name}} będzie tego koloru, a wybór wlicza się do twojej tożsamości kolorystycznej.",
+      "chooseAria": "Wybierz {{color}} dla {{name}}",
+      "confirm": "Potwierdź"
     }
   },
   "gameProvider": {
@@ -2103,7 +2110,8 @@
       "priorityCombat": "combat",
       "priorityMain": "main phase",
       "priority": "priority",
-      "thinking": "deciding"
+      "thinking": "deciding",
+      "pregameColor": "choosing a color"
     },
     "seat": {
       "declareAttackers": "Declaring attackers",
@@ -2118,7 +2126,8 @@
       "priorityCombat": "Combat",
       "priorityMain": "Main phase",
       "priority": "Priority",
-      "thinking": "Thinking"
+      "thinking": "Thinking",
+      "pregameColor": "Choosing color"
     }
   }
 }

@@ -4648,6 +4648,21 @@ fn apply_continuous_effect_filtered(
         None
     };
 
+    // CR 607.2p + CR 604.3: Pre-read the pre-game-chosen color(s) for the
+    // `SetPregameChosenColor` CDA. Unlike `chosen_color` (which reads the
+    // source's transient `chosen_attributes`, CR 400.7-cleared each zone
+    // change), this reads the persistent `pregame_chosen_colors` map keyed on
+    // the commander's stable id, so the linked CDA keeps applying as the
+    // commander changes zones. Absent entry ⇒ `None` ⇒ the apply arm is a no-op.
+    let pregame_colors = if matches!(
+        effect.modification,
+        ContinuousModification::SetPregameChosenColor
+    ) {
+        state.pregame_chosen_colors.get(&effect.source_id).cloned()
+    } else {
+        None
+    };
+
     // Pre-read chosen keyword from source (avoids borrow conflict in the loop).
     // CR 608.2d + CR 613.1f: When the modification is `RemoveChosenKeyword`,
     // the granting source's `chosen_attributes` carry the typed `Keyword` that
@@ -5181,6 +5196,16 @@ fn apply_continuous_effect_filtered(
             ContinuousModification::AddChosenColor => {
                 if let Some(color) = chosen_color {
                     obj.color = vec![color];
+                }
+            }
+            // CR 105.3 + CR 607.2p: Set the object's color to the pre-game-chosen
+            // color(s). Reads the persistent `pregame_chosen_colors` map (via the
+            // `pregame_colors` pre-read), so the choice survives every zone change.
+            ContinuousModification::SetPregameChosenColor => {
+                if let Some(colors) = &pregame_colors {
+                    if !colors.is_empty() {
+                        obj.color = colors.clone();
+                    }
                 }
             }
             ContinuousModification::SetDynamicPower { .. } => {
@@ -17168,6 +17193,58 @@ mod tests {
                 StaticModeKind::Shroud
             ),
             "phased-out static (CR 702.26b) must not appear in presence"
+        );
+    }
+
+    /// CR 105.3 + CR 607.2p (cluster-110): the `SetPregameChosenColor` CDA reads
+    /// the persistent `pregame_chosen_colors` map at layer-evaluation time and
+    /// sets the object's color to the pre-game choice. Empty/absent entry is a
+    /// no-op; the choice persists across zone changes (unlike `AddChosenColor`,
+    /// CR 400.7). This is the building-block test for the new Layer-5 arm.
+    #[test]
+    fn set_pregame_chosen_color_applies_persistent_choice() {
+        let mut state = setup();
+        let clara = make_creature(&mut state, "Clara Oswald", 2, 2, P0);
+        {
+            let obj = state.objects.get_mut(&clara).unwrap();
+            obj.color.clear();
+            obj.base_color.clear();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::SetPregameChosenColor])
+                    .active_zones(vec![Zone::Battlefield])
+                    .cda(),
+            );
+        }
+
+        // No pre-game entry yet ⇒ the CDA is a no-op, colorless base preserved.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects.get(&clara).unwrap().color.is_empty(),
+            "absent pre-game entry must leave the object colorless"
+        );
+
+        // Seed the pre-game choice ⇒ the CDA sets the object's color to Blue.
+        state
+            .pregame_chosen_colors
+            .insert(clara, vec![ManaColor::Blue]);
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&clara).unwrap().color,
+            vec![ManaColor::Blue],
+            "SetPregameChosenColor must set color to the pre-game choice"
+        );
+
+        // Re-evaluating (a proxy for a later zone change / recompute) keeps Blue.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&clara).unwrap().color,
+            vec![ManaColor::Blue],
+            "the pre-game color must persist across recomputation"
         );
     }
 }

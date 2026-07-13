@@ -2694,6 +2694,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor
+        | ContinuousModification::SetPregameChosenColor
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }

@@ -316,8 +316,10 @@ fn advance_companion_reveal(
         }
     }
 
-    // All players done — proceed to mulligans
-    super::mulligan::start_mulligan(state, events)
+    // CR 103.2c + CR 903.4b: All companion reveals done — run any pre-game color
+    // choices (Clara Oswald / The Prismatic Piper / Faceless One) before
+    // mulligans, or proceed straight to mulligans when none are needed.
+    super::pregame_choices::begin_pregame_color_or_mulligan(state, events)
 }
 
 // ── Special Action: Pay {3} to Move Companion to Hand ───────────────────

@@ -174,6 +174,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ExertChoice",
     "EnlistChoice",
     "CompanionReveal",
+    // CR 103.2c + CR 903.4b: pre-game commander color choice overlay.
+    "PregameChooseColor",
     // Game lifecycle
     "GameOver",
     "MulliganDecision",
@@ -243,6 +245,8 @@ export function waitingForReason(
     case "MulliganDecision":
     case "OpeningHandBottomCards":
       return { key: "status.reason.mulligan" };
+    case "PregameChooseColor":
+      return { key: "status.reason.pregameColor" };
     case "DiscardToHandSize":
     case "DiscardChoice":
       return { key: "status.reason.discarding" };
