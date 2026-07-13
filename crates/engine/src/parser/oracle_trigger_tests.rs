@@ -17470,6 +17470,7 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
         kind: AbilityKind::Spell,
         chain_rounding: None,
         actor: None,
+        in_trigger: true,
         repeat_until: None,
     };
 
@@ -17548,6 +17549,7 @@ fn branch_otherwise_fallback_self_emits_unimplemented_marker_and_else() {
         kind: AbilityKind::Spell,
         chain_rounding: None,
         actor: None,
+        in_trigger: true,
         repeat_until: None,
     };
 
@@ -17640,6 +17642,7 @@ fn modify_prior_enters_tapped_attacking_patches_prior_token_with_condition_else(
         kind: AbilityKind::Spell,
         chain_rounding: None,
         actor: None,
+        in_trigger: true,
         repeat_until: None,
     };
 

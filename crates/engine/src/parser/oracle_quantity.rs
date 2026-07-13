@@ -281,6 +281,30 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
 
+    // CR 608.2c + CR 603.2c: the POSSESSIVE set anaphor — "their total <prop>".
+    // The pronoun IS the set reference (there is no trailing "of <set>" phrase),
+    // so it cannot go through the "the total <prop> of " prefix arm below.
+    //
+    // Like the demonstrative arms, this emits the context-free BATCH reading and
+    // lets the clause layer re-anchor it to the chain-published set when an
+    // earlier clause published one. Both readings are live and byte-identical in
+    // the leaf text — that is why the disambiguation cannot happen here:
+    //   Witch-king, Sky Scourge  "Whenever you attack with one or more Wraiths,
+    //     exile the top X cards …, where X is their total power."  -> the ATTACK
+    //     BATCH (no earlier clause; "their" = the triggering Wraiths).
+    //   Kylox, Visionary Inventor  "… sacrifice any number of other creatures,
+    //     then exile the top X cards …, where X is their total power."  -> the
+    //     CHAIN SET ("their" = the creatures the PRECEDING clause sacrificed).
+    if let Ok((rest, (func, prop))) = parse_possessive_batch_aggregate(trimmed) {
+        if rest.trim().is_empty() {
+            return Some(QuantityRef::TrackedSetAggregate {
+                function: func,
+                property: prop,
+                source: TrackedAnaphorSource::TriggeringBatch,
+            });
+        }
+    }
+
     // Aggregate patterns: "the greatest X among" / "the total power of"
     if let Ok((rest, (func, prop))) = alt((
         value(
@@ -345,35 +369,41 @@ pub(crate) fn parse_quantity_ref_with_context(
         // phrase (bare "creatures" would otherwise parse as a filter).
         //
         // Scoped narrowly because this parser is context-free and cannot see
-        // whether the enclosing ability is a batched *dies* trigger:
-        //   * "those creatures" ONLY (not "those cards"/"those permanents").
-        //     "those cards" is overloaded — it also names a mill set ("you mill
-        //     three cards, then … the total mana value of those cards":
-        //     Combustible Gearhulk, Palantír of Orthanc) or a chosen target set
-        //     (Command the Dreadhorde), where TriggeringBatch resolves to the
-        //     wrong/empty event set.
-        //   * Sum ("the total <prop> OF those creatures") ONLY, never Max/Min
-        //     ("the greatest <prop> AMONG those creatures"). The "greatest …
-        //     among those creatures" idiom is an ATTACK batch (Shriekwood
-        //     Devourer: "whenever you attack with one or more creatures … the
-        //     greatest power among those creatures"), whose multi-attacker
-        //     `AttackersDeclared` fan-out `extract_source_from_event` does not yet
-        //     resolve (it collapses >1 attacker to `None`). Plan §8 defers attack
-        //     batches; mapping it here would silently resolve to 0.
-        // With both gates, the sole card enabled is The Skullspore Nexus (Benthic
-        // Anomaly / Dracoplasm route their "those creatures" through the
-        // copy/"becomes" paths, not this quantity parser) — measured.
-        if matches!(func, AggregateFunction::Sum) {
-            if let Ok((anaphor_rest, _)) =
-                tag::<_, _, OracleError<'_>>("those creatures").parse(rest)
-            {
-                if anaphor_rest.trim().is_empty() {
-                    return Some(QuantityRef::TrackedSetAggregate {
-                        function: func,
-                        property: prop,
-                        source: TrackedAnaphorSource::TriggeringBatch,
-                    });
-                }
+        // whether the enclosing ability is a batched trigger. The anaphor set is
+        // limited to the two BATCH pronouns:
+        //   * "those creatures" — the batch subjects (The Skullspore Nexus's
+        //     dies batch; Shriekwood Devourer's attack batch).
+        //   * "them" — the same referent in the "greatest <prop> AMONG them"
+        //     idiom (Aloy, Savior of Meridian).
+        // and deliberately EXCLUDES "those cards", which is overloaded — it also
+        // names a mill set ("you mill three cards, then … the total mana value of
+        // those cards": Combustible Gearhulk, Palantír of Orthanc) or a chosen
+        // target set (Command the Dreadhorde), where TriggeringBatch resolves to
+        // the wrong/empty event set.
+        //
+        // CR 508.1: the Max/Min ("greatest <prop> AMONG …") forms are now
+        // admitted alongside Sum ("total <prop> OF …"). t78 gated them out
+        // because the "greatest … among those creatures" idiom is an ATTACK
+        // batch whose multi-attacker `AttackersDeclared` fan-out the SINGLETON
+        // `extract_source_from_event` collapsed to `None` — binding it then
+        // would have resolved to 0. The set-valued `extract_sources_from_event`
+        // (game/targeting.rs) now reduces the full attacker batch, so the gate
+        // is lifted and the aggregate computes over every attacker.
+        //
+        // The chain-published-set reading of these same pronouns is NOT decided
+        // here — this combinator is context-free. It emits the batch reading and
+        // the clause layer (`assembly.rs`) re-anchors it to `ChainSet` when an
+        // EARLIER clause in the chain publishes a set. See
+        // `rebind_tracked_aggregate_to_chain_set`.
+        if let Ok((anaphor_rest, _)) =
+            alt((tag::<_, _, OracleError<'_>>("those creatures"), tag("them"))).parse(rest)
+        {
+            if anaphor_rest.trim().is_empty() {
+                return Some(QuantityRef::TrackedSetAggregate {
+                    function: func,
+                    property: prop,
+                    source: TrackedAnaphorSource::TriggeringBatch,
+                });
             }
         }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
@@ -1046,6 +1076,29 @@ pub(crate) fn parse_cda_quantity_with_context(
     }
 
     None
+}
+
+/// CR 608.2c + CR 208.1 + CR 202.3: the possessive set-anaphor aggregate —
+/// "their total <property>".
+///
+/// Composed on its two axes (the possessive Sum marker × the reduced property)
+/// rather than enumerated as one `tag()` per phrase, so a new property is one
+/// `value()` arm. `Sum` is intrinsic to the surface form: "their total X" is
+/// always a sum — the extremum reading has its own "the greatest X among …"
+/// grammar (`parse_greatest_among_prefix`).
+fn parse_possessive_batch_aggregate(
+    input: &str,
+) -> OracleResult<'_, (AggregateFunction, ObjectProperty)> {
+    preceded(
+        tag("their total "),
+        alt((
+            value(ObjectProperty::Power, tag("power")),
+            value(ObjectProperty::Toughness, tag("toughness")),
+            value(ObjectProperty::ManaValue, tag("mana value")),
+        )),
+    )
+    .map(|property| (AggregateFunction::Sum, property))
+    .parse(input)
 }
 
 /// CR 202.3: aggregate prefix for the cross-zone "greatest <prop> among"

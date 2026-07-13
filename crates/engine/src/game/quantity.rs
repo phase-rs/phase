@@ -2457,14 +2457,23 @@ fn resolve_ref(
                     .map(|(_, ids)| ids.clone())
                     .unwrap_or_default(),
                 // CR 603.2c + CR 603.10a: the current triggering event batch
-                // ("those creatures" on a batched dies trigger). The subjects are
+                // ("those creatures" on a batched dies trigger; "them" / "their
+                // total power" on a batched attack trigger). The subjects are
                 // read from `state.current_trigger_events`; each died creature's
                 // power comes from its last-known info (LKI), i.e. death-time
                 // power, via `aggregate_property_over`'s live-then-LKI extract.
+                //
+                // CR 508.1: `extract_sources_from_event` is the SET-valued
+                // extractor. The singleton `extract_source_from_event` collapses
+                // a multi-attacker `AttackersDeclared` to `None`, which reduced
+                // this aggregate over an EMPTY set — 0 attackers' worth of power
+                // on every board with 2+ attackers (Aloy, Shriekwood Devourer,
+                // Witch-king, Sky Scourge). Dies batches are unchanged: they
+                // arrive as one event per creature and are still collected here.
                 TrackedAnaphorSource::TriggeringBatch => state
                     .current_trigger_events
                     .iter()
-                    .filter_map(crate::game::targeting::extract_source_from_event)
+                    .flat_map(crate::game::targeting::extract_sources_from_event)
                     .collect(),
             };
             // Per-object aggregation delegated to the shared
