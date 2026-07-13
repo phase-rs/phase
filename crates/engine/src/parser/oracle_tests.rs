@@ -1538,11 +1538,23 @@ fn cavernous_maw_still_a_cave_land_clause_has_no_unimplemented() {
     for ability in &r.abilities {
         walk(ability, &mut effects);
     }
+    // CR 602.5: the activation restriction ("the number of other Caves you control PLUS
+    // the number of Cave cards in your graveyard is three or greater") is a cross-zone
+    // SUM that no typed condition can represent. It is now an honest `Effect::Unimplemented`
+    // instead of a `RequiresCondition { condition: None }`, which evaluated permissively —
+    // i.e. the ability used to be activatable with NO restriction at all. The clause this
+    // test guards is the "It's still a Cave land" retention sentence, which must still
+    // lower to a typed continuous modification and NOT be unimplemented.
+    let unimplemented: Vec<_> = effects
+        .iter()
+        .filter(|e| matches!(e, Effect::Unimplemented { .. }))
+        .collect();
     assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e, Effect::Unimplemented { .. })),
-        "Cavernous Maw must not emit Effect::Unimplemented, got {effects:#?}"
+        unimplemented.iter().all(|e| matches!(
+            e,
+            Effect::Unimplemented { name, .. } if name == "activate"
+        )),
+        "the only permitted gap is the cross-zone-sum activation restriction, got {effects:#?}"
     );
 
     // The retention clause must produce a continuous GenericEffect that
@@ -7064,10 +7076,23 @@ fn spell_casting_option_parses_free_cast_condition() {
             &["Instant"],
             &[],
         );
-    assert_eq!(
-        r.casting_options,
-        vec![SpellCastingOption::free_cast()
-            .condition(crate::types::ability::ParsedCondition::FirstSpellThisGame)]
+    // "the first spell you've cast this game" = you have cast zero spells so far.
+    assert!(
+        matches!(
+            r.casting_options.as_slice(),
+            [SpellCastingOption {
+                condition: Some(crate::types::ability::ParsedCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisGame { .. }
+                    },
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                }),
+                ..
+            }]
+        ),
+        "got {:?}",
+        r.casting_options
     );
 }
 
@@ -8074,12 +8099,13 @@ fn ability_word_prefixed_activated_ability_preserves_restrictions() {
         matches!(
             restriction,
             ActivationRestriction::RequiresCondition {
-                condition: Some(
-                    crate::types::ability::ParsedCondition::ZoneCardCountAtLeast {
-                        zone: Zone::Graveyard,
-                        count: 7
-                    }
-                )
+                condition: Some(crate::types::ability::ParsedCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::GraveyardSize { .. }
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 7 }
+                })
             }
         )
     }));
@@ -8096,14 +8122,22 @@ fn parses_activate_only_land_condition_into_activation_restriction() {
     );
     assert_eq!(r.abilities.len(), 2);
     let second = &r.abilities[1];
-    assert!(matches!(
-        second.activation_restrictions.as_slice(),
-        [ActivationRestriction::RequiresCondition {
-            condition: Some(
-                crate::types::ability::ParsedCondition::YouControlLandSubtypeAny { .. }
-            )
-        }]
-    ));
+    // The disjunction lives INSIDE the object-count filter ("an Island or a Swamp" is one
+    // population), not as a condition-level Or.
+    assert!(
+        matches!(
+            second.activation_restrictions.as_slice(),
+            [ActivationRestriction::RequiresCondition {
+                condition: Some(crate::types::ability::ParsedCondition::QuantityComparison {
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                    ..
+                })
+            }]
+        ),
+        "got {:?}",
+        second.activation_restrictions
+    );
 }
 
 #[test]
@@ -8670,9 +8704,12 @@ fn parses_activate_only_if_condition_and_only_once_each_turn() {
         restrictions.iter().any(|r| matches!(
             r,
             ActivationRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::PlayerCountAtLeast {
-                    filter: PlayerFilter::OpponentLostLife,
-                    minimum: 1,
+                condition: Some(ParsedCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeLostThisTurn { .. }
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
                 })
             }
         )),
@@ -8696,9 +8733,12 @@ fn parses_activate_only_if_condition_and_only_as_sorcery() {
     assert!(restrictions.iter().any(|restriction| matches!(
         restriction,
         ActivationRestriction::RequiresCondition {
-            condition: Some(ParsedCondition::ZoneCardTypeCountAtLeast {
-                zone: Zone::Graveyard,
-                count: 4
+            condition: Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctCardTypes { .. }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
             })
         }
     )));
@@ -8719,9 +8759,12 @@ fn parses_activate_only_timing_and_only_if_condition() {
     assert!(restrictions.iter().any(|restriction| matches!(
         restriction,
         ActivationRestriction::RequiresCondition {
-            condition: Some(ParsedCondition::PlayerCountAtLeast {
-                filter: PlayerFilter::OpponentLostLife,
-                minimum: 1,
+            condition: Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn { .. }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
             })
         }
     )));
@@ -8810,8 +8853,14 @@ fn parses_activate_only_as_sorcery_and_only_if_hand_size_condition() {
     assert!(restrictions.iter().any(|restriction| matches!(
         restriction,
         ActivationRestriction::RequiresCondition {
-            condition: Some(ParsedCondition::HandSizeOneOf { counts })
-        } if counts == &vec![0, 1]
+            condition: Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize { .. }
+                },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        }
     )));
     assert!(r.parse_warnings.iter().all(
         |warning| warning.to_string().split_whitespace().next() != Some("Swallow:Condition_If")
@@ -15960,13 +16009,21 @@ fn negative_self_casting_restriction_stays_metadata() {
             &["Goblin", "Knight"],
         );
 
-    assert_eq!(
-        r.casting_restrictions,
-        vec![CastingRestriction::RequiresCondition {
-            condition: Some(ParsedCondition::Not {
-                condition: Box::new(ParsedCondition::YouPlayedLandThisTurn),
-            }),
-        }]
+    assert!(
+        matches!(
+            r.casting_restrictions.as_slice(),
+            [CastingRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::Not { condition }),
+            }] if matches!(**condition, ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LandsPlayedThisTurn { .. }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        ),
+        "got {:?}",
+        r.casting_restrictions
     );
     assert!(
         r.statics.iter().any(|d| {
@@ -18735,8 +18792,15 @@ fn instant_or_sorcery_cast_activation_restriction_does_not_emit_condition_warnin
         .any(|restriction| matches!(
             restriction,
             ActivationRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::YouCastSpellThisTurn {
-                    filter: Some(TargetFilter::Or { filters })
+                condition: Some(ParsedCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisTurn {
+                            filter: Some(TargetFilter::Or { filters }),
+                            ..
+                        }
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
                 })
             } if filters.iter().any(|filter| matches!(
                 filter,

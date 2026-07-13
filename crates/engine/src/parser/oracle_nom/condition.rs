@@ -52,33 +52,66 @@ pub fn parse_condition(input: &str) -> OracleResult<'_, StaticCondition> {
 ///
 /// Useful when the prefix has already been consumed by the caller.
 pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    alt((parse_condition_disjunction, parse_single_inner_condition)).parse(input)
+    alt((parse_condition_connective, parse_single_inner_condition)).parse(input)
 }
 
-/// CR 608.2c: "<condition A> or <condition B>" — a natural-language disjunction
-/// of two game-state conditions (Plasma Bolt's Void clause: "a nonland
-/// permanent left the battlefield this turn or a spell was warped this turn").
-/// Each side is parsed by the non-disjunction dispatcher (`parse_single_inner_
-/// condition`) to avoid left-recursion, and the result is wrapped in the
-/// existing `StaticCondition::Or` combinator. Tried before the single-condition
-/// dispatcher so the longer `A or B` phrase wins.
+/// CR 608.2c: the logical connective axis of a game-state condition —
+/// "<condition A> and <condition B>" / "<condition A> or <condition B>".
 ///
-/// CR 602.5: The connector accepts both the bare `" or "` and the
-/// activate-only-if `" or if "` surface ("Activate only if X or if Y" —
-/// Bonecache Overseer), where the second disjunct repeats the restriction's
-/// `if`. `" or if "` is tried first because `" or "` is its prefix; matching
-/// `" or "` first would strand the leading `if` on the right-hand side and fail
-/// the whole disjunction.
-fn parse_condition_disjunction(input: &str) -> OracleResult<'_, StaticCondition> {
+/// One combinator covers both connectives, parameterized by which
+/// `StaticCondition` combinator the connector word selects. Conjunction and
+/// disjunction differ only in that leaf, so they must not be two parsers.
+///
+/// Left side uses the non-connective dispatcher (`parse_single_inner_condition`)
+/// to avoid left-recursion; the right side recurses into `parse_inner_condition`
+/// so an n-ary chain ("A and B and C") nests right-associatively instead of
+/// leaving " and C" as an unconsumed — and therefore silently swallowed — tail.
+/// Tried before the single-condition dispatcher so the longer phrase wins.
+///
+/// CR 602.5: a restriction may REPEAT its `if` on the second operand — "Activate
+/// only if X or if Y" (Bonecache Overseer). That trailing marker is grammatical
+/// scaffolding, not part of the condition, so it is consumed by an `opt` after the
+/// connector rather than by widening the connector itself. Consuming it here (as
+/// opposed to matching a `" or if "` connector tag) makes the marker orthogonal to
+/// the connective axis, so `" and if "` is covered by the same code that covers
+/// `" or if "` — no permutation of (connector x marker) is enumerated.
+///
+/// This is the ONLY place a restriction/static condition is decomposed on a
+/// connector. Splitting the raw string on " and "/" or " (the pre-CR-608.2c
+/// approach) tears atomic phrases apart — "more cards in hand than each opponent",
+/// "an artifact or enchantment" — because a string split cannot see that the
+/// connector sits INSIDE a leaf. Requiring both sides to parse as complete
+/// conditions is what makes the decomposition safe.
+fn parse_condition_connective(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, lhs) = parse_single_inner_condition(input)?;
-    let (rest, _) = alt((tag(" or if "), tag(" or "))).parse(rest)?;
-    let (rest, rhs) = parse_single_inner_condition(rest)?;
-    Ok((
-        rest,
-        StaticCondition::Or {
-            conditions: vec![lhs, rhs],
-        },
+    let (rest, connective) = parse_condition_connector(rest)?;
+    let (rest, _) = opt(alt((tag("only if "), tag("if ")))).parse(rest)?;
+    let (rest, rhs) = parse_inner_condition(rest)?;
+    Ok((rest, connective.build(vec![lhs, rhs])))
+}
+
+/// CR 608.2c: which logical combinator a connector word selects.
+#[derive(Clone, Copy)]
+enum ConditionConnective {
+    And,
+    Or,
+}
+
+impl ConditionConnective {
+    fn build(self, conditions: Vec<StaticCondition>) -> StaticCondition {
+        match self {
+            Self::And => StaticCondition::And { conditions },
+            Self::Or => StaticCondition::Or { conditions },
+        }
+    }
+}
+
+fn parse_condition_connector(input: &str) -> OracleResult<'_, ConditionConnective> {
+    alt((
+        value(ConditionConnective::And, tag(" and ")),
+        value(ConditionConnective::Or, tag(" or ")),
     ))
+    .parse(input)
 }
 
 fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -3835,7 +3868,7 @@ fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     // "you control <type A> or <article> <type B>" (Doctor Doom: "you control
     // an artifact creature or a Plan"). The repeated "you control"/article RHS
     // ("or a Plan") is NOT a standalone control condition, so the top-level
-    // `parse_condition_disjunction` cannot split it; instead a single shared
+    // `parse_condition_connective` cannot split it; instead a single shared
     // verb governs both type filters. Each additional " or <article> <type>"
     // segment is folded into a disjunction of presence filters. `parse_type_phrase`
     // (unchanged) parses each article-led segment; this loop only adds the
@@ -4876,7 +4909,7 @@ fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
 /// player has already played this turn): "[…]played a land [this turn]" body.
 /// "played" is identical across simple-past and present-perfect, so one body
 /// serves every subject prefix. The " this turn" suffix is optional so the
-/// combinator can also serve as the LHS of `parse_condition_disjunction`
+/// combinator can also serve as the LHS of `parse_condition_connective`
 /// ("played a land or cast …"). `from_zones: None` selects the scalar
 /// `Player::lands_played_this_turn` counter (no zone-origin restriction).
 fn parse_played_a_land_this_turn_body(input: &str) -> OracleResult<'_, StaticCondition> {
