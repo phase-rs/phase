@@ -29,12 +29,12 @@ use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, CastingPermission, Comparator, ConjureSource, ContinuousModification,
-    ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission, MultiTargetSpec,
-    ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
-    QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TypeFilter, TypedFilter,
+    ControllerRef, DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect,
+    EffectScope, FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission,
+    MultiTargetSpec, ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue,
+    QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -7869,6 +7869,14 @@ pub(super) fn apply_where_x_effect_expression(
             mana_value_limit: amount,
             ..
         }
+        // CR 701.47a: "amass Orcs X, where X is …" (Fall of Cair Andros) — "put N
+        // +1/+1 counters on that creature", so N is the bound quantity. Without
+        // this arm the where-X binding was never attempted and the bare
+        // `Variable("X")` SURVIVED — amassing 0 counters at runtime while the face
+        // still rendered as fully supported. This match is NOT exhaustive over the
+        // 64 `QuantityExpr`-carrying variants, and the `_ => {}` below turns every
+        // unenumerated one into that same silent fabrication rather than a red.
+        | Effect::Amass { count: amount, .. }
         | Effect::Incubate { count: amount } => {
             bind_where_x_quantity(amount, where_x_expression, &mut unbound_where_x);
         }
@@ -8032,12 +8040,68 @@ pub(super) fn apply_where_x_effect_expression(
         }
         _ => {}
     }
+    // CR 107.3c — TOTALITY GUARD. The match above rewrites the quantity slots of the
+    // `Effect` variants it enumerates. It is NOT exhaustive: of the 64 variants that
+    // carry a `QuantityExpr`, 42 fall through the `_ => {}` above (task #95 binds the
+    // representable ones). Without this guard the wildcard's failure mode is a
+    // FABRICATION rather than a red — the effect keeps its bare `Variable("X")`, which
+    // resolves to 0 at runtime (amass 0 / surveil 0 / discard 0) while the face still
+    // renders as fully supported. That lie is invisible BOTH to a red-count ledger
+    // (there is no `Unimplemented` node to count) and to the zero-raw-text invariant
+    // ("X" is the legitimate alias). So the pass asserts its own post-condition: if the
+    // clause DEFINED X and an unbound X survived the rewrite, report the gap. A control
+    // with an escape hatch is not a control.
+    //
+    // The guard is keyed on the EXPRESSION, never on tree-presence of `Variable("X")`.
+    // Some expressions legitimately bind TO the placeholder, and for those a surviving
+    // `Variable("X")` is the CORRECT binding, not a fabrication:
+    //   - Join Forces (CR 107.3i): "where X is the total amount of mana paid this way"
+    //     resolves through the `chosen_x` machinery.
+    //   - Constraint tails (CR 608.2g): "where X is less than or equal to <bound>"
+    //     BOUNDS the player's chosen X rather than defining it (Well of Lost Dreams).
+    // A tree-presence check would flip both families to red.
+    if let Some(expression) = where_x_expression.filter(|_| unbound_where_x.is_none()) {
+        if !where_x_binds_to_placeholder(expression) && effect_retains_unbound_x(effect) {
+            unbound_where_x = Some(expression.to_string());
+        }
+    }
     // CR 107.3c: the clause defines X, but we cannot represent that definition.
     // Report the gap instead of keeping a P/T placeholder that resolves to no
     // modification at all (a silent +0/+0 no-op that still reads as supported).
     if let Some(expression) = unbound_where_x {
         *effect = Effect::unimplemented("where_x_binding", format!("where X is {expression}"));
     }
+}
+
+/// CR 107.3i + CR 608.2g: does this where-X expression legitimately bind X to the
+/// PLACEHOLDER itself, rather than to a concrete quantity?
+///
+/// `parse_where_x_quantity_expression` deliberately returns `Variable("X")` for two
+/// families — Join Forces' "the total amount of mana paid this way" (resolved via
+/// `chosen_x`) and the comparator-shaped constraint tails ("where X is less than or
+/// equal to …", which bound rather than define X). For those, a residual
+/// `Variable("X")` in the effect is the CORRECT lowering, so the totality guard must
+/// not treat it as an unbound fabrication.
+fn where_x_binds_to_placeholder(expression: &str) -> bool {
+    matches!(
+        parse_where_x_quantity_expression(expression),
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::Variable { ref name },
+        }) if name.eq_ignore_ascii_case("X")
+    )
+}
+
+/// Does an unbound `QuantityRef::Variable { name: "X" }` survive anywhere in `effect`?
+///
+/// Uses the key-anchored typed-evidence probe (`QUANTITY_KEYS`) rather than a
+/// hand-rolled 64-variant visitor: a value reached through a quantity key IS a quantity
+/// by construction, so no cross-enum name collision is reachable. `QuantityRef` must
+/// never be probed unanchored — ten of its variant names are shared with other
+/// internally-tagged enums (see `swallow_evidence`).
+fn effect_retains_unbound_x(effect: &Effect) -> bool {
+    crate::parser::swallow_evidence::UnitEvidence::of_effect(effect).any_quantity_ref(
+        |qty| matches!(qty, QuantityRef::Variable { name } if name.eq_ignore_ascii_case("X")),
+    )
 }
 
 /// CR 107.3i + CR 611.2c: Substitute a "where X is <expression>" binding into a
@@ -8560,10 +8624,77 @@ fn apply_where_x_to_filter_prop(
     })
 }
 
+/// CR 120.10: the BARE demonstrative "that excess damage" — no subject, no
+/// "dealt this way" tail to anchor it.
+///
+/// The shared quantity grammar deliberately declines this phrase, because out of
+/// context its antecedent is ambiguous and the two readings resolve from DIFFERENT
+/// state (see [`rebind_context_dependent_where_x`]). Only the def-level licence can
+/// bind it, so it is recognised here rather than in the leaf combinators.
+fn parse_bare_excess_demonstrative(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(value((), (tag("that "), tag("excess damage")))).parse(input)
+}
+
+/// CR 120.10 + CR 107.3c: licence a resolution-local demonstrative where-X tail
+/// against the definition's OWN condition, normalizing it onto the explicit phrase
+/// the shared quantity grammar already binds.
+///
+/// "…, where X is that excess damage" has two readings, and a context-free leaf
+/// combinator cannot separate them:
+///
+///   - Contest of Claws — "IF EXCESS DAMAGE WAS DEALT THIS WAY, discover X, where X
+///     is that excess damage." The sibling condition lowers to
+///     `AbilityCondition::PreviousEffectAmount { channel: Excess }` on THIS def. That
+///     condition is the LICENCE: it proves the antecedent is this resolution's own
+///     excess tally, which `last_effect_excess_amount` is holding and which
+///     `QuantityRef::PreviousEffectAmount { channel: Excess }` reads correctly.
+///
+///   - Fall of Cair Andros — "Whenever a creature an opponent controls is dealt
+///     excess noncombat damage, amass Orcs X, where X is that excess damage." The
+///     antecedent is the TRIGGERING EVENT. The triggered ability resolves as its own
+///     top-level chain and the depth-0 prelude has already CLEARED
+///     `last_effect_excess_amount`, so the resolution-local read would silently
+///     amass 0 while rendering as supported. It carries no such condition, so it is
+///     not licensed, and CR 107.3c keeps it an honest gap.
+///
+/// The disambiguator therefore lives exactly one layer above the leaf — on the def,
+/// next to the effect — which is why this runs here and not in `oracle_nom`.
+/// Rewriting onto the explicit phrase (rather than binding a second leaf) keeps ONE
+/// grammar and ONE binding authority.
+///
+/// This mirrors the `rebind_target_anaphor` seam below, which likewise resolves a
+/// demonstrative anaphor at the lowering layer against a disambiguator the leaf
+/// cannot see.
+fn rebind_context_dependent_where_x(
+    def: &AbilityDefinition,
+    where_x_expression: Option<&str>,
+) -> Option<String> {
+    let expression = where_x_expression?;
+    let normalized = expression.trim().trim_end_matches('.').to_ascii_lowercase();
+    parse_bare_excess_demonstrative(normalized.as_str()).ok()?;
+    // The licence: this definition's own condition reads the resolution-local
+    // EXCESS channel ("if excess damage was dealt this way").
+    matches!(
+        def.condition.as_ref(),
+        Some(AbilityCondition::PreviousEffectAmount {
+            channel: DamageChannel::Excess,
+            ..
+        })
+    )
+    .then(|| "the amount of excess damage dealt this way".to_string())
+}
+
 pub(super) fn apply_where_x_ability_expression(
     def: &mut AbilityDefinition,
     where_x_expression: Option<&str>,
 ) {
+    // CR 120.10: a context-dependent demonstrative tail is licensed against this
+    // def's condition and normalized onto the phrase the shared grammar binds,
+    // BEFORE any of the rewrites below consume it. Unlicensed demonstratives fall
+    // through unchanged and are reported as CR 107.3c gaps by the passes below.
+    let licensed_where_x = rebind_context_dependent_where_x(def, where_x_expression);
+    let where_x_expression = licensed_where_x.as_deref().or(where_x_expression);
+
     // CR 107.3i: All instances of X on an object share one value at any given
     // time. Substitute X in this AbilityDefinition's condition before walking
     // into effect/sub_ability/etc. The recursion below visits every chained

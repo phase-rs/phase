@@ -426,7 +426,23 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         .parse(i)
     });
     if let Some(draw_scope) = draw_scope {
-        let effect_text = extract_replacement_effect(&normalized);
+        // CR 614.1a: An "As long as <state>, if you would draw a
+        // card, ..." gate (Archmage Ascension) precedes the draw antecedent with
+        // its own comma clause. Split it off so effect extraction anchors on the
+        // draw clause's comma — not the gate's — and lift the state into a typed
+        // `ReplacementCondition`. `Unparsed` means the gate is present but its
+        // condition can't be carried, so fail closed rather than emit an
+        // ungated, always-on draw replacement.
+        let (effect_source, as_long_as_gate): (&str, Option<ReplacementCondition>) =
+            match strip_as_long_as_draw_gate(&normalized) {
+                AsLongAsDrawGate::Absent => (&normalized, None),
+                AsLongAsDrawGate::Parsed {
+                    remainder,
+                    condition,
+                } => (remainder, Some(condition)),
+                AsLongAsDrawGate::Unparsed => return None,
+            };
+        let effect_text = extract_replacement_effect(effect_source);
         let mut def = ReplacementDefinition::new(ReplacementEvent::Draw)
             .draw_scope(draw_scope)
             .description(text.to_string());
@@ -469,10 +485,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         if body_skips_draw {
             def = def.quantity_modification(QuantityModification::Prevent);
             apply_draw_player_scope(&lower, &mut def);
-            match parse_while_antecedent(&lower, "would draw a card") {
-                WhileAntecedent::Parsed(condition) => def = def.condition(condition),
-                WhileAntecedent::Unparsed => return None,
-                WhileAntecedent::Absent => {}
+            if let Some(condition) = as_long_as_gate {
+                def = def.condition(condition);
+            } else {
+                match parse_while_antecedent(&lower, "would draw a card") {
+                    WhileAntecedent::Parsed(condition) => def = def.condition(condition),
+                    WhileAntecedent::Unparsed => return None,
+                    WhileAntecedent::Absent => {}
+                }
             }
             return Some(def);
         }
@@ -495,6 +515,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         }
         // CR 614.1a: Player scope for draw replacements.
         apply_draw_player_scope(&lower, &mut def);
+        // CR 614.1a: A parsed "As long as <state>" gate takes precedence — it is
+        // the antecedent's own restriction, not a mid-clause "while" or
+        // except-first exception.
+        if let Some(condition) = as_long_as_gate {
+            def = def.condition(condition);
+            return Some(def);
+        }
         // CR 121.1 + CR 504.1 + CR 614.6: Detect Alhammarret's Archive's
         // "except the first one [you|they] draw in each of [your|their] draw
         // steps" exception clause and gate the replacement so it does NOT
@@ -7141,6 +7168,113 @@ fn parse_while_antecedent(lower: &str, verb_anchor: &str) -> WhileAntecedent {
         rhs,
         active_player_req: None,
     })
+}
+
+/// CR 614.1a: Result of splitting an "As long as <state>, if
+/// [player] would draw ..." gate off a draw-replacement line.
+enum AsLongAsDrawGate<'a> {
+    /// No "as long as ... , if ... would draw" prefix — use the whole line.
+    Absent,
+    /// Gate parsed; `remainder` is the bare "if ... would draw ..." clause in
+    /// original case, `condition` the lifted state restriction.
+    Parsed {
+        remainder: &'a str,
+        condition: ReplacementCondition,
+    },
+    /// Gate present but its condition can't be carried — fail closed.
+    Unparsed,
+}
+
+/// CR 614.1a: Split an "As long as <state>, if [player] would draw
+/// ..." gate off a draw-replacement line. Archmage Ascension gates an
+/// individual-draw substitute on "~ has six or more quest counters on it"; the
+/// gate carries its own comma, which would otherwise steer
+/// `extract_replacement_effect` to the wrong clause (and the state restriction
+/// would be dropped, firing the replacement on every draw). Returns the bare
+/// "if ... would draw ..." remainder plus the lifted condition.
+fn strip_as_long_as_draw_gate(normalized: &str) -> AsLongAsDrawGate<'_> {
+    let lower = normalized.to_lowercase();
+    // Consume "as long as <cond>, " up to (but not into) the draw antecedent,
+    // leaving "if ... would draw ..." as the remainder. Run on the lowercased
+    // copy, map the remainder back to original case via `nom_on_lower`.
+    let Some((condition_len, remainder)) = nom_on_lower(normalized, &lower, |input| {
+        let (input, _) = tag("as long as ").parse(input)?;
+        let (input, condition_text) = take_until(", if ").parse(input)?;
+        let (input, _) = tag(", ").parse(input)?;
+        Ok((input, condition_text.len()))
+    }) else {
+        return AsLongAsDrawGate::Absent;
+    };
+    // The clause after the gate must be the draw antecedent, not some unrelated
+    // ", if ..." elsewhere in the line.
+    if !nom_primitives::scan_contains(&remainder.to_lowercase(), "would draw") {
+        return AsLongAsDrawGate::Absent;
+    }
+    let condition_start = "as long as ".len();
+    let condition_text = &lower[condition_start..condition_start + condition_len];
+    let Ok((rest, static_cond)) = parse_inner_condition(condition_text) else {
+        return AsLongAsDrawGate::Unparsed;
+    };
+    if !rest.trim().is_empty() {
+        return AsLongAsDrawGate::Unparsed;
+    }
+    match static_gate_to_replacement_condition(static_cond) {
+        Some(condition) => AsLongAsDrawGate::Parsed {
+            remainder: remainder.trim_start(),
+            condition,
+        },
+        None => AsLongAsDrawGate::Unparsed,
+    }
+}
+
+/// CR 614.1a: Lower a parsed `StaticCondition` "as long as" gate into the typed
+/// [`ReplacementCondition::OnlyIfQuantity`] surface. Covers the quantity form
+/// (hand size, life) and the source-counter form ("~ has N or more X counters
+/// on it" — Archmage Ascension), which lowers to a `CountersOn` comparison
+/// resolved against the replacement source. Returns `None` for shapes the typed
+/// surface can't carry, so callers fail closed.
+fn static_gate_to_replacement_condition(
+    condition: StaticCondition,
+) -> Option<ReplacementCondition> {
+    match condition {
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => Some(ReplacementCondition::OnlyIfQuantity {
+            lhs,
+            comparator,
+            rhs,
+            active_player_req: None,
+        }),
+        // CR 122.1: "~ has N or more <type> counters on it" — the source-counter
+        // lower-bound gate. Bounded/exact ranges aren't attested for draw gates,
+        // so only the `N or more` (no maximum) form is carried.
+        StaticCondition::HasCounters {
+            counters,
+            minimum,
+            maximum: None,
+        } => {
+            let counter_type = match counters {
+                CounterMatch::OfType(ct) => Some(ct),
+                CounterMatch::Any => None,
+            };
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: crate::types::ability::ObjectScope::Source,
+                        counter_type,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed {
+                    value: minimum as i32,
+                },
+                active_player_req: None,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn parse_conditional_draw_replacement(text: &str, lower: &str) -> Option<ReplacementDefinition> {
@@ -17661,6 +17795,60 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// #5656 + CR 614.1a: Archmage Ascension's "As long as ~ has six
+    /// or more quest counters on it, if you would draw a card, you may instead
+    /// search your library for a card, ..." gates an optional individual-draw
+    /// substitute on a source-counter state. The gate's own comma previously
+    /// steered effect extraction to the wrong clause, dropping the substitute to
+    /// Unimplemented and losing the counter gate entirely.
+    #[test]
+    fn archmage_ascension_conditional_optional_search_substitute() {
+        let def = parse_replacement_line(
+            "As long as this enchantment has six or more quest counters on it, \
+             if you would draw a card, you may instead search your library for a card, \
+             put that card into your hand, then shuffle.",
+            "Archmage Ascension",
+        )
+        .expect("Archmage Ascension draw replacement parses");
+
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert_eq!(def.draw_scope, Some(DrawReplacementScope::IndividualDraw));
+        // "you may instead" makes the substitution optional (accept/decline).
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        // The counter state is lifted to a typed OnlyIfQuantity gate resolved
+        // against the source enchantment, not dropped.
+        assert!(
+            matches!(
+                &def.condition,
+                Some(ReplacementCondition::OnlyIfQuantity {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOn {
+                            scope: crate::types::ability::ObjectScope::Source,
+                            counter_type: Some(ct),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 6 },
+                    active_player_req: None,
+                }) if *ct == crate::types::counter::CounterType::Generic("quest".to_string())
+            ),
+            "expected quest-counter GE 6 gate, got {:?}",
+            def.condition,
+        );
+        // The substitute must be a real search, not an Unimplemented stub.
+        assert!(
+            matches!(
+                &*def.execute.as_ref().expect("execute chain present").effect,
+                Effect::SearchLibrary { .. }
+            ),
+            "expected SearchLibrary substitute, got {:?}",
+            def.execute.as_ref().map(|e| &e.effect),
+        );
     }
 
     /// CR 614.1a + CR 121.1: Opponent draw replacements with the shared

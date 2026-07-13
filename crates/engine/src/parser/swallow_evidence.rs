@@ -422,6 +422,20 @@ impl UnitEvidence {
         }
     }
 
+    /// Build a probe tree over a single [`Effect`] subtree.
+    ///
+    /// Same contract as [`Self::of`] — a serialization failure yields an empty tree,
+    /// which yields NO evidence, which is the conservative direction for every probe
+    /// built on it. Used by the where-X lowering pass to assert its own post-condition
+    /// (CR 107.3c): the pass enumerates only some of the `QuantityExpr`-carrying
+    /// `Effect` variants, so it needs to ask whether an unbound X survived anywhere in
+    /// the effect it just rewrote, without hand-rolling a 64-variant visitor.
+    pub(crate) fn of_effect(effect: &crate::types::ability::Effect) -> Self {
+        Self {
+            root: serde_json::to_value(effect).unwrap_or(Value::Null),
+        }
+    }
+
     /// Visit nodes depth-first, short-circuiting on the first `true`.
     ///
     /// `key` is the object key the node is stored under (`None` at the root). Array

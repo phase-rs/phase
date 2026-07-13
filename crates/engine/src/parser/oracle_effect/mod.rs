@@ -7968,21 +7968,24 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // variant. An optional leading player subject ("you", "that player", "target
     // opponent", …) redirects who performs the discover (Zoyowa's Justice: "Then
     // that player discovers X"). Bare "discover N" defaults to the controller.
-    let (discover_tp, discover_where_x) = strip_trailing_where_x(tp);
+    // CR 107.3c: the trailing "where X is …" tail is consumed here ONLY so the
+    // discover phrase itself parses to its end. The BINDING is deliberately not
+    // decided at this layer: a clause parser cannot see the definition's
+    // condition, and the condition is exactly what licences a demonstrative
+    // ("If excess damage was dealt this way, discover X, where X is that excess
+    // damage" — Contest of Claws). Deciding here emitted the gap node before the
+    // condition was ever attached, which destroyed the Discover shape the
+    // def-level pass needed in order to disambiguate.
+    //
+    // `apply_where_x_effect_expression` (lower.rs) is the SINGLE AUTHORITY for
+    // this binding: it carries an `Effect::Discover` arm, binds the limit through
+    // `bind_where_x_quantity`, and converts a failed bind into an
+    // `Effect::unimplemented("where_x_binding", …)` gap — the identical payload
+    // this site used to emit, now raised one layer up where the condition is in
+    // scope.
+    let (discover_tp, _) = strip_trailing_where_x(tp);
     if let Some((discover_player, limit, rest_orig)) = parse_discover_with_player(discover_tp) {
         if rest_orig.trim().is_empty() {
-            // CR 107.3c: "discover X, where X is <expr>" — the clause DEFINES X.
-            // If the definition has no typed home, report the gap instead of
-            // fabricating a raw-text placeholder that resolves to 0 (a discover
-            // for mana value 0) while still reading as supported.
-            let Some(limit) = apply_where_x_quantity_expression(limit, discover_where_x.as_deref())
-            else {
-                let expression = discover_where_x.unwrap_or_default();
-                return parsed_clause(Effect::unimplemented(
-                    "where_x_binding",
-                    format!("where X is {expression}"),
-                ));
-            };
             return parsed_clause(Effect::Discover {
                 mana_value_limit: limit,
                 player: discover_player,
