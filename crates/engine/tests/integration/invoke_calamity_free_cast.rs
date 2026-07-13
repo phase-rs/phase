@@ -321,3 +321,59 @@ fn invoke_calamity_free_casts_hand_spell_for_zero_mana() {
          empty; a non-free cast would have failed or charged mana)",
     );
 }
+
+/// CR 601.2c + CR 608.2g: a during-resolution cast cannot select a spell whose
+/// required target does not exist. The unrelated draw spell remains castable.
+#[test]
+fn invoke_calamity_does_not_offer_spell_without_required_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let invoke_id = scenario
+        .add_spell_to_hand_from_oracle(P0, "Invoke Calamity", true, INVOKE_CALAMITY_TEXT)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let draw_spell = scenario
+        .add_spell_to_graveyard(P0, "Graveyard Draw", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .from_oracle_text("Draw a card.")
+        .id();
+    let removal = scenario
+        .add_spell_to_graveyard(P0, "Graveyard Removal", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .from_oracle_text("Destroy target creature.")
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    let invoke_card_id = runner.state().objects[&invoke_id].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: invoke_id,
+            card_id: invoke_card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Invoke Calamity must succeed");
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    match runner.state().waiting_for.clone() {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::FreeCastWindow { candidates, .. },
+            ..
+        } => {
+            assert!(candidates.contains(&draw_spell));
+            assert!(
+                !candidates.contains(&removal),
+                "a spell requiring a creature target must not be offered on an empty battlefield"
+            );
+        }
+        other => panic!("expected FreeCastWindow to open, got {other:?}"),
+    }
+}
