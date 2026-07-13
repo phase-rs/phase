@@ -4,6 +4,9 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use nom::character::complete::anychar;
+use nom::combinator::not;
+use nom::multi::many1;
 
 /// CR 702.11e + CR 609.4 + CR 702.21a: Parse the "[subject] can be the targets
 /// of spells and abilities[ you control] as though they didn't have hexproof[.
@@ -2960,10 +2963,6 @@ pub(crate) fn parse_qualified_creatures_you_control_suffix<'a>(
 /// compound (`None`) unless each one anchors, so an over-split can never emit a
 /// wrong `Or`.
 fn split_subject_list(text: &str) -> Vec<&str> {
-    use nom::character::complete::anychar;
-    use nom::combinator::not;
-    use nom::multi::many1;
-
     // Not a coordinated enumeration → one subject (do not split bare commas).
     if !list_has_coordinator(text) {
         return vec![text.trim()];
