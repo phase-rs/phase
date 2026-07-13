@@ -306,9 +306,8 @@ fn detect_replacement(
     // CR 614.1b carriers: a skip is modelled as a step-skipping static or a
     // skip-next-turn/step effect rather than a `ReplacementDefinition`.
     if evidence.any_static_mode(|m| matches!(m, StaticMode::SkipStep { .. }))
-        || evidence.any::<Effect>(|e| {
-            matches!(e, Effect::SkipNextTurn { .. } | Effect::SkipNextStep { .. })
-        })
+        || evidence
+            .any_effect(|e| matches!(e, Effect::SkipNextTurn { .. } | Effect::SkipNextStep { .. }))
     {
         return;
     }
@@ -330,7 +329,7 @@ fn detect_replacement(
         )
     }) || evidence.any::<ContinuousModification>(|m| {
         matches!(m, ContinuousModification::AddCounterOnEnter { .. })
-    }) || evidence.any::<Effect>(|e| matches!(e, Effect::AddPendingEntersModifications { .. }))
+    }) || evidence.any_effect(|e| matches!(e, Effect::AddPendingEntersModifications { .. }))
     {
         return;
     }
@@ -2070,7 +2069,7 @@ fn detect_dynamic_qty(
     //   CR 701.34a ProliferateTarget — counter-kind iteration is intrinsic to proliferate.
     //   CR 122.1   EachPlayerCopyChosen — `scale_property` is read live at placement.
     //   Sylvan Library  ChooseDrawnThisTurnPayOrTopdeck — per-card choice effect.
-    if evidence.any::<Effect>(|e| {
+    if evidence.any_effect(|e| {
         matches!(
             e,
             Effect::EachDealsDamageEqualToPower { .. }
@@ -2139,6 +2138,13 @@ fn detect_dynamic_qty(
     //              it only because its OTHER marker, `SelfManaCost`, is a SUBSTRING of
     //              `SelfManaCostReduced`. The typed probe cannot lean on that accident, so
     //              the real carrier has to be named.
+    //
+    // UNANCHORED, AND COLLISION-INVARIANT (audited, task #51). `SelfManaValue` is also a
+    // `QuantityRef` variant name, so a `QuantityRef::SelfManaValue` node deserializes here as
+    // `ManaCost::SelfManaValue`. The ANSWER is the same under either reading: this detector
+    // asks only "is there a value derived from the card's OWN mana cost rather than a fixed
+    // amount?" (CR 106.1), and both readings ARE exactly that. Anchoring would buy nothing and
+    // would risk dropping the quantity reading, which is equally valid evidence here.
     if evidence.any::<ManaCost>(|c| {
         matches!(
             c,
@@ -2178,7 +2184,7 @@ fn detect_dynamic_qty(
         return;
     }
     if cleaned_has_only_counter_multiplier_dynamic(cleaned)
-        && evidence.any::<Effect>(|e| matches!(e, Effect::MultiplyCounter { .. }))
+        && evidence.any_effect(|e| matches!(e, Effect::MultiplyCounter { .. }))
     {
         return;
     }
@@ -2206,6 +2212,15 @@ fn detect_dynamic_qty(
     // bare `IfYouDo` sits on EVERY Braids-class AST whether or not the decline body
     // attached. Both condition enums carry a `Not` (they share 17 variant names) and
     // either satisfies this fact, so the probe deliberately accepts both.
+    //
+    // UNANCHORED, AND COLLISION-INVARIANT (audited, task #51). Two independent reasons, both
+    // checkable:
+    //   * the two condition readings are OR'd together right here, so `AbilityCondition::Not`
+    //     vs `StaticCondition::Not` is answer-identical BY CONSTRUCTION;
+    //   * `Not` is ALSO a variant of `FilterProp` and `TargetFilter`, but those are
+    //     `Not { prop }` and `Not { filter }` — the field NAME differs from `Not { condition }`,
+    //     so neither can deserialize as a condition. That collision is structurally impossible,
+    //     not merely improbable.
     if cleaned_for_each_is_only_decline_iteration(cleaned)
         && (evidence.any::<AbilityCondition>(|c| matches!(c, AbilityCondition::Not { .. }))
             || evidence.any::<StaticCondition>(|c| matches!(c, StaticCondition::Not { .. })))
@@ -2216,7 +2231,7 @@ fn detect_dynamic_qty(
     // ..." is a turn-order choice procedure, not a numeric quantity. Its carrier
     // is the dedicated ChooseAndSacrificeRest effect rather than a QuantityExpr.
     if cleaned.contains("for each player, you choose ") // allow-noncombinator: swallow detector marker scan on classified text
-        && evidence.any::<Effect>(|e| matches!(e, Effect::ChooseAndSacrificeRest { .. }))
+        && evidence.any_effect(|e| matches!(e, Effect::ChooseAndSacrificeRest { .. }))
     {
         return;
     }
@@ -2229,7 +2244,7 @@ fn detect_dynamic_qty(
     // the AST is a Vote and every dynamic marker is tally phrasing, nothing was
     // swallowed.
     if cleaned_dynamic_is_only_vote_tally(cleaned)
-        && evidence.any::<Effect>(|e| matches!(e, Effect::Vote { .. }))
+        && evidence.any_effect(|e| matches!(e, Effect::Vote { .. }))
     {
         return;
     }
@@ -3043,7 +3058,7 @@ fn detect_condition_if(
     // a separate `condition` field) aren't suppressed.
     if stripped.contains("if damage would be dealt to") // allow-noncombinator: swallow detector marker scan on classified text
         && stripped.contains("prevent that damage") // allow-noncombinator: swallow detector marker scan on classified text
-        && evidence.any::<Effect>(|e| matches!(e, Effect::PreventDamage { .. }))
+        && evidence.any_effect(|e| matches!(e, Effect::PreventDamage { .. }))
     {
         return;
     }
@@ -3142,7 +3157,7 @@ fn detect_condition_if(
     // (CR 901.9c). CR 705: coin-flip / die-roll branches encode "if you win the flip" and
     // the result table as structured win_effect / lose_effect / results sub-trees, so the
     // effect IS the gate. CR 508.1d / CR 509.1c: "if able" attack/block requirements.
-    if evidence.any::<Effect>(|e| {
+    if evidence.any_effect(|e| {
         matches!(
             e,
             Effect::AddTargetReplacement { .. }
@@ -3662,7 +3677,7 @@ fn detect_duration_this_turn(
         .sum();
     if total_this_turn > 0
         && total_this_turn == activate_only_this_turn
-        && evidence.any::<ActivationRestriction>(|r| {
+        && evidence.any_activation_restriction(|r| {
             matches!(r, ActivationRestriction::RequiresCondition { .. })
         })
     {
@@ -3814,6 +3829,31 @@ fn detect_duration_this_turn(
     }) {
         return;
     }
+    // The five probes that follow (`ParsedCondition`, `StaticCondition`, `AbilityCondition`,
+    // `TriggerCondition`, `FilterProp`) are deliberately UNANCHORED, and that is SOUND — for a
+    // stated, checkable reason rather than because "each names a specific variant" (that claim
+    // is false in general; see `swallow_evidence`'s module doc, and `Effect::CastFromZone`).
+    //
+    // COLLISION-INVARIANT (audited over all 162 tagged enums, task #51). 14 of the variant names
+    // matched below are shared with another tagged enum — `SourceEnteredThisTurn` alone is a
+    // UNIT variant of FOUR condition enums, so it deserializes on the `type` tag alone and any
+    // of these probes will accept any of the others' nodes. It does not matter, because:
+    //
+    //   * this whole block asks ONE existential question — "does this unit carry ANY turn-scoped
+    //     carrier?" — as a disjunction across seven enums; and
+    //   * EVERY variant named in these `matches!` arms has `ThisTurn` in its name, and a
+    //     collision IS name identity. So a colliding node, read as any of its owning enums,
+    //     still bears a `ThisTurn` name and is still a turn-scoped carrier.
+    //
+    // The disjunction is therefore CLOSED under its own collision set and the answer is the same
+    // under every reading. Anchoring these would be actively WRONG: `ReplacementCondition` also
+    // owns `YouAttackedThisTurn` and `DealtDamageThisTurnBySource` and has NO leg here, so today
+    // those carriers are seen only VIA the collision. Anchoring without first adding typed legs
+    // for them would suppress true turn-scope evidence — the `ManaProduction` trap from #50,
+    // where anchoring removed a fact that was accidentally load-bearing.
+    //
+    // The checkable invariant, if you change these arms: every variant named below must contain
+    // `ThisTurn`. Add one that does not, and this argument no longer holds — anchor instead.
     if evidence.any::<ParsedCondition>(|x| {
         matches!(
             x,
@@ -3952,7 +3992,7 @@ fn detect_duration_this_turn(
     //       CR 601.2f  ReduceNextSpellCost — consumed by the next cast
     //       CR 509.1c  ForceBlock — a one-turn combat requirement
     //       CR 601.2   CastFromZone — a cast permission, not a duration
-    if evidence.any::<Effect>(|e| {
+    if evidence.any_effect(|e| {
         matches!(
             e,
             Effect::PreventDamage { .. }
