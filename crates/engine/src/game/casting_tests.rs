@@ -84,6 +84,129 @@ fn create_tap_mana_source(state: &mut GameState, name: &str, produced: ManaProdu
 }
 
 #[test]
+fn tapped_relic_can_use_a_new_legend_to_pay_a_second_creature_spell() {
+    let mut state = setup_game_at_main_phase();
+    let spell =
+        create_generic_creature_in_hand(&mut state, 9_014, PlayerId(0), "Slogurk Stand-In", 0);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Green, ManaCostShard::Blue],
+        generic: 0,
+    };
+
+    create_tap_mana_source(
+        &mut state,
+        "Xander's Lounge Stand-In",
+        ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: vec![ManaColor::Blue, ManaColor::Black, ManaColor::Red],
+            contribution: ManaContribution::Base,
+        },
+    );
+    let relic = create_object(
+        &mut state,
+        CardId(9_015),
+        PlayerId(0),
+        "Relic of Legends Stand-In".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&relic).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.tapped = true;
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: vec![
+                            ManaColor::White,
+                            ManaColor::Blue,
+                            ManaColor::Black,
+                            ManaColor::Red,
+                            ManaColor::Green,
+                        ],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::TapCreatures {
+                requirement: crate::types::ability::TapCreaturesRequirement::count(1),
+                filter: TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    }])
+                    .into(),
+            }),
+        );
+    }
+    let legend = create_object(
+        &mut state,
+        CardId(9_016),
+        PlayerId(0),
+        "New Legend".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&legend).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.supertypes.push(Supertype::Legendary);
+        obj.summoning_sick = true;
+    }
+
+    let cost = state.objects[&spell].mana_cost.clone();
+    assert!(!can_pay_cost_after_auto_tap(
+        &state,
+        PlayerId(0),
+        spell,
+        &cost
+    ));
+    assert!(has_manual_mana_ability_for_spell_payment(
+        &state,
+        PlayerId(0),
+        spell
+    ));
+    assert!(can_feasibly_pay_mana_cost(
+        &state,
+        PlayerId(0),
+        Some(spell),
+        &cost
+    ));
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(9_014),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("the legal cast must enter mana payment, not fail after announcement");
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        }
+    ));
+    assert!(crate::ai_support::candidate_actions(&state)
+        .iter()
+        .any(|candidate| matches!(
+            candidate.action,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+            } if source_id == relic
+        )));
+}
+
+#[test]
 fn fixed_alternative_chosen_color_auto_tap_replays_selected_fixed_color() {
     let mut state = setup_game_at_main_phase();
     let spell = create_generic_creature_in_hand(&mut state, 9_011, PlayerId(0), "Blue Spell", 0);

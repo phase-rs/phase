@@ -1430,35 +1430,39 @@ fn group_profiles_by_object(
     grouped.into_iter().collect()
 }
 
-fn apply_profile_kind(
+fn profile_applications(
     profile: &ActivatableManaProfileKind,
     requirements: &[Vec<ManaType>],
-) -> Option<(Vec<Vec<ManaType>>, u32)> {
+) -> Vec<(Vec<Vec<ManaType>>, u32)> {
     match profile {
         ActivatableManaProfileKind::Exact(types) => {
             let mut remaining = requirements.to_vec();
             for mana_type in types {
-                let pos = remaining.iter().position(|opts| opts.contains(mana_type))?;
+                let Some(pos) = remaining.iter().position(|opts| opts.contains(mana_type)) else {
+                    return Vec::new();
+                };
                 remaining.remove(pos);
             }
-            Some((remaining, types.len() as u32))
+            vec![(remaining, types.len() as u32)]
         }
-        ActivatableManaProfileKind::AnyOneColor { count, options } => {
-            options.iter().find_map(|&color| {
-                combination_assign(*count, std::slice::from_ref(&color), requirements)
+        ActivatableManaProfileKind::AnyOneColor { count, options } => options
+            .iter()
+            .flat_map(|&color| {
+                combination_assignments(*count, std::slice::from_ref(&color), requirements)
             })
-        }
+            .collect(),
         ActivatableManaProfileKind::AnyCombination { count, options } => {
-            combination_assign(*count, options, requirements)
+            combination_assignments(*count, options, requirements)
         }
-        ActivatableManaProfileKind::CombinationChoices(choices) => {
-            choices.iter().find_map(|choice| {
-                apply_profile_kind(
+        ActivatableManaProfileKind::CombinationChoices(choices) => choices
+            .iter()
+            .flat_map(|choice| {
+                profile_applications(
                     &ActivatableManaProfileKind::Exact(choice.clone()),
                     requirements,
                 )
             })
-        }
+            .collect(),
     }
 }
 
@@ -1479,7 +1483,7 @@ fn assign_profiles_to_requirements(
         return Some(consumed);
     }
     for profile in &objects[object_index].1 {
-        if let Some((remaining, consumed)) = apply_profile_kind(profile, &requirements) {
+        for (remaining, consumed) in profile_applications(profile, &requirements) {
             if let Some(rest) =
                 assign_profiles_to_requirements(objects, object_index + 1, remaining)
             {
@@ -1490,21 +1494,26 @@ fn assign_profiles_to_requirements(
     None
 }
 
-fn combination_assign(
+/// CR 106.1 + CR 601.2g: Enumerate the colored shards one flexible source can
+/// cover, allowing later sources to cover the remainder. A one-mana
+/// `AnyOneColor` source must not be rejected simply because the spell has two
+/// colored shards; Relic of Legends plus a dual land is the common case.
+fn combination_assignments(
     count: u32,
     options: &[ManaType],
     requirements: &[Vec<ManaType>],
-) -> Option<(Vec<Vec<ManaType>>, u32)> {
+) -> Vec<(Vec<Vec<ManaType>>, u32)> {
     if requirements.is_empty() {
         // All shards are covered; any leftover `count` is simply surplus mana
         // the player never produces (or lets drain). Rejecting over-production
         // here would falsely mark e.g. a power-3 combination source as unable
         // to pay a two-shard cost.
-        return Some((Vec::new(), 0));
+        return vec![(Vec::new(), 0)];
     }
     if count == 0 {
-        return None;
+        return vec![(requirements.to_vec(), 0)];
     }
+    let mut applications = Vec::new();
     for (index, payment_options) in requirements.iter().enumerate() {
         for &color in payment_options {
             if !options.contains(&color) {
@@ -1512,14 +1521,14 @@ fn combination_assign(
             }
             let mut next_requirements = requirements.to_vec();
             next_requirements.remove(index);
-            if let Some((remaining, inner)) =
-                combination_assign(count - 1, options, &next_requirements)
+            for (remaining, inner) in
+                combination_assignments(count - 1, options, &next_requirements)
             {
-                return Some((remaining, 1 + inner));
+                applications.push((remaining, 1 + inner));
             }
         }
     }
-    None
+    applications
 }
 
 fn assign_profiles_to_shards(
