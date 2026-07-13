@@ -12202,6 +12202,26 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
     can_cast_object_now_with_probe(state, player, object_id, None)
 }
 
+/// CR 715.3a / CR 720.3a: Test one Adventure-family face without allowing
+/// castability of the other face to make this choice look legal.
+pub fn can_cast_adventure_face_now(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    creature: bool,
+) -> bool {
+    let mut sim = state.clone();
+    let Some(obj) = sim.objects.get_mut(&object_id) else {
+        return false;
+    };
+    if creature {
+        obj.back_face = None;
+    } else {
+        swap_to_alternative_spell_face(obj);
+    }
+    can_cast_object_now(&sim, player, object_id)
+}
+
 pub fn can_cast_object_now_with_probe(
     state: &GameState,
     player: PlayerId,
