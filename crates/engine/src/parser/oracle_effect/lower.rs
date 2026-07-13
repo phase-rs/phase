@@ -7052,8 +7052,12 @@ pub(crate) fn parse_pump_clause_with_context(
         Ok::<_, nom::Err<OracleError<'_>>>((rest, pt))
     })(lower.as_str())
     .ok()?;
-    let power = apply_where_x_expression(power, where_x_expression.as_deref());
-    let toughness = apply_where_x_expression(toughness, where_x_expression.as_deref());
+    // CR 107.3c: if the clause defines X but we cannot represent the definition,
+    // this pump clause does not lower — fail the parse rather than fabricate a
+    // dead placeholder. The line then falls through to the gap path and is
+    // reported honestly instead of resolving as a silent +0/+0 no-op.
+    let power = apply_where_x_expression(power, where_x_expression.as_deref())?;
+    let toughness = apply_where_x_expression(toughness, where_x_expression.as_deref())?;
 
     // CR 613.4c: Compose with "for each" quantity to produce dynamic PtValue.
     let (power, toughness) = if let Some(quantity) = for_each_qty {
@@ -7238,24 +7242,35 @@ pub(super) fn strip_leading_sequence_connector(text: &str) -> &str {
     }
 }
 
-fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) -> PtValue {
+/// CR 107.3c: A "where X is …" clause DEFINES the value of X in the ability's
+/// text — the controller does not choose it. Bind the X placeholder to the typed
+/// quantity the clause names.
+///
+/// Returns `None` when the clause defines X but the parser cannot represent that
+/// definition. That is a PARSE FAILURE and callers MUST surface it through
+/// `Effect::unimplemented`; they must never fabricate a substitute value.
+///
+/// This function previously fell back to `PtValue::Variable("<raw oracle text>")`.
+/// That fallback was a silent lie: `resolve_variable_pt` (game/effects/pump.rs)
+/// dispatches only `X`/`-X` and returns `None` for any other content, so
+/// `pt_modifications` pushed NO `ContinuousModification` at all and the pump
+/// resolved as a +0/+0 no-op — while the raw text still rendered as a supported
+/// dynamic quantity in the coverage report. The node was well-typed and
+/// completely dead. Honest failure is the only correct answer here.
+fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) -> Option<PtValue> {
     match (value, where_x_expression) {
         (PtValue::Variable(alias), Some(expression)) if alias.eq_ignore_ascii_case("X") => {
-            parse_where_x_quantity_expression(expression)
-                .map(PtValue::Quantity)
-                .unwrap_or_else(|| PtValue::Variable(expression.to_string()))
+            parse_where_x_quantity_expression(expression).map(PtValue::Quantity)
         }
         (PtValue::Variable(alias), Some(expression)) if alias.eq_ignore_ascii_case("-X") => {
-            parse_where_x_quantity_expression(expression)
-                .map(|inner| {
-                    PtValue::Quantity(QuantityExpr::Multiply {
-                        factor: -1,
-                        inner: Box::new(inner),
-                    })
+            parse_where_x_quantity_expression(expression).map(|inner| {
+                PtValue::Quantity(QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(inner),
                 })
-                .unwrap_or_else(|| PtValue::Variable(format!("-({expression})")))
+            })
         }
-        (value, _) => value,
+        (value, _) => Some(value),
     }
 }
 
@@ -7339,6 +7354,9 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     if let Some(expr) = parse_where_x_kicker_count(expression) {
         return Some(expr);
     }
+    if let Some(expr) = parse_where_x_exiled_card_power(expression_lower.as_str()) {
+        return Some(expr);
+    }
     let lower = expression.to_ascii_lowercase();
     if tag::<_, _, OracleError<'_>>("the number of times ")
         .parse(lower.as_str())
@@ -7405,6 +7423,26 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     // `None` for the bare die-result phrase (see `cda_quantity_returns_none_for_the_result`),
     // so this fallback is what binds Ancient Bronze Dragon's "where X is the result".
     crate::parser::oracle_quantity::parse_event_context_quantity(where_x_expression)
+}
+
+/// CR 107.3c + CR 608.2h: "where X is the power of the exiled card" DEFINES X as
+/// the power of the card exiled by this ability's source — Bishop of Binding
+/// ("Whenever this creature attacks, target Vampire gets +X/+X until end of
+/// turn, where X is the power of the exiled card") and Redemptor Dreadnought.
+/// CR 608.2h: the exiled card is read via last known information, which is what
+/// `QuantityRef::ExiledCardPower` resolves against (game/quantity.rs).
+///
+/// `index: 0` is the first (and, for this class, only) card the source exiled.
+fn parse_where_x_exiled_card_power(expression_lower: &str) -> Option<QuantityExpr> {
+    all_consuming(value(
+        QuantityExpr::Ref {
+            qty: QuantityRef::ExiledCardPower { index: 0 },
+        },
+        tag::<_, _, OracleError<'_>>("the power of the exiled card"),
+    ))
+    .parse(expression_lower)
+    .ok()
+    .map(|(_, expr)| expr)
 }
 
 /// CR 608.2c + CR 202.3: Match EXACTLY `that card's mana value` (or its
@@ -7646,6 +7684,10 @@ pub(super) fn apply_where_x_effect_expression(
     effect: &mut Effect,
     where_x_expression: Option<&str>,
 ) {
+    // CR 107.3c: set when the clause DEFINES X but the definition is not
+    // representable. Recorded here and converted to a gap node after the match
+    // (the arms hold a mutable borrow of `effect`'s fields).
+    let mut unbound_where_x: Option<String> = None;
     match effect {
         Effect::DealDamage { amount, .. }
         | Effect::DamageAll { amount, .. }
@@ -7672,8 +7714,16 @@ pub(super) fn apply_where_x_effect_expression(
             ..
         } => {
             *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
-            *power = apply_where_x_expression(power.clone(), where_x_expression);
-            *toughness = apply_where_x_expression(toughness.clone(), where_x_expression);
+            match (
+                apply_where_x_expression(power.clone(), where_x_expression),
+                apply_where_x_expression(toughness.clone(), where_x_expression),
+            ) {
+                (Some(bound_power), Some(bound_toughness)) => {
+                    *power = bound_power;
+                    *toughness = bound_toughness;
+                }
+                _ => unbound_where_x = where_x_expression.map(str::to_string),
+            }
         }
         // CR 107.3i + CR 109.4 + CR 109.5: "search/seek for up to X …, where X
         // is …" binds the search count (Oreskos Explorer). Eldritch Evolution
@@ -7718,8 +7768,16 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::PumpAll {
             power, toughness, ..
         } => {
-            *power = apply_where_x_expression(power.clone(), where_x_expression);
-            *toughness = apply_where_x_expression(toughness.clone(), where_x_expression);
+            match (
+                apply_where_x_expression(power.clone(), where_x_expression),
+                apply_where_x_expression(toughness.clone(), where_x_expression),
+            ) {
+                (Some(bound_power), Some(bound_toughness)) => {
+                    *power = bound_power;
+                    *toughness = bound_toughness;
+                }
+                _ => unbound_where_x = where_x_expression.map(str::to_string),
+            }
         }
         Effect::PreventDamage {
             amount,
@@ -7800,6 +7858,12 @@ pub(super) fn apply_where_x_effect_expression(
             }
         }
         _ => {}
+    }
+    // CR 107.3c: the clause defines X, but we cannot represent that definition.
+    // Report the gap instead of keeping a P/T placeholder that resolves to no
+    // modification at all (a silent +0/+0 no-op that still reads as supported).
+    if let Some(expression) = unbound_where_x {
+        *effect = Effect::unimplemented("where_x_binding", format!("where X is {expression}"));
     }
 }
 

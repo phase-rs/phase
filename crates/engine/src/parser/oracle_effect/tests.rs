@@ -28915,6 +28915,40 @@ fn craterhoof_where_x_binds_dynamic_pump_to_object_count() {
     }
 }
 
+/// CR 107.3c: "where X is …" DEFINES X in the ability's text — the controller
+/// does not choose it, and the parser must bind it to a typed quantity. Bishop
+/// of Binding ("target Vampire gets +X/+X until end of turn, where X is the
+/// power of the exiled card") and Redemptor Dreadnought share this binding.
+///
+/// Regression pin: the binding previously degraded to the lossy
+/// `PtValue::Variable("<raw oracle text>")` fallback, which `resolve_variable_pt`
+/// (game/effects/pump.rs) resolves to `None` — so the pump silently applied
+/// NOTHING. `QuantityRef::ExiledCardPower` is the typed home for this quantity.
+#[test]
+fn where_x_power_of_the_exiled_card_binds_exiled_card_power() {
+    let def = parse_effect_chain(
+        "target Vampire gets +X/+X until end of turn, where X is the power of the exiled card",
+        AbilityKind::Spell,
+    );
+    let Effect::Pump {
+        power, toughness, ..
+    } = &*def.effect
+    else {
+        panic!("expected Pump, got {:?}", def.effect);
+    };
+    let expected = QuantityExpr::Ref {
+        qty: QuantityRef::ExiledCardPower { index: 0 },
+    };
+    for (stat, value) in [("power", power), ("toughness", toughness)] {
+        assert_eq!(
+            value,
+            &PtValue::Quantity(expected.clone()),
+            "X must bind to ExiledCardPower in {stat}; an unbound PtValue::Variable \
+             resolves to no modification at all (silent no-op), got {value:?}"
+        );
+    }
+}
+
 #[test]
 fn duration_preserved_with_for_each_suffix() {
     // Goblin Piledriver pattern: "gets +2/+0 until end of turn for each other attacking Goblin"

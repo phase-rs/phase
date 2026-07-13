@@ -27,6 +27,7 @@ mod banding_combat;
 mod batched_trigger_subject_count;
 mod belbe_thornbow_life_loss;
 mod betor_lifelink_counters_repro;
+mod bishop_of_binding_where_x_exiled_card_power;
 mod blessed_orator_other_anthem;
 mod bolas_citadel_regression;
 mod boneyard_parley_pile_separation;
