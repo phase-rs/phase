@@ -176,8 +176,14 @@ fn parse_restriction_only_condition(text: &str) -> Option<ParsedCondition> {
     // changes the runtime condition representation for live cards (a fixed
     // `ParsedCondition` leaf becomes a `QuantityComparison` resolved through
     // `game::quantity`), which needs its own runtime-equivalence proof and full-pool
-    // dual-run. That is a separate unit; deleting them now would silently drop the cards
-    // listed beside each parser.
+    // dual-run. That work is tracked as **P02-U3b (shared-grammar phrasing parity)**;
+    // deleting them now would silently drop the cards listed beside each parser.
+    //
+    // NOTE for P02-U3b: the source-predicate family above is a PREREQUISITE, not a
+    // sibling. Until `ParsedCondition` can hold a filter for its source, teaching the
+    // shared grammar a new source phrasing REMOVES restriction support for it (the shared
+    // parse starts succeeding, the conversion then rejects it). Align the vocabularies
+    // first.
     //
     // The rule for anyone extending this file: a NEW restriction phrase never lands here.
     // Teach `parse_inner_condition` the phrasing — that is where every static ability
@@ -1481,16 +1487,31 @@ mod tests {
         }
     }
 
-    /// Counter thresholds on the source convert exactly through the shared grammar.
+    /// CR 122.1: counter thresholds on the source convert through the shared grammar to a
+    /// `QuantityComparison` over `CountersOn { Source }` — the representation #5677 shares
+    /// with the `AbilityCondition` peer, so the restriction and effect paths agree on one
+    /// lowering instead of each keeping a private counter leaf.
     #[test]
     fn source_counter_thresholds_convert() {
         assert!(matches!(
             parse_restriction_condition("there are three or more brick counters on ~"),
-            Some(ParsedCondition::SourceHasCounterAtLeast { count: 3, .. })
+            Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn { .. }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            })
         ));
         assert!(matches!(
             parse_restriction_condition("there are no charge counters on ~"),
-            Some(ParsedCondition::SourceHasNoCounter { .. })
+            Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn { .. }
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            })
         ));
     }
 
@@ -1716,5 +1737,100 @@ mod tests {
             } => {}
             other => panic!("expected filtered SpellsCastThisTurn >= 3, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod retained_family_gate {
+    /// STRUCTURAL GATE (not prose): the restriction-only fallback may dispatch to exactly
+    /// these six parser families, and no others.
+    ///
+    /// `parse_restriction_only_condition`'s doc comment tells contributors not to add a
+    /// new phrase there. A comment stops nobody. This test does: it reads this module's
+    /// own source, extracts the fallback's body, and pins the dispatch set. Adding a
+    /// seventh arm turns it red and forces the author to answer the only question that
+    /// matters — is the new phrase (a) restriction-context-referential, (b) a leaf the
+    /// shared vocabulary genuinely cannot express, or (c) merely a phrasing the shared
+    /// grammar does not spell yet? Only (a) and (b) belong here. (c) belongs in
+    /// `parse_inner_condition` — see task P02-U3b, which is porting the five families
+    /// below that are already known to be (c).
+    ///
+    /// If you are here because this test went red: do not just append your parser to the
+    /// list. Justify it, or teach the shared grammar the phrasing instead.
+    const PINNED_RETAINED_FAMILIES: [&str; 6] = [
+        // (a) restriction-context referent — the in-flight spell (CR 601.3d). PERMANENT.
+        "parse_spell_targets_filter",
+        // (b) vocabulary gap — ParsedCondition has no filter-carrying source predicate,
+        //     so StaticCondition::SourceMatchesFilter cannot be converted. Root fix is a
+        //     vocabulary alignment, not a parser edit.
+        "parse_source_condition",
+        // (c) PHRASING GAPS — port pending (P02-U3b). Each has an existing shared target.
+        "parse_you_control_condition",
+        "parse_hand_condition",
+        "parse_event_condition",
+        "parse_you_attacked_with",
+    ];
+
+    #[test]
+    fn restriction_only_fallback_dispatches_exactly_the_pinned_families() {
+        let source = include_str!("oracle_condition.rs");
+        // allow-noncombinator: scans RUST SOURCE, not Oracle text. nom parses card text;
+        // this gate parses this module's own bytes to pin its dispatch set.
+        let start = source
+            .find("fn parse_restriction_only_condition") // allow-noncombinator: scans RUST SOURCE, not Oracle text
+            .expect("fallback dispatcher must exist");
+        // The body ends at the first column-0 closing brace after the signature.
+        // allow-noncombinator: Rust source scan (see above).
+        let body_len = source[start..]
+            .find("\n}") // allow-noncombinator: Rust source scan
+            .expect("fallback dispatcher must be closed");
+        let body = &source[start..start + body_len];
+
+        let dispatched: Vec<&str> = PINNED_RETAINED_FAMILIES
+            .iter()
+            .copied()
+            .filter(|family| body.contains(&format!("{family}(text)")))
+            .collect();
+        assert_eq!(
+            dispatched.len(),
+            PINNED_RETAINED_FAMILIES.len(),
+            "a pinned family is no longer dispatched — if you REMOVED one (e.g. finished \
+             its port into parse_inner_condition), delete it from PINNED_RETAINED_FAMILIES \
+             too. Dispatched: {dispatched:?}"
+        );
+
+        // Now the direction that actually guards the boundary: count every `parse_*(text)`
+        // call in the body and require that none is unpinned.
+        let mut calls = 0usize;
+        let mut rest = body;
+        // allow-noncombinator: Rust source scan (see above).
+        while let Some(i) = rest.find("parse_") {
+            rest = &rest[i..];
+            // allow-noncombinator: Rust source scan (see above).
+            let end = rest
+                .find("(text)") // allow-noncombinator: Rust source scan
+                .filter(|end| !rest[..*end].contains(char::is_whitespace));
+            if let Some(end) = end {
+                let name = &rest[..end];
+                assert!(
+                    PINNED_RETAINED_FAMILIES.contains(&name),
+                    "UNPINNED restriction-only parser `{name}` was added to the fallback.\n\
+                     The restriction-only grammar is closed. A new restriction phrase almost \
+                     always belongs in `parse_inner_condition` (the shared static-condition \
+                     grammar), because that is where every static ability with the same words \
+                     already looks. Only two things may live here: a referent the shared \
+                     grammar structurally cannot bind (the in-flight spell of CR 601.3d), or \
+                     a leaf `StaticCondition` genuinely has no vocabulary for. If yours is \
+                     neither, teach the shared grammar the phrasing."
+                );
+                calls += 1;
+            }
+            rest = &rest["parse_".len()..];
+        }
+        assert_eq!(
+            calls,
+            PINNED_RETAINED_FAMILIES.len(),
+            "the fallback dispatch count changed; pin it deliberately"
+        );
     }
 }

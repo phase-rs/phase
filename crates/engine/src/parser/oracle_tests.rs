@@ -1538,23 +1538,19 @@ fn cavernous_maw_still_a_cave_land_clause_has_no_unimplemented() {
     for ability in &r.abilities {
         walk(ability, &mut effects);
     }
-    // CR 602.5: the activation restriction ("the number of other Caves you control PLUS
-    // the number of Cave cards in your graveyard is three or greater") is a cross-zone
-    // SUM that no typed condition can represent. It is now an honest `Effect::Unimplemented`
-    // instead of a `RequiresCondition { condition: None }`, which evaluated permissively —
-    // i.e. the ability used to be activatable with NO restriction at all. The clause this
-    // test guards is the "It's still a Cave land" retention sentence, which must still
-    // lower to a typed continuous modification and NOT be unimplemented.
-    let unimplemented: Vec<_> = effects
-        .iter()
-        .filter(|e| matches!(e, Effect::Unimplemented { .. }))
-        .collect();
+    // CR 602.5: Cavernous Maw's restriction ("the number of other Caves you control PLUS
+    // the number of Cave cards in your graveyard is three or greater") is a cross-zone SUM.
+    // P02-U3 first made this an honest `Effect::Unimplemented` — it had been a
+    // `RequiresCondition { condition: None }`, i.e. the ability was activatable with NO
+    // restriction at all. #5677's condition lane then taught the shared grammar the summed
+    // form, and because P02-U3 routes restrictions through that grammar FIRST, the card
+    // came back fully supported with a real `QuantityComparison{Sum[..]}` gate. The strict
+    // zero-Unimplemented assertion is therefore restored.
     assert!(
-        unimplemented.iter().all(|e| matches!(
-            e,
-            Effect::Unimplemented { name, .. } if name == "activate"
-        )),
-        "the only permitted gap is the cross-zone-sum activation restriction, got {effects:#?}"
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "Cavernous Maw must not emit Effect::Unimplemented, got {effects:#?}"
     );
 
     // The retention clause must produce a continuous GenericEffect that
@@ -20899,5 +20895,95 @@ fn token_copy_except_this_ability_resolves_printed_slot_at_finish() {
         resolved, 1,
         "CR 707.9a: finish() must resolve the CopyTokenOf printed slot to the \
          trigger's source-ordered index (1)"
+    );
+}
+
+/// CR 602.5: An activation gate whose CONDITION does not parse must commit NOTHING —
+/// not even the cadence restriction that shares the sentence.
+///
+/// This is the exact defect `commit_requires_condition` exists to prevent. The old code
+/// peeled "…and only once each turn" (pushing `OnlyOnceEachTurn`), truncated the source
+/// line, then pushed `RequiresCondition { condition: parse_restriction_condition(..) }`.
+/// When the condition failed, that stored `condition: None`, which
+/// `restrictions::evaluate_activation_restriction` evaluates with `Option::is_none_or`,
+/// i.e. as ALWAYS TRUE. The result was an ability that was rate-limited but otherwise
+/// activatable AT WILL — and, because the clause had been consumed, one that reported as
+/// fully supported. Three mutations (cadence push, line truncation, condition push) had
+/// to succeed or fail together; they didn't.
+///
+/// Revert-discriminating: restore the push-then-parse order in
+/// `parse_activation_constraints` and this test goes red on BOTH assertions — a stranded
+/// `OnlyOnceEachTurn` appears, and the unparseable condition vanishes from the text
+/// instead of surfacing as `Effect::Unimplemented`.
+#[test]
+fn failed_activation_condition_commits_no_cadence_and_leaves_the_clause_unimplemented() {
+    let r = parse(
+        "{2}: Draw a card. Activate only once each turn and only if you control a frobnicator.",
+        "Atomic Commit Test",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+
+    let ability = &r.abilities[0];
+    assert!(
+        ability.activation_restrictions.is_empty(),
+        "an unparsed condition must strand NOTHING — the cadence restriction shares the \
+         sentence and must roll back with it, got {:?}",
+        ability.activation_restrictions
+    );
+    assert!(
+        !ability.activation_restrictions.iter().any(|r| matches!(
+            r,
+            ActivationRestriction::RequiresCondition { condition: None }
+        )),
+        "RequiresCondition {{ condition: None }} evaluates permissively true — it must \
+         never be stored"
+    );
+
+    fn walk<'a>(ability: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+        out.push(&ability.effect);
+        if let Some(sub) = &ability.sub_ability {
+            walk(sub, out);
+        }
+    }
+    let mut effects = Vec::new();
+    for ability in &r.abilities {
+        walk(ability, &mut effects);
+    }
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "the unparsed restriction clause must survive as Effect::Unimplemented rather \
+         than being silently consumed, got {effects:#?}"
+    );
+}
+
+/// The positive reach-guard for the test above: when the condition DOES parse, the same
+/// sentence still commits both halves. Without this, the atomicity test could pass simply
+/// because the peeling branch never runs.
+#[test]
+fn parsed_activation_condition_commits_both_cadence_and_condition() {
+    let r = parse(
+        "{2}: Draw a card. Activate only once each turn and only if you control an artifact.",
+        "Atomic Commit Positive",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    let restrictions = &r.abilities[0].activation_restrictions;
+    assert!(
+        restrictions.contains(&ActivationRestriction::OnlyOnceEachTurn),
+        "cadence must commit when the condition parses, got {restrictions:?}"
+    );
+    assert!(
+        restrictions.iter().any(|r| matches!(
+            r,
+            ActivationRestriction::RequiresCondition {
+                condition: Some(crate::types::ability::ParsedCondition::QuantityComparison { .. })
+            }
+        )),
+        "condition must commit alongside the cadence, got {restrictions:?}"
     );
 }
