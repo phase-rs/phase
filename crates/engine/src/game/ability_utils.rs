@@ -7548,13 +7548,32 @@ mod tests {
         );
         state.waiting_for = waiting;
 
-        crate::game::engine::apply_as_current(
+        let result = crate::game::engine::apply_as_current(
             &mut state,
             GameAction::SelectCards {
                 cards: vec![mazes_end],
             },
         )
         .expect("paying the self-bounce cost should finish activation");
+
+        let moves: Vec<_> = result
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                crate::types::events::GameEvent::ZoneChanged {
+                    object_id,
+                    from,
+                    to,
+                    ..
+                } if *object_id == mazes_end => Some((*from, *to)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            moves,
+            vec![(Some(Zone::Battlefield), Zone::Hand)],
+            "a self-return activation cost must emit exactly one battlefield-to-hand move"
+        );
 
         assert_eq!(state.objects[&mazes_end].zone, Zone::Hand);
         assert!(

@@ -2850,11 +2850,18 @@ pub(crate) fn handle_return_to_hand_for_cost(
     // Karoo lands, Cavern Harpy): `count` is almost always 1, so the stamp's
     // `len() < 2` guard would no-op. If a >=2-permanent return-to-hand cost ever
     // ships, mirror the A1 stamp from `handle_sacrifice_for_cost` here.
+    // A self-return component is paid by `pay_ability_cost` above. Moving
+    // that source a second time would emit a spurious Hand -> Hand event.
+    let to_return: Vec<_> = chosen
+        .iter()
+        .copied()
+        .filter(|id| state.objects.get(id).is_some_and(|obj| obj.zone != Zone::Hand))
+        .collect();
     finish_cost_object_moves(
         state,
         player,
         pending,
-        chosen.to_vec(),
+        to_return,
         0,
         Zone::Hand,
         PendingCostMoveCompletion::FinishPending,
