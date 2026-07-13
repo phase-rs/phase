@@ -5068,6 +5068,16 @@ pub(crate) fn controller_for_relative_filter(
             return scoped;
         }
     }
+    // CR 109.5 + CR 608.2c: a resolution-time "your hand and/or graveyard"
+    // choice still belongs to the spell's controller. A player targeted by an
+    // earlier instruction (for example, the damage half of Worldsoul's Rage)
+    // must not rebind "you" for the later untargeted zone choice.
+    if matches!(
+        ability.target_choice_timing,
+        crate::types::ability::TargetChoiceTiming::Resolution
+    ) {
+        return ability.controller;
+    }
     if filter_uses_relative_controller_you(target_filter)
         && ability.scoped_player.is_none()
         && ability
