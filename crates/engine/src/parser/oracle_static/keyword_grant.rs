@@ -1837,7 +1837,23 @@ pub(crate) fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousMo
 /// canonical inner classifier without exposing the private
 /// `parse_quoted_ability` / `parse_quoted_rule_static_modifications` helpers.
 pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModification> {
-    let ability_text = ability_text.trim();
+    // CR 207.2c: A trailing sentence COMMA carried INSIDE the closing quote
+    // (Oracle convention: `...until end of turn," and it loses all other
+    // abilities`) is the OUTER sentence's list/clause punctuation, never the
+    // granted ability's own text — an ability's own text always terminates in a
+    // period, never a bare comma. Strip it at this single seam — every
+    // quoted-ability isolation site (`return_as_aura::try_parse`,
+    // `parse_quoted_ability_modifications`) funnels through here, BEFORE the
+    // trigger/keyword/static/GrantAbility sub-parse ladder — so a quoted ability
+    // followed by a continuing clause parses identically to its unquoted form
+    // (Bronzehide Lion, #5681: the `{G}{W}: … until end of turn,` grant otherwise
+    // dropped its duration and made the creature indestructible permanently).
+    // Only the comma: a trailing PERIOD is the ability's OWN sentence terminator
+    // and is preserved here (kept in the grant `description`; the duration/keyword
+    // sub-parsers strip it themselves) — stripping it would corrupt descriptions
+    // like `"{T}: Add {G}."`.
+    // allow-noncombinator: trailing outer-sentence comma cleanup on the isolated quoted body, not parsing dispatch
+    let ability_text = ability_text.trim().trim_end_matches(',').trim();
     if ability_text.is_empty() {
         return Vec::new();
     }

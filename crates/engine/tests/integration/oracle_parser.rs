@@ -662,6 +662,35 @@ fn snapshot_bronzehide_lion() {
     insta::assert_json_snapshot!(result);
 }
 
+/// #5681 discriminating assertion (beyond the snapshot): Bronzehide Lion's
+/// granted ability `"{G}{W}: Enchanted creature gains indestructible until end of
+/// turn,"` carries the sentence comma INSIDE the closing quote. The quoted-body
+/// sub-parse must strip that trailing comma so the duration combinator still
+/// matches — otherwise the duration drops to prose and the creature becomes
+/// indestructible PERMANENTLY. After the fix every "until end of turn" in the
+/// card is a typed `Duration::UntilEndOfTurn`: two for the printed `{G}{W}`
+/// ability and two for the granted copy (its static modification + the ability
+/// itself), so exactly four typed-duration fields. On `main` the two grant-side
+/// fields are `null`, so the count is two.
+#[test]
+fn bronzehide_lion_quoted_grant_keeps_until_end_of_turn_duration() {
+    let result = parse(
+        "{G}{W}: This creature gains indestructible until end of turn.\nWhen this creature dies, return it to the battlefield. It's an Aura enchantment with enchant creature you control and \"{G}{W}: Enchanted creature gains indestructible until end of turn,\" and it loses all other abilities.",
+        "Bronzehide Lion",
+        &[],
+        &["Creature"],
+        &["Cat"],
+    );
+    let json = serde_json::to_string(&result).expect("ParsedAbilities serializes");
+    let typed_durations = json.matches("\"duration\":\"UntilEndOfTurn\"").count();
+    assert_eq!(
+        typed_durations, 4,
+        "Bronzehide's printed AND granted 'until end of turn' must both parse to a typed \
+         duration (2 printed + 2 granted); the granted pair is dropped to null when the \
+         trailing comma inside the closing quote is not normalized. got {typed_durations}"
+    );
+}
+
 #[test]
 fn snapshot_harold_and_bob_first_numens() {
     // CR 614.1 + CR 113.10: Harold's "<card name> loses all other abilities"

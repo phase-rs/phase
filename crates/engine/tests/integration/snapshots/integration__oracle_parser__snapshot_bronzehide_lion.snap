@@ -119,10 +119,10 @@ expression: result
                         "effect_zone": null,
                         "active_zones": [],
                         "characteristic_defining": false,
-                        "description": "gain indestructible until end of turn,"
+                        "description": "gain indestructible"
                       }
                     ],
-                    "duration": null,
+                    "duration": "UntilEndOfTurn",
                     "target": null
                   },
                   "cost": {
@@ -137,8 +137,8 @@ expression: result
                     }
                   },
                   "sub_ability": null,
-                  "duration": null,
-                  "description": "{G}{W}: Enchanted creature gains indestructible until end of turn,",
+                  "duration": "UntilEndOfTurn",
+                  "description": "{G}{W}: Enchanted creature gains indestructible until end of turn",
                   "target_prompt": null,
                   "condition": null,
                   "optional_targeting": false,
@@ -189,13 +189,5 @@ expression: result
   ],
   "statics": [],
   "replacements": [],
-  "extractedKeywords": [],
-  "parseWarnings": [
-    {
-      "type": "SwallowedClause",
-      "detector": "Duration_UntilEndOfTurn",
-      "description": "When this creature dies, return it to the battlefield. It's an Aura enchantment with enchant creature you control and \"{G}{W}: Enchanted cre",
-      "line_index": 1
-    }
-  ]
+  "extractedKeywords": []
 }
