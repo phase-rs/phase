@@ -48,8 +48,8 @@ mod prelude {
         AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, CombatRelation,
         CombatRelationSubject, Comparator, ContinuousModification, ControllerRef, CostCategory,
         CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PtStat, PtValueScope,
-        QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, StaticCondition,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SharedQualityRelation,
+        StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     pub(super) use crate::types::card_type::{
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,

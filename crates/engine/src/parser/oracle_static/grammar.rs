@@ -1116,10 +1116,11 @@ pub(crate) fn parse_variable_pt_pattern(
 ) -> nom::IResult<&str, VariablePtAxes, OracleError<'_>> {
     fn axis(input: &str) -> nom::IResult<&str, (i32, Option<i32>), OracleError<'_>> {
         let (rest, sign) = alt((value(-1i32, tag("-")), value(1i32, tag("+")))).parse(input)?;
-        // `None` == the variable X (dynamic); `Some(n)` == a fixed magnitude
-        // (`0` included, so "+x/+0" still yields no toughness modification).
+        // `None` == a dynamic variable axis (`x`, or `y` for a "+X/+Y" pump whose
+        // two axes bind to different quantities — Aspect of Wolf); `Some(n)` == a
+        // fixed magnitude (`0` included, so "+x/+0" still yields no toughness mod).
         let (rest, mag) = alt((
-            value(None, tag("x")),
+            value(None, alt((tag("x"), tag("y")))),
             map_res(digit1, |d: &str| d.parse::<i32>().map(Some)),
         ))
         .parse(rest)?;

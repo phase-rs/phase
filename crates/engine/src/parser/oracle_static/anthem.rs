@@ -1153,6 +1153,26 @@ fn strip_trailing_distributive_each(s: &str) -> &str {
     }
 }
 
+/// Split a compound "+X/+Y" pump binding clause `<A> and Y is <B>` into the
+/// X-axis expression (`A`) and Y-axis expression (`B`) when the two axes bind to
+/// different quantities (Aspect of Wolf: "X is half the number of Forests you
+/// control, rounded down, and Y is half the number of Forests you control,
+/// rounded up"). Returns `None` for the common single-quantity clause. `wx` is
+/// already lowercased, so the " and y is " boundary matches the printed
+/// "and Y is". The trailing comma left on `A` and the sentence period on `B` are
+/// trimmed so each half feeds `parse_cda_quantity` cleanly.
+fn split_x_and_y_where_clause(wx: &str) -> Option<(String, String)> {
+    // `wx` arrives in original case (it is sliced from `.original`), so lowercase
+    // before locating the " and y is " boundary; the halves feed
+    // `parse_cda_quantity`, which is itself case-insensitive.
+    let lower = wx.to_lowercase();
+    let (_, (x_expr, y_expr)) = nom_primitives::split_once_on(&lower, " and y is ").ok()?;
+    Some((
+        x_expr.trim().trim_end_matches(',').to_string(),
+        y_expr.trim().trim_end_matches('.').trim().to_string(),
+    ))
+}
+
 pub(crate) fn parse_dynamic_pt_in_text(
     lower: &str,
     where_x_expression: Option<&str>,
@@ -1188,14 +1208,30 @@ pub(crate) fn parse_dynamic_pt_in_text(
     // case. This unblocks +X/+0 and +X/+X pump activations like Kessig Wolf
     // Run whose effect text has no binding clause — the X is bound to the
     // cost, not to a derived quantity.
-    let quantity = match where_x_expression {
-        // Intensity now lives in the shared `parse_quantity_ref` combinator
-        // (oracle_nom/quantity.rs), which `parse_cda_quantity` delegates to — so
-        // the local duplicate this arm used to carry is gone.
-        Some(wx) => parse_cda_quantity(wx).or_else(|| parse_event_context_quantity(wx))?,
-        None => QuantityExpr::Ref {
-            qty: QuantityRef::CostXPaid,
+    // Intensity and the other derived quantities live in the shared
+    // `parse_quantity_ref` combinator (oracle_nom/quantity.rs), which
+    // `parse_cda_quantity` delegates to. Most pumps bind X to a single quantity
+    // applied to both axes; a "+X/+Y" pump whose clause reads "where X is <A> and
+    // Y is <B>" (Aspect of Wolf) binds each axis to its own quantity, so the
+    // clause is split on " and y is " and each half is parsed independently.
+    let resolve_quantity =
+        |wx: &str| parse_cda_quantity(wx).or_else(|| parse_event_context_quantity(wx));
+    let (p_quantity, t_quantity) = match where_x_expression {
+        Some(wx) => match split_x_and_y_where_clause(wx) {
+            Some((x_expr, y_expr)) => (resolve_quantity(&x_expr)?, resolve_quantity(&y_expr)?),
+            None => {
+                let q = resolve_quantity(wx)?;
+                (q.clone(), q)
+            }
         },
+        // CR 107.3a + CR 107.3i: no binding clause → X is the value chosen as the
+        // ability's cost-X was paid (Kessig Wolf Run).
+        None => {
+            let q = QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid,
+            };
+            (q.clone(), q)
+        }
     };
 
     let mut mods = Vec::new();
@@ -1204,30 +1240,30 @@ pub(crate) fn parse_dynamic_pt_in_text(
     // "+X/+1" case). A fixed `0` axis contributes nothing.
     match p_mag {
         None => {
-            let qty = if p_sign < 0 {
+            let value = if p_sign < 0 {
                 QuantityExpr::Multiply {
                     factor: -1,
-                    inner: Box::new(quantity.clone()),
+                    inner: Box::new(p_quantity),
                 }
             } else {
-                quantity.clone()
+                p_quantity
             };
-            mods.push(ContinuousModification::AddDynamicPower { value: qty });
+            mods.push(ContinuousModification::AddDynamicPower { value });
         }
         Some(n) if n != 0 => mods.push(ContinuousModification::AddPower { value: p_sign * n }),
         Some(_) => {}
     }
     match t_mag {
         None => {
-            let qty = if t_sign < 0 {
+            let value = if t_sign < 0 {
                 QuantityExpr::Multiply {
                     factor: -1,
-                    inner: Box::new(quantity),
+                    inner: Box::new(t_quantity),
                 }
             } else {
-                quantity
+                t_quantity
             };
-            mods.push(ContinuousModification::AddDynamicToughness { value: qty });
+            mods.push(ContinuousModification::AddDynamicToughness { value });
         }
         Some(n) if n != 0 => mods.push(ContinuousModification::AddToughness { value: t_sign * n }),
         Some(_) => {}

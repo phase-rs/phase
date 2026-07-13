@@ -28778,3 +28778,46 @@ fn filter_scoped_cant_be_activated_parses_mana_ability_exemption() {
         s[0].mode
     );
 }
+
+/// CR 613.4c: a "+X/+Y" pump whose two axes bind to DIFFERENT quantities —
+/// Aspect of Wolf: "X is half the number of Forests you control, rounded down,
+/// and Y is half ..., rounded up". Power scales by the rounded-DOWN half,
+/// toughness by the rounded-UP half (the discriminating detail: a single-quantity
+/// implementation would apply the same rounding to both axes).
+#[test]
+fn dynamic_pt_pump_binds_x_and_y_axes_to_distinct_quantities() {
+    let s = super::shared::parse_static_line_multi(
+        "Enchanted creature gets +X/+Y, where X is half the number of Forests you control, rounded down, and Y is half the number of Forests you control, rounded up.",
+    );
+    assert_eq!(s.len(), 1, "Aspect of Wolf: {s:?}");
+    let power = s[0].modifications.iter().find_map(|m| match m {
+        ContinuousModification::AddDynamicPower { value } => Some(value),
+        _ => None,
+    });
+    let toughness = s[0].modifications.iter().find_map(|m| match m {
+        ContinuousModification::AddDynamicToughness { value } => Some(value),
+        _ => None,
+    });
+    assert!(
+        matches!(
+            power,
+            Some(QuantityExpr::DivideRounded {
+                divisor: 2,
+                rounding: RoundingMode::Down,
+                ..
+            })
+        ),
+        "power axis must be half rounded DOWN, got {power:?}"
+    );
+    assert!(
+        matches!(
+            toughness,
+            Some(QuantityExpr::DivideRounded {
+                divisor: 2,
+                rounding: RoundingMode::Up,
+                ..
+            })
+        ),
+        "toughness axis must be half rounded UP, got {toughness:?}"
+    );
+}
