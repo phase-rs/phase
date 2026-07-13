@@ -2556,6 +2556,23 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("you surveil ")),
         value((), tag("you get ")),
         value((), tag("you may ")),
+        // CR 614.1b + CR 603.7a: "Effects that use the word 'skip' are
+        // replacement effects" — a skip is its own instruction, never a
+        // continuation of the conjunct before it. Ivory Gargoyle / Molten
+        // Firebird: "return it to the battlefield under its owner's control at
+        // the beginning of the next end step AND YOU SKIP YOUR NEXT DRAW STEP";
+        // Waterspout Elemental: "return all other creatures to their owners'
+        // hands and you skip your next turn."
+        //
+        // Without this arm the bare-and splitter left the whole sentence as ONE
+        // clause, which cost both halves at once: the skip tail was swallowed by
+        // the leading imperative (the CR 614.1b replacement vanished), AND the
+        // temporal phrase stopped being a suffix — so `strip_temporal_suffix`
+        // (lower.rs), which only matches a temporal phrase at the END of the
+        // clause, never fired and the delayed return collapsed into an immediate
+        // one. Splitting here restores the temporal phrase to clause-final
+        // position, so ONE arm recovers both behaviors.
+        value((), tag("you skip ")),
         // CR 707.10c: "[subject] may copy this spell and may choose a new
         // target for that copy" — the Chain cycle joins the optional copy and
         // its retarget grant with "and". "may choose" begins a verb phrase,
