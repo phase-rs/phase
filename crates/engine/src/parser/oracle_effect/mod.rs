@@ -17671,6 +17671,15 @@ fn lower_subject_predicate_ast(
                 if let Some(scope) = player_scope_from_parent_target_subject(&subject.affected) {
                     ctx.pending_player_scope = Some(scope);
                 }
+                // CR 701.16a + CR 608.2c + CR 400.7: "investigate FOR EACH nontoken
+                // creature exiled this way" — the fieldless Investigate carries no
+                // count slot, so lift the "for each <filter> … this way" suffix to a
+                // pending `repeat_for` (the effect-chain loop stamps it on this
+                // clause's def). The resolver loops the Investigate N times over the
+                // merged exile tracked set, one Clue per nontoken creature exiled.
+                if let Some(qty) = repeat_for_each_this_way_suffix(&pred_lower) {
+                    ctx.pending_repeat_for = Some(qty);
+                }
             }
             inject_subject_target(&mut clause.effect, &subject);
             sync_subject_into_nested_shuffle_sub(&mut clause, &subject);
@@ -17880,6 +17889,36 @@ fn player_scope_from_parent_target_subject(affected: &TargetFilter) -> Option<Pl
     match affected {
         TargetFilter::ParentTargetController => Some(PlayerFilter::ParentObjectTargetController),
         TargetFilter::ParentTargetOwner => Some(PlayerFilter::ParentObjectTargetOwner),
+        _ => None,
+    }
+}
+
+/// CR 701.16a + CR 400.7: Parse a "for each <filter> <cause> this way" SUFFIX
+/// (lowercased predicate text) into a `repeat_for` count for a count-less effect
+/// like `Effect::Investigate`. Routes the tail through the shared
+/// `parse_for_each_clause` (the parser the "for each …, <effect>" prefix path
+/// already uses) and accepts ONLY a cause-filtered tracked-set count
+/// (`FilteredTrackedSetSize { caused_by: Some(_) }`, e.g. "nontoken creature
+/// exiled this way") — an unfiltered or non-"this way" suffix returns `None` so
+/// the caller leaves the effect untouched. The chain-tracked exile set the count
+/// reads is published by the preceding `ChangeZone`/`ChangeZoneAll` exiles.
+fn repeat_for_each_this_way_suffix(pred_lower: &str) -> Option<QuantityExpr> {
+    // Combinator split at the " for each " delimiter (PATTERNS.md Pattern 6): the
+    // tail is the count clause.
+    let (after_base, _) = take_until::<_, _, OracleError<'_>>(" for each ")
+        .parse(pred_lower)
+        .ok()?;
+    let (tail, _) = tag::<_, _, OracleError<'_>>(" for each ")
+        .parse(after_base)
+        .ok()?;
+    // allow-noncombinator: trailing-sentence-period cleanup on the pre-split tail, not parse dispatch
+    let clause = tail.trim_end().trim_end_matches('.').trim_end();
+    match parse_for_each_clause(clause) {
+        Some(
+            qty @ QuantityRef::FilteredTrackedSetSize {
+                caused_by: Some(_), ..
+            },
+        ) => Some(QuantityExpr::Ref { qty }),
         _ => None,
     }
 }
@@ -26826,6 +26865,11 @@ pub(crate) fn parse_effect_chain_ir(
                 player_scope = Some(scope);
             }
         }
+        // CR 701.16a + CR 608.2c: Fold a pending `repeat_for` lifted from a
+        // count-less "investigate for each … this way" (Declaration in Stone) into
+        // this chunk's repeat count (→ `AbilityDefinition.repeat_for`). take() so
+        // it is consumed within this chunk; a pre-existing repeat_for wins.
+        let repeat_for = repeat_for.or_else(|| ctx.pending_repeat_for.take());
         // CR 109.5: Rebind recipient-bearing nodes inside a decline body so the
         // body's "you"/"that player" anaphors resolve relative to the surrounding
         // per-player iteration. The two walkers are parallel inverses:

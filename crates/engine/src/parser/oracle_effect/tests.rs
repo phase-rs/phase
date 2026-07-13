@@ -45638,18 +45638,21 @@ fn instead_override_never_absorbs_the_preceding_sentence() {
 }
 
 /// CR 109.4 + CR 608.2h + CR 701.16a: an "its controller / that player
-/// investigates" subject-predicate (whose fieldless `Effect::Investigate` gives
-/// `inject_subject_target` nowhere to stamp the subject) lifts the dropped
-/// player anaphor to the Investigate sub-ability's `player_scope`, so the Clue
-/// goes to the target's controller — not the caster. Covers the whole class
-/// (Declaration in Stone + Fateful Absence) plus a caster-default negative.
+/// investigates [for each … this way]" subject-predicate (whose fieldless
+/// `Effect::Investigate` gives `inject_subject_target` nowhere to stamp the
+/// subject and no slot for the count) lifts BOTH the dropped player anaphor to
+/// the Investigate sub-ability's `player_scope` (so the Clue goes to the
+/// target's controller, not the caster) AND the "for each … exiled this way"
+/// suffix to `repeat_for` (so N creatures exiled → N Clues). Covers the class
+/// (Declaration in Stone with count + Fateful Absence single-target) plus a
+/// caster-default negative.
 #[test]
 fn investigate_subject_lifts_parent_target_controller_to_player_scope() {
-    fn find_investigate_scope(def: &AbilityDefinition) -> Option<Option<PlayerFilter>> {
+    fn find_investigate(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
         let mut node = Some(def);
         while let Some(d) = node {
             if matches!(&*d.effect, Effect::Investigate) {
-                return Some(d.player_scope.clone());
+                return Some(d);
             }
             node = d.sub_ability.as_deref();
         }
@@ -45657,7 +45660,8 @@ fn investigate_subject_lifts_parent_target_controller_to_player_scope() {
     }
 
     // Declaration in Stone: "That player investigates for each nontoken creature
-    // exiled this way" — "that player" = the exiled creature's controller.
+    // exiled this way" — "that player" = the exiled creature's controller, and
+    // the Investigate repeats once per nontoken creature exiled this way.
     let dis = parse_oracle_text(
         "Exile target creature and all other creatures its controller controls with the same \
          name as that creature. That player investigates for each nontoken creature exiled this way.",
@@ -45666,14 +45670,28 @@ fn investigate_subject_lifts_parent_target_controller_to_player_scope() {
         &["Sorcery".to_string()],
         &[],
     );
+    let dis_inv = find_investigate(&dis.abilities[0]).expect("Declaration has an Investigate");
     assert_eq!(
-        find_investigate_scope(&dis.abilities[0]),
-        Some(Some(PlayerFilter::ParentObjectTargetController)),
+        dis_inv.player_scope,
+        Some(PlayerFilter::ParentObjectTargetController),
         "Declaration in Stone's Investigate must fan out to the exiled creature's controller"
+    );
+    assert!(
+        matches!(
+            dis_inv.repeat_for.as_ref(),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    caused_by: Some(ThisWayCause::Exiled),
+                    ..
+                }
+            })
+        ),
+        "Declaration's Investigate must repeat once per nontoken creature exiled this way, got {:?}",
+        dis_inv.repeat_for
     );
 
     // Fateful Absence: "Destroy target creature or planeswalker. Its controller
-    // investigates." — same class, singular non-token target.
+    // investigates." — same recipient class, singular target, NO count suffix.
     let fateful = parse_oracle_text(
         "Destroy target creature or planeswalker. Its controller investigates.",
         "Fateful Absence",
@@ -45681,15 +45699,21 @@ fn investigate_subject_lifts_parent_target_controller_to_player_scope() {
         &["Instant".to_string()],
         &[],
     );
+    let fa_inv =
+        find_investigate(&fateful.abilities[0]).expect("Fateful Absence has an Investigate");
     assert_eq!(
-        find_investigate_scope(&fateful.abilities[0]),
-        Some(Some(PlayerFilter::ParentObjectTargetController)),
+        fa_inv.player_scope,
+        Some(PlayerFilter::ParentObjectTargetController),
         "Fateful Absence's \"its controller investigates\" must fan out to the destroyed \
          permanent's controller"
     );
+    assert_eq!(
+        fa_inv.repeat_for, None,
+        "Fateful Absence has no \"for each\" suffix — a single Clue, no repeat"
+    );
 
-    // Negative: a bare "investigate" with no player subject stays the caster
-    // default (no player_scope) — the lift must not over-apply.
+    // Negative: a bare "investigate" with no player subject and no count stays the
+    // caster default — neither lift may over-apply.
     let press = parse_oracle_text(
         "Tap target creature. Investigate.",
         "Press for Answers",
@@ -45697,9 +45721,13 @@ fn investigate_subject_lifts_parent_target_controller_to_player_scope() {
         &["Instant".to_string()],
         &[],
     );
+    let press_inv = find_investigate(&press.abilities[0]).expect("Press has an Investigate");
     assert_eq!(
-        find_investigate_scope(&press.abilities[0]),
-        Some(None),
+        press_inv.player_scope, None,
         "a bare \"investigate\" must keep the caster default (no player_scope)"
+    );
+    assert_eq!(
+        press_inv.repeat_for, None,
+        "a bare \"investigate\" must not gain a repeat count"
     );
 }

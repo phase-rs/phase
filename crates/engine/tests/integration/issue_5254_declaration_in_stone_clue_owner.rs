@@ -81,3 +81,56 @@ fn declaration_in_stone_gives_clue_to_exiled_creatures_controller_not_caster() {
         "the caster must NOT receive the Clue"
     );
 }
+
+#[test]
+fn declaration_in_stone_investigates_once_per_nontoken_creature_exiled() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // The opponent (P1) controls TWO same-name nontoken creatures. Declaration in
+    // Stone exiles the target AND all other same-name creatures its controller
+    // controls — so BOTH are exiled — and "investigates for each nontoken creature
+    // exiled this way" must create TWO Clues, both to P1. On `main` (and on the
+    // recipient-only fix) the count is dropped and only ONE Clue is made.
+    let victim = scenario.add_creature(P1, "Grizzly Bear", 2, 2).id();
+    let twin = scenario.add_creature(P1, "Grizzly Bear", 2, 2).id();
+
+    let dis = scenario
+        .add_spell_to_hand(P0, "Declaration in Stone", false)
+        .from_oracle_text(DECLARATION_IN_STONE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![],
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(dis).target_objects(&[victim]).resolve();
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Declaration in Stone must resolve cleanly, got {:?}",
+        outcome.final_waiting_for()
+    );
+
+    // Both same-name creatures were exiled.
+    assert!(
+        !runner.state().battlefield.contains(&victim)
+            && !runner.state().battlefield.contains(&twin),
+        "both same-name creatures must be exiled"
+    );
+
+    // THE COUNT FIX: two nontoken creatures exiled this way → TWO Clues, both to
+    // the opponent (the exiled creatures' controller); zero to the caster.
+    assert_eq!(
+        clues_controlled(runner.state(), P1),
+        2,
+        "one Clue per nontoken creature exiled this way (two exiled → two Clues), all to the opponent"
+    );
+    assert_eq!(
+        clues_controlled(runner.state(), P0),
+        0,
+        "the caster must NOT receive any Clue"
+    );
+}
