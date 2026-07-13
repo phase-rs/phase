@@ -1648,7 +1648,13 @@ pub(super) fn handle_resolution_choice(
                 },
                 events,
             )?;
-            ResolutionChoiceOutcome::WaitingFor(result)
+            // CR 608.2g: when the final free cast is announced, finish the
+            // parent spell (including Invoke's self-exile) before priority.
+            if matches!(result, WaitingFor::Priority { .. }) {
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            } else {
+                ResolutionChoiceOutcome::WaitingFor(result)
+            }
         }
         (WaitingFor::LearnChoice { player, hand_cards }, GameAction::LearnDecision { choice }) => {
             match choice {
