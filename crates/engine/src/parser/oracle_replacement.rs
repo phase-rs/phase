@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::{char, multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map_opt, opt, peek, rest, value};
 use nom::multi::separated_list1;
@@ -9331,18 +9331,16 @@ fn extract_prevention_followup(original_text: &str) -> Option<String> {
 /// `runtime_execute` instead of dropping it (New Way Forward, Phyrexian
 /// Vindicator, Outfitted Jouster).
 pub(crate) fn clause_is_prevented_this_way_rider(fragment: &str) -> bool {
-    let lower = fragment.trim_start().to_lowercase();
-    let is_rider = preceded(
+    preceded(
         alt((
-            tag::<_, _, OracleError<'_>>("when "),
-            tag::<_, _, OracleError<'_>>("whenever "),
-            tag::<_, _, OracleError<'_>>("if "),
+            tag_no_case::<_, _, OracleError<'_>>("when "),
+            tag_no_case::<_, _, OracleError<'_>>("whenever "),
+            tag_no_case::<_, _, OracleError<'_>>("if "),
         )),
-        tag::<_, _, OracleError<'_>>("damage is prevented this way,"),
+        tag_no_case::<_, _, OracleError<'_>>("damage is prevented this way,"),
     )
-    .parse(lower.as_str())
-    .is_ok();
-    is_rider
+    .parse(fragment.trim_start())
+    .is_ok()
 }
 
 /// CR 614.1a: Parse event substitution replacement effects.
