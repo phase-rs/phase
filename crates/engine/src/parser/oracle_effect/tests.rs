@@ -4,7 +4,7 @@ use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
     AttachmentKind, CastManaObjectScope, CastManaSpentMetric, ExcessRecipient,
-    ForEachCategoryAction, PerpetualModification,
+    ForEachCategoryAction, PerpetualModification, SeatDirection,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -43646,7 +43646,13 @@ fn each_player_copy_chosen_human_time_lord_trigger() {
             max,
             copy_modifications,
             scale,
+            choose_scope,
         } => {
+            assert_eq!(
+                *choose_scope,
+                CopyChooseScope::Chooser,
+                "\"they control\" → each chooser's own battlefield"
+            );
             assert_eq!((*min, *max), (1, 2), "chooses one or two");
             assert!(
                 matches!(choose_filter, TargetFilter::Typed(tf)
@@ -43698,6 +43704,50 @@ fn each_player_copy_chosen_no_scale_menace_sibling() {
                     keyword: Keyword::Menace
                 }],
                 "except it has menace → AddKeyword(Menace)"
+            );
+            assert_eq!(scale, &None, "no scaling sentence → scale None");
+        }
+        other => panic!("expected EachPlayerCopyChosen, got {other:?}"),
+    }
+}
+
+/// CR 102.1 + CR 103.1 + CR 707.2: the seat-relative choose clause. "controlled
+/// by the player to their {left|right}" lowers to `choose_scope: Neighbor` with
+/// the parsed direction, independent of the copy modification (flying here, not
+/// menace) — proving the parser covers the whole class, both directions, not one
+/// card. This is the Caught in a Parallel Universe shape with the direction and
+/// keyword swapped.
+#[test]
+fn each_player_copy_chosen_neighbor_right_scope() {
+    let def = parse_effect_chain(
+        "Each player chooses a creature controlled by the player to their right. Each player creates a token that's a copy of the creature they chose, except it has flying.",
+        AbilityKind::Spell,
+    );
+    assert!(def.sub_ability.is_none(), "single self-contained effect");
+    assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    match &*def.effect {
+        Effect::EachPlayerCopyChosen {
+            min,
+            max,
+            copy_modifications,
+            scale,
+            choose_scope,
+            ..
+        } => {
+            assert_eq!((*min, *max), (1, 1), "chooses a (single) creature");
+            assert_eq!(
+                *choose_scope,
+                CopyChooseScope::Neighbor {
+                    direction: SeatDirection::Right
+                },
+                "\"controlled by the player to their right\" → Neighbor{{Right}}"
+            );
+            assert_eq!(
+                copy_modifications,
+                &vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying
+                }],
+                "except it has flying → AddKeyword(Flying)"
             );
             assert_eq!(scale, &None, "no scaling sentence → scale None");
         }

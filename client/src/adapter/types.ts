@@ -1563,6 +1563,12 @@ export type WaitingFor =
       choose_filter: TargetFilter;
       copy_modifications?: unknown[];
       scale?: unknown;
+      // CR 102.1 + CR 103.1: whose battlefield the chooser's pool was drawn from
+      // (their own or a seat-neighbor's). Resolver-internal; the modal renders the
+      // precomputed public `eligible` list and ignores this.
+      choose_scope?:
+        | { type: "Chooser" }
+        | { type: "Neighbor"; direction: { type: "Left" | "Right" } };
       source_id: ObjectId;
       source_controller: PlayerId;
       remaining_players: PlayerId[];

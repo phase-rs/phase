@@ -9,12 +9,12 @@ use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
     CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification, ControlWindow, CopyScale,
-    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, PileSource,
-    QuantityExpr, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
-    StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause,
-    TriggerCondition, TriggerDefinition,
+    ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification, ControlWindow,
+    CopyChooseScope, CopyScale, CostPaidObjectSnapshot, CounterCostSelection,
+    DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
+    LibraryPosition, ModalChoice, PileSource, QuantityExpr, ResolvedAbility,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
+    TargetFilter, TargetRef, ThisWayCause, TriggerCondition, TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, TokenImageRef};
@@ -1363,6 +1363,10 @@ pub struct PendingEachPlayerCopyChosen {
     pub copy_modifications: Vec<ContinuousModification>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<CopyScale>,
+    /// CR 102.1 + CR 103.1: whose battlefield the paused chooser drew from, so a
+    /// mid-flight save/reload reconstructs the correct eligibility controller.
+    #[serde(default)]
+    pub choose_scope: CopyChooseScope,
     pub source_id: ObjectId,
     pub source_controller: PlayerId,
     /// APNAP-ordered scoped player set (for a mid-choice save/reload).
@@ -4933,7 +4937,8 @@ pub enum WaitingFor {
     /// each subsequent player in APNAP order.
     EachPlayerCopyChosenSelection {
         player: PlayerId,
-        /// The choosing player's own eligible objects (public battlefield info).
+        /// Eligible objects for this chooser — either their own or their
+        /// seat-neighbor's, per `choose_scope` (all public battlefield info).
         eligible: Vec<TargetRef>,
         min: u32,
         max: u32,
@@ -4942,6 +4947,10 @@ pub enum WaitingFor {
         copy_modifications: Vec<ContinuousModification>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scale: Option<CopyScale>,
+        /// CR 102.1 + CR 103.1: whose battlefield this chooser's pool was drawn
+        /// from, so live re-validation (CR 608.2c) uses the right controller.
+        #[serde(default)]
+        choose_scope: CopyChooseScope,
         source_id: ObjectId,
         source_controller: PlayerId,
         /// Players still to choose after the current one (APNAP order).

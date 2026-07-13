@@ -3035,6 +3035,7 @@ fn legacy_effect(x: &Effect) -> bool {
             max: _,
             copy_modifications,
             scale: _,
+            choose_scope: _,
         } => {
             legacy_target_filter(choose_filter)
                 || copy_modifications
