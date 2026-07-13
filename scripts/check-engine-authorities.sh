@@ -136,6 +136,15 @@ snapshots), annotate the line with:
 EOF
 fi
 
+# (B0) The census scanner's own seam suite. Gates (B) and (C) both stand on
+# `strip_noncode` in zone_authority_census.py; a lexer regression there would
+# not fail those gates — it would silently mis-scope them (a swallowed hit
+# reads as migration progress). So the suite that pins the lexer runs here,
+# ahead of the gates it protects.
+if ! python3 "$(dirname "$0")/zone_authority_census_tests.py"; then
+    FAIL=1
+fi
+
 # (B) Raw zone mutation — full-tree ratchet against the frozen baseline.
 if ! python3 "$(dirname "$0")/zone_authority_census.py" --check; then
     FAIL=1
@@ -149,14 +158,12 @@ fi
 # card-data and therefore runs in the card-data CI job, not this one.
 #
 # SCOPE: three crates — engine, engine-wasm, mtgish-import — of a 13-crate
-# workspace. NOT full-tree, and previously mislabelled as such. It is not
-# full-tree because the shared scanner cannot yet read the whole workspace:
-# `strip_noncode` has no branch for Rust RAW strings (`r#"..."#`), so braces
-# inside one are counted, and a genuinely workspace-wide scan dies with
-# `CensusError: crates/draft-wasm/src/suggest.rs:437: brace tracking desynced`.
-# That is the scanner failing loudly rather than mis-scoping, which is correct —
-# but it means "full-tree" is an aspiration, not a description. Teaching
-# `strip_noncode` about raw strings would unlock it.
+# workspace. NOT full-tree, and previously mislabelled as such. The historical
+# blocker (no raw-string branch in `strip_noncode`, which made a workspace-wide
+# scan die on crates/draft-wasm/src/suggest.rs:437) was fixed in #5704; the
+# scope has simply not been widened yet. Widening it changes this gate's frozen
+# producer population, so it is its own unit with its own baseline review — not
+# a drive-by.
 if ! python3 "$(dirname "$0")/draw_replacement_census.py" --producers --check; then
     FAIL=1
 fi
