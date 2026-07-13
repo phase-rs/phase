@@ -10440,6 +10440,163 @@ fn effect_copy_retarget_with_no_preceding_copy_stays_orphaned() {
     );
 }
 
+// ── CR 707.10c: the PLURAL clause scopes over the SELECTOR, not just the
+// mutation ────────────────────────────────────────────────────────────────────
+//
+// `Increasing Vengeance` (above) pins the case where both copies live in ONE
+// def's sub-ability chain. The four tests below pin the case the point binding
+// could not reach: a card whose copies land in SIBLING defs. Before
+// `AllWithRole`, a `LastWithRole` binding patched only the LAST copy-bearing def
+// and every earlier copy silently kept its original targets — measured on the
+// full pool as `[KeepOriginalTargets, MayChooseNewTargets]` on each of these
+// four faces.
+
+/// CR 707.10c: Banish into Fable — TWO conditional copies emitted as SIBLING
+/// defs ("copy it if you control an artifact, THEN copy it if you control an
+/// enchantment"). The plural "the copies" must reach both, not just the second.
+#[test]
+fn effect_copy_retarget_plural_reaches_sibling_defs_banish_into_fable() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "When you cast this spell from your hand, copy it if you control an artifact, \
+         then copy it if you control an enchantment. You may choose new targets for the copies.\n\
+         Return target nonland permanent to its owner's hand. You create a 2/2 white Knight \
+         creature token with vigilance.",
+        "Banish into Fable",
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert_eq!(
+        retargets.len(),
+        2,
+        "both conditional copies must be present, got {retargets:?}"
+    );
+    assert!(
+        retargets
+            .iter()
+            .all(|r| *r == CopyRetargetPermission::MayChooseNewTargets),
+        "the plural clause must retarget EVERY sibling copy, not just the last, \
+         got {retargets:?}"
+    );
+}
+
+/// CR 707.10c: Ulalek, Fused Atrocity — copies all spells, THEN all other
+/// activated and triggered abilities: two sibling copy defs under one trigger.
+#[test]
+fn effect_copy_retarget_plural_reaches_sibling_defs_ulalek() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "Devoid (This card has no color.)\n\
+         Whenever you cast an Eldrazi spell, you may pay {C}{C}. If you do, copy all spells \
+         you control, then copy all other activated and triggered abilities you control. \
+         You may choose new targets for the copies. (Mana abilities can't be copied.)",
+        "Ulalek, Fused Atrocity",
+        &["Creature"],
+        &["Eldrazi"],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert!(
+        retargets.len() >= 2,
+        "both the spell-copy and the ability-copy must be present, got {retargets:?}"
+    );
+    assert!(
+        retargets
+            .iter()
+            .all(|r| *r == CopyRetargetPermission::MayChooseNewTargets),
+        "the plural clause must retarget EVERY sibling copy, got {retargets:?}"
+    );
+}
+
+/// CR 707.10c: Sea Gate Stormcaller — the delayed-trigger copy and the
+/// conditional "copy that spell twice instead" land in sibling defs (unlike
+/// Increasing Vengeance, whose second copy nests as a sub-ability), so the
+/// plural clause must fan out across defs to reach the first one.
+#[test]
+fn effect_copy_retarget_plural_reaches_sibling_defs_sea_gate_stormcaller() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "Kicker {4}{U}\n\
+         When this creature enters, copy the next instant or sorcery spell with mana value 2 \
+         or less you cast this turn when you cast it. If this creature was kicked, copy that \
+         spell twice instead. You may choose new targets for the copies.",
+        "Sea Gate Stormcaller",
+        &["Creature"],
+        &["Human", "Wizard"],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert!(
+        retargets.len() >= 2,
+        "both the base copy and the kicked 'twice instead' copy must be present, \
+         got {retargets:?}"
+    );
+    assert!(
+        retargets
+            .iter()
+            .all(|r| *r == CopyRetargetPermission::MayChooseNewTargets),
+        "the plural clause must retarget EVERY sibling copy, got {retargets:?}"
+    );
+}
+
+/// CR 707.10c: Tomb of Horrors Adventurer — same sibling-def shape as Sea Gate
+/// Stormcaller ("copy it. If you've completed a dungeon, copy that spell twice
+/// instead. You may choose new targets for the copies.").
+#[test]
+fn effect_copy_retarget_plural_reaches_sibling_defs_tomb_of_horrors_adventurer() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "When this creature enters, you take the initiative.\n\
+         Whenever you cast your second spell each turn, copy it. If you've completed a dungeon, \
+         copy that spell twice instead. You may choose new targets for the copies. \
+         (A copy of a permanent spell becomes a token.)",
+        "Tomb of Horrors Adventurer",
+        &["Creature"],
+        &["Elf", "Monk"],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert!(
+        retargets.len() >= 2,
+        "both the base copy and the dungeon 'twice instead' copy must be present, \
+         got {retargets:?}"
+    );
+    assert!(
+        retargets
+            .iter()
+            .all(|r| *r == CopyRetargetPermission::MayChooseNewTargets),
+        "the plural clause must retarget EVERY sibling copy, got {retargets:?}"
+    );
+}
+
+/// CR 707.10c: OVER-PATCH GUARD — the mirror risk a fan-out selector introduces.
+///
+/// Choreographed Sparks' mode 1 carries a retarget sentence; mode 2 ("Copy target
+/// creature spell you control. The copy gains haste ...") deliberately does NOT.
+/// A retarget clause may only reach copies STATED BEFORE it, which holds because
+/// continuations are applied in source order — so mode 2's copy must survive with
+/// `KeepOriginalTargets`. If a future change makes the fan-out reach forward (or
+/// widens `CopySpellBearer` membership), this test goes red instead of silently
+/// granting a retarget the card never printed.
+#[test]
+fn effect_copy_retarget_singular_does_not_leak_to_later_mode_choreographed_sparks() {
+    let (retargets, orphaned) = copy_retarget_scan_card(
+        "This spell can't be copied.\n\
+         Choose one or both —\n\
+         • Copy target instant or sorcery spell you control. You may choose new targets for \
+         the copy.\n\
+         • Copy target creature spell you control. The copy gains haste and \"At the beginning \
+         of the end step, sacrifice this token.\"",
+        "Choreographed Sparks",
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(orphaned, 0, "orphaned_copy_retarget must not survive");
+    assert!(
+        retargets.contains(&CopyRetargetPermission::KeepOriginalTargets),
+        "mode 2 prints no retarget sentence and must keep its original targets, \
+         got {retargets:?}"
+    );
+    assert!(
+        retargets.contains(&CopyRetargetPermission::MayChooseNewTargets),
+        "mode 1 prints a retarget sentence and must carry it, got {retargets:?}"
+    );
+}
+
 /// CR 603.7 (issue #1191): Tzaangor Shaman — "copy the next instant or
 /// sorcery spell you cast this turn when you cast it" must install a
 /// one-shot delayed trigger, not a combat-damage CopySpell.

@@ -3589,34 +3589,47 @@ pub(super) fn apply_clause_continuation(
             }
         }
         ContinuationAst::CopyMayRetarget { all_copies } => {
-            // CR 707.10c: bind the most recent copy-bearing ability and grant its
+            // CR 707.10c: bind the copy-bearing ability/abilities and grant their
             // CopySpell(s) the retarget permission. The copy is usually the last def,
             // but a clause that resolves between the copy and the retarget sentence can
             // sit in between (Narset's Reversal's bounce, Spinerock Tyrant's "those
             // spells gain wither" rider) — so this is a ROLE, not `LastEmitted`.
             //
-            // `CopySpellBearer` is a LIVE predicate (`def_bears_retargetable_copy`), so
-            // `LastWithRole` resolves to `(0..defs.len()).rev().find(|i|
-            // bears_copy(&defs[i]))` — the backward scan this replaces, over the same
-            // `defs` at the same moment, with the SAME tree descent (own effect →
-            // CreateDelayedTrigger wrapper → sub-ability chain). Recognition already
-            // confirmed a preceding copy exists (parse_followup_continuation_ast); if
-            // somehow none does, `OnMiss::Ignore` keeps it a silent no-op, as before.
+            // `all_copies` — the PLURAL "you may choose new targets for the copIES" —
+            // scopes over BOTH axes, and they are independent:
             //
-            // `all_copies` (the plural "the copies" clause) patches every copy in that
-            // copy-bearing ability — Increasing Vengeance's primary copy and its nested
-            // conditional "copy that spell twice" copy both live in one ability — while
-            // the singular clause keeps nearest-only binding. The flag steers the
-            // MUTATION only; it is not part of the role (see the predicate's doc).
-            let bound = env.resolve(
-                defs,
-                super::assembly::AntecedentSelector::LastWithRole(
-                    super::assembly::AntecedentRole::CopySpellBearer,
-                ),
-                None,
-                super::assembly::OnMiss::Ignore,
-            );
-            if let Some(bound_index) = bound {
+            //   SELECTOR (which defs):   plural ⇒ `AllWithRole`, because a card can make
+            //     its copies in SIBLING defs. Banish into Fable copies once if you
+            //     control an artifact and again if you control an enchantment; Ulalek
+            //     copies all spells, THEN all other abilities. A point binding reaches
+            //     only the last of those and every earlier copy silently keeps its
+            //     original targets — the CR 707.10c defect this arm exists to fix.
+            //   MUTATION (which copies inside one def): plural ⇒ `all = true`, so the
+            //     descent does not stop at the nearest copy. Increasing Vengeance's
+            //     primary copy and its nested conditional "copy that spell twice" copy
+            //     live in ONE def's sub-ability chain, and both must be patched.
+            //
+            // The singular clause ("the copy") keeps the nearest-only point binding on
+            // both axes. Binding only defs already emitted is what makes the fan-out
+            // safe: continuations apply in SOURCE ORDER, so a copy stated AFTER this
+            // sentence (Choreographed Sparks' retarget-less second mode) is not in
+            // `defs` yet and cannot be over-patched.
+            //
+            // `CopySpellBearer` is a LIVE predicate (`def_bears_retargetable_copy`) that
+            // mirrors the mutator's descent exactly (own effect → CreateDelayedTrigger
+            // wrapper → sub-ability chain), so every bound node patches. Recognition
+            // already confirmed a preceding copy exists
+            // (parse_followup_continuation_ast); if somehow none does, `OnMiss::Ignore`
+            // keeps it a silent no-op, as before.
+            let role = super::assembly::AntecedentRole::CopySpellBearer;
+            let selector = if all_copies {
+                super::assembly::AntecedentSelector::AllWithRole(role)
+            } else {
+                super::assembly::AntecedentSelector::LastWithRole(role)
+            };
+            for bound_index in
+                env.resolve_all(defs, selector, None, super::assembly::OnMiss::Ignore)
+            {
                 // `CopySpellBearer` membership is the structural mirror of this
                 // mutator's own success condition (`def_bears_retargetable_copy`), so a
                 // bound node ALWAYS patches — the role and the mutator cannot disagree.
