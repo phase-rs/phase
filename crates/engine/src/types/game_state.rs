@@ -3419,7 +3419,7 @@ impl TrustedGameStateEnvelope {
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum PersistedGameState {
-    Raw(GameState),
+    Raw(Box<GameState>),
     Trusted(Box<TrustedGameStateEnvelope>),
 }
 
@@ -3435,7 +3435,7 @@ impl<'de> Deserialize<'de> for PersistedGameState {
                 .map_err(serde::de::Error::custom)
         } else {
             serde_json::from_value(value)
-                .map(Self::Raw)
+                .map(|state| Self::Raw(Box::new(state)))
                 .map_err(serde::de::Error::custom)
         }
     }
@@ -3451,7 +3451,7 @@ impl PersistedGameState {
     pub fn into_game_state(self) -> GameState {
         match self {
             Self::Raw(state) => {
-                let mut state = state;
+                let mut state = *state;
                 crate::game::precast_copy_shortcut::normalize_untrusted_restore(&mut state);
                 state
             }
