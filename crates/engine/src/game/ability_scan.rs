@@ -2580,6 +2580,11 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         // by exclusion within this ability's own resolution — no event/sibling
         // axis, like the demonstrative/anaphoric referents.
         ObjectScope::OtherRevealedCard => Axes::NONE,
+        // CR 608.2c (issue #5276): per-resolution local (the grantee's own
+        // exiled card), resolved via this ability's own exile-link set and
+        // current controller — no event/sibling axis, same as the reveal
+        // sibling above.
+        ObjectScope::OwnExiledThisWay => Axes::NONE,
         ObjectScope::AmassedArmy => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,

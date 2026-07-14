@@ -8748,7 +8748,8 @@ pub(crate) fn evaluate_condition(
             | crate::types::ability::ObjectScope::CostPaidObject
             | crate::types::ability::ObjectScope::OtherRevealedCard
             | crate::types::ability::ObjectScope::EventTarget
-            | crate::types::ability::ObjectScope::AmassedArmy => false,
+            | crate::types::ability::ObjectScope::AmassedArmy
+            | crate::types::ability::ObjectScope::OwnExiledThisWay => false,
         },
         AbilityCondition::AlternativeManaCostPaid => ability.context.alternative_mana_cost_paid,
         AbilityCondition::EffectOutcome {
@@ -8969,7 +8970,8 @@ pub(crate) fn evaluate_condition(
                 | crate::types::ability::ObjectScope::CostPaidObject
                 | crate::types::ability::ObjectScope::OtherRevealedCard
                 | crate::types::ability::ObjectScope::EventTarget
-                | crate::types::ability::ObjectScope::AmassedArmy => None,
+                | crate::types::ability::ObjectScope::AmassedArmy
+                | crate::types::ability::ObjectScope::OwnExiledThisWay => None,
             };
             object_id
                 .and_then(|id| state.objects.get(&id))

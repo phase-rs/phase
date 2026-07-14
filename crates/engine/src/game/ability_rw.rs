@@ -2130,7 +2130,10 @@ fn legacy_object_scope(s: &ObjectScope) -> bool {
         // Per-resolution local surfaced by THIS ability's own reveal — not one of
         // the 12 retained legacy refs (mirrors the LastRevealed precedent).
         | ObjectScope::OtherRevealedCard
-        | ObjectScope::EventTarget => false,
+        | ObjectScope::EventTarget
+        // Per-resolution local surfaced by THIS ability's own exile-link set
+        // (issue #5276) — likewise not a legacy ref.
+        | ObjectScope::OwnExiledThisWay => false,
     }
 }
 
@@ -3510,6 +3513,11 @@ fn read_object_scope(scope: &ObjectScope, kind: StateKind) -> RwProfile {
         // `ObjectScope::Recipient` and the `LastRevealed => empty` classification;
         // contributes no observable `reads_board`/`reads_src`.
         ObjectScope::OtherRevealedCard => RwProfile::empty(),
+        // Same §L7 precedent (issue #5276): a per-resolution local surfaced by
+        // THIS ability's own exile-link set, keyed by ownership match rather
+        // than reveal exclusion. Its read is the exiled card's intrinsic
+        // printed MV, not a mutable board characteristic a sibling reorders.
+        ObjectScope::OwnExiledThisWay => RwProfile::empty(),
         // D5 carrier: `CostPaidObject` is one of the 12 retained refs.
         ObjectScope::CostPaidObject => legacy_ref(),
     }

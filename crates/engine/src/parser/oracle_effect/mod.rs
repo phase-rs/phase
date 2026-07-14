@@ -19779,6 +19779,107 @@ fn parse_cast_copies_count_prefix(input: &str) -> (&str, Option<QuantityExpr>) {
     (input, None)
 }
 
+/// CR 608.2c + CR 406.6 + CR 118.9 (issue #5276, Triple Triad class): "the
+/// card you own exiled this way and each other card exiled this way with
+/// lesser mana value than it [without paying {its|their} mana cost(s)]" — a
+/// comparative impulse-play grant. The exiling player may always play the
+/// card they themselves exiled (unconditional disjunct); they may ALSO play
+/// any OTHER player's exiled card whose mana value compares favorably
+/// (usually "lesser") against their own — a per-grantee threshold, not a
+/// single fixed one, since each player exiled a different card.
+///
+/// Distinct from every anaphor branch below: those bind to either a single
+/// fixed object (`ParentTarget`) or the whole `ExiledBySource` set with no
+/// per-candidate filter. This clause needs a per-CANDIDATE comparator
+/// (`FilterProp::Cmc`) whose reference value is itself per-GRANTEE dynamic
+/// (`ObjectScope::OwnExiledThisWay`, resolved fresh on every read against the
+/// resolving ability's current `controller` — see its doc comment). That
+/// combination is unique to this clause shape, so it gets its own dedicated
+/// combinator rather than overloading the generic "with lesser mana value
+/// than X" reference parser (`oracle_target::parse_relative_mana_value_suffix`),
+/// which has no notion of a per-grantee referent and is shared by many
+/// unrelated single-threshold cards (Kodama class) that must not change
+/// behavior.
+///
+/// Anchors: `try_parse_play_from_exile`'s "each player may play the card
+/// they exiled this way" class (Rocco, Street Chef) for the "own exiled
+/// card" half, and `parse_relative_mana_value_suffix` (oracle_target.rs) for
+/// the "with lesser mana value than X" comparator grammar.
+fn try_parse_own_exiled_and_compared_others(
+    rest: &str,
+    without_paying: bool,
+    constraint: Option<CastPermissionConstraint>,
+    mode: CardPlayMode,
+) -> Option<Effect> {
+    type E<'a> = OracleError<'a>;
+
+    let (rest, _) = tag::<_, _, E>("the card you own exiled this way")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, E>(" and each other card exiled this way with ")
+        .parse(rest)
+        .ok()?;
+    // Reuses the same comparator vocabulary as
+    // `parse_relative_mana_value_suffix` ("with lesser/greater/equal[-or-]
+    // mana value") so future comparator axes stay in one place conceptually,
+    // even though the per-grantee referent forces a separate combinator here.
+    let (rest, comparator) = alt((
+        value(Comparator::LT, tag::<_, _, E>("lesser mana value")),
+        value(Comparator::GT, tag("greater mana value")),
+        value(Comparator::LE, tag("equal or lesser mana value")),
+        value(Comparator::GE, tag("equal or greater mana value")),
+        value(Comparator::EQ, tag("the same mana value")),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (_rest, _) = tag::<_, _, E>(" than it").parse(rest).ok()?;
+
+    // CR 108.3: "the card you own exiled this way" — this ability's exile
+    // linkage, restricted to the object this SAME resolving ability's
+    // controller owns.
+    let own_disjunct = TargetFilter::And {
+        filters: vec![
+            TargetFilter::ExiledBySource,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::You,
+            }])),
+        ],
+    };
+    // CR 202.3: "each other card exiled this way with [comparator] mana
+    // value than it" — every exiled card (any owner) whose mana value
+    // compares against the per-grantee `OwnExiledThisWay` referent. A
+    // strict `LT`/`GT`/etc. comparator against your OWN card's mana value is
+    // never true for that same card, so this disjunct naturally excludes
+    // your own card without an explicit ownership exclusion.
+    let compared_disjunct = TargetFilter::And {
+        filters: vec![
+            TargetFilter::ExiledBySource,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                comparator,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::OwnExiledThisWay,
+                    },
+                },
+            }])),
+        ],
+    };
+
+    Some(Effect::CastFromZone {
+        target: TargetFilter::Or {
+            filters: vec![own_disjunct, compared_disjunct],
+        },
+        without_paying_mana_cost: without_paying,
+        mode,
+        cast_transformed: false,
+        alt_ability_cost: None,
+        constraint,
+        duration: None,
+        driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+        mana_spend_permission: None,
+    })
+}
+
 /// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
 ///    `ParentTarget` (refers to the cards exiled / chosen by a prior effect).
 /// 2. Constrained — "cast a [type-phrase] [from <zone>] [with mana value <bound>]
@@ -19846,6 +19947,21 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     let without_paying = scan_contains_phrase(rest, "without paying its mana cost")
         || scan_contains_phrase(rest, "without paying their mana cost");
     let constraint = parse_cast_permission_constraint(rest);
+
+    // CR 608.2c (issue #5276, Triple Triad class): "the card you own exiled
+    // this way and each other card exiled this way with lesser mana value
+    // than it" — a comparative own+other exile-play grant. Must run BEFORE
+    // Branch 1's anaphor scan: Branch 1 only matches when `rest` STARTS WITH
+    // a bare anaphor token ("it"/"that card"/"those cards"/…), but this
+    // clause starts with "the card you own exiled this way" instead, so
+    // Branch 1 would fall through to Branch 3's `TargetFilter::Any` fallback
+    // (a permission grant not scoped to the exiled cards at all — the
+    // reported bug) without this dedicated branch.
+    if let Some(effect) =
+        try_parse_own_exiled_and_compared_others(rest, without_paying, constraint.clone(), mode)
+    {
+        return Some(effect);
+    }
 
     // Branch 1: anaphoric forms. Order longer-first ("one of those cards"
     // before "those cards") so the prefix-match doesn't shadow the longer

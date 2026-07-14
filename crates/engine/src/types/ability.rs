@@ -4915,6 +4915,23 @@ pub enum ObjectScope {
     /// hand. Fail-closed to a null read (→ 0) when no "other" entry exists (empty
     /// library or an illegal target on resolution, CR 608.2b).
     OtherRevealedCard,
+    /// CR 608.2c + CR 406.6 + CR 108.3 (issue #5276, Triple Triad class):
+    /// "it" in "... and each other card exiled this way with lesser mana
+    /// value than it" — the specific object matching `ExiledBySource` whose
+    /// owner is the ability's CURRENT controller. Distinct from
+    /// [`ObjectScope::Anaphoric`]/[`ObjectScope::Demonstrative`] (a single
+    /// `effect_context_object` snapshot fixed for the whole resolution):
+    /// this re-derives its referent from `state.exile_links` + object
+    /// ownership on every read instead of reading a pre-bound snapshot, so
+    /// it resolves correctly when the enclosing `GrantCastingPermission`/
+    /// `CastFromZone` runs under a `player_scope: All` fan-out — the driver
+    /// rebinds `ability.controller` to each iterating player (CR 608.2), and
+    /// re-deriving (rather than snapshotting once) yields THAT player's own
+    /// exiled card on every iteration. Mirrors `OtherRevealedCard`'s
+    /// by-exclusion resolution shape but keys by ownership match instead of
+    /// by exclusion, and reads the exile-link set instead of
+    /// `last_revealed_ids`.
+    OwnExiledThisWay,
 }
 
 /// Source set for counting distinct card types.

@@ -1324,6 +1324,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::CostPaidObject => "cost-paid object",
                 ObjectScope::OtherRevealedCard => "other revealed card",
                 ObjectScope::AmassedArmy => "amassed Army",
+                ObjectScope::OwnExiledThisWay => "own exiled card",
             };
             match counter_type {
                 Some(ct) => format!("{} counters on {scope_str}", ct.as_str()),
@@ -1350,6 +1351,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::CostPaidObject => "referenced object's power".into(),
             ObjectScope::OtherRevealedCard => "other revealed card's power".into(),
             ObjectScope::AmassedArmy => "amassed Army's power".into(),
+            ObjectScope::OwnExiledThisWay => "own exiled card's power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1362,6 +1364,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::CostPaidObject => "referenced object's toughness".into(),
             ObjectScope::OtherRevealedCard => "other revealed card's toughness".into(),
             ObjectScope::AmassedArmy => "amassed Army's toughness".into(),
+            ObjectScope::OwnExiledThisWay => "own exiled card's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1374,6 +1377,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::CostPaidObject => "referenced object's mana value".into(),
             ObjectScope::OtherRevealedCard => "other revealed card's mana value".into(),
             ObjectScope::AmassedArmy => "amassed Army's mana value".into(),
+            ObjectScope::OwnExiledThisWay => "own exiled card's mana value".into(),
         },
         QuantityRef::TargetObjectManaValue { .. } => "target object's mana value".into(),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -1387,6 +1391,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::CostPaidObject => "cost-paid object's colors".into(),
             ObjectScope::OtherRevealedCard => "other revealed card's colors".into(),
             ObjectScope::AmassedArmy => "amassed Army's colors".into(),
+            ObjectScope::OwnExiledThisWay => "own exiled card's colors".into(),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1399,6 +1404,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::CostPaidObject => "typeline components on cost-paid object".into(),
             ObjectScope::OtherRevealedCard => "typeline components on other revealed card".into(),
             ObjectScope::AmassedArmy => "typeline components on amassed Army".into(),
+            ObjectScope::OwnExiledThisWay => "typeline components on own exiled card".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1411,6 +1417,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::CostPaidObject => "words in cost-paid object's name".into(),
             ObjectScope::OtherRevealedCard => "words in other revealed card's name".into(),
             ObjectScope::AmassedArmy => "words in amassed Army's name".into(),
+            ObjectScope::OwnExiledThisWay => "words in own exiled card's name".into(),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
@@ -1422,6 +1429,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::CostPaidObject => "cost-paid object",
                 ObjectScope::OtherRevealedCard => "other revealed card",
                 ObjectScope::AmassedArmy => "amassed Army",
+                ObjectScope::OwnExiledThisWay => "own exiled card",
             };
             match color {
                 Some(c) => format!("{c:?} mana symbols in {scope_str}'s mana cost"),
@@ -7303,6 +7311,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::CostPaidObject => ("CostPaidObjectPower", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardPower", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyPower", Handled),
+            ObjectScope::OwnExiledThisWay => ("OwnExiledThisWayPower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -7315,6 +7324,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::CostPaidObject => ("CostPaidObjectToughness", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardToughness", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyToughness", Handled),
+            ObjectScope::OwnExiledThisWay => ("OwnExiledThisWayToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -7327,6 +7337,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::CostPaidObject => ("CostPaidObjectManaValue", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardManaValue", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyManaValue", Handled),
+            ObjectScope::OwnExiledThisWay => ("OwnExiledThisWayManaValue", Handled),
         },
         QuantityRef::TargetObjectManaValue { .. } => ("TargetObjectManaValue", Handled),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -7340,6 +7351,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::CostPaidObject => ("CostPaidObjectColorCount", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardColorCount", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyObjectColorCount", Handled),
+            ObjectScope::OwnExiledThisWay => ("OwnExiledThisWayObjectColorCount", Handled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -7352,6 +7364,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::CostPaidObject => ("CostPaidObjectNameWordCount", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardNameWordCount", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyObjectNameWordCount", Handled),
+            ObjectScope::OwnExiledThisWay => ("OwnExiledThisWayObjectNameWordCount", Handled),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -7364,6 +7377,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::CostPaidObject => ("CostPaidObjectTypelineComponentCount", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardTypelineComponentCount", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyObjectTypelineComponentCount", Handled),
+            ObjectScope::OwnExiledThisWay => {
+                ("OwnExiledThisWayObjectTypelineComponentCount", Handled)
+            }
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -7376,6 +7392,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::CostPaidObject => ("CostPaidObjectManaSymbolsInManaCost", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardManaSymbolsInManaCost", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyManaSymbolsInManaCost", Handled),
+            ObjectScope::OwnExiledThisWay => ("OwnExiledThisWayManaSymbolsInManaCost", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),

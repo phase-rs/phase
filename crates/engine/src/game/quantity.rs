@@ -244,7 +244,11 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             // resolved only at resolution time (never a static CDA read).
             | ObjectScope::OtherRevealedCard
             | ObjectScope::Demonstrative
-            | ObjectScope::AmassedArmy => true,
+            | ObjectScope::AmassedArmy
+            // CR 608.2c (issue #5276): the grantee's own exiled card is
+            // likewise a per-resolution exile-link lookup, never a static
+            // CDA read.
+            | ObjectScope::OwnExiledThisWay => true,
         }
     }
     match expr {
@@ -3673,11 +3677,15 @@ fn object_for_scope<'a>(
         // not plain live-board scopes available to this ability-free helper.
         // `OtherRevealedCard` is resolved specially in `resolve_object_mana_value`
         // by exclusion over `last_revealed_ids`, not via this generic path.
+        // `OwnExiledThisWay` (issue #5276) is likewise resolved specially in
+        // `resolve_object_mana_value` via an ownership-matched exile-link
+        // lookup, not via this generic (ability-free) path.
         ObjectScope::CostPaidObject
         | ObjectScope::Anaphoric
         | ObjectScope::OtherRevealedCard
         | ObjectScope::Demonstrative
-        | ObjectScope::AmassedArmy => None,
+        | ObjectScope::AmassedArmy
+        | ObjectScope::OwnExiledThisWay => None,
     }
 }
 
@@ -3726,11 +3734,15 @@ fn object_id_for_scope(
         // not plain live-board scopes available to this ability-free helper.
         // `OtherRevealedCard` is resolved specially in `resolve_object_mana_value`
         // by exclusion over `last_revealed_ids`, not via this generic path.
+        // `OwnExiledThisWay` (issue #5276) is likewise resolved specially in
+        // `resolve_object_mana_value` via an ownership-matched exile-link
+        // lookup, not via this generic (ability-free) path.
         ObjectScope::CostPaidObject
         | ObjectScope::Anaphoric
         | ObjectScope::OtherRevealedCard
         | ObjectScope::Demonstrative
-        | ObjectScope::AmassedArmy => None,
+        | ObjectScope::AmassedArmy
+        | ObjectScope::OwnExiledThisWay => None,
     }
 }
 
@@ -4264,6 +4276,13 @@ where
         // toughness, so this is a fail-closed placeholder. Extend by mirroring the
         // `last_revealed_ids` by-exclusion read in `resolve_object_mana_value`.
         ObjectScope::OtherRevealedCard => 0,
+        // CR 608.2c: MV-only class today (Triple Triad class, issue #5276 —
+        // "lesser mana value than it" reads only the grantee's own exiled
+        // card's mana value). No card reads its power or toughness, so this
+        // is a fail-closed placeholder mirroring `OtherRevealedCard` above.
+        // Extend by mirroring the exile-link owner-match read in
+        // `resolve_object_mana_value`.
+        ObjectScope::OwnExiledThisWay => 0,
     }
 }
 
@@ -4457,6 +4476,36 @@ fn resolve_object_mana_value(
                 .iter()
                 .find(|id| Some(**id) != own)
                 .and_then(|id| state.objects.get(id))
+                .map(|obj| {
+                    u32_to_i32_saturating(
+                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+                    )
+                })
+                .unwrap_or(0)
+        }
+        // CR 608.2c + CR 406.6 + CR 108.3 (issue #5276, Triple Triad class):
+        // "it" in "each other card exiled this way with lesser mana value
+        // than it" — the object matching `ExiledBySource` (this ability's
+        // `source_id`) whose OWNER is the ability's CURRENT controller.
+        // Re-derived on every read (not a pre-bound `effect_context_object`
+        // snapshot) so a `player_scope: All` fan-out over the enclosing grant
+        // — which rebinds `ability.controller` to each iterating player,
+        // CR 608.2 — yields THAT player's own exiled card on every
+        // iteration, not a single fixed card shared by every grantee.
+        // Fail-closed to 0 when no such link exists (no ability context, or
+        // this controller exiled nothing this way).
+        ObjectScope::OwnExiledThisWay => {
+            let Some(ability) = ability else {
+                return 0;
+            };
+            state
+                .exile_links
+                .iter()
+                .filter(|link| link.source_id == ability.source_id)
+                .find_map(|link| {
+                    let obj = state.objects.get(&link.exiled_id)?;
+                    (obj.owner == ability.controller).then_some(obj)
+                })
                 .map(|obj| {
                     u32_to_i32_saturating(
                         obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
