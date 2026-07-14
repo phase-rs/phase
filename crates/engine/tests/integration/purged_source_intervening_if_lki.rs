@@ -85,8 +85,14 @@ fn attack_then_kill_source(kind: SourceKind, bearer: CounterBearer) -> i32 {
         .add_creature_from_oracle(P0, "Delta Bloodflies", 1, 2, DELTA_BLOODFLIES)
         .id();
 
+    // In BOTH arms the controller keeps a second creature on the battlefield, so the
+    // filter always has a live candidate to test. Only the COUNTER differs. Without
+    // this, the `Absent` arm would leave the controller with no creatures at all once
+    // the source is purged, and "no match" could mean "empty battlefield" rather than
+    // "the counter predicate is genuinely false" — a control that cannot tell those
+    // apart is not a control.
+    let host = scenario.add_creature(P0, "Counter Bearer", 2, 2).id();
     if bearer == CounterBearer::Present {
-        let host = scenario.add_creature(P0, "Counter Bearer", 2, 2).id();
         scenario.with_counter(host, CounterType::Plus1Plus1, 1);
     }
 
@@ -176,9 +182,13 @@ fn nontoken_source_is_unaffected() {
 }
 
 /// NEGATIVE CONTROL (the fallback must not fabricate a match). Same purged-token
-/// source, but the controller controls NO creature with a counter on it, so the
-/// intervening-if is genuinely FALSE at resolution. CR 603.4 removes the ability
-/// from the stack and no life is lost.
+/// source, and the controller still controls a creature — but that creature has NO
+/// counter on it, so the intervening-if is genuinely FALSE at resolution. CR 603.4
+/// removes the ability from the stack and no life is lost.
+///
+/// The creature is present on purpose: it gives the filter a live candidate to
+/// reject, so a pass here means "the counter predicate was evaluated and was false",
+/// not "there was nothing on the battlefield to match".
 ///
 /// This is what makes the primary witness non-vacuous: the LKI fallback restores
 /// the ability to ANSWER the question, it does not make the answer unconditionally
