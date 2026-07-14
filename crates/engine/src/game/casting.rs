@@ -1925,6 +1925,105 @@ pub(super) fn build_spell_meta(
     })
 }
 
+/// CR 107.4f + CR 601.2f/h: Check an explicit Phyrexian payment route
+/// against the complete pending cost. Individual shard options deliberately
+/// do not reserve contested mana, so callers must validate the full vector
+/// before advertising or counting it.
+pub fn pending_phyrexian_route_is_payable(
+    state: &GameState,
+    player: PlayerId,
+    spell_object: ObjectId,
+    choices: &[crate::types::game_state::ShardChoice],
+) -> bool {
+    let Some(pending) = state.pending_cast.as_deref() else {
+        return false;
+    };
+    if pending.object_id != spell_object {
+        return false;
+    }
+    let Some(player_data) = state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+    else {
+        return false;
+    };
+
+    let (source_types, source_subtypes, activation_tag) = pending
+        .activation_ability_index
+        .map(|ability_index| {
+            let (types, subtypes) = activation_source_types(state, spell_object);
+            (
+                types,
+                subtypes,
+                Some(activation_ability_tag(state, spell_object, ability_index)),
+            )
+        })
+        .unwrap_or_default();
+    let spell_meta = pending
+        .activation_ability_index
+        .is_none()
+        .then(|| build_spell_meta(state, player, spell_object))
+        .flatten();
+    let payment_context = if pending.activation_ability_index.is_some() {
+        Some(PaymentContext::Activation {
+            source_types: &source_types,
+            source_subtypes: &source_subtypes,
+            ability_tag: activation_tag.flatten(),
+        })
+    } else {
+        spell_meta.as_ref().map(PaymentContext::Spell)
+    };
+    let any_color = player_can_spend_as_any_color_for_payment(
+        state,
+        player,
+        Some(spell_object),
+        payment_context.as_ref(),
+    );
+    let permissions =
+        super::static_abilities::build_cost_permission_context(state, player, any_color);
+    let phyrexian_count = match &pending.cost {
+        ManaCost::Cost { shards, .. } => shards
+            .iter()
+            .filter(|shard| {
+                matches!(
+                    mana_payment::effective_shard_requirement(
+                        mana_payment::shard_to_mana_type(**shard),
+                        permissions.life_colors,
+                    ),
+                    mana_payment::ShardRequirement::Phyrexian(..)
+                        | mana_payment::ShardRequirement::HybridPhyrexian(..)
+                        | mana_payment::ShardRequirement::TwoGenericHybridPhyrexian(..)
+                )
+            })
+            .count(),
+        _ => 0,
+    };
+    if choices.len() != phyrexian_count
+        || choices
+            .iter()
+            .filter(|choice| matches!(choice, crate::types::game_state::ShardChoice::PayLife))
+            .count()
+            > permissions.max_life as usize
+    {
+        return false;
+    }
+
+    let hand_demand = mana_payment::compute_hand_color_demand(state, player, spell_object);
+    let mut pool = player_data.mana_pool.clone();
+    mana_payment::pay_cost_with_demand_and_choices(
+        &mut pool,
+        &pending.cost,
+        Some(&hand_demand),
+        payment_context.as_ref(),
+        any_color,
+        Some(choices),
+        permissions.life_colors,
+        &pending.pinned_pool_units,
+    )
+    .is_ok()
+}
+
 fn object_type_names(obj: &crate::game::game_object::GameObject) -> Vec<String> {
     let mut names = obj
         .card_types

@@ -5033,6 +5033,16 @@ fn apply_action(
                         _ => {}
                     }
                 }
+                if !casting::pending_phyrexian_route_is_payable(
+                    state,
+                    player,
+                    spell_object,
+                    &choices,
+                ) {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay mana cost with selected Phyrexian route".to_string(),
+                    ));
+                }
             }
             // CR 118.3a: `finalize_mana_payment_with_phyrexian_choices` clears
             // `active_payment_pins` itself on every Ok/Err path; no caller clear.
