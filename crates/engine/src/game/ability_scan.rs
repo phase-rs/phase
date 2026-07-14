@@ -100,7 +100,7 @@ use crate::types::ability::{
     TriggerCondition, TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{DisguiseCost, Keyword};
 
 /// The three independent classification axes, accumulated over one AST walk.
 /// `true` on an axis means "reads (or may read) that dimension"; the fail-safe
@@ -3904,6 +3904,8 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Casualty(_)
         | Keyword::Assist => true,
 
+        Keyword::Disguise(DisguiseCost::Reduced { .. }) => true,
+
         // SAFE: no casting/activation cost that reads a growing board/graveyard class.
         Keyword::Flying
         | Keyword::FirstStrike
@@ -3995,7 +3997,7 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Morph(_)
         | Keyword::Megamorph(_)
         | Keyword::Madness(_)
-        | Keyword::Disguise(_)
+        | Keyword::Disguise(DisguiseCost::Mana(_))
         | Keyword::Mayhem(_)
         | Keyword::Suspend { .. }
         | Keyword::Blitz(_)

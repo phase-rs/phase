@@ -271,7 +271,34 @@ pub(crate) fn turn_face_up_prepare(
         .keywords
         .iter()
         .find_map(|k| match k {
-            Keyword::Morph(c) | Keyword::Megamorph(c) | Keyword::Disguise(c) => Some(c.clone()),
+            Keyword::Morph(c) | Keyword::Megamorph(c) => Some(c.clone()),
+            Keyword::Disguise(crate::types::keywords::DisguiseCost::Mana(c)) => Some(c.clone()),
+            Keyword::Disguise(crate::types::keywords::DisguiseCost::Reduced {
+                cost,
+                reduction,
+            }) => {
+                let condition_met = reduction.condition.as_ref().is_none_or(|condition| {
+                    crate::game::restrictions::evaluate_condition(
+                        state, player, object_id, condition,
+                    )
+                });
+                let count = if condition_met {
+                    crate::game::quantity::resolve_quantity(
+                        state,
+                        &reduction.count,
+                        player,
+                        object_id,
+                    )
+                    .max(0) as u32
+                } else {
+                    0
+                };
+                let mut cost = cost.clone();
+                if let ManaCost::Cost { generic, .. } = &mut cost {
+                    *generic = generic.saturating_sub(reduction.amount_per.saturating_mul(count));
+                }
+                Some(cost)
+            }
             _ => None,
         })
         .or_else(|| {
@@ -551,6 +578,58 @@ mod tests {
         assert!(obj.keywords.is_empty());
         assert!(obj.abilities.is_empty());
         assert!(obj.color.is_empty());
+    }
+
+    /// CR 702.168d + CR 118.7a: Fugitive Codebreaker's disguise discount is
+    /// evaluated when the special action is taken and cannot reduce the red pip.
+    #[test]
+    fn disguise_turn_face_up_cost_counts_instant_and_sorcery_cards() {
+        use crate::types::ability::{CostReduction, CountScope, QuantityRef, TypeFilter, ZoneRef};
+        use crate::types::keywords::DisguiseCost;
+        use crate::types::mana::ManaCostShard;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+        state.objects.get_mut(&id).unwrap().keywords =
+            vec![Keyword::Disguise(DisguiseCost::Reduced {
+                cost: ManaCost::Cost {
+                    generic: 5,
+                    shards: vec![ManaCostShard::Red],
+                },
+                reduction: Box::new(CostReduction {
+                    amount_per: 1,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            zone: ZoneRef::Graveyard,
+                            card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                            filter: None,
+                            scope: CountScope::Controller,
+                        },
+                    },
+                    condition: None,
+                }),
+            })];
+        for (offset, card_type) in [CoreType::Instant, CoreType::Sorcery, CoreType::Creature]
+            .into_iter()
+            .enumerate()
+        {
+            let gy = create_object(
+                &mut state,
+                CardId(20 + offset as u64),
+                player,
+                format!("GY{offset}"),
+                Zone::Graveyard,
+            );
+            state.objects.get_mut(&gy).unwrap().card_types.core_types = vec![card_type];
+        }
+        play_face_down(&mut state, player, id, &mut Vec::new()).unwrap();
+        let cost = turn_face_up_prepare(&state, id, player).expect("disguise can turn face up");
+        assert!(matches!(
+            cost,
+            ManaCost::Cost { generic: 3, shards }
+                if shards.as_slice() == [ManaCostShard::Red]
+        ));
     }
 
     /// CR 616.1 + CR 708.3 discriminating test (fail-first): a face-down morph

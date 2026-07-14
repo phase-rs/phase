@@ -9018,7 +9018,7 @@ fn disguise_face_down_has_ward_morph_does_not() {
 
     assert!(
         cast_face_down(crate::types::keywords::Keyword::Disguise(
-            ManaCost::generic(4)
+            ManaCost::generic(4).into()
         )),
         "CR 702.168a: a disguise face-down 2/2 must have ward {{2}}"
     );
