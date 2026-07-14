@@ -3,7 +3,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::space1;
-use nom::combinator::{eof, not, opt, peek, success, value};
+use nom::combinator::{eof, map, not, opt, peek, success, value};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -410,6 +410,24 @@ fn parse_disjunct_mana_value(
             value: mv,
         },
     ))
+}
+
+/// CR 102.1 + CR 103.1: seat-relative neighbor phrase → [`SeatDirection`].
+/// Matches "the player to {their|your} {left|right}" — the reflexive "their"
+/// form for "each player …" chooser scopes, the "your" form for
+/// controller-relative references. Single authority for seat-direction phrase
+/// parsing on already-lowercased text; the `TargetFilter::Neighbor` arms and the
+/// `EachPlayerCopyChosen` controller-clause dispatch both delegate here so the
+/// phrase lives in exactly one combinator.
+pub(crate) fn parse_neighbor_seat_direction(input: &str) -> OracleResult<'_, SeatDirection> {
+    preceded(
+        (tag("the player to "), alt((tag("their "), tag("your ")))),
+        alt((
+            value(SeatDirection::Left, tag("left")),
+            value(SeatDirection::Right, tag("right")),
+        )),
+    )
+    .parse(input)
 }
 
 /// Context-aware variant of `parse_target`. TargetFallback diagnostics are
@@ -1189,22 +1207,14 @@ pub fn parse_target_with_syntax<'a>(
                 TargetFilter::ParentTargetSlot { index: 0 },
                 tag("the second player"),
             ),
-            // CR 102.1 + CR 103.1: "the player to your right/left" —
+            // CR 102.1 + CR 103.1: "the player to {your|their} {right|left}" —
             // seating-relative neighbor. Right = previous seat (clockwise turn
             // order proceeds to the left). Placed before the bare "the player"
             // arm so the longer phrase wins under longest-match-first dispatch.
-            value(
-                TargetFilter::Neighbor {
-                    direction: SeatDirection::Right,
-                },
-                tag("the player to your right"),
-            ),
-            value(
-                TargetFilter::Neighbor {
-                    direction: SeatDirection::Left,
-                },
-                tag("the player to your left"),
-            ),
+            // Delegates to the single `parse_neighbor_seat_direction` authority.
+            map(parse_neighbor_seat_direction, |direction| {
+                TargetFilter::Neighbor { direction }
+            }),
             value(TargetFilter::ParentTarget, tag("the player")),
             value(TargetFilter::ParentTarget, tag("the creature")),
             value(TargetFilter::ParentTarget, tag("the spell")),
@@ -15292,6 +15302,26 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    /// CR 102.1 + CR 103.1: the shared seat-direction combinator accepts both the
+    /// reflexive "their" (each-player chooser scopes) and the "your"
+    /// (controller-relative) possessives, in both directions.
+    #[test]
+    fn parse_neighbor_seat_direction_covers_their_your_left_right() {
+        for (phrase, expected) in [
+            ("the player to their left", SeatDirection::Left),
+            ("the player to their right", SeatDirection::Right),
+            ("the player to your left", SeatDirection::Left),
+            ("the player to your right", SeatDirection::Right),
+        ] {
+            let (rest, dir) =
+                parse_neighbor_seat_direction(phrase).expect("seat direction phrase parses");
+            assert_eq!(dir, expected, "{phrase}");
+            assert_eq!(rest, "", "{phrase} fully consumed");
+        }
+        // A non-neighbor phrase is declined (fail-closed).
+        assert!(parse_neighbor_seat_direction("the player who cast it").is_err());
     }
 
     #[test]

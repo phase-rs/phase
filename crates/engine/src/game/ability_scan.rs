@@ -541,6 +541,7 @@ fn scan_effect(x: &Effect) -> Axes {
             max: _,
             copy_modifications: _,
             scale: _,
+            choose_scope: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(choose_filter));

@@ -4,6 +4,9 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use nom::character::complete::anychar;
+use nom::combinator::not;
+use nom::multi::many1;
 
 /// CR 702.11e + CR 609.4 + CR 702.21a: Parse the "[subject] can be the targets
 /// of spells and abilities[ you control] as though they didn't have hexproof[.
@@ -2928,6 +2931,91 @@ pub(crate) fn parse_qualified_creatures_you_control_suffix<'a>(
     Some((filter, predicate_text))
 }
 
+/// CR 611.3a: Split an Oxford-comma / "and" / "or" / "and/or" subject list into
+/// its item text slices — "Skeletons, Vampires, and Zombies" →
+/// `["Skeletons", "Vampires", "Zombies"]`; "Plants and Treefolk" →
+/// `["Plants", "Treefolk"]`; a single subject → one item.
+///
+/// Uses `separated_list1(separator, item)` — the same idiom as
+/// [`parse_subtype_or_list_prefix_with_word_parser`] — where each item is the
+/// maximal run of characters that does not begin a list separator. Unlike a
+/// word-boundary scan (which only ever tries a match at the start of a word and
+/// so can never match a separator that begins with a comma or a leading space),
+/// this consumes a separator wherever it actually starts, so a shared-suffix
+/// Oxford list splits into *every* item rather than collapsing to one.
+///
+/// A bare comma is only a list separator inside a *coordinated* enumeration:
+/// English writes a genuine subject union as "A, B, and C" / "A and B" /
+/// "A or B" — always with a coordinating conjunction before the final item. A
+/// bare-comma sequence with no coordinator is instead a stack of pre-nominal
+/// adjectives modifying one shared head noun ("Noncreature, non-Equipment
+/// artifacts" — Dan Lewis: artifacts that are noncreature AND non-Equipment),
+/// which is a *single* subject, not a union. A pure `", "` split cannot tell the
+/// two apart — both "Noncreature" and "non-Equipment artifacts" anchor as valid
+/// standalone subjects — so this gates bare-comma splitting on the presence of a
+/// coordinator ([`list_has_coordinator`]). Without one, the whole descriptor is
+/// returned as a single item and the caller defers to the single-subject path.
+///
+/// Bare " or " is also excluded from the separator grammar (it would split an
+/// intra-subject qualifier like "with power 3 or greater"); only the
+/// comma-anchored ", or " is a separator. As a final backstop, the caller
+/// re-parses every item as a controller-anchored subject and rejects the whole
+/// compound (`None`) unless each one anchors, so an over-split can never emit a
+/// wrong `Or`.
+fn split_subject_list(text: &str) -> Vec<&str> {
+    // Not a coordinated enumeration → one subject (do not split bare commas).
+    if !list_has_coordinator(text) {
+        return vec![text.trim()];
+    }
+
+    // One list item: one or more characters, none of which begins a separator.
+    fn subject_list_item(input: &str) -> OracleResult<'_, &str> {
+        recognize(many1(preceded(not(subject_list_separator), anychar))).parse(input)
+    }
+
+    match separated_list1(subject_list_separator, subject_list_item).parse(text) {
+        // Require the split to consume the whole list (a trailing/dangling
+        // separator leaves `rest` non-empty) — otherwise treat it as one item.
+        Ok((rest, items)) if rest.trim().is_empty() => items.into_iter().map(str::trim).collect(),
+        _ => vec![text.trim()],
+    }
+}
+
+/// True when `text` carries a coordinating conjunction ("and" / "or" / "and/or")
+/// at a word boundary — the syntactic marker of a genuine enumeration. Matched
+/// without the leading space because [`nom_primitives::scan_at_word_boundaries`]
+/// lands on each word start; the trailing space keeps "or"/"and" from matching
+/// inside a word ("Warriors", "Orcs"). Oracle text writes these coordinators
+/// lowercase mid-subject, so the original-case `text` matches directly.
+fn list_has_coordinator(text: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(text, |i: &str| {
+        alt((
+            tag::<_, _, OracleError<'_>>("and/or "),
+            tag("and "),
+            tag("or "),
+        ))
+        .parse(i)
+    })
+    .is_some()
+}
+
+/// One subject-list connector token. Ordered longest/most-specific first so that
+/// at a comma position ", and " wins over ", " (no dangling comma on the item).
+fn subject_list_separator(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>(", and/or "),
+            tag(", and "),
+            tag(", or "),
+            tag(" and/or "),
+            tag(" and "),
+            tag(", "),
+        )),
+    )
+    .parse(input)
+}
+
 fn parse_shared_controller_compound_subject_filter(subject: &TextPair<'_>) -> Option<TargetFilter> {
     let (descriptor, suffix) = parse_subject_suffix(subject, " you control")
         .map(|descriptor| (descriptor, " you control"))
@@ -2936,53 +3024,55 @@ fn parse_shared_controller_compound_subject_filter(subject: &TextPair<'_>) -> Op
                 .map(|descriptor| (descriptor, " your opponents control"))
         })?;
 
-    let (left_lower, _, right_lower) = nom_primitives::scan_preceded(descriptor.lower, |input| {
-        value((), tag::<_, _, OracleError<'_>>("and ")).parse(input)
-    })?;
-    let right_start = descriptor.lower.len() - right_lower.len();
-    let left_original = descriptor.original[..left_lower.len()].trim();
-    let right_original = descriptor.original[right_start..].trim();
-    if left_original.is_empty() || right_original.is_empty() {
+    // A leading distribution word ("Other <list>", "Each other <list>", "Each
+    // <list>") applies across EVERY list item, so strip it here and re-attach
+    // "other " to each item's subject. A mid-list "other" (Grimlock: "…, and
+    // other Transformers creatures") stays on its own item and is handled by
+    // `parse_continuous_subject_filter` when that item is parsed.
+    let descriptor_original = descriptor.original.trim();
+    let descriptor_lower_owned = descriptor_original.to_lowercase();
+    let descriptor_tp = TextPair::new(descriptor_original, &descriptor_lower_owned);
+    let (list_text, distribute_other) =
+        if let Some(rest) = nom_tag_tp(&descriptor_tp, "each other ") {
+            (rest.original.trim(), true)
+        } else if let Some(rest) = nom_tag_tp(&descriptor_tp, "other ") {
+            (rest.original.trim(), true)
+        } else if let Some(rest) = nom_tag_tp(&descriptor_tp, "each ") {
+            (rest.original.trim(), false)
+        } else {
+            (descriptor_original, false)
+        };
+    if list_text.is_empty() {
         return None;
     }
 
-    let left_lower_owned = left_original.to_lowercase();
-    let left_tp = TextPair::new(left_original, &left_lower_owned);
-    let (left_core, distribute_other) = if let Some(rest) = nom_tag_tp(&left_tp, "each other ") {
-        (rest.original.trim(), true)
-    } else if let Some(rest) = nom_tag_tp(&left_tp, "other ") {
-        (rest.original.trim(), true)
-    } else if let Some(rest) = nom_tag_tp(&left_tp, "each ") {
-        (rest.original.trim(), false)
-    } else {
-        (left_original, false)
-    };
-    if left_core.is_empty() {
-        return None;
-    }
-
-    let left_subject = if distribute_other {
-        format!("other {left_core}{suffix}")
-    } else {
-        format!("{left_core}{suffix}")
-    };
-    let right_subject = if distribute_other {
-        format!("other {right_original}{suffix}")
-    } else {
-        format!("{right_original}{suffix}")
-    };
-
-    let left_filter = parse_continuous_subject_filter(&left_subject)?;
-    let right_filter = parse_continuous_subject_filter(&right_subject)?;
-    if !filter_has_source_or_controller_anchor(&left_filter)
-        || !filter_has_source_or_controller_anchor(&right_filter)
-    {
+    // Split the full Oxford-comma / and / or subject list into its items. A
+    // single item is not a compound subject — defer to the single-subject path.
+    let items = split_subject_list(list_text);
+    if items.len() < 2 {
         return None;
     }
 
     let mut filters = Vec::new();
-    push_or_filter_branch(&mut filters, left_filter);
-    push_or_filter_branch(&mut filters, right_filter);
+    for item in items {
+        if item.is_empty() {
+            return None;
+        }
+        let item_subject = if distribute_other {
+            format!("other {item}{suffix}")
+        } else {
+            format!("{item}{suffix}")
+        };
+        let item_filter = parse_continuous_subject_filter(&item_subject)?;
+        // Fail-safe: an intra-subject mis-split (e.g. a qualifier containing
+        // "and") yields an item that isn't a controller-anchored subject, so we
+        // bail to `None` and let the caller's other handlers try — never emit a
+        // wrong Or.
+        if !filter_has_source_or_controller_anchor(&item_filter) {
+            return None;
+        }
+        push_or_filter_branch(&mut filters, item_filter);
+    }
     Some(TargetFilter::Or { filters })
 }
 

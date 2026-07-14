@@ -4590,6 +4590,7 @@ pub(super) fn handle_resolution_choice(
                 choose_filter,
                 copy_modifications,
                 scale,
+                choose_scope,
                 source_id,
                 source_controller,
                 remaining_players,
@@ -4630,6 +4631,7 @@ pub(super) fn handle_resolution_choice(
                     player,
                     *id,
                     &choose_filter,
+                    choose_scope,
                     source_id,
                     source_controller,
                 ) {
@@ -4646,6 +4648,7 @@ pub(super) fn handle_resolution_choice(
                 max,
                 copy_modifications,
                 scale,
+                choose_scope,
                 source_id,
                 source_controller,
                 scoped_players,

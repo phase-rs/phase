@@ -78,6 +78,10 @@ import { ChooseOneOfBranchModal } from "../components/modal/ChooseOneOfBranchMod
 import { LifeRedistributionModal } from "../components/modal/LifeRedistributionModal.tsx";
 import { ModeChoiceModal } from "../components/modal/ModeChoiceModal.tsx";
 import { DeclareShortcutModal, RespondToShortcutModal } from "../components/modal/LoopShortcutModal.tsx";
+import {
+  PrecastCopyShortcutOfferModal,
+  RespondToPrecastCopyShortcutModal,
+} from "../components/modal/PrecastCopyShortcutModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
 import { PeekTab } from "../components/modal/DialogShell.tsx";
@@ -1709,6 +1713,8 @@ function GamePageContent({
         <ModeChoiceModal />
         <DeclareShortcutModal />
         <RespondToShortcutModal />
+        <PrecastCopyShortcutOfferModal />
+        <RespondToPrecastCopyShortcutModal />
         <ChooseOneOfBranchModal />
         <LifeRedistributionModal />
         <AdventureCastModal />

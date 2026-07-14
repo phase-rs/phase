@@ -2,7 +2,13 @@ import { createContext, useEffect, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import type { FormatConfig, GameAction, MatchConfig, MatchType } from "../adapter/types";
+import {
+  type FormatConfig,
+  type GameAction,
+  type MatchConfig,
+  type MatchType,
+  persistedGameStateView,
+} from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
@@ -1154,7 +1160,7 @@ export function GameProvider({
           if (cancelled) return;
           // Derive player count from the restored state — the URL param may be
           // absent on resume (e.g. navigating directly to a saved game URL).
-          const resumedPlayerCount = savedState.players?.length ?? playerCount;
+          const resumedPlayerCount = persistedGameStateView(savedState).players.length;
           controller = createGameLoopController({
             mode: mode === "local" ? "local" : "ai",
             difficulty,

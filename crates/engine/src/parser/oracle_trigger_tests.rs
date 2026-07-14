@@ -7,12 +7,12 @@ use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute,
-    Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope,
-    DamageChannel, DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope,
-    Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
+    Comparator, ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission,
+    CountScope, DamageChannel, DamageModification, DamageSource, DelayedTriggerCondition,
+    DiscardSelfScope, Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
     ManaSpendPermission, ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, TapStateChange, TargetFilter,
-    TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality, TapStateChange,
+    TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -12212,34 +12212,20 @@ fn trigger_encounter_maps_to_planeswalked_to() {
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
 }
 
-/// DEFERRED GAP (documented, not fixed): Caught in a Parallel Universe is a
+/// CR 101.4 + CR 102.1 + CR 103.1 + CR 707.2: Caught in a Parallel Universe is a
 /// Planechase phenomenon whose encounter effect is a per-player, left-neighbor,
 /// many-to-many choose-and-copy — "each player chooses a creature controlled by
 /// the player to their left. Each player creates a token that's a copy of the
 /// creature they chose, except it has menace."
 ///
-/// Modeling this correctly needs infrastructure the engine does not yet have:
-///   * a left-neighbor `ControllerRef` — CR 103.1 fixes turn order (starting
-///     player, proceeding clockwise) and thus "the player to their left", but no
-///     filter controller ref resolves it (`ControllerRef` has no
-///     `PlayerToTheLeft`/left-neighbor variant);
-///   * a per-player PARALLEL selection where every player is simultaneously a
-///     chooser binding their own creature — `Effect::ChooseObjectsIntoTrackedSet`
-///     has a single `chooser` and one tracked set (CR 608.2c), not one binding
-///     per player; and
-///   * a per-player token copy keyed to each chooser's own binding —
-///     `CopyTokenOf { target: ParentTarget }` inherits ONE parent target, not a
-///     per-player selection (CR 707.2).
-///
-/// This is a single Planechase phenomenon, not a card class, so the per-player
-/// left-neighbor choose head is deliberately left as a strict-failure
-/// `Unimplemented { name: "choose" }` gap rather than mis-modeled with the
-/// single-chooser machinery. This test LOCKS that documented state so the card
-/// is not silently counted as fixed and a future change can't quietly alter the
-/// shape. When per-player parallel-selection infrastructure lands, replace this
-/// with a positive end-to-end test.
+/// This now lowers to a single self-contained [`Effect::EachPlayerCopyChosen`]
+/// with `choose_scope: Neighbor { Left }` (each chooser's pool is drawn from the
+/// player seated to their left, resolved by `game::players::neighbor`), the same
+/// shape as Human—Time Lord Meta-Crisis but with the seat-relative eligibility
+/// scope and a single choice + menace grant. No chained tail: the whole body
+/// collapses into one effect (`sub_ability.is_none()`).
 #[test]
-fn caught_in_a_parallel_universe_per_player_left_neighbor_choose_is_deferred_gap() {
+fn caught_in_a_parallel_universe_lowers_to_left_neighbor_copy_chosen() {
     let def = parse_trigger_line(
         "When you encounter Caught in a Parallel Universe, each player chooses a \
          creature controlled by the player to their left. Each player creates a \
@@ -12258,17 +12244,53 @@ fn caught_in_a_parallel_universe_per_player_left_neighbor_choose_is_deferred_gap
         .execute
         .as_deref()
         .expect("the encounter trigger must carry an execute body");
-    // The per-player left-neighbor selection head is unsupported: it must remain
-    // a documented `Unimplemented { name: "choose" }` strict-failure, NOT be
-    // mis-converted into a single-chooser `ChooseObjectsIntoTrackedSet`.
+    // CR 101.4: "each player" → scope over all players.
+    assert_eq!(
+        execute.player_scope,
+        Some(PlayerFilter::All),
+        "\"each player\" → player_scope All"
+    );
+    // The whole body collapses into a single self-contained effect (no chained
+    // tail); the pre-fix `SequentialSibling` CopyTokenOf head is gone.
+    assert!(
+        execute.sub_ability.is_none(),
+        "the body must collapse into a single EachPlayerCopyChosen, got sub {:?}",
+        execute.sub_ability
+    );
     match &*execute.effect {
-        Effect::Unimplemented { name, .. } => assert_eq!(
-            name, "choose",
-            "the deferred per-player choose head must stay an Unimplemented choose gap"
-        ),
+        Effect::EachPlayerCopyChosen {
+            choose_filter,
+            min,
+            max,
+            copy_modifications,
+            scale,
+            choose_scope,
+        } => {
+            assert_eq!((*min, *max), (1, 1), "chooses a (single) creature");
+            assert!(
+                matches!(choose_filter, TargetFilter::Typed(tf)
+                    if tf.type_filters.contains(&TypeFilter::Creature)),
+                "choose_filter must be a creature filter, got {choose_filter:?}"
+            );
+            assert_eq!(
+                *choose_scope,
+                CopyChooseScope::Neighbor {
+                    direction: SeatDirection::Left
+                },
+                "\"controlled by the player to their left\" → Neighbor{{Left}}"
+            );
+            assert_eq!(
+                copy_modifications,
+                &vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Menace
+                }],
+                "except it has menace → AddKeyword(Menace)"
+            );
+            assert_eq!(scale, &None, "single-choice shape → no scaling clause");
+        }
         other => panic!(
-            "Caught in a Parallel Universe's per-player left-neighbor choose is a \
-             deferred gap and must remain Unimplemented, got {other:?}"
+            "Caught in a Parallel Universe must lower to a left-neighbor \
+             EachPlayerCopyChosen, got {other:?}"
         ),
     }
 }
@@ -23699,5 +23721,42 @@ fn saruman_copy_the_exiled_card_binds_exiled_by_source_not_tracked_set() {
         serde_json::json!({ "type": "ExiledBySource" }),
         "Saruman's copy must bind ExiledBySource (was TrackedSet(0)); got {:?}",
         targets[0]
+    );
+}
+
+#[test]
+fn ketramose_exile_trigger_gated_on_source_zones_and_own_turn() {
+    // #4952: the batched "one or more cards are put into exile from graveyards
+    // and/or the battlefield during your turn" trigger must (a) restrict its
+    // source zones to graveyard + battlefield (NOT exile-from-hand) and (b) fire
+    // only on the controller's own turn — both were dropped, so it fired on the
+    // opponent's turn and on exiling a card from hand.
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Whenever one or more cards are put into exile from graveyards and/or the battlefield during your turn, you draw a card and lose 1 life.",
+        "Ketramose, the New Dawn",
+        &[],
+        &[],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == crate::types::TriggerMode::ChangesZoneAll)
+        .expect("batched exile trigger should parse as ChangesZoneAll");
+    assert!(
+        trigger
+            .origin_zones
+            .contains(&crate::types::Zone::Graveyard)
+            && trigger
+                .origin_zones
+                .contains(&crate::types::Zone::Battlefield),
+        "source zones must be graveyard + battlefield, got {:?}",
+        trigger.origin_zones
+    );
+    assert_eq!(
+        trigger.constraint,
+        Some(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn),
+        "must be gated to the controller's own turn, got {:?}",
+        trigger.constraint
     );
 }

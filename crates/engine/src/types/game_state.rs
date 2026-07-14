@@ -9,12 +9,12 @@ use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
     CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification, ControlWindow, CopyScale,
-    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, PileSource,
-    QuantityExpr, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
-    StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause,
-    TriggerCondition, TriggerDefinition,
+    ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification, ControlWindow,
+    CopyChooseScope, CopyScale, CostPaidObjectSnapshot, CounterCostSelection,
+    DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
+    LibraryPosition, ModalChoice, PileSource, QuantityExpr, ResolvedAbility,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
+    TargetFilter, TargetRef, ThisWayCause, TriggerCondition, TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, TokenImageRef};
@@ -1363,6 +1363,10 @@ pub struct PendingEachPlayerCopyChosen {
     pub copy_modifications: Vec<ContinuousModification>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<CopyScale>,
+    /// CR 102.1 + CR 103.1: whose battlefield the paused chooser drew from, so a
+    /// mid-flight save/reload reconstructs the correct eligibility controller.
+    #[serde(default)]
+    pub choose_scope: CopyChooseScope,
     pub source_id: ObjectId,
     pub source_controller: PlayerId,
     /// APNAP-ordered scoped player set (for a mid-choice save/reload).
@@ -3335,6 +3339,131 @@ pub struct LifeRedistributionOption {
     pub assignment: Vec<(PlayerId, i32)>,
 }
 
+/// Private, live-only state for the finite pre-cast Chain-copy shortcut.
+///
+/// The public `WaitingFor` variants deliberately carry only actor-facing
+/// opaque capabilities and display counts. The verified transcript, selected
+/// route, suppression latch, and replay controls stay engine-private so a
+/// viewer cannot fabricate or recover a route from serialized game state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct PrecastShortcutRuntime {
+    pub(crate) next_epoch: u64,
+    pub(crate) offer: Option<PrecastShortcutOfferRuntime>,
+    pub(crate) suppressed_cast: Option<ObjectId>,
+    pub(crate) must_diverge: Option<PlayerId>,
+    pub(crate) materializing: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PrecastShortcutOfferRuntime {
+    pub(crate) caster: PlayerId,
+    pub(crate) spell_id: ObjectId,
+    pub(crate) epoch: u64,
+    pub(crate) route_id: u64,
+    pub(crate) responders: Vec<PlayerId>,
+    pub(crate) transcript: Vec<PrecastShortcutReplayStep>,
+    pub(crate) breakpoints: Vec<PrecastShortcutBreakpoint>,
+    pub(crate) shortened: Option<PrecastShortcutBreakpoint>,
+}
+
+/// One exact normal-reducer action in the private route prefix. A shortener
+/// never supplies these actions; they are authored and replayed only by the
+/// engine after every responder has answered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PrecastShortcutReplayStep {
+    pub(crate) actor: PlayerId,
+    pub(crate) action: crate::types::actions::GameAction,
+}
+
+/// A reducer-valid, actor-owned pass boundary. `prefix_length` indexes the
+/// private replay transcript; the public protocol exposes only `id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PrecastShortcutBreakpoint {
+    pub(crate) id: u64,
+    pub(crate) owner: PlayerId,
+    pub(crate) prefix_length: usize,
+    pub(crate) expected_priority_holder: PlayerId,
+    pub(crate) expected_active_player: PlayerId,
+    pub(crate) expected_priority_passes: BTreeSet<PlayerId>,
+    pub(crate) fingerprint: u64,
+}
+
+/// Trusted-persistence-only envelope for runtime data that must never cross a
+/// raw or public `GameState` serialization boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustedGameStateEnvelope {
+    state: GameState,
+    #[serde(default)]
+    precast_shortcut_runtime: PrecastShortcutRuntime,
+}
+
+impl TrustedGameStateEnvelope {
+    /// Captures a trusted persistence snapshot without changing `GameState`'s
+    /// raw serialization contract.
+    pub fn capture(state: GameState) -> Self {
+        Self {
+            precast_shortcut_runtime: state.precast_shortcut_runtime.clone(),
+            state,
+        }
+    }
+
+    /// Restores private runtime data and rotates opaque capabilities before the
+    /// restored state is exposed to clients.
+    pub fn into_game_state(self) -> GameState {
+        let mut state = self.state;
+        state.precast_shortcut_runtime = self.precast_shortcut_runtime;
+        crate::game::precast_copy_shortcut::rekey_after_trusted_restore(&mut state);
+        state
+    }
+}
+
+/// Decodes both current trusted snapshots and historical raw `GameState`
+/// snapshots. The raw form has no pre-cast route authority, so restoring it
+/// always drops any protocol wait before it reaches a live game session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum PersistedGameState {
+    Raw(Box<GameState>),
+    Trusted(Box<TrustedGameStateEnvelope>),
+}
+
+impl<'de> Deserialize<'de> for PersistedGameState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("state").is_some() {
+            serde_json::from_value(value)
+                .map(|envelope| Self::Trusted(Box::new(envelope)))
+                .map_err(serde::de::Error::custom)
+        } else {
+            serde_json::from_value(value)
+                .map(|state| Self::Raw(Box::new(state)))
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+impl PersistedGameState {
+    /// Captures a current trusted snapshot for a persistence boundary.
+    pub fn capture(state: GameState) -> Self {
+        Self::Trusted(Box::new(TrustedGameStateEnvelope::capture(state)))
+    }
+
+    /// Restores the persisted form through the appropriate trust boundary.
+    pub fn into_game_state(self) -> GameState {
+        match self {
+            Self::Raw(state) => {
+                let mut state = *state;
+                crate::game::precast_copy_shortcut::normalize_untrusted_restore(&mut state);
+                state
+            }
+            Self::Trusted(envelope) => (*envelope).into_game_state(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -4350,6 +4479,25 @@ pub enum WaitingFor {
         remaining_players: Vec<PlayerId>,
         proposal: crate::analysis::loop_check::ShortcutProposal,
     },
+    /// CR 732.2a: an engine-proved finite, pre-cast shortcut proposal. This
+    /// family is intentionally separate from `LoopShortcut`; it is not a
+    /// generic loop declaration and exposes no replay transcript.
+    PrecastCopyShortcutOffer {
+        proposer: PlayerId,
+        epoch: u64,
+        route_count: u8,
+    },
+    /// CR 732.2b/c: a responder's accept-or-shorten turn for the finite
+    /// pre-cast route. `breakpoint_ids` are opaque, engine-issued pass
+    /// boundaries owned by this responder.
+    RespondToPrecastCopyShortcut {
+        player: PlayerId,
+        epoch: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        breakpoint_ids: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining_players: Vec<PlayerId>,
+    },
     /// CR 118.12: Opponent must decide whether to pay a cost to prevent an effect.
     /// Used by "counter unless pays {X}" (Mana Leak), tax triggers (Esper Sentinel),
     /// and ward costs (CR 702.21a).
@@ -4933,7 +5081,8 @@ pub enum WaitingFor {
     /// each subsequent player in APNAP order.
     EachPlayerCopyChosenSelection {
         player: PlayerId,
-        /// The choosing player's own eligible objects (public battlefield info).
+        /// Eligible objects for this chooser — either their own or their
+        /// seat-neighbor's, per `choose_scope` (all public battlefield info).
         eligible: Vec<TargetRef>,
         min: u32,
         max: u32,
@@ -4942,6 +5091,10 @@ pub enum WaitingFor {
         copy_modifications: Vec<ContinuousModification>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scale: Option<CopyScale>,
+        /// CR 102.1 + CR 103.1: whose battlefield this chooser's pool was drawn
+        /// from, so live re-validation (CR 608.2c) uses the right controller.
+        #[serde(default)]
+        choose_scope: CopyChooseScope,
         source_id: ObjectId,
         source_controller: PlayerId,
         /// Players still to choose after the current one (APNAP order).
@@ -5314,6 +5467,8 @@ impl WaitingFor {
             WaitingFor::OpponentMayChoice { .. } => "OpponentMayChoice",
             WaitingFor::LoopShortcut { .. } => "LoopShortcut",
             WaitingFor::RespondToShortcut { .. } => "RespondToShortcut",
+            WaitingFor::PrecastCopyShortcutOffer { .. } => "PrecastCopyShortcutOffer",
+            WaitingFor::RespondToPrecastCopyShortcut { .. } => "RespondToPrecastCopyShortcut",
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
             WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
@@ -5462,6 +5617,7 @@ impl WaitingFor {
             | WaitingFor::PairChoice { player, .. }
             | WaitingFor::OpponentMayChoice { player, .. }
             | WaitingFor::RespondToShortcut { player, .. }
+            | WaitingFor::RespondToPrecastCopyShortcut { player, .. }
             | WaitingFor::TributeChoice { player, .. }
             | WaitingFor::UnlessPayment { player, .. }
             | WaitingFor::UnlessPaymentChooseCost { player, .. }
@@ -5513,6 +5669,7 @@ impl WaitingFor {
             // CR 732.2a: the loop-shortcut proposer is the player with priority, carried
             // in `proposer` (not a `player` field) — dedicated arm like `AssistPayment`.
             WaitingFor::LoopShortcut { proposer, .. } => Some(*proposer),
+            WaitingFor::PrecastCopyShortcutOffer { proposer, .. } => Some(*proposer),
             WaitingFor::GameOver { .. } => None,
         }
     }
@@ -6937,6 +7094,11 @@ pub struct GameState {
     /// dedup on semantically-identical positions is unaffected.
     #[serde(skip, default)]
     pub loop_detect_ring: std::collections::VecDeque<std::sync::Arc<GameState>>,
+    /// Live-only authority for the finite pre-cast shortcut. It is absent from
+    /// raw/public serialization; trusted persistence uses the explicit codec
+    /// envelope in `game::precast_copy_shortcut`.
+    #[serde(skip, default)]
+    pub(crate) precast_shortcut_runtime: PrecastShortcutRuntime,
     pub next_timestamp: u64,
     #[serde(skip, default = "PublicStateDirty::all_dirty")]
     pub public_state_dirty: PublicStateDirty,
@@ -9559,6 +9721,7 @@ impl GameState {
             static_source_index: StaticSourceIndex::default(),
             static_mode_presence: crate::types::statics::StaticModePresence::all_present(),
             loop_detect_ring: std::collections::VecDeque::new(),
+            precast_shortcut_runtime: PrecastShortcutRuntime::default(),
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
             state_revision: 0,
@@ -10310,6 +10473,9 @@ impl GameState {
         // the live ring → recursive/quadratic growth. Cleared ⇒ every stored snapshot
         // has clone depth 1. Does not affect any comparison (the ring is eq-excluded).
         clone.loop_detect_ring.clear();
+        // Private shortcut capabilities are live interaction state, never part
+        // of a CR 104.4b position sample.
+        clone.precast_shortcut_runtime = PrecastShortcutRuntime::default();
         // CR 104.4b + CR 400.7: the all-zone incarnation bump advances a source's
         // epoch on every zone change, so a mandatory loop that cycles its source's
         // zones would otherwise carry a growing `ResolvedAbility::source_incarnation`
@@ -10554,6 +10720,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         static_source_index: _,
         static_mode_presence: _,
         loop_detect_ring: _,
+        precast_shortcut_runtime: _,
         next_timestamp: _,
         public_state_dirty: _,
         state_revision: _,

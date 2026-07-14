@@ -33,6 +33,11 @@ TESTS_DIR = REPO_ROOT / "crates/engine/tests"
 SRC_DIR = REPO_ROOT / "crates/engine/src"
 FIXTURE_PATH = REPO_ROOT / "crates/engine/tests/fixtures/integration_cards.json"
 
+# This fixture must exercise Witherbloom Apprentice through the raw-MTGJSON
+# parser, not a hand-maintained card-data export entry. Keep the set narrow:
+# every other referenced card is selected from the production export below.
+PARSER_BACKED_FIXTURE_CARDS = {"witherbloom apprentice"}
+
 # A few non-test-named source files contain test-only card references or corpus
 # rows consumed by tests that load the curated fixture.
 ALWAYS_SCAN_SRC_FILES = [
@@ -90,6 +95,7 @@ def main() -> int:
     export: dict[str, object] = json.loads(EXPORT_PATH.read_text(encoding="utf-8"))
 
     referenced = referenced_card_keys(export)
+    export_referenced = referenced - PARSER_BACKED_FIXTURE_CARDS
 
     # Group keys by oracle id so a referenced front face pulls in its siblings.
     by_oracle: dict[str, list[str]] = {}
@@ -98,8 +104,8 @@ def main() -> int:
         if oid:
             by_oracle.setdefault(oid, []).append(key)
 
-    selected: set[str] = set(referenced)
-    for key in referenced:
+    selected: set[str] = set(export_referenced)
+    for key in export_referenced:
         value = export[key]
         oid = value.get("scryfall_oracle_id") if isinstance(value, dict) else None
         if oid:
@@ -118,6 +124,13 @@ def main() -> int:
                 f"error: fixture is stale — {len(missing)} card(s) not covered:\n  "
                 f"{listed}\nregenerate with `python3 scripts/gen-test-fixture.py`"
             )
+        parser_backed = current & PARSER_BACKED_FIXTURE_CARDS
+        if parser_backed:
+            listed = "\n  ".join(sorted(parser_backed))
+            sys.exit(
+                "error: parser-backed cards leaked into the export fixture:\n  "
+                f"{listed}\nregenerate with `python3 scripts/gen-test-fixture.py`"
+            )
         print(f"ok: fixture covers all {len(selected)} referenced cards")
         return 0
 
@@ -127,10 +140,10 @@ def main() -> int:
     serialized = json.dumps(fixture, separators=(",", ":"), ensure_ascii=False)
     FIXTURE_PATH.write_text(serialized + "\n", encoding="utf-8")
 
-    siblings = len(selected) - len(referenced)
+    siblings = len(selected) - len(export_referenced)
     print(
         f"wrote {len(selected)} cards "
-        f"({len(referenced)} referenced + {siblings} sibling faces) to "
+        f"({len(export_referenced)} export-referenced + {siblings} sibling faces) to "
         f"{FIXTURE_PATH.relative_to(REPO_ROOT)} "
         f"({len(serialized) / 1024:.0f} KB)"
     )

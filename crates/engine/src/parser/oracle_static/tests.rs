@@ -7311,6 +7311,131 @@ fn static_self_and_group_subject_delegates_group_filter() {
     ));
 }
 
+/// CR 611.3a: an Oxford-comma subtype list in a "you control" anthem subject
+/// must keep EVERY listed subtype. Before the N-way split fix the compound-
+/// subject parser split only on the last " and ", so "Skeletons, Vampires, and
+/// Zombies" kept only [Skeleton, Zombie] (the trailing ", Vampires" on the left
+/// half was swallowed) — silently buffing the wrong board. Class: Death-Priest
+/// of Myrkul, Blex, Raphael, Valley Questcaller, Grimlock, etc.
+#[test]
+fn compound_subject_oxford_subtype_list_keeps_all_conjuncts() {
+    fn subtypes(f: &TargetFilter) -> Vec<String> {
+        let TargetFilter::Or { filters } = f else {
+            return vec![];
+        };
+        filters
+            .iter()
+            .flat_map(|c| match c {
+                TargetFilter::Typed(tf) => tf
+                    .type_filters
+                    .iter()
+                    .filter_map(|t| match t {
+                        TypeFilter::Subtype(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => vec![],
+            })
+            .collect()
+    }
+
+    // 3-item Oxford list (Death-Priest of Myrkul).
+    let def = parse_static_line("Skeletons, Vampires, and Zombies you control get +1/+1.")
+        .expect("anthem should parse");
+    let subs = subtypes(def.affected.as_ref().expect("affected filter"));
+    for want in ["Skeleton", "Vampire", "Zombie"] {
+        assert!(
+            subs.iter().any(|s| s == want),
+            "dropped subtype {want} (got {subs:?})"
+        );
+    }
+
+    // 5-item Oxford list with a leading "Other " distributor (Blex, Vexing Pest).
+    let def =
+        parse_static_line("Other Pests, Bats, Insects, Snakes, and Spiders you control get +1/+1.")
+            .expect("anthem should parse");
+    let aff = def.affected.as_ref().expect("affected filter");
+    let subs = subtypes(aff);
+    for want in ["Pest", "Bat", "Insect", "Snake", "Spider"] {
+        assert!(
+            subs.iter().any(|s| s == want),
+            "dropped subtype {want} (got {subs:?})"
+        );
+    }
+    // "Other" distributes across every conjunct (each excludes the source).
+    let TargetFilter::Or { filters } = aff else {
+        panic!("expected an Or of subtype filters, got {aff:?}");
+    };
+    for c in filters {
+        if let TargetFilter::Typed(tf) = c {
+            assert!(
+                tf.properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::Another)),
+                "each 'other' conjunct must carry Another: {tf:?}"
+            );
+        }
+    }
+}
+
+/// Regression: a plain two-item compound (no Oxford comma) still yields exactly
+/// two `Or` conjuncts (Gisa "Skeletons and Zombies", Fountain Watch "Artifacts
+/// and enchantments").
+#[test]
+fn compound_subject_two_item_still_ors_both() {
+    let def = parse_static_line("Skeletons and Zombies you control get +1/+1.")
+        .expect("anthem should parse");
+    let TargetFilter::Or { filters } = def.affected.as_ref().expect("affected filter") else {
+        panic!("expected Or, got {:?}", def.affected);
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "two-item compound must yield exactly 2 conjuncts, got {filters:?}"
+    );
+}
+
+/// CR 611.3a: a static's continuous effect applies to exactly what its text
+/// names, so a leading comma in the subject must not be over-read as a list
+/// separator. Dan Lewis's "Noncreature, non-Equipment artifacts you control" is
+/// ONE conjunctive type description (artifacts that are noncreature AND
+/// non-Equipment), not a union — the comma stacks pre-nominal adjectives onto
+/// the shared head noun "artifacts". Because that phrase has no coordinating
+/// conjunction, the compound-subject splitter must leave it whole rather than
+/// emit `Or[noncreature, non-Equipment artifacts]` (whose first branch would
+/// wrongly admit non-artifact noncreatures). Guards the comma-grammar fix.
+#[test]
+fn compound_subject_comma_adjectives_without_coordinator_stay_one_subject() {
+    let filter =
+        parse_continuous_subject_filter("Noncreature, non-Equipment artifacts you control")
+            .expect("Dan Lewis subject should parse");
+    // A single conjunctive subject, never a union.
+    let TargetFilter::Typed(tf) = &filter else {
+        panic!("expected a single Typed subject, got {filter:?}");
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    // All three conjuncts survive on the one branch: artifact ∧ ¬creature ∧ ¬Equipment.
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Artifact),
+        "must keep the Artifact head type, got {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature))),
+        "must keep the noncreature restriction, got {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Equipment".into()
+            )))),
+        "must keep the non-Equipment restriction, got {:?}",
+        tf.type_filters
+    );
+}
+
 #[test]
 fn static_as_long_as_unrecognized_condition() {
     // Conditions the parser cannot yet decompose fall through to Unrecognized.
