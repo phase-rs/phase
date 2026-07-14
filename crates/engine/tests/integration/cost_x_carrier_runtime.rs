@@ -612,3 +612,148 @@ fn activated_ability_x_is_save_compatible() {
         "the announced X and its source must round-trip through a save"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE FILTER-MANA-VALUE SUB-CLASS — t96 left this MEASURED-UNKNOWN, and the totality
+// guard's scoping depends on the answer. These two pin it in BOTH directions.
+//
+// ~9 gated-ETB faces (Dune Drifter, Kinetic Ooze, Thieving Skydiver, Halo Forager, In
+// Residence, Invasion of Ikoria, Knickknack Ouphe, Rocco, Taj-Nar Swordsmith) keep a bare
+// `Variable{"X"}` in a filter's mana-value bound INSIDE the effect. The cost-X walk does not
+// rewrite it — the AST residual is real. The question is whether it FABRICATES.
+//
+// MEASURED: it does not. The runtime binds it. So these faces WORK, and a totality guard keyed
+// on tree-presence of an X would red all nine of them — manufacturing honest-looking reds out
+// of cards that play correctly. That is why the guard is keyed on the target-selection sibling
+// slots ONLY. These tests are the evidence for that scoping; if they ever go red, the guard's
+// scope must be revisited.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Kinetic Ooze `{X}{G}`, MEASURED — direction 1: an object WITHIN the bound is a legal target.
+/// "This creature enters with X +1/+1 counters on it.
+///  When this creature enters, destroy up to one target artifact or enchantment with mana value
+///  X or less."
+///
+/// BUILT-IN NON-VACUITY CONTROL: one card, one X, two slots. "Enters with X +1/+1 counters"
+/// reads the spell's X (CR 107.3m); if that reads 3, X was available and the harness is live.
+/// A 3-counter Ooze beside a SURVIVING artifact would isolate the filter slot as fabricating.
+#[test]
+fn filter_mana_value_bound_binds_x_and_destroys_within_bound() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let relic = scenario
+        .add_creature(P1, "Worn Powerstone", 0, 0)
+        .as_artifact()
+        .id();
+    let ooze = {
+        let mut b = scenario.add_creature_to_hand_from_oracle(
+            P0,
+            "Kinetic Ooze",
+            0,
+            0,
+            "This creature enters with X +1/+1 counters on it.\nWhen this creature enters, \
+             destroy up to one target artifact or enchantment with mana value X or less.",
+        );
+        b.with_mana_cost(cost(vec![ManaCostShard::X, ManaCostShard::Green], 0));
+        b.id()
+    };
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&relic)
+        .unwrap()
+        .mana_cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 3,
+    };
+    add_mana(&mut runner, ManaType::Green, 8);
+
+    runner.cast(ooze).x(3).target_object(relic).resolve();
+
+    let counters = runner
+        .state()
+        .objects
+        .get(&ooze)
+        .and_then(|o| o.counters.get(&CounterType::Plus1Plus1).copied())
+        .unwrap_or(0);
+    let relic_alive = runner
+        .state()
+        .objects
+        .get(&relic)
+        .is_some_and(|o| o.zone == Zone::Battlefield);
+    assert_eq!(
+        counters, 3,
+        "NON-VACUITY CONTROL: the enters-with-X counters read the spell's X (CR 107.3m). If this \
+         is not 3 the X never reached the card at all and the filter verdict below is void. \
+         MEASURED: {counters}"
+    );
+    assert!(
+        !relic_alive,
+        "the filter's mana-value bound must bind X: cast for X=3, an MV-3 artifact IS a legal \
+         target and must be destroyed. A survivor here means the bound fabricated 0 ('mana value \
+         0 or less' matches nothing) — and the totality guard would then need to red this class."
+    );
+}
+
+/// Kinetic Ooze, MEASURED — direction 2, THE DISCRIMINATOR. Direction 1 alone is ambiguous: a
+/// filter whose mana-value prop was DROPPED ENTIRELY (over-permissive — a different bug) would
+/// also destroy the artifact. Here X=1 against an MV-3 artifact. Bound to X => MV 3 > 1 is an
+/// ILLEGAL target and it survives. Prop dropped => it dies anyway. It survives, so the bound is
+/// really bound to X — not fabricated, and not dropped.
+#[test]
+fn filter_mana_value_bound_excludes_targets_above_x() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let relic = scenario
+        .add_creature(P1, "Worn Powerstone", 0, 0)
+        .as_artifact()
+        .id();
+    let ooze = {
+        let mut b = scenario.add_creature_to_hand_from_oracle(
+            P0,
+            "Kinetic Ooze",
+            0,
+            0,
+            "This creature enters with X +1/+1 counters on it.\nWhen this creature enters, \
+             destroy up to one target artifact or enchantment with mana value X or less.",
+        );
+        b.with_mana_cost(cost(vec![ManaCostShard::X, ManaCostShard::Green], 0));
+        b.id()
+    };
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&relic)
+        .unwrap()
+        .mana_cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 3,
+    };
+    add_mana(&mut runner, ManaType::Green, 8);
+
+    runner.cast(ooze).x(1).resolve();
+
+    let counters = runner
+        .state()
+        .objects
+        .get(&ooze)
+        .and_then(|o| o.counters.get(&CounterType::Plus1Plus1).copied())
+        .unwrap_or(0);
+    let relic_alive = runner
+        .state()
+        .objects
+        .get(&relic)
+        .is_some_and(|o| o.zone == Zone::Battlefield);
+    assert_eq!(
+        counters, 1,
+        "NON-VACUITY CONTROL: the enters-with-X counters must read 1. MEASURED: {counters}"
+    );
+    assert!(
+        relic_alive,
+        "cast for X=1, an MV-3 artifact is NOT a legal target and must survive. Its destruction \
+         would mean the mana-value prop was dropped entirely — an over-permissive filter that \
+         destroys anything, which direction 1 alone cannot distinguish from a correct bind."
+    );
+}
