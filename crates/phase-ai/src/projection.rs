@@ -424,12 +424,55 @@ fn resolve_choice(
             .ok_or_else(|| BailReason::NoLegalAction {
                 waiting_for: format!("{:?}", state.waiting_for),
             })?,
+        // The finite pre-cast family remains optional in a projection. Declining
+        // preserves ordinary priority instead of fabricating a route proposal.
+        WaitingFor::PrecastCopyShortcutOffer { .. } => actions
+            .iter()
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::PrecastCopyShortcut {
+                        response: engine::types::actions::PrecastCopyShortcutResponse::Decline,
+                        ..
+                    }
+                )
+            })
+            .cloned()
+            .ok_or_else(|| BailReason::NoLegalAction {
+                waiting_for: format!("{:?}", state.waiting_for),
+            })?,
         // PR-7 Phase 4c (LOW-2): self-preservation via the single-authority
         // `smart_shortcut_response` — Shorten when the polled player has a meaningful
         // way to break the loop, else Accept.
         WaitingFor::RespondToShortcut { player, .. } => GameAction::RespondToShortcut {
             response: engine::ai_support::smart_shortcut_response(state, *player),
         },
+        WaitingFor::RespondToPrecastCopyShortcut {
+            player,
+            epoch,
+            breakpoint_ids,
+            ..
+        } => {
+            let response = match engine::ai_support::smart_shortcut_response(state, *player) {
+                engine::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
+                    breakpoint_ids.first().map_or(
+                        engine::types::actions::PrecastCopyShortcutResponse::Accept,
+                        |breakpoint_id| {
+                            engine::types::actions::PrecastCopyShortcutResponse::Shorten {
+                                breakpoint_id: *breakpoint_id,
+                            }
+                        },
+                    )
+                }
+                engine::analysis::loop_check::ShortcutResponse::Accept => {
+                    engine::types::actions::PrecastCopyShortcutResponse::Accept
+                }
+            };
+            GameAction::PrecastCopyShortcut {
+                epoch: *epoch,
+                response,
+            }
+        }
 
         _ => {
             // All remaining variants: first legal action.
@@ -583,6 +626,70 @@ mod tests {
         assert!(
             is_policy_choice,
             "declining a shortcut is a policy decision"
+        );
+    }
+
+    fn precast_offer_state() -> GameState {
+        use std::path::Path;
+
+        use engine::database::card_db::CardDatabase;
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::game::scenario_db::GameScenarioDbExt;
+        use engine::types::game_state::CastPaymentMode;
+        use engine::types::zones::Zone;
+
+        const CHAIN_OF_SMOG: &str =
+            "Target player discards two cards. That player may copy this spell and may choose a new target for that copy.";
+
+        let db = CardDatabase::from_mtgjson(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mtgjson/test_fixture.json"),
+        )
+        .expect("test fixture must contain Witherbloom Apprentice");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_real_card(P0, "Witherbloom Apprentice", Zone::Battlefield, &db);
+        let chain = scenario
+            .add_spell_to_hand_from_oracle(P0, "Chain of Smog", false, CHAIN_OF_SMOG)
+            .id();
+
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&chain].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: chain,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("Chain must enter the normal target-selection pipeline");
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Player(P0)),
+            })
+            .expect("Chain can target its caster");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::PrecastCopyShortcutOffer { .. }
+        ));
+        runner.state().clone()
+    }
+
+    #[test]
+    fn projection_declines_precast_shortcut_offer() {
+        let state = precast_offer_state();
+        let (_, action, is_policy_choice) =
+            resolve_choice(&state, PlayerId(0), PlayerId(1)).expect("offer has a legal decline");
+
+        assert!(matches!(
+            action,
+            GameAction::PrecastCopyShortcut {
+                response: engine::types::actions::PrecastCopyShortcutResponse::Decline,
+                ..
+            }
+        ));
+        assert!(
+            is_policy_choice,
+            "declining an optional shortcut is a policy choice"
         );
     }
 

@@ -1469,6 +1469,117 @@ fn dual_gated_attached_subject_defers_from_self_ref_splitter() {
     }
 }
 
+/// CR 202.3 + CR 601.2f (#5606): The Scarlet Witch — "Instant and sorcery spells
+/// you cast with mana value 4 or greater cost {N} less" restricts the reduction
+/// to instant/sorcery spells of mana value ≥ 4. Before the fix, the trailing
+/// mana-value gate sat after the "spells you cast" infix and blocked the type
+/// trims, so `spell_filter` came out `null` and EVERY spell was reduced (the
+/// reported bug). The gate now folds into `And{ Or{Instant,Sorcery}, Cmc ≥ 4 }`.
+#[test]
+fn cost_mod_mana_value_gate_instant_sorcery_ge() {
+    let def = parse_static_line(
+        "Instant and sorcery spells you cast with mana value 4 or greater cost {1} less to cast.",
+    )
+    .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        panic!("expected ModifyCost, got {:?}", def.mode);
+    };
+    let filter = spell_filter
+        .as_ref()
+        .expect("spell_filter must not be null (#5606)");
+    let TargetFilter::And { filters } = filter else {
+        panic!("expected And{{type, mana-value}}, got {filter:?}");
+    };
+    assert!(
+        filters
+            .iter()
+            .any(|f| matches!(f, TargetFilter::Or { filters: or } if or.len() == 2)),
+        "missing instant/sorcery type restriction: {filters:?}"
+    );
+    assert!(
+        filters.iter().any(|f| matches!(f,
+            TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(p,
+                FilterProp::Cmc { comparator: Comparator::GE, value: QuantityExpr::Fixed { value: 4 } })))),
+        "missing Cmc >= 4 gate: {filters:?}"
+    );
+}
+
+/// CR 202.3 (#5606): single-type + "mana value N or less" gate folds the Cmc prop
+/// directly onto the typed filter (no `And` wrapper needed for a single `Typed`).
+#[test]
+fn cost_mod_mana_value_gate_single_type_le() {
+    let def = parse_static_line(
+        "Creature spells you cast with mana value 3 or less cost {1} less to cast.",
+    )
+    .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        panic!("expected ModifyCost, got {:?}", def.mode);
+    };
+    let Some(TargetFilter::Typed(tf)) = spell_filter.as_ref() else {
+        panic!("expected Typed(Creature + Cmc), got {spell_filter:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "creature type restriction lost: {tf:?}"
+    );
+    assert!(
+        tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 3 }
+            }
+        )),
+        "missing Cmc <= 3 gate: {tf:?}"
+    );
+}
+
+/// CR 202.3 (#5606): a bare (type-less) mana-value gate — "spells you cast with
+/// mana value 5 or greater" — yields a card filter carrying just the Cmc prop.
+#[test]
+fn cost_mod_mana_value_gate_bare_no_type() {
+    let def =
+        parse_static_line("Spells you cast with mana value 5 or greater cost {2} less to cast.")
+            .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        panic!("expected ModifyCost, got {:?}", def.mode);
+    };
+    let Some(TargetFilter::Typed(tf)) = spell_filter.as_ref() else {
+        panic!("expected Typed(card + Cmc), got {spell_filter:?}");
+    };
+    assert!(
+        tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 5 }
+            }
+        )),
+        "missing Cmc >= 5 gate: {tf:?}"
+    );
+}
+
+/// Regression (#5606): an "Instant and sorcery spells you cast cost {N} less"
+/// line with NO mana-value gate is unchanged — no spurious Cmc prop is added
+/// (Goblin Electromancer class).
+#[test]
+fn cost_mod_no_mana_value_gate_unchanged() {
+    let def = parse_static_line("Instant and sorcery spells you cast cost {1} less to cast.")
+        .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        panic!("expected ModifyCost, got {:?}", def.mode);
+    };
+    assert!(
+        matches!(spell_filter.as_ref(), Some(TargetFilter::Or { filters }) if filters.len() == 2),
+        "expected bare Or{{Instant,Sorcery}} with no Cmc, got {spell_filter:?}"
+    );
+    // No mana-value prop anywhere in the filter.
+    assert!(
+        !format!("{spell_filter:?}").contains("Cmc"),
+        "unexpected Cmc gate on a card with no mana-value qualifier: {spell_filter:?}"
+    );
+}
+
 /// CR 508.1c + CR 509.1b: Grant + dual-gated restrictions emit the pump grant
 /// plus both gated combat statics on the enchanted/equipped host.
 #[test]
@@ -3091,6 +3202,7 @@ fn alt_cost_primal_prayers_energy_creature_mv_leq_3() {
         StaticMode::CastWithAlternativeCost {
             cost,
             timing_permission,
+            frequency,
         } => {
             assert_eq!(
                 *cost,
@@ -3102,6 +3214,8 @@ fn alt_cost_primal_prayers_energy_creature_mv_leq_3() {
                 *timing_permission,
                 Some(CastTimingPermission::AsThoughHadFlash)
             );
+            // CR 118.9: Primal Prayers has no per-turn frequency limit.
+            assert_eq!(*frequency, crate::types::statics::CastFrequency::Unlimited);
         }
         other => panic!("expected CastWithAlternativeCost, got {other:?}"),
     }
@@ -3126,6 +3240,87 @@ fn alt_cost_primal_prayers_energy_creature_mv_leq_3() {
             );
         }
         other => panic!("expected Typed(creature MV<=3 you cast), got {other:?}"),
+    }
+}
+
+/// CR 118.9 + CR 202.3 + CR 601.2b: As Foretold — "Once each turn, you may pay
+/// {0} rather than pay the mana cost for a spell you cast with mana value X or
+/// less, where X is the number of time counters on ~" lowers to a once-per-turn
+/// grant with a DYNAMIC mana-value gate keyed on counters on the source.
+#[test]
+fn alt_cost_as_foretold_once_per_turn_dynamic_mv() {
+    use crate::types::ability::{Comparator, ObjectScope, QuantityExpr, QuantityRef};
+    use crate::types::counter::CounterType;
+    use crate::types::statics::CastFrequency;
+
+    let def = parse_spells_alternative_cost(
+        "Once each turn, you may pay {0} rather than pay the mana cost for a spell you cast \
+         with mana value X or less, where X is the number of time counters on ~.",
+    )
+    .expect("As Foretold must parse to a CastWithAlternativeCost static");
+
+    match &def.mode {
+        StaticMode::CastWithAlternativeCost {
+            cost,
+            timing_permission,
+            frequency,
+        } => {
+            assert_eq!(
+                *cost,
+                AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::zero()
+                }
+            );
+            assert_eq!(*timing_permission, None);
+            assert_eq!(*frequency, CastFrequency::OncePerTurn);
+        }
+        other => panic!("expected CastWithAlternativeCost, got {other:?}"),
+    }
+
+    // Any spell (bare "a spell") gated on MV ≤ time counters on the source.
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::CountersOn {
+                                scope: ObjectScope::Source,
+                                counter_type: Some(CounterType::Time),
+                            },
+                        },
+                    }
+                )),
+                "expected Cmc LE CountersOn(Source, Time), got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("expected Typed(any spell MV<=counters), got {other:?}"),
+    }
+}
+
+/// CR 118.9: Regression — unlimited alternative-cost grants (Fist of Suns,
+/// Rooftop Storm) must carry `frequency: Unlimited` (the default), so the As
+/// Foretold once-per-turn axis does not perturb the existing class members.
+#[test]
+fn alt_cost_unlimited_grants_keep_default_frequency() {
+    use crate::types::statics::CastFrequency;
+
+    for text in [
+        "You may pay {W}{U}{B}{R}{G} rather than pay the mana cost for spells you cast.",
+        "You may pay {0} rather than pay the mana cost for Zombie creature spells you cast.",
+    ] {
+        let def =
+            parse_spells_alternative_cost(text).unwrap_or_else(|| panic!("must parse: {text}"));
+        match &def.mode {
+            StaticMode::CastWithAlternativeCost { frequency, .. } => {
+                assert_eq!(*frequency, CastFrequency::Unlimited, "for {text}");
+            }
+            other => panic!("expected CastWithAlternativeCost, got {other:?}"),
+        }
     }
 }
 
@@ -7114,6 +7309,131 @@ fn static_self_and_group_subject_delegates_group_filter() {
                             && typed.controller == Some(ControllerRef::You)
                 ))
     ));
+}
+
+/// CR 611.3a: an Oxford-comma subtype list in a "you control" anthem subject
+/// must keep EVERY listed subtype. Before the N-way split fix the compound-
+/// subject parser split only on the last " and ", so "Skeletons, Vampires, and
+/// Zombies" kept only [Skeleton, Zombie] (the trailing ", Vampires" on the left
+/// half was swallowed) — silently buffing the wrong board. Class: Death-Priest
+/// of Myrkul, Blex, Raphael, Valley Questcaller, Grimlock, etc.
+#[test]
+fn compound_subject_oxford_subtype_list_keeps_all_conjuncts() {
+    fn subtypes(f: &TargetFilter) -> Vec<String> {
+        let TargetFilter::Or { filters } = f else {
+            return vec![];
+        };
+        filters
+            .iter()
+            .flat_map(|c| match c {
+                TargetFilter::Typed(tf) => tf
+                    .type_filters
+                    .iter()
+                    .filter_map(|t| match t {
+                        TypeFilter::Subtype(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => vec![],
+            })
+            .collect()
+    }
+
+    // 3-item Oxford list (Death-Priest of Myrkul).
+    let def = parse_static_line("Skeletons, Vampires, and Zombies you control get +1/+1.")
+        .expect("anthem should parse");
+    let subs = subtypes(def.affected.as_ref().expect("affected filter"));
+    for want in ["Skeleton", "Vampire", "Zombie"] {
+        assert!(
+            subs.iter().any(|s| s == want),
+            "dropped subtype {want} (got {subs:?})"
+        );
+    }
+
+    // 5-item Oxford list with a leading "Other " distributor (Blex, Vexing Pest).
+    let def =
+        parse_static_line("Other Pests, Bats, Insects, Snakes, and Spiders you control get +1/+1.")
+            .expect("anthem should parse");
+    let aff = def.affected.as_ref().expect("affected filter");
+    let subs = subtypes(aff);
+    for want in ["Pest", "Bat", "Insect", "Snake", "Spider"] {
+        assert!(
+            subs.iter().any(|s| s == want),
+            "dropped subtype {want} (got {subs:?})"
+        );
+    }
+    // "Other" distributes across every conjunct (each excludes the source).
+    let TargetFilter::Or { filters } = aff else {
+        panic!("expected an Or of subtype filters, got {aff:?}");
+    };
+    for c in filters {
+        if let TargetFilter::Typed(tf) = c {
+            assert!(
+                tf.properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::Another)),
+                "each 'other' conjunct must carry Another: {tf:?}"
+            );
+        }
+    }
+}
+
+/// Regression: a plain two-item compound (no Oxford comma) still yields exactly
+/// two `Or` conjuncts (Gisa "Skeletons and Zombies", Fountain Watch "Artifacts
+/// and enchantments").
+#[test]
+fn compound_subject_two_item_still_ors_both() {
+    let def = parse_static_line("Skeletons and Zombies you control get +1/+1.")
+        .expect("anthem should parse");
+    let TargetFilter::Or { filters } = def.affected.as_ref().expect("affected filter") else {
+        panic!("expected Or, got {:?}", def.affected);
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "two-item compound must yield exactly 2 conjuncts, got {filters:?}"
+    );
+}
+
+/// CR 611.3a: a static's continuous effect applies to exactly what its text
+/// names, so a leading comma in the subject must not be over-read as a list
+/// separator. Dan Lewis's "Noncreature, non-Equipment artifacts you control" is
+/// ONE conjunctive type description (artifacts that are noncreature AND
+/// non-Equipment), not a union — the comma stacks pre-nominal adjectives onto
+/// the shared head noun "artifacts". Because that phrase has no coordinating
+/// conjunction, the compound-subject splitter must leave it whole rather than
+/// emit `Or[noncreature, non-Equipment artifacts]` (whose first branch would
+/// wrongly admit non-artifact noncreatures). Guards the comma-grammar fix.
+#[test]
+fn compound_subject_comma_adjectives_without_coordinator_stay_one_subject() {
+    let filter =
+        parse_continuous_subject_filter("Noncreature, non-Equipment artifacts you control")
+            .expect("Dan Lewis subject should parse");
+    // A single conjunctive subject, never a union.
+    let TargetFilter::Typed(tf) = &filter else {
+        panic!("expected a single Typed subject, got {filter:?}");
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    // All three conjuncts survive on the one branch: artifact ∧ ¬creature ∧ ¬Equipment.
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Artifact),
+        "must keep the Artifact head type, got {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature))),
+        "must keep the noncreature restriction, got {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Equipment".into()
+            )))),
+        "must keep the non-Equipment restriction, got {:?}",
+        tf.type_filters
+    );
 }
 
 #[test]
@@ -19560,6 +19880,117 @@ fn static_all_permanents_are_enchantments() {
     );
 }
 
+// CR 109.2 + issue #5740: Secret Arcade's compound-subject additive-type
+// static — "Nonland permanents you control and permanent spells you control
+// are enchantments in addition to their other types." The compound split
+// itself is already generic (`parse_continuous_subject_filter` delegates to
+// `parse_shared_controller_compound_subject_filter`), but the "permanent
+// spells you control" conjunct falls through to the bare type-phrase grammar,
+// which has no notion that a bare "spell(s)" head noun denotes an object on
+// the stack (CR 109.2) — so before this fix the word was silently swallowed
+// and the conjunct collapsed to a battlefield-scoped `Typed{Permanent}`
+// filter, identical to "permanents you control" (dropping the Nonland
+// restriction and never reaching the stack).
+//
+// `parse_continuous_subject_filter("permanent spells you control")` in
+// isolation must resolve to the same stack-scoped shape
+// `oracle_target::scope_target_spell_phrase` already produces for targeting
+// grammar ("target artifact or enchantment spell").
+#[test]
+fn parse_continuous_subject_filter_scopes_spell_conjunct_to_stack() {
+    let filter = parse_continuous_subject_filter("permanent spells you control")
+        .expect("'permanent spells you control' must resolve to a filter");
+    match &filter {
+        TargetFilter::And { filters } => {
+            assert!(
+                filters.contains(&TargetFilter::StackSpell),
+                "expected the And to carry a StackSpell conjunct, got {filters:?}"
+            );
+            let has_permanent_you_control = filters.iter().any(|f| {
+                matches!(
+                    f,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters.contains(&TypeFilter::Permanent)
+                            && tf.controller == Some(ControllerRef::You)
+                )
+            });
+            assert!(
+                has_permanent_you_control,
+                "expected a Typed{{Permanent, controller: You}} conjunct, got {filters:?}"
+            );
+        }
+        other => panic!("expected And{{[StackSpell, Typed]}}, got {other:?}"),
+    }
+}
+
+// Issue #5740: the full Secret Arcade line must produce a compound-subject
+// additive static whose `affected` is an `Or` of the battlefield conjunct
+// (nonland permanents you control) and the stack-scoped conjunct (permanent
+// spells you control), both feeding the same `AddType(Enchantment)`
+// modification.
+#[test]
+fn secret_arcade_compound_additive_type_static_spans_battlefield_and_stack() {
+    let def = parse_static_line(
+        "Nonland permanents you control and permanent spells you control are enchantments in addition to their other types.",
+    )
+    .expect("Secret Arcade's compound additive-type static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Enchantment,
+            }),
+        "expected AddType Enchantment, got {:?}",
+        def.modifications
+    );
+    match &def.affected {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(filters.len(), 2, "expected Or of 2 conjuncts: {filters:?}");
+            let battlefield_conjunct = filters.iter().any(|f| {
+                matches!(
+                    f,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters.contains(&TypeFilter::Permanent)
+                            && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Land)))
+                            && tf.controller == Some(ControllerRef::You)
+                )
+            });
+            assert!(
+                battlefield_conjunct,
+                "expected a Typed{{Permanent, Non(Land), controller: You}} conjunct, got {filters:?}"
+            );
+            let stack_conjunct = filters
+                .iter()
+                .any(|f| matches!(f, TargetFilter::And { filters } if filters.contains(&TargetFilter::StackSpell)));
+            assert!(
+                stack_conjunct,
+                "expected an And{{[StackSpell, ..]}} conjunct, got {filters:?}"
+            );
+        }
+        other => panic!("expected Some(Or{{..}}), got {other:?}"),
+    }
+}
+
+// Issue #5740 (no-regression): a single-subject additive-type static with no
+// "spell" word in its subject must be completely unaffected by the new
+// stack-scoping — still a plain battlefield `Typed` filter.
+#[test]
+fn single_subject_additive_type_static_unaffected_by_spell_scoping() {
+    let def =
+        parse_static_line("Creatures you control are Bears in addition to their other types.")
+            .expect("single-subject additive-type static must still parse");
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "expected a plain Creature filter, got {tf:?}"
+            );
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+        other => panic!("expected a plain Typed filter (no stack-scoping), got {other:?}"),
+    }
+}
+
 // --- Group C2: All [subject] are [color] (global color-defining statics) ---
 
 #[test]
@@ -28626,5 +29057,120 @@ fn dynamic_pt_pump_scales_by_source_intensity() {
             }),
         "expected toughness axis, got {:?}",
         s[0].modifications
+    );
+}
+
+/// CR 605.1a: the filter-scoped "Activated abilities of <types> can't be
+/// activated" static now carries the optional "unless they're mana abilities"
+/// carve-out — Damping Matrix (artifacts and creatures) and Sharkey (lands).
+#[test]
+fn filter_scoped_cant_be_activated_parses_mana_ability_exemption() {
+    let s = super::shared::parse_static_line_multi(
+        "Activated abilities of artifacts and creatures can't be activated unless they're mana abilities.",
+    );
+    assert_eq!(s.len(), 1, "Damping Matrix: {s:?}");
+    assert!(
+        matches!(
+            s[0].mode,
+            StaticMode::CantBeActivated {
+                exemption: ActivationExemption::ManaAbilities,
+                ..
+            }
+        ),
+        "expected mana-ability exemption, got {:?}",
+        s[0].mode
+    );
+
+    // Regression: the Karn/Clarion form (no carve-out) still parses to None.
+    let s = super::shared::parse_static_line_multi(
+        "Activated abilities of artifacts your opponents control can't be activated.",
+    );
+    assert_eq!(s.len(), 1, "Karn/Clarion: {s:?}");
+    assert!(
+        matches!(
+            s[0].mode,
+            StaticMode::CantBeActivated {
+                exemption: ActivationExemption::None,
+                ..
+            }
+        ),
+        "expected no exemption, got {:?}",
+        s[0].mode
+    );
+}
+
+/// CR 613.4c: a "+X/+Y" pump whose two axes bind to DIFFERENT quantities —
+/// Aspect of Wolf: "X is half the number of Forests you control, rounded down,
+/// and Y is half ..., rounded up". Power scales by the rounded-DOWN half,
+/// toughness by the rounded-UP half (the discriminating detail: a single-quantity
+/// implementation would apply the same rounding to both axes).
+#[test]
+fn dynamic_pt_pump_binds_x_and_y_axes_to_distinct_quantities() {
+    let s = super::shared::parse_static_line_multi(
+        "Enchanted creature gets +X/+Y, where X is half the number of Forests you control, rounded down, and Y is half the number of Forests you control, rounded up.",
+    );
+    assert_eq!(s.len(), 1, "Aspect of Wolf: {s:?}");
+    let power = s[0].modifications.iter().find_map(|m| match m {
+        ContinuousModification::AddDynamicPower { value } => Some(value),
+        _ => None,
+    });
+    let toughness = s[0].modifications.iter().find_map(|m| match m {
+        ContinuousModification::AddDynamicToughness { value } => Some(value),
+        _ => None,
+    });
+    assert!(
+        matches!(
+            power,
+            Some(QuantityExpr::DivideRounded {
+                divisor: 2,
+                rounding: RoundingMode::Down,
+                ..
+            })
+        ),
+        "power axis must be half rounded DOWN, got {power:?}"
+    );
+    assert!(
+        matches!(
+            toughness,
+            Some(QuantityExpr::DivideRounded {
+                divisor: 2,
+                rounding: RoundingMode::Up,
+                ..
+            })
+        ),
+        "toughness axis must be half rounded UP, got {toughness:?}"
+    );
+}
+
+/// #5743 review [HIGH] regression guard: a "+X/+Y" / "-X/-Y" pump WITHOUT a
+/// structured "where X is <A>, and Y is <B>" paired binding must stay
+/// unsupported — it must NOT synthesize a cost-X static. Snowblind's
+/// "Enchanted creature gets -X/-Y." defines X/Y in later conditional sentences
+/// (no `{X}` cost), so it previously regressed to a bogus -CostXPaid/-CostXPaid.
+#[test]
+fn distinct_xy_pump_without_paired_binding_is_unsupported() {
+    // Snowblind: no where-clause at all on the -X/-Y line.
+    assert!(
+        super::shared::parse_static_line_multi("Enchanted creature gets -X/-Y.").is_empty(),
+        "Snowblind -X/-Y must not synthesize a static without a paired binding"
+    );
+    // A +X/+Y line with a where-clause that binds only X (no ", and Y is") is
+    // likewise unsupported rather than reusing X's quantity for Y.
+    assert!(
+        super::shared::parse_static_line_multi(
+            "Enchanted creature gets +X/+Y, where X is the number of Forests you control."
+        )
+        .is_empty(),
+        "+X/+Y with an X-only binding must stay unsupported"
+    );
+    // `Y` is supported only as the toughness axis of the paired +X/+Y form;
+    // other Y placements cannot inherit X/cost-X semantics.
+    assert!(
+        super::shared::parse_static_line_multi("Enchanted creature gets +Y/+X.").is_empty(),
+        "+Y/+X must stay unsupported rather than treating Y as cost-X"
+    );
+    assert!(
+        super::shared::parse_static_line_multi("Enchanted creature gets +Y/+Y.").is_empty(),
+        "+Y/+Y must stay unsupported rather than treating Y as cost-X"
     );
 }

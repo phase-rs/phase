@@ -12,13 +12,14 @@ import type {
   ManaCost,
   MatchConfig,
   PlayerId,
+  PersistedGameState,
   StuckDecisionDiagnostic,
   WaitingFor,
 } from "../adapter/types";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { applySpellPaymentPreference } from "../game/castPaymentMode";
 import { getPlayerId } from "../hooks/usePlayerId";
-import { loadCheckpoints, saveGame } from "../services/gamePersistence";
+import { loadCheckpoints, saveAuthoritativeGame } from "../services/gamePersistence";
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
@@ -36,6 +37,7 @@ export function legalResultState(result: LegalActionsResult): Pick<GameStoreStat
 export type { ActiveGameMeta, PersistedP2PHostSession } from "../services/gamePersistence";
 export {
   saveGame,
+  saveAuthoritativeGame,
   loadGame,
   clearGame,
   saveCheckpoints,
@@ -172,7 +174,7 @@ interface GameStoreActions {
     matchConfig?: MatchConfig,
     firstPlayer?: number,
   ) => Promise<void>;
-  resumeGame: (gameId: string, adapter: EngineAdapter, savedState: GameState) => Promise<void>;
+  resumeGame: (gameId: string, adapter: EngineAdapter, savedState: PersistedGameState) => Promise<void>;
   /**
    * Resume a P2P host game. Distinct from `resumeGame` because the
    * adapter already loaded engine state internally via
@@ -361,7 +363,7 @@ export const useGameStore = create<GameStore>()(
           startingContest,
         },
       });
-      saveGame(gameId, state);
+      void saveAuthoritativeGame(gameId, adapter, state);
     },
 
     resumeGame: async (gameId, adapter, savedState) => {
@@ -451,7 +453,7 @@ export const useGameStore = create<GameStore>()(
         stateHistory,
       });
 
-      if (gameId) saveGame(gameId, snapshot.state);
+      if (gameId) void saveAuthoritativeGame(gameId, adapter, snapshot.state);
 
       return result.events;
     },

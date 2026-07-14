@@ -421,6 +421,11 @@ pub(crate) fn handle_decide_additional_cost(
                     !is_card_additional_cost_choice && matches!(fallback, AbilityCost::Mana { .. });
                 if is_spell_alternative_choice {
                     ability.context.alternative_mana_cost_paid = true;
+                    // CR 118.9 + CR 601.2b: accepting a once-per-turn grant's
+                    // alternative cost records the source on the ability context so
+                    // finalize_cast consumes its per-turn slot. Declining (below)
+                    // leaves it `None` — the printed cost was paid, nothing spent.
+                    ability.context.alt_cost_grant_source = pending.alt_cost_grant_source;
                     match preferred {
                         AbilityCost::Mana { cost } => {
                             alternative_base_override = Some(cost.clone());
@@ -532,6 +537,11 @@ pub(crate) fn payable_spell_alternative_cost(
 pub(crate) struct PayableSpellAlternativeCost {
     pub(crate) cost: AbilityCost,
     pub(crate) timing_permission: Option<CastTimingPermission>,
+    /// CR 118.9 + CR 601.2b: `Some(source_id)` when the offered alternative cost
+    /// comes from a once-per-turn grant (As Foretold). Threaded onto the pending
+    /// cast so its per-turn slot is consumed at finalize. `None` for self-options
+    /// and `Unlimited` grants.
+    pub(crate) once_per_turn_source: Option<ObjectId>,
 }
 
 pub(crate) fn payable_spell_alternative_cost_details(
@@ -577,6 +587,9 @@ pub(crate) fn payable_spell_alternative_cost_details(
             Some(PayableSpellAlternativeCost {
                 cost,
                 timing_permission: None,
+                // CR 118.9: a spell's own printed alternative cost carries no
+                // per-turn grant slot to consume.
+                once_per_turn_source: None,
             })
         } else {
             None
@@ -593,6 +606,7 @@ pub(crate) fn payable_spell_alternative_cost_details(
         PayableSpellAlternativeCost {
             cost: granted.cost,
             timing_permission: granted.timing_permission,
+            once_per_turn_source: granted.once_per_turn_source,
         },
     )
 }
@@ -616,6 +630,7 @@ pub(crate) fn payable_spell_alternative_cost_for_timing(
         PayableSpellAlternativeCost {
             cost: granted.cost,
             timing_permission: granted.timing_permission,
+            once_per_turn_source: granted.once_per_turn_source,
         },
     )
 }
@@ -3448,6 +3463,16 @@ fn push_ability_entry(
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
 
+    // CR 107.3a + CR 602.2b: this is the single authority where an activated ability
+    // reaches the stack, so it is where its announced X is published. CR 107.3i then
+    // lets a triggered ability of the SAME object that this activation causes read the
+    // same X — the `Cycled` event emitted a few lines below (Shark Typhoon: "When you
+    // cycle this card, create an X/X blue Shark") is collected into triggers while this
+    // publication is live, and `triggers::build_triggered_ability` stamps it onto the
+    // trigger's `chosen_x`. An activation with no announced X publishes `None`, which
+    // also clears any stale value.
+    state.announced_source_x = resolved.chosen_x.map(|x| (source_id, x));
+
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
     resolved.ability_index = Some(ability_index);
     stack::push_to_stack(
@@ -4085,6 +4110,10 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             })
             .or_else(|| payable_spell_alternative_cost_details(state, player, object_id));
         if let Some(alt_cost) = alt_cost {
+            // CR 118.9 + CR 601.2b: carry the once-per-turn grant source (As
+            // Foretold) across the choice round-trip so its per-turn slot is
+            // consumed at finalize. `None` for self-options / `Unlimited` grants.
+            let alt_cost_grant_source = alt_cost.once_per_turn_source;
             let mut pending = PendingCast::new(object_id, card_id, ability, ManaCost::NoCost);
             pending.base_cost = base_cost.clone();
             pending.casting_variant = casting_variant;
@@ -4092,6 +4121,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             pending.distribute = distribute.clone();
             pending.origin_zone = origin_zone;
             pending.payment_mode = payment_mode;
+            pending.alt_cost_grant_source = alt_cost_grant_source;
             pending.additional_cost_flow =
                 imposed_required_cost.clone().map(AdditionalCost::Required);
             let alt_cost_required_for_timing = cast_timing_permission.is_some()
@@ -4100,6 +4130,10 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 match alt_cost.cost {
                     AbilityCost::Mana { cost: alt_mana } => {
                         pending.ability.context.alternative_mana_cost_paid = true;
+                        // CR 118.9 + CR 601.2b: timing-immediate-pay branch skips
+                        // the accept handler, so stamp the grant source directly on
+                        // the ability context for finalize to consume.
+                        pending.ability.context.alt_cost_grant_source = alt_cost_grant_source;
                         pending.base_cost = Some(alt_mana);
                         pending.cost = super::casting::recompute_pending_mana_total(
                             state,
@@ -6776,6 +6810,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // Unimplemented effect through the cost pipeline (from continue_with_no_ability).
     // Only those remain `ability: None` on the stack — they simply enter the
     // battlefield on resolution. All other spells get their ResolvedAbility.
+    // CR 118.9 + CR 601.2b: capture the once-per-turn CastWithAlternativeCost
+    // grant source from the ability context BEFORE the placeholder branch may drop
+    // the ability (permanent spells with no spell ability carry `stack_ability =
+    // None`, but their alternative cost was still applied and must consume the
+    // slot). Recorded on the context at the alt-vs-printed accept / timing branch.
+    let alt_cost_grant_source = ability.context.alt_cost_grant_source;
     let is_placeholder = matches!(
         ability.effect,
         crate::types::ability::Effect::Unimplemented { .. }
@@ -7144,6 +7184,17 @@ fn finalize_cast_with_phyrexian_choices_inner(
             state.exile_cast_permissions_used.insert(source);
         }
         _ => {}
+    }
+    // CR 118.9 + CR 601.2b: consume a once-per-turn `CastWithAlternativeCost`
+    // grant's slot (As Foretold) when its alternative cost was applied to this
+    // cast — recorded on the ability context at the alt-vs-printed choice (or the
+    // timing-immediate branch). Unlimited grants / self-options carry `None`.
+    // Consumed at finalize (not at accept) so an aborted cast — which
+    // `handle_cancel_cast` reverts before finalize — never spends the slot, matching
+    // every sibling permission. As Foretold's grant rides `CastingVariant::Normal`,
+    // so the `match casting_variant` above never covers it — this is a separate block.
+    if let Some(src) = alt_cost_grant_source {
+        state.alt_cost_grant_permissions_used.insert(src);
     }
     if let Some((source, crate::types::statics::CastFrequency::OncePerTurn)) =
         exile_play_permission_source
@@ -10424,6 +10475,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         }
     }
 
@@ -11707,6 +11759,7 @@ mod tests {
                 cost: ManaCost::zero(),
             },
             timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::creature()
@@ -11780,6 +11833,152 @@ mod tests {
         );
     }
 
+    /// CR 202.3 + CR 601.2f (#5606): the mana-value gate parsed onto a typed
+    /// cost-reduction filter must reach the cost resolver. A permanent granting
+    /// "Instant and sorcery spells you cast with mana value 4 or greater cost {1}
+    /// less to cast" reduces a qualifying instant (MV 5) but NOT a sub-threshold
+    /// instant (MV 3) nor an off-type creature (MV 5). Reverting the parser fix
+    /// (which restored `spell_filter`) makes `effective_spell_cost` reduce all
+    /// three, so this regression flips. Parses the real static line, so it also
+    /// exercises the parser → runtime path end-to-end.
+    #[test]
+    fn mana_value_gated_cost_reduction_reaches_cost_resolver() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            caster,
+            "Cost Reducer".to_string(),
+            Zone::Battlefield,
+        );
+        let static_def = crate::parser::oracle_static::parse_static_line(
+            "Instant and sorcery spells you cast with mana value 4 or greater cost {1} less to cast.",
+        )
+        .expect("cost reduction should parse");
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(static_def);
+
+        let mut add_spell = |id: u64, core: CoreType, mv: u32| -> ObjectId {
+            let obj_id = create_object(
+                &mut state,
+                CardId(id),
+                caster,
+                format!("Spell {id}"),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(core);
+            // Mana value is derived from the printed mana cost.
+            obj.mana_cost = ManaCost::generic(mv);
+            obj_id
+        };
+
+        // Qualifying: instant with mana value 5 (≥ 4).
+        let big_instant = add_spell(11, CoreType::Instant, 5);
+        // Sub-threshold: instant with mana value 3 (< 4) — the Cmc gate excludes it.
+        let small_instant = add_spell(12, CoreType::Instant, 3);
+        // Off-type: creature with mana value 5 — the type restriction excludes it.
+        let big_creature = add_spell(13, CoreType::Creature, 5);
+
+        // `display_spell_cost` is the engine-authoritative post-modifier cost;
+        // it suppresses affordability/timing (the test player has no mana pool)
+        // while still applying every cost-modification static.
+        let cost = |id| crate::game::casting::display_spell_cost(&state, caster, id);
+
+        // CR 601.2f: qualifying instant is reduced by {1} → 5 generic becomes 4.
+        assert_eq!(
+            cost(big_instant),
+            Some(ManaCost::generic(4)),
+            "instant with mana value 5 must receive the {{1}} reduction"
+        );
+        // CR 202.3: the mana-value gate reached the resolver — the sub-threshold
+        // instant is NOT reduced (this flips if the parser fix is reverted).
+        assert_eq!(
+            cost(small_instant),
+            Some(ManaCost::generic(3)),
+            "instant with mana value 3 (< 4) must NOT be reduced"
+        );
+        // The type restriction excludes the creature entirely.
+        assert_eq!(
+            cost(big_creature),
+            Some(ManaCost::generic(5)),
+            "creature must NOT be reduced (type restriction)"
+        );
+    }
+
+    /// CR 202.3 + CR 601.2f (#5606): drive the full cast/payment pipeline. A
+    /// battlefield permanent granting "Instant and sorcery spells you cast with
+    /// mana value 4 or greater cost {1} less to cast" reduces the mana actually
+    /// PAID when the controller casts a qualifying instant, but not a
+    /// sub-threshold one. Each instant is funded to its full printed cost and
+    /// cast through `GameRunner::cast(..).resolve()`; the leftover pool proves the
+    /// reduction reached the payment step, not just the cost-display helper.
+    /// Reverting the parser fix (`spell_filter` → null) reduces the MV-3 spell
+    /// too, so the second assertion flips.
+    #[test]
+    fn mana_value_gated_cost_reduction_through_cast_pipeline() {
+        let caster = PlayerId(0);
+        // Cast an instant of printed mana value `mv` under the reducer, funded to
+        // its full printed cost; return the unspent mana (funded − paid).
+        let leftover_after_casting = |mv: u32| -> u32 {
+            let mut scenario = crate::game::scenario::GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            scenario.add_creature_from_oracle(
+                caster,
+                "Cost Reducer",
+                2,
+                2,
+                "Instant and sorcery spells you cast with mana value 4 or greater cost {1} less to cast.",
+            );
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(caster, "Test Instant", true, "You gain 1 life.")
+                .with_mana_cost(ManaCost::generic(mv))
+                .id();
+            scenario.with_mana_pool(
+                caster,
+                (0..mv)
+                    .map(|_| {
+                        crate::types::mana::ManaUnit::new(
+                            crate::types::mana::ManaType::Colorless,
+                            ObjectId(9999),
+                            false,
+                            vec![],
+                        )
+                    })
+                    .collect(),
+            );
+            let mut runner = scenario.build();
+            let outcome = runner.cast(spell).resolve();
+            outcome
+                .state()
+                .players
+                .iter()
+                .find(|p| p.id == caster)
+                .map(|p| p.mana_pool.total() as u32)
+                .unwrap_or(0)
+        };
+
+        // CR 202.3: MV 5 (≥ 4) instant pays {4} of {5} funded → 1 mana left.
+        assert_eq!(
+            leftover_after_casting(5),
+            1,
+            "MV 5 instant must receive the {{1}} reduction through the cast pipeline"
+        );
+        // CR 202.3: the mana-value gate excludes the MV 3 (< 4) instant → full {3}
+        // paid → 0 left (this flips to 1 if the parser fix is reverted).
+        assert_eq!(
+            leftover_after_casting(3),
+            0,
+            "MV 3 instant must NOT be reduced through the cast pipeline"
+        );
+    }
+
     /// CR 118.9 + CR 107.14: Primal Prayers grants {E} as an alternative cost
     /// for creature spells with MV ≤ 3 that the controller casts.
     #[test]
@@ -11802,6 +12001,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
             },
             timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::creature()
@@ -15265,6 +15465,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         };
 
         let result = pay_additional_cost(
@@ -15395,6 +15596,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         };
 
         let mut events = Vec::new();
@@ -15494,6 +15696,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         };
 
         // Exactly one card is required. Selecting two must fail.
@@ -15582,6 +15785,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         };
 
         // `red` is not in the legal-cards list, so the cost handler must reject
@@ -15703,6 +15907,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            alt_cost_grant_source: None,
         };
 
         let result = pay_additional_cost(

@@ -3006,6 +3006,7 @@ pub fn candidate_actions_broad_with_probe(
         // CR 732.2a: proposing a shortcut is optional. Offer both legal actions so the
         // policy/search layer, rather than the candidate generator, decides whether an AI
         // proposer declares or returns to ordinary priority.
+        // (Scored by `phase_ai::policies::loop_shortcut::LoopShortcutPolicy`.)
         WaitingFor::LoopShortcut { proposer, .. } => vec![
             candidate(
                 GameAction::DeclareShortcut {
@@ -3028,6 +3029,58 @@ pub fn candidate_actions_broad_with_probe(
             vec![candidate(
                 GameAction::RespondToShortcut {
                     response: crate::ai_support::smart_shortcut_response(state, *player),
+                },
+                TacticalClass::Utility,
+                Some(*player),
+            )]
+        }
+        WaitingFor::PrecastCopyShortcutOffer {
+            proposer, epoch, ..
+        } => vec![
+            candidate(
+                GameAction::PrecastCopyShortcut {
+                    epoch: *epoch,
+                    response: crate::types::actions::PrecastCopyShortcutResponse::Propose {
+                        route_id: *epoch,
+                    },
+                },
+                TacticalClass::Utility,
+                Some(*proposer),
+            ),
+            candidate(
+                GameAction::PrecastCopyShortcut {
+                    epoch: *epoch,
+                    response: crate::types::actions::PrecastCopyShortcutResponse::Decline,
+                },
+                TacticalClass::Pass,
+                Some(*proposer),
+            ),
+        ],
+        WaitingFor::RespondToPrecastCopyShortcut {
+            player,
+            epoch,
+            breakpoint_ids,
+            ..
+        } => {
+            let response = match crate::ai_support::smart_shortcut_response(state, *player) {
+                crate::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
+                    breakpoint_ids.first().map_or(
+                        crate::types::actions::PrecastCopyShortcutResponse::Accept,
+                        |breakpoint_id| {
+                            crate::types::actions::PrecastCopyShortcutResponse::Shorten {
+                                breakpoint_id: *breakpoint_id,
+                            }
+                        },
+                    )
+                }
+                crate::analysis::loop_check::ShortcutResponse::Accept => {
+                    crate::types::actions::PrecastCopyShortcutResponse::Accept
+                }
+            };
+            vec![candidate(
+                GameAction::PrecastCopyShortcut {
+                    epoch: *epoch,
+                    response,
                 },
                 TacticalClass::Utility,
                 Some(*player),

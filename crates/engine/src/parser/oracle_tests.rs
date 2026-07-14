@@ -1286,22 +1286,21 @@ fn target_and_non_same_name_compound_not_intercepted() {
     }
 }
 
-/// As Foretold (WHO/AKH): the once-per-turn "pay {0} rather than pay the mana
-/// cost" free-cast line is correctly UNSUPPORTED. As Foretold places no zone
-/// restriction on which spell the cost applies to, but the engine's
-/// `CastFromHandFree` runtime path only covers hand and command-zone origins
-/// (CR 601.2a). Implementing it correctly requires a general once-per-turn
-/// alternative-cost modifier that composes with every cast-permission origin
-/// (graveyard, exile, etc.) — a cross-cutting runtime refactor. Until that
-/// work lands, the free-cast line must fall to `Effect::Unimplemented` rather
-/// than falsely claiming coverage via the wrong zone-scoped path.
-///
-/// The upkeep time-counter trigger is a separate Oracle line and must still
-/// parse. The swallow auditor is suppressed when any ability is Unimplemented
-/// (architecture rule: explicit Unimplemented beats swallow-detector noise), so
-/// no spurious `Optional_YouMay` warning fires.
+/// As Foretold (WHO/AKH): the "Once each turn, you may pay {0} rather than pay
+/// the mana cost for a spell you cast with mana value X or less, where X is the
+/// number of time counters on ~" line lowers to a once-per-turn
+/// `CastWithAlternativeCost` grant (CR 118.9) with a DYNAMIC mana-value gate
+/// (spell MV ≤ time counters on the source, CR 202.3). The `frequency` axis
+/// (`OncePerTurn`) and the `Cmc { LE, CountersOn{Source, Time} }` gate are the
+/// two class-level generalizations over Fist of Suns / Rooftop Storm / Jodah
+/// (unlimited, no dynamic gate). The upkeep time-counter trigger is a separate
+/// Oracle line and must still parse; nothing may remain `Effect::Unimplemented`,
+/// and no `CastFromHandFree` static (wrong zone scope) may appear.
 #[test]
-fn as_foretold_free_cast_line_is_unsupported() {
+fn as_foretold_once_per_turn_alt_cost_grant() {
+    use crate::types::ability::{Comparator, ObjectScope};
+    use crate::types::statics::CastFrequency;
+
     let r = parse(
             "At the beginning of your upkeep, put a time counter on this enchantment.\nOnce each turn, you may pay {0} rather than pay the mana cost for a spell you cast with mana value X or less, where X is the number of time counters on this enchantment.",
             "As Foretold",
@@ -1310,6 +1309,64 @@ fn as_foretold_free_cast_line_is_unsupported() {
             &[],
         );
 
+    // The free-cast line lowers to exactly one CastWithAlternativeCost grant.
+    let grants: Vec<&StaticDefinition> = r
+        .statics
+        .iter()
+        .filter(|s| matches!(s.mode, StaticMode::CastWithAlternativeCost { .. }))
+        .collect();
+    assert_eq!(
+        grants.len(),
+        1,
+        "exactly one alt-cost grant expected, got {:?}",
+        r.statics
+    );
+    let grant = grants[0];
+
+    let StaticMode::CastWithAlternativeCost {
+        cost,
+        timing_permission,
+        frequency,
+    } = &grant.mode
+    else {
+        unreachable!("filtered above")
+    };
+    assert_eq!(*timing_permission, None, "As Foretold has no timing rider");
+    assert_eq!(
+        *frequency,
+        CastFrequency::OncePerTurn,
+        "As Foretold applies its alternative cost once each turn"
+    );
+    assert!(
+        matches!(cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero()),
+        "alternative cost is {{0}}, got {cost:?}"
+    );
+
+    // The dynamic MV gate compares spell mana value to the time counters ON the
+    // source enchantment (ObjectScope::Source), controller-scoped to You.
+    let TargetFilter::Typed(typed) = grant.affected.as_ref().expect("affected filter present")
+    else {
+        panic!("expected Typed affected filter, got {:?}", grant.affected);
+    };
+    assert_eq!(typed.controller, Some(ControllerRef::You));
+    assert!(
+        typed.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(CounterType::Time),
+                    },
+                },
+            }
+        )),
+        "MV gate must be Cmc {{ LE, CountersOn(Source, Time) }}, got {:?}",
+        typed.properties
+    );
+
+    // Nothing may remain Unimplemented now that the grant is supported.
     fn walk<'a>(ability: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
         out.push(&ability.effect);
         if let Some(sub) = &ability.sub_ability {
@@ -1320,17 +1377,14 @@ fn as_foretold_free_cast_line_is_unsupported() {
     for ability in &r.abilities {
         walk(ability, &mut effects);
     }
-    // The free-cast line is Unimplemented — zone-unrestricted "{0}" alternative
-    // cost cannot be lowered onto CastFromHandFree without misrepresenting scope.
     assert!(
-        effects
+        !effects
             .iter()
             .any(|e| matches!(e, Effect::Unimplemented { .. })),
-        "As Foretold free-cast line must remain Effect::Unimplemented until \
-             a zone-agnostic alternative-cost modifier is implemented; got {effects:#?}"
+        "As Foretold must no longer be Unimplemented, got {effects:#?}"
     );
 
-    // No spurious CastFromHandFree static must appear.
+    // No spurious CastFromHandFree static (wrong zone scope) must appear.
     assert!(
         r.statics
             .iter()
@@ -1347,19 +1401,6 @@ fn as_foretold_free_cast_line_is_unsupported() {
             .any(|t| matches!(t.mode, TriggerMode::Phase)),
         "As Foretold must keep its upkeep Phase trigger, got {:?}",
         r.triggers
-    );
-
-    // Swallow auditor is suppressed when Unimplemented is present, so no
-    // Optional_YouMay warning fires despite "you may" appearing in the oracle text.
-    assert!(
-        !r.parse_warnings.iter().any(|w| matches!(
-            w,
-            OracleDiagnostic::SwallowedClause { detector, .. }
-                if detector == "Optional_YouMay"
-        )),
-        "Optional_YouMay must not fire when Unimplemented suppresses swallow checks; \
-             got {:?}",
-        r.parse_warnings
     );
 }
 
@@ -1538,6 +1579,14 @@ fn cavernous_maw_still_a_cave_land_clause_has_no_unimplemented() {
     for ability in &r.abilities {
         walk(ability, &mut effects);
     }
+    // CR 602.5: Cavernous Maw's restriction ("the number of other Caves you control PLUS
+    // the number of Cave cards in your graveyard is three or greater") is a cross-zone SUM.
+    // P02-U3 first made this an honest `Effect::Unimplemented` — it had been a
+    // `RequiresCondition { condition: None }`, i.e. the ability was activatable with NO
+    // restriction at all. #5677's condition lane then taught the shared grammar the summed
+    // form, and because P02-U3 routes restrictions through that grammar FIRST, the card
+    // came back fully supported with a real `QuantityComparison{Sum[..]}` gate. The strict
+    // zero-Unimplemented assertion is therefore restored.
     assert!(
         !effects
             .iter()
@@ -2025,7 +2074,8 @@ fn hyldas_crown_full_card_supported_with_during_your_turn_cost_reduction() {
 /// unimplemented parts. The card is a single activated ability; the only
 /// previously-failing fragment was the "This ability costs {3} less to
 /// activate if you attacked with a Spacecraft this turn" cost-reduction
-/// clause, now extracted with a filtered `YouAttackedWithAtLeast` gate.
+/// clause, now extracted as a typed `QuantityComparison` over a filtered
+/// `AttackedThisTurn` count (GE 1).
 /// (Runtime discrimination — Spacecraft attacker required, opponent's
 /// Spacecraft excluded — lives in `game::casting::tests::
 /// thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker`.)
@@ -2050,12 +2100,15 @@ fn thaumaton_torpedo_full_card_supported_with_spacecraft_attacked_cost_reduction
     assert!(
         matches!(
             ability.cost_reduction.as_ref().unwrap().condition,
-            Some(
-                crate::types::ability::ParsedCondition::YouAttackedWithAtLeast {
-                    count: 1,
-                    filter: Some(_)
-                }
-            )
+            Some(crate::types::ability::ParsedCondition::QuantityComparison {
+                lhs: crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::AttackedThisTurn {
+                        filter: Some(_),
+                        ..
+                    },
+                },
+                ..
+            })
         ),
         "cost reduction must gate on a filtered attacked-with condition, got {:?}",
         ability.cost_reduction
@@ -6875,7 +6928,18 @@ fn spell_casting_option_parses_trap_alternative_cost() {
                 shards: vec![],
             },
         })
-        .condition(crate::types::ability::ParsedCondition::OpponentSearchedLibraryThisTurn)
+        .condition(crate::types::ability::ParsedCondition::QuantityComparison {
+            lhs: crate::types::ability::QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::PlayerActionsThisTurn {
+                    player: crate::types::ability::PlayerScope::Opponent {
+                        aggregate: crate::types::ability::AggregateFunction::Max,
+                    },
+                    action: crate::types::events::PlayerActionKind::SearchedLibrary,
+                },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+        })
     );
     assert_eq!(r.abilities.len(), 1);
     assert!(!matches!(
@@ -7064,10 +7128,23 @@ fn spell_casting_option_parses_free_cast_condition() {
             &["Instant"],
             &[],
         );
-    assert_eq!(
-        r.casting_options,
-        vec![SpellCastingOption::free_cast()
-            .condition(crate::types::ability::ParsedCondition::FirstSpellThisGame)]
+    // "the first spell you've cast this game" = you have cast zero spells so far.
+    assert!(
+        matches!(
+            r.casting_options.as_slice(),
+            [SpellCastingOption {
+                condition: Some(crate::types::ability::ParsedCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisGame { .. }
+                    },
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                }),
+                ..
+            }]
+        ),
+        "got {:?}",
+        r.casting_options
     );
 }
 
@@ -7460,7 +7537,7 @@ fn forest_reminder_text_only() {
 /// (no leftover `Effect:when` gap). Issue #3101-style mana-spent trigger.
 #[test]
 fn lapis_orb_mana_spend_trigger_folds_into_grant() {
-    use crate::types::mana::{ManaRestriction, ManaSpellGrant};
+    use crate::types::mana::ManaSpellGrant;
     let r = parse(
         "{T}: Add {U}. When you spend this mana to cast a Dragon creature spell, scry 2.",
         "Lapis Orb of Dragonkind",
@@ -7473,16 +7550,20 @@ fn lapis_orb_mana_spend_trigger_folds_into_grant() {
         panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
     };
     assert_eq!(grants.len(), 1, "grants: {:?}", grants);
-    let ManaSpellGrant::TriggerOnSpend {
-        restriction,
-        ability,
-    } = &grants[0]
-    else {
+    let ManaSpellGrant::TriggerOnSpend { filter, ability } = &grants[0] else {
         panic!("expected TriggerOnSpend, got {:?}", grants[0]);
     };
+    // CR 603.3: the trigger's EVENT filter — "a Dragon creature spell" — parsed by the
+    // shared type-phrase authority, not a bespoke spend-restriction shape.
     assert_eq!(
-        *restriction,
-        Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string()))
+        *filter,
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![
+                TypeFilter::Creature,
+                TypeFilter::Subtype("Dragon".to_string())
+            ],
+            ..TypedFilter::default()
+        })
     );
     assert!(
         matches!(*ability.effect, Effect::Scry { .. }),
@@ -7738,7 +7819,7 @@ fn tin_street_gossip_face_down_or_turn_face_up_is_coverage_supported() {
 #[test]
 fn path_of_ancestry_full_parse_no_unimplemented() {
     use crate::types::ability::ManaProduction;
-    use crate::types::mana::{ManaRestriction, ManaSpellGrant};
+    use crate::types::mana::ManaSpellGrant;
     let r = parse(
             "This land enters tapped.\n{T}: Add one mana of any color in your commander's color identity. When that mana is spent to cast a creature spell that shares a creature type with your commander, scry 1. (Look at the top card of your library. You may put that card on the bottom.)",
             "Path of Ancestry",
@@ -7766,16 +7847,20 @@ fn path_of_ancestry_full_parse_no_unimplemented() {
         "must stay a mana ability"
     );
     assert_eq!(grants.len(), 1, "grants: {grants:?}");
-    let ManaSpellGrant::TriggerOnSpend {
-        restriction,
-        ability,
-    } = &grants[0]
-    else {
+    let ManaSpellGrant::TriggerOnSpend { filter, ability } = &grants[0] else {
         panic!("expected TriggerOnSpend, got {:?}", grants[0]);
     };
-    assert_eq!(
-        *restriction,
-        Some(ManaRestriction::SharesCreatureTypeWithCommander)
+    // CR 205.3m + CR 903.3: the commander-relational predicate is an OBJECT filter
+    // (which spell fires the trigger), not a CR 106.6 spend restriction — Path of
+    // Ancestry's mana may be spent on anything.
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected a Typed spell filter, got {filter:?}");
+    };
+    assert!(
+        typed
+            .properties
+            .contains(&FilterProp::SharesCreatureTypeWithCommander),
+        "expected the commander-relational property, got {typed:?}"
     );
     assert!(matches!(*ability.effect, Effect::Scry { .. }));
     assert!(
@@ -8074,12 +8159,13 @@ fn ability_word_prefixed_activated_ability_preserves_restrictions() {
         matches!(
             restriction,
             ActivationRestriction::RequiresCondition {
-                condition: Some(
-                    crate::types::ability::ParsedCondition::ZoneCardCountAtLeast {
-                        zone: Zone::Graveyard,
-                        count: 7
-                    }
-                )
+                condition: Some(crate::types::ability::ParsedCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::GraveyardSize { .. }
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 7 }
+                })
             }
         )
     }));
@@ -8096,14 +8182,22 @@ fn parses_activate_only_land_condition_into_activation_restriction() {
     );
     assert_eq!(r.abilities.len(), 2);
     let second = &r.abilities[1];
-    assert!(matches!(
-        second.activation_restrictions.as_slice(),
-        [ActivationRestriction::RequiresCondition {
-            condition: Some(
-                crate::types::ability::ParsedCondition::YouControlLandSubtypeAny { .. }
-            )
-        }]
-    ));
+    // The disjunction lives INSIDE the object-count filter ("an Island or a Swamp" is one
+    // population), not as a condition-level Or.
+    assert!(
+        matches!(
+            second.activation_restrictions.as_slice(),
+            [ActivationRestriction::RequiresCondition {
+                condition: Some(crate::types::ability::ParsedCondition::QuantityComparison {
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                    ..
+                })
+            }]
+        ),
+        "got {:?}",
+        second.activation_restrictions
+    );
 }
 
 #[test]
@@ -8652,7 +8746,7 @@ fn parses_activate_only_if_condition_and_only_once_each_turn() {
     // CR 602.5b: "Activate only if [condition] and only once each turn" must produce
     // both a RequiresCondition restriction (with the condition) and OnlyOnceEachTurn.
     // Tests the general pattern, not a single card.
-    use crate::types::ability::{ParsedCondition, PlayerFilter};
+    use crate::types::ability::ParsedCondition;
     let r = parse(
             "{1}{R}: Put a +1/+1 counter on this creature. Activate only if an opponent lost life this turn and only once each turn.",
             "Test Card",
@@ -8670,9 +8764,12 @@ fn parses_activate_only_if_condition_and_only_once_each_turn() {
         restrictions.iter().any(|r| matches!(
             r,
             ActivationRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::PlayerCountAtLeast {
-                    filter: PlayerFilter::OpponentLostLife,
-                    minimum: 1,
+                condition: Some(ParsedCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeLostThisTurn { .. }
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
                 })
             }
         )),
@@ -8696,9 +8793,12 @@ fn parses_activate_only_if_condition_and_only_as_sorcery() {
     assert!(restrictions.iter().any(|restriction| matches!(
         restriction,
         ActivationRestriction::RequiresCondition {
-            condition: Some(ParsedCondition::ZoneCardTypeCountAtLeast {
-                zone: Zone::Graveyard,
-                count: 4
+            condition: Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctCardTypes { .. }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
             })
         }
     )));
@@ -8719,9 +8819,12 @@ fn parses_activate_only_timing_and_only_if_condition() {
     assert!(restrictions.iter().any(|restriction| matches!(
         restriction,
         ActivationRestriction::RequiresCondition {
-            condition: Some(ParsedCondition::PlayerCountAtLeast {
-                filter: PlayerFilter::OpponentLostLife,
-                minimum: 1,
+            condition: Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn { .. }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
             })
         }
     )));
@@ -8810,8 +8913,14 @@ fn parses_activate_only_as_sorcery_and_only_if_hand_size_condition() {
     assert!(restrictions.iter().any(|restriction| matches!(
         restriction,
         ActivationRestriction::RequiresCondition {
-            condition: Some(ParsedCondition::HandSizeOneOf { counts })
-        } if counts == &vec![0, 1]
+            condition: Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize { .. }
+                },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        }
     )));
     assert!(r.parse_warnings.iter().all(
         |warning| warning.to_string().split_whitespace().next() != Some("Swallow:Condition_If")
@@ -15960,13 +16069,21 @@ fn negative_self_casting_restriction_stays_metadata() {
             &["Goblin", "Knight"],
         );
 
-    assert_eq!(
-        r.casting_restrictions,
-        vec![CastingRestriction::RequiresCondition {
-            condition: Some(ParsedCondition::Not {
-                condition: Box::new(ParsedCondition::YouPlayedLandThisTurn),
-            }),
-        }]
+    assert!(
+        matches!(
+            r.casting_restrictions.as_slice(),
+            [CastingRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::Not { condition }),
+            }] if matches!(**condition, ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LandsPlayedThisTurn { .. }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        ),
+        "got {:?}",
+        r.casting_restrictions
     );
     assert!(
         r.statics.iter().any(|d| {
@@ -18735,8 +18852,15 @@ fn instant_or_sorcery_cast_activation_restriction_does_not_emit_condition_warnin
         .any(|restriction| matches!(
             restriction,
             ActivationRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::YouCastSpellThisTurn {
-                    filter: Some(TargetFilter::Or { filters })
+                condition: Some(ParsedCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisTurn {
+                            filter: Some(TargetFilter::Or { filters }),
+                            ..
+                        }
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
                 })
             } if filters.iter().any(|filter| matches!(
                 filter,
@@ -20835,5 +20959,128 @@ fn token_copy_except_this_ability_resolves_printed_slot_at_finish() {
         resolved, 1,
         "CR 707.9a: finish() must resolve the CopyTokenOf printed slot to the \
          trigger's source-ordered index (1)"
+    );
+}
+
+/// CR 602.5: An activation gate whose CONDITION does not parse must commit NOTHING —
+/// not even the cadence restriction that shares the sentence.
+///
+/// This is the exact defect `commit_requires_condition` exists to prevent. The old code
+/// peeled "…and only once each turn" (pushing `OnlyOnceEachTurn`), truncated the source
+/// line, then pushed `RequiresCondition { condition: parse_restriction_condition(..) }`.
+/// When the condition failed, that stored `condition: None`, which
+/// `restrictions::evaluate_activation_restriction` evaluates with `Option::is_none_or`,
+/// i.e. as ALWAYS TRUE. The result was an ability that was rate-limited but otherwise
+/// activatable AT WILL — and, because the clause had been consumed, one that reported as
+/// fully supported. Three mutations (cadence push, line truncation, condition push) had
+/// to succeed or fail together; they didn't.
+///
+/// Revert-discriminating: restore the push-then-parse order in
+/// `parse_activation_constraints` and this test goes red on BOTH assertions — a stranded
+/// `OnlyOnceEachTurn` appears, and the unparseable condition vanishes from the text
+/// instead of surfacing as `Effect::Unimplemented`.
+#[test]
+fn failed_activation_condition_commits_no_cadence_and_leaves_the_clause_unimplemented() {
+    let r = parse(
+        "{2}: Draw a card. Activate only once each turn and only if you control a frobnicator.",
+        "Atomic Commit Test",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+
+    let ability = &r.abilities[0];
+    assert!(
+        ability.activation_restrictions.is_empty(),
+        "an unparsed condition must strand NOTHING — the cadence restriction shares the \
+         sentence and must roll back with it, got {:?}",
+        ability.activation_restrictions
+    );
+    assert!(
+        !ability.activation_restrictions.iter().any(|r| matches!(
+            r,
+            ActivationRestriction::RequiresCondition { condition: None }
+        )),
+        "RequiresCondition {{ condition: None }} evaluates permissively true — it must \
+         never be stored"
+    );
+
+    fn walk<'a>(ability: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+        out.push(&ability.effect);
+        if let Some(sub) = &ability.sub_ability {
+            walk(sub, out);
+        }
+    }
+    let mut effects = Vec::new();
+    for ability in &r.abilities {
+        walk(ability, &mut effects);
+    }
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "the unparsed restriction clause must survive as Effect::Unimplemented rather \
+         than being silently consumed, got {effects:#?}"
+    );
+}
+
+/// The positive reach-guard for the test above: when the condition DOES parse, the same
+/// sentence still commits both halves. Without this, the atomicity test could pass simply
+/// because the peeling branch never runs.
+#[test]
+fn parsed_activation_condition_commits_both_cadence_and_condition() {
+    let r = parse(
+        "{2}: Draw a card. Activate only once each turn and only if you control an artifact.",
+        "Atomic Commit Positive",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    let restrictions = &r.abilities[0].activation_restrictions;
+    assert!(
+        restrictions.contains(&ActivationRestriction::OnlyOnceEachTurn),
+        "cadence must commit when the condition parses, got {restrictions:?}"
+    );
+    assert!(
+        restrictions.iter().any(|r| matches!(
+            r,
+            ActivationRestriction::RequiresCondition {
+                condition: Some(crate::types::ability::ParsedCondition::QuantityComparison { .. })
+            }
+        )),
+        "condition must commit alongside the cadence, got {restrictions:?}"
+    );
+}
+
+/// CR 106.6 + CR 202.3: Gilanra's mana-value spend filter ("a spell with mana value 6 or
+/// greater") must keep parsing after the retype. Regression pin: the shared spell-filter
+/// grammar is written for the article-less "cast your next … spell" phrasing, so a spend
+/// trigger's leading article would otherwise leave a bare "a" as the type phrase and
+/// reject the whole clause — silently turning a supported card into a gap.
+#[test]
+fn gilanra_mana_value_spend_trigger_survives_the_retype() {
+    use crate::types::mana::ManaSpellGrant;
+    let r = parse(
+        "{T}: Add {G}. When you spend this mana to cast a spell with mana value 6 or greater, draw a card.",
+        "Gilanra, Caller of Wirewood",
+        &[],
+        &["Creature"],
+        &["Gilanra, Caller of Wirewood"],
+    );
+    let Effect::Mana { grants, .. } = &*r.abilities[0].effect else {
+        panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+    };
+    assert_eq!(grants.len(), 1, "grants: {grants:?}");
+    let ManaSpellGrant::TriggerOnSpend { filter, ability } = &grants[0] else {
+        panic!("expected TriggerOnSpend, got {:?}", grants[0]);
+    };
+    assert!(
+        format!("{filter:?}").contains("Cmc"),
+        "the mana-value threshold must survive as a Cmc predicate: {filter:?}"
+    );
+    assert!(matches!(*ability.effect, Effect::Draw { .. }));
+    assert!(
+        !matches!(*r.abilities[0].effect, Effect::Unimplemented { .. }),
+        "Gilanra must not regress to Unimplemented"
     );
 }

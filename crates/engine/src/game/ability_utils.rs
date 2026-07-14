@@ -47,6 +47,46 @@ pub fn build_resolved_from_def(
     build_resolved_from_def_with_targets(def, source_id, controller, Vec::new())
 }
 
+/// CR 601.2b + CR 602.2b: publish an announce-time-locked X onto an ability being
+/// announced. **Single computation authority** for the announce-locked X channel.
+///
+/// A "where X is <count> as you cast this spell" / "… as you activate this ability"
+/// clause defines X by the object's own text and pins the measurement to the
+/// announcement step. CR 602.2b makes an activated ability's announcement identical to a
+/// spell's (rules 601.2b–i), so ONE computation serves both surfaces — and a loyalty
+/// ability, being an activated ability, rides the same path.
+///
+/// The value is published through `chosen_x`, the object's single X channel (CR 107.3i:
+/// "all instances of X on an object have the same value"). Every
+/// `QuantityRef::Variable("X")` on the ability already reads it, so the announced target
+/// count (CR 601.2c), the divided-damage pool (CR 601.2d), and any resolution-time amount
+/// (CR 608.2) all observe the SAME number — which is exactly what the printed qualifier
+/// demands and what CR 107.3c would otherwise let drift ("the value of X may change while
+/// that spell or ability is on the stack").
+///
+/// MUST be called BEFORE target selection: CR 601.2b precedes CR 601.2c, and
+/// `resolve_multi_target_bounds` fails closed ("Target count requires a resolved quantity
+/// before target selection") rather than silently counting an unresolved X as 0.
+///
+/// Idempotent via the `chosen_x.is_some()` gate, so a re-announced/resumed cast cannot
+/// re-measure the count against a board that has since changed.
+pub(crate) fn publish_announced_x(
+    state: &GameState,
+    resolved: &mut ResolvedAbility,
+    controller: PlayerId,
+    source_id: ObjectId,
+) {
+    if resolved.chosen_x.is_some() {
+        return;
+    }
+    let Some(expr) = resolved.announced_x.clone() else {
+        return;
+    };
+    let value = super::quantity::resolve_quantity(state, &expr, controller, source_id);
+    // CR 107.3: X is never negative.
+    resolved.set_chosen_x_recursive(u32::try_from(value.max(0)).unwrap_or(0));
+}
+
 /// CR 113.1a + CR 608.2c: Build a resolved ability from its definition while
 /// supplying the already selected root targets. Sub-abilities intentionally
 /// start without targets so `resolve_ability_chain` can apply the standard
@@ -90,6 +130,11 @@ pub fn build_resolved_from_def_with_targets(
     // `repeat_until` dispatch in `resolve_ability_chain` can re-follow the chain.
     resolved.repeat_until = def.repeat_until.clone();
     resolved.min_x_value = def.min_x_value;
+    // CR 601.2b + CR 602.2b: carry the announce-time-locked definition of X through
+    // to the resolved ability, where the announcement step evaluates it once into
+    // `chosen_x`. Without this copy the parsed definition never reaches the pending
+    // cast/activation and every `Variable("X")` on the ability resolves to 0.
+    resolved.announced_x = def.announced_x.clone();
     resolved.cant_be_copied = def.cant_be_copied;
     resolved.description = def.description.clone();
     resolved.forward_result = def.forward_result;

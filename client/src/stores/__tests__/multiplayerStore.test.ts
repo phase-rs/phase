@@ -94,7 +94,7 @@ vi.mock("../../services/openPhaseSocket", () => ({
     }
   },
   openPhaseSocket: vi.fn(async () => ({
-    serverInfo: { mode: "Full", protocolVersion: 13 },
+    serverInfo: { mode: "Full", protocolVersion: 14 },
     ws: (() => {
       const ws = {
       send: socketMocks.send,

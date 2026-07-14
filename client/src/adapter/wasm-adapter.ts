@@ -7,6 +7,7 @@ import type {
   GameState,
   LegalActionsResult,
   MatchConfig,
+  PersistedGameState,
   PlayerId,
   SubmitResult,
   ViewerSnapshot,
@@ -456,12 +457,23 @@ export class WasmAdapter implements EngineAdapter {
     throw new Error("resolveAll requires worker-based engine");
   }
 
-  async restoreState(state: GameState): Promise<void> {
+  async restoreState(state: PersistedGameState): Promise<void> {
     this.assertInitialized();
     await this.ensureCardDb();
     const json = JSON.stringify(state);
     if (this.engine) await this.engine.restoreState(json);
     else await this.fallback!.restoreState(json);
+  }
+
+  /**
+   * Export the engine-authored trusted persistence envelope. The local store
+   * may retain this opaque JSON, but only the engine decodes its private route
+   * runtime on restore.
+   */
+  async exportPersistenceState(): Promise<string> {
+    this.assertInitialized();
+    if (this.engine) return this.engine.exportState();
+    return this.fallback!.exportState();
   }
 
   /**
@@ -506,7 +518,7 @@ export class WasmAdapter implements EngineAdapter {
    * Distinct from `restoreState` (undo semantics, deterministic re-seed).
    * Mirrors `server-core::GameSession::from_persisted`.
    */
-  async resumeMultiplayerHostState(state: GameState): Promise<void> {
+  async resumeMultiplayerHostState(state: PersistedGameState): Promise<void> {
     this.assertInitialized();
     const json = JSON.stringify(state);
     if (this.engine) {
@@ -668,6 +680,7 @@ interface MainThreadFallback {
   getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult>;
   getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot>;
   getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null>;
+  exportState(): Promise<string>;
   restoreState(stateJson: string): Promise<void>;
   resumeMultiplayerHostState(stateJson: string): void;
   setMultiplayerMode(enabled: boolean): void;
@@ -771,6 +784,8 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         const r = wasm.get_ai_action(difficulty, playerId);
         return (r ?? null) as GameAction | null;
       }),
+
+    exportState: () => enqueue(() => wasm.export_game_state_json()),
 
     restoreState: (stateJson: string) =>
       enqueue(() => wasm.restore_game_state(stateJson)),

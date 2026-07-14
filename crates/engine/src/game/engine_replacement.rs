@@ -1121,7 +1121,7 @@ pub(super) fn handle_copy_target_choice(
                 "Mismatched liminal entry resume".to_string(),
             ));
         }
-        let ability = copy_effect_for_source(state, source_id)
+        let mut ability = copy_effect_for_source(state, source_id)
             .map(|effect_def| {
                 build_resolved_from_def_with_targets(
                     effect_def,
@@ -1161,15 +1161,44 @@ pub(super) fn handle_copy_target_choice(
                 })
             })
         });
+        // CR 707.9b: a copy effect's "except" clauses (Embalm/Eternalize's
+        // "the token has no mana cost, it's white, and it's a Zombie in
+        // addition to its other types", etc.) are part of the copy's COPIABLE
+        // values, so they must be folded into the `BecomeCopy` that copies the
+        // chosen source rather than re-applied as a separate layered effect on
+        // top of it. Fold the pending `CopyTokenSpec` exceptions (from the
+        // synthesized Embalm/Eternalize `CopyTokenOf`, which reach this liminal
+        // accept path only because the copied card carries its own "enter as a
+        // copy" replacement) into the `BecomeCopy`'s `additional_modifications`.
+        // `become_copy::resolve` is the single authority that consumes
+        // `RemoveManaCost` / `SetStartingLoyalty` into the copiable values and
+        // layers the remaining exceptions atop the `CopyValues` clone — the
+        // only rules-correct home for stamp-only modifications that must never
+        // be layered directly.
         let copy_token_exceptions = state.liminal_entries.get(&source_id).and_then(|entry| {
             entry.copy_resume.as_ref().map(|copy| {
                 (
-                    entry.controller,
                     copy.extra_keywords.clone(),
                     copy.additional_modifications.clone(),
                 )
             })
         });
+        if let Some((extra_keywords, additional_modifications)) = copy_token_exceptions {
+            if let Effect::BecomeCopy {
+                additional_modifications: become_copy_mods,
+                ..
+            } = &mut ability.effect
+            {
+                become_copy_mods.extend(additional_modifications);
+                // CR 707.2 + CR 702: "except it has [keyword]" grants ride the
+                // typed `extra_keywords` channel on the token spec; carry them
+                // through as layered `AddKeyword` exceptions so they become
+                // part of the copy's copiable keyword set.
+                become_copy_mods.extend(extra_keywords.into_iter().map(|keyword| {
+                    crate::types::ability::ContinuousModification::AddKeyword { keyword }
+                }));
+            }
+        }
         if !super::effects::token::commit_liminal_token_entry_with_event_emission(
             state,
             resume.event,
@@ -1178,22 +1207,11 @@ pub(super) fn handle_copy_target_choice(
         ) {
             return Ok(state.waiting_for.clone());
         }
+        // CR 614.12a: the copy target was chosen before the token entered; the
+        // `BecomeCopy` here overwrites the token's copiable values with the
+        // chosen source's values, then layers/consumes the folded copy
+        // exceptions (CR 707.9b).
         let _ = effects::resolve_ability_chain(state, &ability, events, 0);
-        if let Some((controller, extra_keywords, mut modifications)) = copy_token_exceptions {
-            modifications.extend(extra_keywords.into_iter().map(|keyword| {
-                crate::types::ability::ContinuousModification::AddKeyword { keyword }
-            }));
-            if !modifications.is_empty() {
-                state.add_transient_continuous_effect(
-                    source_id,
-                    controller,
-                    crate::types::ability::Duration::Permanent,
-                    TargetFilter::SpecificObject { id: source_id },
-                    modifications,
-                    None,
-                );
-            }
-        }
         let mut counter_pause_post_actions = Vec::new();
         if let Some((name, event_source_id)) = entry_events.clone() {
             counter_pause_post_actions.push(

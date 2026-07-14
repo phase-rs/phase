@@ -1,6 +1,19 @@
 {
   "entries": [
     {
+      "id": 172,
+      "date": "2026-07-13",
+      "title": "Loop shortcuts enter the game",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Interactive loop shortcuts now let you propose a known repeatable combo, with an engine-checked summary and a chance for opponents to accept or break out\n• Finality counters now do what they promise: a permanent with one is exiled instead of going to the graveyard when it dies\n• Top-of-library continuous effects now update correctly, bringing online Vampire Nocturnus, Mul Daya Channelers, Conspicuous Snoop, and similar cards\n• More than 30 Standard cards gained correctly enforced conditions, including activation gates, intervening-if triggers, cast-origin checks, and as-long-as effects\n• Alchemist's Gift now gives its pumped creature the chosen deathtouch or lifelink; The Dining Car's temporary activation-cost reduction is supported\n\n🛠️ Cards That Now Work Right\n• Jodah, the Unifier now puts the unchosen exiled cards on the bottom of your library, including when it finds no eligible legendary card\n• Copy effects now grant the promised retargeting choice to every copy, and the same permission works through “if you do” and “cast your next” wordings (Ulalek, Spider-Verse, Twinferno, Pyromancer's Goggles, Primal Wellspring)\n• “Where X is …” abilities now use their real value instead of silently resolving as zero (Bishop of Binding, Porcuparrot, Abby, Merciless Soldier, and more)\n• Cost reductions retain their mana-value and spell-type limits, preventing Scarlet Witch and similar cards from discounting the wrong spells\n• “One or more counters” triggers now fire once per placement and use the total number added, fixing All Will Be One and Stalwart Successor\n• Archmage Ascension, Aspect of Wolf, Damping Matrix, Secret Arcade, and multi-subtype anthems now follow their printed text more closely\n\n⚔️ Combat & Gameplay\n• Damage-prevention follow-ups now happen “this way,” so their delayed riders resolve with the prevention shield that created them\n• Effects that say another player may act now leave the drawing player out of that offer, and “that player investigates” gives the Clue to the right controller\n\n🖥️ Interface\n• New loop-shortcut dialogs show the engine-provided offer, let the proposing player decline it, and let opponents respond without the client calculating game logic",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1526357807287504917"
+    },
+    {
       "id": 171,
       "date": "2026-07-12",
       "title": "Captain America throws, Ram Through tramples",

@@ -241,9 +241,25 @@ For a feature named `<feat>` with `<Feat>Feature` struct and policies `<Feat>Pol
 | `crates/phase-ai/src/policies/registry.rs` | Add `PolicyId::<Feat>` (and `<Feat>Mulligan`) variants. Import `super::<feat>::<Feat>Policy`. Add `Box::new(<Feat>Policy)` to `PolicyRegistry::default`'s vec. |
 | `crates/phase-ai/src/policies/mulligan/<feat>_keepables.rs` | NEW (if a mulligan policy is in scope). |
 | `crates/phase-ai/src/policies/mulligan/mod.rs` | Add module + `pub use` + `Box::new(<Feat>Mulligan)` to `MulliganRegistry::default`'s vec. |
+| `crates/phase-ai/src/config.rs` | Add the policy's scoring scalar(s) to `PolicyPenalties`, **and register each new field** in `ACTIVE_POLICY_PENALTY_FIELDS` or `UNTUNED_POLICY_PENALTY_FIELDS`. Not optional — a test enforces it. See Section 7a. |
 | `crates/phase-ai/src/plan/curves.rs` | OPTIONAL: add tempo-class branch in `tempo_class_for` (carefully ordered — see Section 8). Add expected-curve adjustments in `expected_lands_for`/`expected_mana_for`/`expected_threats_for` if archetype shifts the curve. Plan data is consumed by mulligan bottoming and curve expectations; do not add zombie plan fields. |
 
 The `no_name_matching` lint at `features/tests/no_name_matching.rs` automatically scans both `src/features/` and `src/policies/` — no manual exemption needed unless your file names appear in the lint's allow-list (unlikely).
+
+---
+
+## 7a. `PolicyPenalties` registration — ACTIVE vs UNTUNED
+
+Every scoring scalar you add to `PolicyPenalties` **must** be listed in exactly one of two sets in `crates/phase-ai/src/config.rs`. This is enforced, not advisory:
+
+- `every_policy_penalty_is_tuning_registered_or_explicitly_untuned` (`config.rs:1342`) serializes `PolicyPenalties::default()` and asserts **set equality** between its field names and `ACTIVE_POLICY_PENALTY_FIELDS ∪ UNTUNED_POLICY_PENALTY_FIELDS`. A new field in neither set — or a stale name in either set — turns `cargo nextest run -p phase-ai` red (Tilt `test-ai`; CI runs it workspace-wide via the `cargo nextest run --profile ci … --workspace` step in `.github/workflows/ci.yml`). The same test requires every `UNTUNED_` entry's reason string to be non-empty.
+
+**Which set?** `ACTIVE_POLICY_PENALTY_FIELDS` (`config.rs:617`) *is* the CMA-ES parameter vector: `ai_tune` builds the `--group penalties` parameter names from it (`bin/ai_tune.rs:102`) and `policy_penalties_from_params` deserializes the optimizer's output back over exactly those fields, clamped to `[-15.0, 15.0]` (`bin/ai_tune.rs:222`). Anything listed there is a **free variable the optimizer will overwrite**.
+
+- **`ACTIVE_`** — soft heuristics whose magnitude is a preference (nudge/preference/strong band). Only after a paired-seed `cargo ai-gate` calibration; that's what every current `UNTUNED_` reason is waiting for.
+- **`UNTUNED_`** (`config.rs:658`, `(field, reason)` pairs) — the default, and the **mandatory** home for any game-deciding scalar whose value is load-bearing for correctness rather than taste (a `critical`-band win-detector weight, e.g. a CR 104.2a "last player standing" crown term). Listing such a scalar in `ACTIVE_` licenses CMA-ES to tune a win detector into noise.
+
+When in doubt, ship in `UNTUNED_` with a reason. Promotion is a one-line move backed by an ai-gate report; demotion after the optimizer has already smeared the value is not.
 
 ---
 

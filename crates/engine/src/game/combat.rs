@@ -3569,6 +3569,15 @@ pub fn blocker_constraints_for_player(
     constraints
 }
 
+/// Return the blocker keys in stable numeric object-id order for prompt payloads.
+pub(crate) fn ordered_valid_blocker_ids(
+    valid_block_targets: &HashMap<ObjectId, Vec<ObjectId>>,
+) -> Vec<ObjectId> {
+    let mut blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+    blocker_ids.sort_unstable_by_key(|id| id.0);
+    blocker_ids
+}
+
 /// CR 508.1a / CR 509.1a: Rebuild the eligibility snapshot carried by the
 /// `DeclareAttackers` / `DeclareBlockers` waiting states from the live game
 /// queries. The declare-step waiting payloads are computed exactly once by
@@ -3605,7 +3614,7 @@ pub fn refresh_combat_declaration_waiting_for(state: &mut GameState) {
             let player = *player;
             // CR 509.1a: Mirror turns.rs:1394-1396 — player-scoped block targets.
             let valid_block_targets = get_valid_block_targets_for_player(state, player);
-            let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+            let valid_blocker_ids = ordered_valid_blocker_ids(&valid_block_targets);
             let block_requirements = block_requirements_for_player(state, player);
             // CR 509.1b/c: recompute the display constraints from the same
             // recomputed `valid_block_targets` (self-heal parity).
@@ -4376,6 +4385,24 @@ mod tests {
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
+
+    #[test]
+    fn ordered_valid_blocker_ids_sorts_numeric_keys_and_handles_small_maps() {
+        let mut targets = HashMap::new();
+        for id in [ObjectId(91), ObjectId(7), ObjectId(42), ObjectId(3)] {
+            targets.insert(id, Vec::new());
+        }
+        assert_eq!(
+            ordered_valid_blocker_ids(&targets),
+            vec![ObjectId(3), ObjectId(7), ObjectId(42), ObjectId(91)]
+        );
+
+        assert!(ordered_valid_blocker_ids(&HashMap::new()).is_empty());
+        assert_eq!(
+            ordered_valid_blocker_ids(&HashMap::from([(ObjectId(12), Vec::new())])),
+            vec![ObjectId(12)]
+        );
+    }
 
     fn setup() -> GameState {
         let mut state = GameState::new_two_player(42);

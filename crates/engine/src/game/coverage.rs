@@ -901,6 +901,10 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::NotHistoric => parts.push("nonhistoric".into()),
             // CR 903.3d
             FilterProp::IsCommander => parts.push("commander".into()),
+            // CR 205.3m + CR 903.3: Path of Ancestry's relational predicate.
+            FilterProp::SharesCreatureTypeWithCommander => {
+                parts.push("that shares a creature type with your commander".into())
+            }
             FilterProp::ToughnessGTPower => parts.push("toughness > power".into()),
             FilterProp::PowerExceedsBase => parts.push("power > base power".into()),
             FilterProp::DifferentNameFrom { .. } => parts.push("different name".into()),
@@ -1537,7 +1541,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("# of counter kinds among {}", fmt_target(filter))
         }
         QuantityRef::VoteCount { choice_index } => format!("# of votes for choice {choice_index}"),
-        QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
+        QuantityRef::PreviousEffectAmount { .. } => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::FilteredTrackedSetSize { filter, .. } => {
             format!("filtered tracked set ({})", fmt_target(filter))
@@ -2400,6 +2404,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::BeneathTop { .. },
                 }) => d.push(("redirect".into(), "library beneath top X".into())),
+                Some(SpellStackToGraveyardReplacement::Library {
+                    position: LibraryPosition::RandomWithinTop { .. },
+                }) => d.push(("redirect".into(), "library random within top N".into())),
                 Some(SpellStackToGraveyardReplacement::Hand) => {
                     d.push(("redirect".into(), "hand".into()))
                 }
@@ -3715,6 +3722,10 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         ),
         AbilityCondition::HasMaxSpeed => "has max speed".into(),
         AbilityCondition::IsMonarch => "is monarch".into(),
+        AbilityCondition::CompletedDungeon { specific } => match specific {
+            None => "you've completed a dungeon".into(),
+            Some(dungeon) => format!("you've completed {dungeon}"),
+        },
         AbilityCondition::IsInitiative => "has the initiative".into(),
         AbilityCondition::HasCityBlessing => "has the city's blessing".into(),
         AbilityCondition::IsRingBearer => "is the ring-bearer".into(),
@@ -7082,6 +7093,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ManaColorSpent { .. } => ("ManaColorSpent", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
+        // CR 309.7: evaluated at resolution via `dungeon::has_completed_dungeon`.
+        AbilityCondition::CompletedDungeon { .. } => ("CompletedDungeon", Handled),
         AbilityCondition::IsInitiative => ("IsInitiative", Handled),
         AbilityCondition::HasCityBlessing => ("HasCityBlessing", Handled),
         AbilityCondition::IsRingBearer => ("IsRingBearer", Handled),
@@ -7282,7 +7295,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         }
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::VoteCount { .. } => ("VoteCount", Handled),
-        QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
+        QuantityRef::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
         QuantityRef::TrackedSetAggregate { .. } => ("TrackedSetAggregate", Handled),

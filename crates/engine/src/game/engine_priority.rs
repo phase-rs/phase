@@ -204,22 +204,38 @@ pub(crate) fn run_post_action_pipeline_from(
     }
 
     if state.stack.len() > stack_before {
-        return Ok(flush_pending_priority_intercepts(
+        let outgoing = flush_pending_priority_intercepts(
             state,
             WaitingFor::Priority {
                 player: state.active_player,
             },
-        ));
+            default_wf.acting_player(),
+        );
+        return Ok(outgoing);
     }
 
     super::layers::flush_layers(state);
 
-    Ok(flush_pending_priority_intercepts(state, default_wf.clone()))
+    Ok(flush_pending_priority_intercepts(
+        state,
+        default_wf.clone(),
+        default_wf.acting_player(),
+    ))
 }
 
-fn flush_pending_priority_intercepts(state: &mut GameState, outgoing: WaitingFor) -> WaitingFor {
+fn flush_pending_priority_intercepts(
+    state: &mut GameState,
+    outgoing: WaitingFor,
+    semantic_caster: Option<crate::types::player::PlayerId>,
+) -> WaitingFor {
     let outgoing = super::effects::paradigm::flush_pending_remaining_offers(state, outgoing);
-    flush_pending_miracle_offer(state, outgoing)
+    let outgoing = flush_pending_miracle_offer(state, outgoing);
+    match semantic_caster {
+        Some(caster) => {
+            super::precast_copy_shortcut::maybe_offer_after_cast_triggers(state, caster, outgoing)
+        }
+        None => outgoing,
+    }
 }
 
 /// CR 702.94a + CR 603.11: Intercept a `WaitingFor::Priority` and replace it

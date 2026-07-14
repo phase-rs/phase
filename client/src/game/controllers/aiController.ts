@@ -163,9 +163,12 @@ export function createAIController(config: AIControllerConfig): AIController {
       if (
         !("data" in waitingFor) ||
         !waitingFor.data ||
-        // CR 732.2a: LoopShortcut carries `proposer`, not `player`; still route
-        // via the engine-derived `priority_player` like every `player in` state.
-        (!("player" in waitingFor.data) && waitingFor.type !== "LoopShortcut")
+        // CR 732.2a: shortcut offers carry `proposer`, not `player`; route both
+        // legacy and finite pre-cast offers via the engine-derived
+        // `priority_player` like every `player in` state.
+        (!("player" in waitingFor.data) &&
+          waitingFor.type !== "LoopShortcut" &&
+          waitingFor.type !== "PrecastCopyShortcutOffer")
       )
         return;
       // CR 723.5: Under a turn-control effect (Emrakul, the Promised End /

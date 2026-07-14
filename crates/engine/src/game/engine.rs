@@ -1095,6 +1095,12 @@ fn until_lethal_fallback(state: &mut GameState, result: &mut ActionResult, commi
 /// player drain pins ALL opponents every cycle (`TargetPin::Player` is constant, period 1). The
 /// seam is built for generality; a multi-cycle aggregation is fail-safe (an object loop reaching
 /// the arm measures 1 cycle, finds no faller, does not crown).
+///
+/// CR 732.2a SAFETY LIMIT: the returned period is clamped to `MAX_SHORTCUT_CYCLES`. Both
+/// consumers derive their `0..period` range from this one helper (`validate_pins` and
+/// `apply_until_lethal_shortcut`), so the clamp bounds validate + drive coherently;
+/// crown-soundness holds — every crownable loop has period 1, so the clamp only truncates a
+/// hostile over-cap schedule into the conservative manual-fallback arm, never a mis-crown.
 fn shortcut_drive_period(
     template: Option<&crate::analysis::decision_template::DecisionTemplate>,
 ) -> crate::analysis::decision_template::IterationIndex {
@@ -1117,7 +1123,16 @@ fn shortcut_drive_period(
         })
         .max()
         .unwrap_or(1)
-        .max(1)
+        // CR 732.2a SAFETY LIMIT: the drive period is STRUCTURALLY unbounded in the engine —
+        // its length is the client template schedule's own length. On the WS transport the
+        // 8 KB inbound-frame cap (phase-server/src/main.rs:409/1420) already bounds a hostile
+        // schedule to a few hundred entries (~1-2 s stall, not a million-cycle remote DoS),
+        // but in-process callers (WASM/Tauri/local) bypass that cap, so clamp here AT THE
+        // SOURCE for every caller. Real schedules rotate over a handful of object sources
+        // (period ≪ cap), so this is invisible to every legitimate loop; a clamped-shorter
+        // drive measures a smaller (more conservative) delta ⇒ FEWER crowns / more manual
+        // fallbacks, never a wrong crown.
+        .clamp(1, MAX_SHORTCUT_CYCLES)
 }
 
 /// PR-7 Combo-UI Stage 2: the typed result of driving ONE whole loop-shortcut cycle on a
@@ -1863,6 +1878,35 @@ fn handle_declare_shortcut(
             }
         }
     }
+    // CR 732.2a SAFETY LIMIT (see MAX_SHORTCUT_CYCLES): reject an over-cap Fixed count at
+    // the single authority — BEFORE the proposal is built — into the same fail-closed
+    // manual-play handback the pin validation above uses. This is THE catastrophic remote
+    // vector: `Fixed(u32)` scalar-encodes up to ~4.3e9 cycles in ~10 bytes, sailing through
+    // the 8 KB WS frame cap → one GameState clone + drive per cycle. Both confirmation paths
+    // (solitaire-immediate below, APNAP Accept) consume this one proposal, and both drive
+    // helpers (materialize_fixed_shortcut / materialize_object_growth_shortcut) read `n` from
+    // it, so this one check bounds every Fixed drive on every transport. The drive helpers do
+    // NOT re-check.
+    // Exhaustive (no wildcard) so a future `IterationCount` variant — e.g. the reserved
+    // `UntilResource`, which would carry its OWN unbounded count — build-breaks HERE and
+    // forces a bound decision rather than silently regressing this cap.
+    match &count {
+        crate::analysis::decision_template::IterationCount::Fixed(n)
+            if *n > MAX_SHORTCUT_CYCLES =>
+        {
+            priority::reset_priority(state);
+            // CR 800.4a: hand priority to the next living seat.
+            state.waiting_for = WaitingFor::Priority {
+                player: living_priority_seat(state),
+            };
+            result.waiting_for = state.waiting_for.clone();
+            return Ok(result);
+        }
+        // Under-cap `Fixed` and `UntilLethal` (period-bounded by `shortcut_drive_period`)
+        // proceed to the proposal.
+        crate::analysis::decision_template::IterationCount::Fixed(_)
+        | crate::analysis::decision_template::IterationCount::UntilLethal => {}
+    }
     let proposal = crate::analysis::loop_check::ShortcutProposal {
         proposer: offer.proposer,
         predicted_winner: offer.predicted_winner,
@@ -2185,6 +2229,11 @@ fn pass_priority_once_with_pipeline(
     events: &mut Vec<GameEvent>,
     stack_resolution_limit: Option<u32>,
 ) -> Result<WaitingFor, EngineError> {
+    if let WaitingFor::Priority { player } = &state.waiting_for {
+        if super::precast_copy_shortcut::blocks_pass(state, *player) {
+            return Ok(state.waiting_for.clone());
+        }
+    }
     state.cancelled_casts.clear();
     // CR 117.4 + 608.1: When all players pass in succession the stack begins
     // resolving; at that moment the AI guard against re-activating pending
@@ -2355,6 +2404,17 @@ fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameSt
     !finished.is_empty()
 }
 
+// CR 732.2a SAFETY LIMIT: a shortcut is "a loop that repeats a specified number of times";
+// the CR places NO board-relative upper bound, so this is an engine implementation cap
+// against an absurd/hostile count — NOT a rules constraint. It bounds both a `Fixed(n)`
+// cycle count (handle_declare_shortcut) and a template drive period (shortcut_drive_period).
+// Motivating vector: a `u32` count scalar-encodes up to ~4.3e9 cycles in ~10 JSON bytes, so
+// it sails through the 8 KB inbound WS frame cap (phase-server/src/main.rs:409/1420) yet
+// would force ~4.3e9 GameState clones — a byte cap cannot see it, only this count cap can.
+// 1_000 is generous vs any honest Fixed count (~10x KCI-style loops); worst-case bounded
+// cost is 1_000 cycles x <=10_000 beats = 1e7.
+const MAX_SHORTCUT_CYCLES: u32 = 1_000;
+
 fn auto_pass_loop_max_iterations(state: &GameState) -> usize {
     let living_players = state
         .players
@@ -2421,6 +2481,9 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
         match &result.waiting_for {
             WaitingFor::Priority { player } => {
                 let player = *player;
+                if super::precast_copy_shortcut::blocks_pass(state, player) {
+                    break;
+                }
                 let decision = priority_auto_pass_decision(state, player);
                 match decision {
                     AutoPassDecision::Exit => {
@@ -3030,6 +3093,12 @@ fn apply_action(
         state.loop_detect_ring.clear();
     }
 
+    // Keep the semantic owner of the prompt before reducing it. Under turn
+    // control this can differ from the authenticated submitter; a successful
+    // action discharges a shortened shortcut only for that owner.
+    let semantic_actor = state.waiting_for.acting_player().unwrap_or(actor);
+    let action_for_divergence = action.clone();
+
     // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass.
     // CR 103.5: Use the authenticated `actor` directly so the simultaneous mulligan
     // variants (where `authorized_submitter` is None when multiple players are pending)
@@ -3072,6 +3141,12 @@ fn apply_action(
                 != turn_control::authorized_submitter_for_player(state, *player)
             {
                 return Err(EngineError::NotYourPriority);
+            }
+            if super::precast_copy_shortcut::blocks_pass(state, *player) {
+                return Err(EngineError::ActionNotAllowed(
+                    "A shortened pre-cast shortcut requires a different meaningful action before passing"
+                        .to_string(),
+                ));
             }
             let wf = pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit)?;
             return Ok(ActionResult {
@@ -4319,6 +4394,13 @@ fn apply_action(
         (WaitingFor::LoopShortcut { .. }, GameAction::DeclineShortcut) => {
             return handle_decline_shortcut(state, &mut events);
         }
+        // The finite pre-cast protocol is intentionally isolated from the
+        // legacy generic loop-shortcut handlers above.
+        (
+            WaitingFor::PrecastCopyShortcutOffer { .. }
+            | WaitingFor::RespondToPrecastCopyShortcut { .. },
+            GameAction::PrecastCopyShortcut { epoch, response },
+        ) => super::precast_copy_shortcut::handle(state, actor, epoch, response, &mut events)?,
         // CR 732.2b/c: an opponent answers the loop-shortcut offer.
         (
             WaitingFor::RespondToShortcut {
@@ -5989,13 +6071,14 @@ fn apply_action(
             super::morph::play_face_down(state, p, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
-        (WaitingFor::Priority { player }, GameAction::TurnFaceUp { object_id }) => {
+        (WaitingFor::Priority { player }, GameAction::TurnFaceUp { object_id, x }) => {
             if state.priority_player
                 != turn_control::authorized_submitter_for_player(state, *player)
             {
                 return Err(EngineError::NotYourPriority);
             }
             let p = *player;
+            let announced_x = x;
             // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b + CR 106.6: turning
             // a face-down permanent face up is a special action whose morph/disguise/
             // manifest cost must be paid *before* the flip. `turn_face_up_prepare`
@@ -6005,12 +6088,47 @@ fn apply_action(
             // Gossip) is eligible here while other-context mana is rejected. Mirrors
             // the `UnlockDoor` special-action handler.
             let cost = super::morph::turn_face_up_prepare(state, object_id, p)?;
-            let cost = casting::apply_special_action_cost_reduction(
+            let mut cost = casting::apply_special_action_cost_reduction(
                 state,
                 p,
                 crate::types::mana::SpecialAction::TurnFaceUp,
                 cost,
             );
+
+            // CR 107.3d: "If a cost associated with a special action, such as a suspend
+            // cost or a morph cost, has an {X} ... in it, the value of X is chosen by the
+            // player taking the special action immediately before they pay that cost."
+            // The announcement happens HERE — inside the action, with no priority window
+            // between choosing X and paying it, exactly as the rule describes.
+            //
+            // Warbreak Trumpeter (Morph {X}{X}{R}), Bane of the Living (Morph {X}{B}{B})
+            // and Aurelia's Vindicator (Disguise {X}{3}{W}) are the live faces.
+            let has_x = casting_costs::cost_has_x(&cost);
+            if has_x {
+                // CR 118.3: a player can't announce an X they cannot pay for. The cap is
+                // computed with `object_id: None` deliberately — this is a SPECIAL ACTION,
+                // not a cast, so cast-time cost modifiers and floors must not apply (the
+                // special-action reduction was already applied above).
+                let max_x = casting_costs::max_x_value(state, p, &cost, None);
+                if announced_x > max_x {
+                    return Err(EngineError::InvalidAction(format!(
+                        "X={announced_x} exceeds the maximum payable value of {max_x} for this \
+                         turn-face-up cost"
+                    )));
+                }
+                // CR 107.1b + CR 601.2f: each `{X}` shard becomes `announced_x` generic, so
+                // Warbreak Trumpeter's `{X}{X}{R}` costs 2X + {R}. Without this the X shards
+                // reach mana payment unresolved and are dropped — the permanent flips for
+                // its non-X remainder alone.
+                cost.concretize_x(announced_x);
+            } else if announced_x != 0 {
+                // A cost with no {X} admits no choice: CR 107.3d only grants one "if a cost
+                // ... has an {X} ... in it". Reject rather than silently ignore, so a client
+                // bug cannot masquerade as a legal flip.
+                return Err(EngineError::InvalidAction(
+                    "This permanent's turn-face-up cost has no {X}, so X must be 0".to_string(),
+                ));
+            }
             casting::pay_special_action_mana_cost(
                 state,
                 p,
@@ -6019,6 +6137,29 @@ fn apply_action(
                 crate::types::mana::SpecialAction::TurnFaceUp,
                 &mut events,
             )?;
+
+            // CR 702.37f (morph) / CR 702.168e (disguise): "If a permanent's morph cost
+            // includes X, other abilities of that permanent may also refer to X. The value
+            // of X in those abilities is equal to the value of X chosen as the morph special
+            // action was taken." Publish the announced X on the source-keyed carrier BEFORE
+            // the flip emits `TurnedFaceUp`, so `triggers::build_triggered_ability` — the
+            // single trigger-instantiation authority — stamps it onto the turn-face-up
+            // trigger's `chosen_x`.
+            //
+            // The stamp must land at INSTANTIATION, not resolution: Aurelia's Vindicator
+            // spends its X in `multi_target.max` ("exile up to X other target creatures"),
+            // which is consumed during target selection, before the trigger ever resolves.
+            //
+            // Published only when the cost actually HAS an {X} (CR 107.3d grants a choice
+            // only then). A no-X flip leaves the carrier untouched rather than clobbering it
+            // with `Some((.., 0))`: an unrelated activated ability of ANOTHER object may be
+            // on the stack with its own announced X in flight, and that value must survive.
+            // The carrier is cleared at the start of the next `resolve_top`, so this
+            // publication cannot outlive the trigger it is for.
+            if has_x {
+                state.announced_source_x = Some((object_id, announced_x));
+            }
+
             super::morph::turn_face_up(state, p, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
@@ -6170,6 +6311,12 @@ fn apply_action(
             GameAction::PassParadigmOffer,
         ) => WaitingFor::Priority { player: *player },
         (WaitingFor::Priority { player }, GameAction::SetAutoPass { mode }) => {
+            if super::precast_copy_shortcut::blocks_pass(state, *player) {
+                return Err(EngineError::ActionNotAllowed(
+                    "A shortened pre-cast shortcut requires a different meaningful action before passing"
+                        .to_string(),
+                ));
+            }
             // Convert request to stored mode, capturing engine state as needed.
             let stored_mode = match mode {
                 AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
@@ -6791,6 +6938,16 @@ fn apply_action(
             )));
         }
     };
+
+    // A shortened shortcut is discharged only by an action the normal reducer
+    // accepted. In particular, a rejected cast/land attempt must leave the
+    // CR 732.2c divergence requirement armed; preference actions returned
+    // earlier and priority passes never reach this successful-reducer seam.
+    super::precast_copy_shortcut::note_meaningful_action(
+        state,
+        semantic_actor,
+        &action_for_divergence,
+    );
 
     // Run post-action pipeline (SBAs, triggers, layers) and check for terminal states.
     // When triggers were already processed inline (e.g., DeclareAttackers, combat damage),
@@ -9507,5 +9664,16 @@ mod stage2_injector_tests {
             (5, b.clone()),
         ]))]);
         assert_eq!(shortcut_drive_period(Some(&pw)), 2, "Piecewise(2) ⇒ 2");
+
+        // CR 732.2a SAFETY LIMIT: an over-cap schedule clamps to MAX_SHORTCUT_CYCLES.
+        // Revert-probe: restore `.max(1)` (drop the `.clamp`) ⇒ returns MAX+5 (1005) ≠ 1000.
+        let oversized = mk(vec![TargetPin::Scheduled(TargetSchedule::RoundRobin(
+            vec![a.clone(); (MAX_SHORTCUT_CYCLES + 5) as usize],
+        ))]);
+        assert_eq!(
+            shortcut_drive_period(Some(&oversized)),
+            MAX_SHORTCUT_CYCLES,
+            "RoundRobin(MAX+5) clamps to MAX_SHORTCUT_CYCLES"
+        );
     }
 }

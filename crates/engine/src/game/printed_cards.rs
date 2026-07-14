@@ -2657,6 +2657,8 @@ mod tests {
                 }],
                 destination,
                 tapped: false,
+                library_position: None,
+                library_players: None,
             },
         )
     }
@@ -2850,6 +2852,8 @@ mod tests {
                 }],
                 destination: Zone::Hand,
                 tapped: false,
+                library_position: None,
+                library_players: None,
             }),
         });
         def.unless_pay = Some(UnlessPayModifier {
@@ -2863,6 +2867,8 @@ mod tests {
                     }],
                     destination: Zone::Hand,
                     tapped: false,
+                    library_position: None,
+                    library_players: None,
                 }),
             },
             payer: TargetFilter::Controller,
@@ -3040,6 +3046,8 @@ mod tests {
                     }],
                     destination: Zone::Hand,
                     tapped: false,
+                    library_position: None,
+                    library_players: None,
                 }),
             },
             payer: TargetFilter::Controller,
@@ -3072,6 +3080,8 @@ mod tests {
                     }],
                     destination: Zone::Hand,
                     tapped: false,
+                    library_position: None,
+                    library_players: None,
                 }),
             },
             decline: Some(Box::new(conjure_ability(
@@ -3102,6 +3112,8 @@ mod tests {
                 }],
                 destination: Zone::Hand,
                 tapped: false,
+                library_position: None,
+                library_players: None,
             }),
         };
         walk_effect(&draw_repl, &mut names);

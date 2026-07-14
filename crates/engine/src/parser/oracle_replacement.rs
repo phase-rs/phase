@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::{char, multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map_opt, opt, peek, rest, value};
 use nom::multi::separated_list1;
@@ -426,10 +426,49 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         .parse(i)
     });
     if let Some(draw_scope) = draw_scope {
-        let effect_text = extract_replacement_effect(&normalized);
+        // CR 614.1a: An "As long as <state>, if you would draw a
+        // card, ..." gate (Archmage Ascension) precedes the draw antecedent with
+        // its own comma clause. Split it off so effect extraction anchors on the
+        // draw clause's comma — not the gate's — and lift the state into a typed
+        // `ReplacementCondition`. `Unparsed` means the gate is present but its
+        // condition can't be carried, so fail closed rather than emit an
+        // ungated, always-on draw replacement.
+        let (effect_source, as_long_as_gate): (&str, Option<ReplacementCondition>) =
+            match strip_as_long_as_draw_gate(&normalized) {
+                AsLongAsDrawGate::Absent => (&normalized, None),
+                AsLongAsDrawGate::Parsed {
+                    remainder,
+                    condition,
+                } => (remainder, Some(condition)),
+                AsLongAsDrawGate::Unparsed => return None,
+            };
+        let effect_text = extract_replacement_effect(effect_source);
         let mut def = ReplacementDefinition::new(ReplacementEvent::Draw)
             .draw_scope(draw_scope)
             .description(text.to_string());
+        // CR 614.6 + CR 121.6 + CR 614.1a: "you may skip that draw [instead]"
+        // (Obstinate Familiar) and "instead you may skip that draw" (Island
+        // Sanctuary) are OPTIONAL draw-suppression replacements. Must precede
+        // the mandatory `body_is_draw_skip` arm (Living Conundrum) and the
+        // generic `you may instead {effect}` execute path (Abundance).
+        if let Some(effect) = effect_text.as_deref() {
+            let effect_lower = effect.to_lowercase();
+            if let Some(remainder) = strip_optional_draw_skip(&effect_lower, effect) {
+                def = def.mode(ReplacementMode::Optional { decline: None });
+                def = def.quantity_modification(QuantityModification::Prevent);
+                def = attach_optional_draw_skip_rider(def, remainder)?;
+                apply_draw_player_scope(&lower, &mut def);
+                // CR 504.1 + CR 614.1a + CR 614.11: draw-step timing and "while …"
+                // quantity gates are independent antecedent dimensions — compose
+                // both rather than mutually excluding them.
+                match compose_draw_replacement_conditions(&lower, "would draw a card") {
+                    Ok(Some(condition)) => def = def.condition(condition),
+                    Ok(None) => {}
+                    Err(()) => return None,
+                }
+                return Some(def);
+            }
+        }
         // CR 614.6 + CR 121.6: "skip that draw instead" fully suppresses the
         // draw (Living Conundrum: "If you would draw a card while your library
         // has no cards in it, skip that draw instead"). The body lowers to a
@@ -446,10 +485,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         if body_skips_draw {
             def = def.quantity_modification(QuantityModification::Prevent);
             apply_draw_player_scope(&lower, &mut def);
-            match parse_while_antecedent(&lower, "would draw a card") {
-                WhileAntecedent::Parsed(condition) => def = def.condition(condition),
-                WhileAntecedent::Unparsed => return None,
-                WhileAntecedent::Absent => {}
+            if let Some(condition) = as_long_as_gate {
+                def = def.condition(condition);
+            } else {
+                match parse_while_antecedent(&lower, "would draw a card") {
+                    WhileAntecedent::Parsed(condition) => def = def.condition(condition),
+                    WhileAntecedent::Unparsed => return None,
+                    WhileAntecedent::Absent => {}
+                }
             }
             return Some(def);
         }
@@ -466,10 +509,19 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             if optional_modal_present {
                 def = def.mode(ReplacementMode::Optional { decline: None });
             }
-            def = def.execute(parse_effect_chain(effect_after_modal, AbilityKind::Spell));
+            let mut execute = parse_effect_chain(effect_after_modal, AbilityKind::Spell);
+            rewrite_draw_replacement_execute_referents(&mut execute);
+            def = def.execute(execute);
         }
         // CR 614.1a: Player scope for draw replacements.
         apply_draw_player_scope(&lower, &mut def);
+        // CR 614.1a: A parsed "As long as <state>" gate takes precedence — it is
+        // the antecedent's own restriction, not a mid-clause "while" or
+        // except-first exception.
+        if let Some(condition) = as_long_as_gate {
+            def = def.condition(condition);
+            return Some(def);
+        }
         // CR 121.1 + CR 504.1 + CR 614.6: Detect Alhammarret's Archive's
         // "except the first one [you|they] draw in each of [your|their] draw
         // steps" exception clause and gate the replacement so it does NOT
@@ -555,7 +607,7 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             // damage recipients. Generic `ParentTarget*` resolution is left
             // untouched.
             let mut execute = parse_effect_chain(&e, AbilityKind::Spell);
-            rewrite_damage_recipient_to_post_replacement_target(&mut execute);
+            rewrite_replacement_event_recipient_to_post_replacement_target(&mut execute);
             def = def.execute(execute);
         }
         // CR 614.1a: Parse the subject to determine player scope.
@@ -6490,6 +6542,45 @@ fn body_is_draw_skip(lower_body: &str) -> bool {
         .is_ok()
 }
 
+/// CR 614.6 + CR 121.6 + CR 614.1a: Strip a leading optional draw-suppression
+/// modal — `"[instead] you may skip that draw [instead]"` — and return the
+/// remainder for an optional `"if you do, …"` rider (Island Sanctuary). Returns
+/// `None` when the body is not this shape. Distinct from mandatory
+/// `body_is_draw_skip` (Living Conundrum), which has no `"may"` modal.
+fn strip_optional_draw_skip<'a>(lower_body: &str, original_body: &'a str) -> Option<&'a str> {
+    let (_, rest) = nom_on_lower(original_body, lower_body, |input| {
+        value(
+            (),
+            (
+                opt(tag::<_, _, OracleError<'_>>("instead ")),
+                tag("you may "),
+                alt((tag("skips "), tag("skip "))),
+                alt((tag("that draw"), tag("the draw"))),
+                opt(tag(" instead")),
+            ),
+        )
+        .parse(input)
+    })?;
+    Some(rest.trim_start())
+}
+
+/// CR 603.12 + issue #5655: Attach an optional `"if you do, …"` rider to an
+/// optional draw-skip replacement. Returns `None` when non-empty rider text is
+/// present but cannot be lowered to a typed effect — fail closed rather than
+/// report the card as supported with a silently discarded rider (Island
+/// Sanctuary's conditional attack restriction class).
+fn attach_optional_draw_skip_rider(
+    def: ReplacementDefinition,
+    remainder: &str,
+) -> Option<ReplacementDefinition> {
+    let trimmed = remainder.trim_start_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        return Some(def);
+    }
+    let rider = parse_when_you_do_reflexive(remainder)?;
+    Some(def.execute(rider))
+}
+
 /// CR 614.1a: Assign the replacement's player scope from the antecedent subject
 /// ("an opponent" → Opponent, "a player" / "its controller" → AnyPlayer,
 /// "you" → controller-only/None). Shared by the `Prevent` short-circuit and the
@@ -6964,6 +7055,35 @@ fn parse_scry_replacement_count(input: &str) -> nom::IResult<&str, QuantityExpr,
     .parse(input)
 }
 
+/// CR 504.1 + CR 614.1a + CR 614.11: Compose independent draw-replacement
+/// gates from the antecedent — "during [your/their] draw step" timing and
+/// "while …" quantity guards are separate dimensions and must not be mutually
+/// exclusive.
+fn compose_draw_replacement_conditions(
+    lower: &str,
+    verb_anchor: &str,
+) -> Result<Option<ReplacementCondition>, ()> {
+    let mut conditions = Vec::new();
+
+    if let Some(active_player_req) = parse_during_draw_step_antecedent(lower) {
+        conditions.push(ReplacementCondition::DuringDrawStep {
+            active_player_req: Some(active_player_req),
+        });
+    }
+
+    match parse_while_antecedent(lower, verb_anchor) {
+        WhileAntecedent::Parsed(condition) => conditions.push(condition),
+        WhileAntecedent::Unparsed => return Err(()),
+        WhileAntecedent::Absent => {}
+    }
+
+    Ok(match conditions.len() {
+        0 => None,
+        1 => Some(conditions.into_iter().next().expect("len checked")),
+        _ => Some(ReplacementCondition::And { conditions }),
+    })
+}
+
 /// Outcome of inspecting the `"...would <verb> while <condition>,"` antecedent
 /// of a replacement line. The three states are deliberately distinct: a guard
 /// that is *present but unparseable* must never be silently collapsed into
@@ -7048,6 +7168,113 @@ fn parse_while_antecedent(lower: &str, verb_anchor: &str) -> WhileAntecedent {
         rhs,
         active_player_req: None,
     })
+}
+
+/// CR 614.1a: Result of splitting an "As long as <state>, if
+/// [player] would draw ..." gate off a draw-replacement line.
+enum AsLongAsDrawGate<'a> {
+    /// No "as long as ... , if ... would draw" prefix — use the whole line.
+    Absent,
+    /// Gate parsed; `remainder` is the bare "if ... would draw ..." clause in
+    /// original case, `condition` the lifted state restriction.
+    Parsed {
+        remainder: &'a str,
+        condition: ReplacementCondition,
+    },
+    /// Gate present but its condition can't be carried — fail closed.
+    Unparsed,
+}
+
+/// CR 614.1a: Split an "As long as <state>, if [player] would draw
+/// ..." gate off a draw-replacement line. Archmage Ascension gates an
+/// individual-draw substitute on "~ has six or more quest counters on it"; the
+/// gate carries its own comma, which would otherwise steer
+/// `extract_replacement_effect` to the wrong clause (and the state restriction
+/// would be dropped, firing the replacement on every draw). Returns the bare
+/// "if ... would draw ..." remainder plus the lifted condition.
+fn strip_as_long_as_draw_gate(normalized: &str) -> AsLongAsDrawGate<'_> {
+    let lower = normalized.to_lowercase();
+    // Consume "as long as <cond>, " up to (but not into) the draw antecedent,
+    // leaving "if ... would draw ..." as the remainder. Run on the lowercased
+    // copy, map the remainder back to original case via `nom_on_lower`.
+    let Some((condition_len, remainder)) = nom_on_lower(normalized, &lower, |input| {
+        let (input, _) = tag("as long as ").parse(input)?;
+        let (input, condition_text) = take_until(", if ").parse(input)?;
+        let (input, _) = tag(", ").parse(input)?;
+        Ok((input, condition_text.len()))
+    }) else {
+        return AsLongAsDrawGate::Absent;
+    };
+    // The clause after the gate must be the draw antecedent, not some unrelated
+    // ", if ..." elsewhere in the line.
+    if !nom_primitives::scan_contains(&remainder.to_lowercase(), "would draw") {
+        return AsLongAsDrawGate::Absent;
+    }
+    let condition_start = "as long as ".len();
+    let condition_text = &lower[condition_start..condition_start + condition_len];
+    let Ok((rest, static_cond)) = parse_inner_condition(condition_text) else {
+        return AsLongAsDrawGate::Unparsed;
+    };
+    if !rest.trim().is_empty() {
+        return AsLongAsDrawGate::Unparsed;
+    }
+    match static_gate_to_replacement_condition(static_cond) {
+        Some(condition) => AsLongAsDrawGate::Parsed {
+            remainder: remainder.trim_start(),
+            condition,
+        },
+        None => AsLongAsDrawGate::Unparsed,
+    }
+}
+
+/// CR 614.1a: Lower a parsed `StaticCondition` "as long as" gate into the typed
+/// [`ReplacementCondition::OnlyIfQuantity`] surface. Covers the quantity form
+/// (hand size, life) and the source-counter form ("~ has N or more X counters
+/// on it" — Archmage Ascension), which lowers to a `CountersOn` comparison
+/// resolved against the replacement source. Returns `None` for shapes the typed
+/// surface can't carry, so callers fail closed.
+fn static_gate_to_replacement_condition(
+    condition: StaticCondition,
+) -> Option<ReplacementCondition> {
+    match condition {
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => Some(ReplacementCondition::OnlyIfQuantity {
+            lhs,
+            comparator,
+            rhs,
+            active_player_req: None,
+        }),
+        // CR 122.1: "~ has N or more <type> counters on it" — the source-counter
+        // lower-bound gate. Bounded/exact ranges aren't attested for draw gates,
+        // so only the `N or more` (no maximum) form is carried.
+        StaticCondition::HasCounters {
+            counters,
+            minimum,
+            maximum: None,
+        } => {
+            let counter_type = match counters {
+                CounterMatch::OfType(ct) => Some(ct),
+                CounterMatch::Any => None,
+            };
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: crate::types::ability::ObjectScope::Source,
+                        counter_type,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed {
+                    value: minimum as i32,
+                },
+                active_player_req: None,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn parse_conditional_draw_replacement(text: &str, lower: &str) -> Option<ReplacementDefinition> {
@@ -7143,6 +7370,32 @@ pub(super) fn has_except_first_draw_in_draw_step_clause(lower: &str) -> bool {
             .map_or("", |i| remaining[i + 1..].trim_start());
     }
     false
+}
+
+/// CR 504.1 + CR 614.1a: Parse "...during [your/their] draw step..." in a
+/// draw-replacement antecedent (Island Sanctuary class). Scans word-by-word so
+/// the phrase can appear between the verb anchor and the consequent comma.
+fn parse_during_draw_step_antecedent(lower: &str) -> Option<ControllerRef> {
+    fn parse_clause(input: &str) -> nom::IResult<&str, ControllerRef, OracleError<'_>> {
+        let (input, _) = tag("during ").parse(input)?;
+        let (input, scope) = alt((
+            value(ControllerRef::You, tag("your ")),
+            value(ControllerRef::Opponent, tag("their ")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag("draw step").parse(input)?;
+        Ok((input, scope))
+    }
+    let mut remaining = lower;
+    while !remaining.is_empty() {
+        if let Ok((_, scope)) = parse_clause(remaining) {
+            return Some(scope);
+        }
+        remaining = remaining
+            .find(' ')
+            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    None
 }
 
 /// CR 707.10 + CR 614.1a: Parse a "copy an additional time" replacement —
@@ -8554,7 +8807,7 @@ fn parse_damage_to_player_instead_followup(
 
     let effect_text = original_text.get(effect_start..effect_start + effect_len)?;
     let mut followup = parse_effect_chain(effect_text, AbilityKind::Spell);
-    rewrite_damage_recipient_to_post_replacement_target(&mut followup);
+    rewrite_replacement_event_recipient_to_post_replacement_target(&mut followup);
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -9040,7 +9293,9 @@ fn parse_damage_recipient_after_prefix(working_lower: &str, prefix: &str) -> Opt
 /// `TargetFilter::ParentTargetController` slot to
 /// `TargetFilter::PostReplacementSourceController`. Invoked at the prevention
 /// follow-up call site only — see the parent comment for rationale.
-fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut AbilityDefinition) {
+pub(crate) fn rewrite_parent_target_controller_to_post_replacement_source(
+    def: &mut AbilityDefinition,
+) {
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
         if matches!(f, TargetFilter::ParentTargetController) {
             *f = TargetFilter::PostReplacementSourceController;
@@ -9064,7 +9319,7 @@ fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut Ability
 /// `ParentTarget` to `PostReplacementDamageTarget` so the runtime resolves
 /// it against `state.post_replacement_event_target`.
 ///
-/// Sibling of `rewrite_damage_recipient_to_post_replacement_target` which
+/// Sibling of `rewrite_replacement_event_recipient_to_post_replacement_target` which
 /// handles the player-anaphor cohort ("that player draws cards ..."). Kept
 /// separate so the player walker stays scoped to player refs and this walker
 /// only fires when the caller has confirmed the shield is event-driven (via
@@ -9173,16 +9428,63 @@ fn rewrite_parent_target_to_self_ref(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 615.5: In a prevention follow-up attached to "damage would be dealt to a
-/// player", the surface subject "that player" refers to the prevented event's
-/// damage recipient. The ordinary effect parser has no active trigger event in
-/// this replacement context, so it lowers a standalone non-trigger "that player"
-/// subject to `TargetFilter::ParentTargetController` (the generic CR 608.2c
-/// anaphor) — or, inside a trigger context, to `TargetFilter::TriggeringPlayer`.
-/// Neither resolves correctly here (there is no parent target and no trigger
-/// event), so rewrite the anaphoric recipient to `PostReplacementDamageTarget`
-/// at the call site.
-fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefinition) {
+/// CR 614.6 + CR 608.2c: In a draw-replacement execute chain ("they reveal it
+/// instead. Then any other player may … / otherwise, that player draws"), surface
+/// pronouns refer to the replaced draw's affected player and the card they would
+/// have drawn — not the ability's controller. The generic effect parser lowers
+/// "they reveal it" to `RevealTop { player: Controller }` and standalone "that
+/// player" subjects to `ParentTargetController` / `TriggeringPlayer`. Rewrite at
+/// the parser seam, mirroring the lifegain-replacement and CR 615.5 prevention
+/// follow-up paths.
+fn rewrite_draw_replacement_execute_referents(def: &mut AbilityDefinition) {
+    rewrite_reveal_top_player_to_post_replacement_target(def);
+    rewrite_replacement_event_recipient_to_post_replacement_target(def);
+}
+
+/// CR 614.6 + CR 701.20a: "they reveal it" in a draw replacement reveals the top
+/// card of the *drawing player's* library, not the enchantment controller's.
+fn rewrite_reveal_top_player_to_post_replacement_target(def: &mut AbilityDefinition) {
+    match def.effect.as_mut() {
+        Effect::RevealTop { player, .. } => {
+            if matches!(
+                player,
+                TargetFilter::Controller
+                    | TargetFilter::ParentTargetController
+                    | TargetFilter::TriggeringPlayer
+                    | TargetFilter::Player
+            ) {
+                *player = TargetFilter::PostReplacementDamageTarget;
+            }
+        }
+        // CR 701.20a: a subject-bound "they reveal it" can lower to
+        // `Reveal { ParentTarget }` before chain lowering; in a draw replacement
+        // the anaphor is the would-be-drawn library top, not a parent target slot.
+        Effect::Reveal {
+            target: TargetFilter::ParentTarget,
+        } => {
+            *def.effect = Effect::RevealTop {
+                player: TargetFilter::PostReplacementDamageTarget,
+                count: 1,
+            };
+        }
+        _ => {}
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_reveal_top_player_to_post_replacement_target(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_reveal_top_player_to_post_replacement_target(else_branch);
+    }
+}
+
+/// CR 614.6 + CR 615.5: In an event-driven replacement execute chain, the
+/// surface recipient (for example, "that player") refers to the affected player
+/// of the replaced Draw, life-gain, or damage event. The ordinary effect parser
+/// has no active replacement event, so it lowers the anaphor to
+/// `ParentTargetController` or `TriggeringPlayer`; neither resolves correctly
+/// once the replacement continuation runs. Rewrite that recipient to the
+/// explicit post-replacement event target at the parser seam.
+fn rewrite_replacement_event_recipient_to_post_replacement_target(def: &mut AbilityDefinition) {
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
         if matches!(
             f,
@@ -9194,10 +9496,10 @@ fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefiniti
         }
     });
     if let Some(sub) = def.sub_ability.as_mut() {
-        rewrite_damage_recipient_to_post_replacement_target(sub);
+        rewrite_replacement_event_recipient_to_post_replacement_target(sub);
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
-        rewrite_damage_recipient_to_post_replacement_target(else_branch);
+        rewrite_replacement_event_recipient_to_post_replacement_target(else_branch);
     }
 }
 
@@ -9267,6 +9569,29 @@ fn extract_prevention_followup(original_text: &str) -> Option<String> {
         return None;
     }
     Some(body.to_string())
+}
+
+/// CR 615.5: True when a clause is introduced by a
+/// `"(When|Whenever|If) damage is prevented this way, …"` prelude. That
+/// back-reference ("this way") can only bind to the prevention printed
+/// immediately before it, so the clause is always a rider on that prevention —
+/// it fires once per prevented event against the amount the shield prevented,
+/// never as an independent following instruction. Effect-chain assembly uses
+/// this to keep such a rider a `ContinuationStep` even when it is printed as its
+/// own sentence, so the prevention resolver installs it as the shield's
+/// `runtime_execute` instead of dropping it (New Way Forward, Phyrexian
+/// Vindicator, Outfitted Jouster).
+pub(crate) fn clause_is_prevented_this_way_rider(fragment: &str) -> bool {
+    preceded(
+        alt((
+            tag_no_case::<_, _, OracleError<'_>>("when "),
+            tag_no_case::<_, _, OracleError<'_>>("whenever "),
+            tag_no_case::<_, _, OracleError<'_>>("if "),
+        )),
+        tag_no_case::<_, _, OracleError<'_>>("damage is prevented this way,"),
+    )
+    .parse(fragment.trim_start())
+    .is_ok()
 }
 
 /// CR 614.1a: Parse event substitution replacement effects.
@@ -10822,6 +11147,150 @@ mod tests {
         assert_eq!(you_def.valid_player, None);
     }
 
+    /// CR 614.1a + CR 614.6 + CR 121.6 + issue #5655: Obstinate Familiar — "you
+    /// may skip that draw instead" must compose Optional mode with structured
+    /// `Prevent`, NOT fall through to `Effect::Unimplemented`.
+    #[test]
+    fn optional_draw_skip_lowers_to_optional_prevent_not_unimplemented() {
+        let def = parse_replacement_line(
+            "If you would draw a card, you may skip that draw instead.",
+            "Obstinate Familiar",
+        )
+        .expect("Obstinate Familiar draw replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert!(
+            matches!(def.mode, ReplacementMode::Optional { decline: None }),
+            "optional skip must lift to Optional {{ decline: None }}; got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent),
+            "optional skip accept branch must carry Prevent"
+        );
+        assert!(
+            def.execute.is_none(),
+            "pure optional skip must not carry an execute effect"
+        );
+    }
+
+    /// CR 504.1 + CR 614.1a + CR 614.11: draw-step timing and "while …" gates
+    /// compose via `ReplacementCondition::And` rather than mutually excluding.
+    #[test]
+    fn optional_draw_skip_composes_during_draw_step_and_while_gates() {
+        let def = parse_replacement_line(
+            "If you would draw a card during your draw step while you have 5 or less life, \
+             instead you may skip that draw.",
+            "Synthetic Draw Gate",
+        )
+        .expect("combined draw-step + while gate should parse");
+        let condition = def
+            .condition
+            .as_ref()
+            .expect("during draw step and while gates must compose with And");
+        match condition {
+            ReplacementCondition::And { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                assert!(matches!(
+                    conditions[0],
+                    ReplacementCondition::DuringDrawStep {
+                        active_player_req: Some(ControllerRef::You),
+                    }
+                ));
+                match &conditions[1] {
+                    ReplacementCondition::OnlyIfQuantity {
+                        lhs,
+                        comparator,
+                        rhs,
+                        active_player_req,
+                    } => {
+                        assert_eq!(
+                            *lhs,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::LifeTotal {
+                                    player: crate::types::ability::PlayerScope::Controller,
+                                },
+                            }
+                        );
+                        assert_eq!(*comparator, Comparator::LE);
+                        assert_eq!(*rhs, QuantityExpr::Fixed { value: 5 });
+                        assert_eq!(*active_player_req, None);
+                    }
+                    other => panic!("expected OnlyIfQuantity, got {other:?}"),
+                }
+            }
+            other => panic!("expected And, got {other:?}"),
+        }
+    }
+
+    /// CR 504.1 + CR 614.1a: optional draw-skip during the draw step without a
+    /// reflexive rider parses cleanly (Island Sanctuary's base clause shape).
+    #[test]
+    fn optional_draw_skip_during_draw_step_without_rider_parses() {
+        let def = parse_replacement_line(
+            "If you would draw a card during your draw step, instead you may skip that draw.",
+            "Synthetic Draw Skip",
+        )
+        .expect("optional draw skip during draw step should parse");
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::DuringDrawStep {
+                active_player_req: Some(ControllerRef::You),
+            }),
+            "during your draw step antecedent must gate on controller's draw step"
+        );
+        assert!(
+            def.execute.is_none(),
+            "no reflexive rider must not attach an execute effect"
+        );
+    }
+
+    /// CR 614.1a + CR 614.6 + CR 121.6 + issue #5655: Island Sanctuary's full
+    /// Oracle text carries an `"if you do, …"` attack-restriction rider that is
+    /// not yet implemented — fail closed rather than silently discarding it.
+    #[test]
+    fn island_sanctuary_unimplemented_rider_fails_closed() {
+        assert!(
+            parse_replacement_line(
+                "If you would draw a card during your draw step, instead you may skip that draw. \
+                 If you do, until your next turn, you can't be attacked except by creatures with \
+                 flying and/or islandwalk.",
+                "Island Sanctuary",
+            )
+            .is_none(),
+            "unimplemented rider must fail closed, not report partial support"
+        );
+    }
+
+    /// CR 614.6 + CR 121.6: mandatory "skip that draw" must NOT be misclassified
+    /// as optional when there is no "may" modal (Living Conundrum class).
+    #[test]
+    fn mandatory_draw_skip_stays_non_optional() {
+        let def = parse_replacement_line(
+            "If you would draw a card while your library has no cards in it, skip that draw instead.",
+            "Living Conundrum",
+        )
+        .expect("Living Conundrum draw replacement should parse");
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        assert!(
+            matches!(def.mode, ReplacementMode::Mandatory),
+            "mandatory skip must not lift to Optional; got {:?}",
+            def.mode
+        );
+    }
+
     #[test]
     fn lifegain_doubler_still_doubles_not_prevented() {
         // Negative guard: "gain twice that much life" must NOT collapse into
@@ -11392,6 +11861,69 @@ mod tests {
              When damage is prevented this way, ~ deals 2 damage to any target.",
         );
         assert_eq!(result.as_deref(), Some("~ deals 2 damage to any target."));
+    }
+
+    #[test]
+    fn clause_is_prevented_this_way_rider_matches_the_prelude_forms() {
+        // CR 615.5: the three attested prelude forms (New Way Forward,
+        // Outfitted Jouster / Phyrexian Vindicator "When", the "If" variant).
+        assert!(clause_is_prevented_this_way_rider(
+            "When damage is prevented this way, ~ deals 2 damage to any target."
+        ));
+        assert!(clause_is_prevented_this_way_rider(
+            "Whenever damage is prevented this way, you draw a card."
+        ));
+        assert!(clause_is_prevented_this_way_rider(
+            "If damage is prevented this way, you draw a card."
+        ));
+        // Leading whitespace (chunker hand-off) is tolerated.
+        assert!(clause_is_prevented_this_way_rider(
+            "  When damage is prevented this way, sacrifice an Equipment."
+        ));
+        // The same-sentence "equal to the damage prevented this way" form is NOT a
+        // separate-sentence rider (Swans of Bryn Argoll's working class).
+        assert!(!clause_is_prevented_this_way_rider(
+            "The source's controller draws cards equal to the damage prevented this way."
+        ));
+        // An unrelated following instruction is not a rider.
+        assert!(!clause_is_prevented_this_way_rider("You draw a card."));
+    }
+
+    /// CR 615.5 + CR 609.7 (issue #5658): New Way Forward's separate-sentence
+    /// "When damage is prevented this way, …" rider must fold into the preceding
+    /// prevention as a `ContinuationStep` (so `prevent_damage.rs` installs it as
+    /// the shield's `runtime_execute`), and "that source's controller" must lower
+    /// to `PostReplacementSourceController` — not a dangling `ParentTargetController`.
+    #[test]
+    fn new_way_forward_rider_folds_into_the_prevention_shield() {
+        use crate::types::ability::SubAbilityLink;
+        let parsed = parse_oracle_text(
+            "The next time a source of your choice would deal damage to you this turn, \
+             prevent that damage. When damage is prevented this way, New Way Forward \
+             deals that much damage to that source's controller and you draw that many cards.",
+            "New Way Forward",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let prevent = &parsed.abilities[0];
+        assert!(matches!(*prevent.effect, Effect::PreventDamage { .. }));
+        let rider = prevent
+            .sub_ability
+            .as_ref()
+            .expect("the prevention must carry the rider as a sub-ability");
+        assert_eq!(
+            rider.sub_link,
+            SubAbilityLink::ContinuationStep,
+            "the 'When damage is prevented this way' sentence is a rider, not a sibling"
+        );
+        assert!(matches!(
+            &*rider.effect,
+            Effect::DealDamage {
+                target: TargetFilter::PostReplacementSourceController,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -17265,6 +17797,60 @@ mod tests {
         ));
     }
 
+    /// #5656 + CR 614.1a: Archmage Ascension's "As long as ~ has six
+    /// or more quest counters on it, if you would draw a card, you may instead
+    /// search your library for a card, ..." gates an optional individual-draw
+    /// substitute on a source-counter state. The gate's own comma previously
+    /// steered effect extraction to the wrong clause, dropping the substitute to
+    /// Unimplemented and losing the counter gate entirely.
+    #[test]
+    fn archmage_ascension_conditional_optional_search_substitute() {
+        let def = parse_replacement_line(
+            "As long as this enchantment has six or more quest counters on it, \
+             if you would draw a card, you may instead search your library for a card, \
+             put that card into your hand, then shuffle.",
+            "Archmage Ascension",
+        )
+        .expect("Archmage Ascension draw replacement parses");
+
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert_eq!(def.draw_scope, Some(DrawReplacementScope::IndividualDraw));
+        // "you may instead" makes the substitution optional (accept/decline).
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        // The counter state is lifted to a typed OnlyIfQuantity gate resolved
+        // against the source enchantment, not dropped.
+        assert!(
+            matches!(
+                &def.condition,
+                Some(ReplacementCondition::OnlyIfQuantity {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOn {
+                            scope: crate::types::ability::ObjectScope::Source,
+                            counter_type: Some(ct),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 6 },
+                    active_player_req: None,
+                }) if *ct == crate::types::counter::CounterType::Generic("quest".to_string())
+            ),
+            "expected quest-counter GE 6 gate, got {:?}",
+            def.condition,
+        );
+        // The substitute must be a real search, not an Unimplemented stub.
+        assert!(
+            matches!(
+                &*def.execute.as_ref().expect("execute chain present").effect,
+                Effect::SearchLibrary { .. }
+            ),
+            "expected SearchLibrary substitute, got {:?}",
+            def.execute.as_ref().map(|e| &e.effect),
+        );
+    }
+
     /// CR 614.1a + CR 121.1: Opponent draw replacements with the shared
     /// except-first-draw-in-draw-step clause (Notion Thief / Hullbreacher class).
     #[test]
@@ -18921,6 +19507,72 @@ mod snapshot_tests {
             );
             node = ability.sub_ability.as_deref();
         }
+    }
+
+    /// CR 614.6 + CR 608.2d: Zur's Weirding — the draw-replacement execute must
+    /// thread the affected drawing player through "they reveal it" and "that
+    /// player draws", and peel "any other player may" to `AnyOtherPlayer`.
+    #[test]
+    fn zurs_weirding_draw_replacement_threads_affected_player_referents() {
+        use crate::types::ability::{AbilityCondition, OpponentMayScope};
+        let def = parse_replacement_line(
+            "If a player would draw a card, they reveal it instead. Then any other player may pay 2 life. \
+             If a player does, put that card into its owner's graveyard. Otherwise, that player draws a card.",
+            "Zur's Weirding",
+        )
+        .expect("Zur's Weirding must parse as a Draw replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::AnyPlayer));
+
+        let execute = def.execute.as_ref().expect("execute chain must be present");
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::RevealTop {
+                    player: TargetFilter::PostReplacementDamageTarget,
+                    count: 1,
+                }
+            ),
+            "reveal-it must target the drawing player via PostReplacementDamageTarget, got {:?}",
+            execute.effect
+        );
+
+        let opponent_may = execute
+            .sub_ability
+            .as_ref()
+            .expect("reveal must chain to opponent-may");
+        assert!(opponent_may.optional);
+        assert_eq!(
+            opponent_may.optional_for,
+            Some(OpponentMayScope::AnyOtherPlayer),
+            "any other player may must peel to AnyOtherPlayer"
+        );
+
+        let if_player_does = opponent_may
+            .sub_ability
+            .as_ref()
+            .expect("opponent-may must chain to if-a-player-does");
+        assert_eq!(
+            if_player_does.condition,
+            Some(AbilityCondition::effect_performed())
+        );
+
+        let else_draw = if_player_does
+            .else_ability
+            .as_ref()
+            .expect("if-a-player-does must carry otherwise draw");
+        assert!(
+            matches!(
+                *else_draw.effect,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::PostReplacementDamageTarget,
+                }
+            ),
+            "otherwise draw must draw one card for the drawing player, got {:?}",
+            else_draw.effect
+        );
     }
 
     /// CR 614.1a + CR 614.6: A "you may instead" lead-in on a draw

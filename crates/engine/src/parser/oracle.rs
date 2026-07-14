@@ -28,7 +28,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
-use super::oracle_nom::condition::{parse_graveyard_keyword_grant_sentence, parse_inner_condition};
+use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
 use super::oracle_nom::primitives::{parse_number as nom_parse_number, scan_contains};
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
@@ -1943,9 +1943,14 @@ use crate::parser::oracle_ir::ast::ActivatedConstraintAst;
 /// 2. "[effect] instead if [condition]" — mid-line "instead", condition AFTER
 /// 3. "[effect] instead" — trailing "instead"
 ///
-/// Any extracted "if [condition]" clause is parsed through the shared condition
-/// grammar (`parse_inner_condition`) and composed with any ability-word condition
-/// at the caller.
+/// Any extracted "if [condition]" clause is lowered through
+/// `conditions::lower_instead_condition` — the SINGLE AUTHORITY shared with the
+/// intra-chain override path (`build_instead_def`) — and composed with any
+/// ability-word condition at the caller. This path previously ran only the nom
+/// `StaticCondition` grammar, a strictly narrower vocabulary that cannot express
+/// a target-relative predicate; conditions the chain path lowers fine ("its
+/// controller has three or more poison counters") were silently dropped here, and
+/// the override was then published as an UNCONDITIONAL sibling ability.
 fn strip_instead_clause(
     text: &str,
     ctx: &mut ParseContext,
@@ -1961,10 +1966,11 @@ fn strip_instead_clause(
         if let Ok((cond_text, ())) =
             value::<_, _, OracleError<'_>, _>((), tag("if ")).parse(before.lower.trim_start())
         {
-            if let Some(condition) = parse_inner_condition(cond_text.trim())
-                .ok()
-                .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition))
-                .and_then(|condition| ability_word_to_ability_condition(&Some(condition), ctx))
+            if let Some(condition) =
+                crate::parser::oracle_effect::conditions::lower_instead_condition(
+                    cond_text.trim(),
+                    ctx,
+                )
             {
                 return (after.original.trim().to_string(), Some(condition), true);
             }
@@ -2008,10 +2014,8 @@ fn strip_instead_clause(
             // allow-noncombinator: structural sentence-boundary split, not parsing dispatch
             return (text.to_string(), None, false);
         }
-        let condition = parse_inner_condition(condition_text)
-            .ok()
-            .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition))
-            .and_then(|condition| ability_word_to_ability_condition(&Some(condition), ctx));
+        let condition =
+            crate::parser::oracle_effect::conditions::lower_instead_condition(condition_text, ctx);
         return (before.original.trim().to_string(), condition, true);
     }
 
@@ -5304,6 +5308,43 @@ pub(crate) fn parse_oracle_ir(
             } else {
                 parse_effect_chain_with_context(parse_line, AbilityKind::Spell, &mut ctx)
             };
+
+            // CR 614.15 + CR 608.2c: a PARTIAL cross-line self-replacement whose
+            // antecedent is a `Dig` ("Reveal the top five cards of your library. You
+            // may put a creature card from among them into your hand. Put the rest
+            // into your graveyard." / "Spell mastery — If <cond>, put up to TWO
+            // creature cards from among the revealed cards into your hand INSTEAD OF
+            // ONE.").
+            //
+            // The override's body cannot stand on its own: parsed in isolation it
+            // lowers to a bare `ChangeZone`, dropping the reveal, the library source
+            // and the rest-to-graveyard rider that the printed Dig carries. Binding
+            // THAT as the replacement would trade the double-execution for an effect
+            // LOSS. `try_parse_dig_instead_alternative` is the existing
+            // antecedent-parameterized handler for exactly this: it rebuilds the
+            // alternative as a full `Dig` that reuses the preceding Dig's source and
+            // reveal-mode and swaps only what the override actually changes
+            // (keep_count / up_to / filter / destination). It is reached intra-chain
+            // via the chunk ladder; here we hand it the previous LINE's def as the
+            // antecedent, which is the same relationship across a line boundary.
+            //
+            // The resulting alternative carries its own condition, so it flows into
+            // the ability-word merge and the cross-line binder below exactly like any
+            // other override — the binder wraps it in `ConditionInstead` and parks the
+            // printed Dig as the `else_ability` fallback.
+            let dig_alt = emitter.builder.peek_last_spell().and_then(|previous| {
+                crate::parser::oracle_effect::conditions::try_parse_dig_instead_alternative(
+                    &effect_line,
+                    Some(previous),
+                    AbilityKind::Spell,
+                    &mut ctx,
+                )
+            });
+            let is_cross_line_dig_alt = dig_alt.is_some();
+            if let Some(alt) = dig_alt {
+                def = alt;
+            }
+
             def.min_x_value = spell_min_x_value;
             def.description = Some(description);
             // CR 608.2c: Compose ability word condition with chain-extracted condition.
@@ -5336,11 +5377,36 @@ pub(crate) fn parse_oracle_ir(
             if has_roll_die_pattern(&lower) {
                 i = attach_die_result_branches_to_chain(&mut def, &lines, i);
             }
-            // CR 608.2c: Cross-line "instead" replacement — when a conditional line
-            // replaces the entire preceding ability, compose them so the engine resolves
-            // the binary choice correctly. The "instead" sub has the condition; the base
-            // ability becomes the fallback when the condition is not met.
-            if is_instead || is_instead_replacement_line(&effect_line) {
+            // CR 608.2c + CR 614.15: Cross-line "instead" self-replacement — a
+            // separate printed line (usually an ability word, per CR 614.15)
+            // replaces the preceding ability's effect. Compose them so the engine
+            // resolves the binary choice: the "instead" sub carries the condition;
+            // the base ability becomes the fallback when it is not met.
+            // CR 614.15: the residual self-replacement printings. The three gates above
+            // recognize the shapes we can BIND: the whole-clause forms (bare trailing
+            // "instead", ", instead <effect>", "<effect> instead if <cond>") and the
+            // partial quantity form with a Dig antecedent. Everything else that is
+            // still a self-replacement override reaches here — e.g. a partial override
+            // whose antecedent is NOT a Dig ("search your library for up to three basic
+            // Forest cards instead of two"), or one that replaces a NON-first clause of
+            // the base chain ("You may put that card onto the battlefield instead of
+            // putting it into your hand").
+            //
+            // Those need a clause-level antecedent selection and a tail that survives in
+            // BOTH branches, which the FirstEmitted binder cannot express. We do NOT
+            // guess at them — but neither may they be published as independent abilities,
+            // which is what happened before and made the engine run the base effect AND
+            // the replacement (CR 614.6). They fall to the honest-failure floor below.
+            //
+            // The "would" exclusion is CR 614.1: a replacement effect watches for an
+            // event that WOULD happen. A "would" clause names an EVENT (CR 614.1a) and is
+            // owned by the replacement machinery, not by this self-replacement binder —
+            // claiming it here would replace a working rider encoding with an honest red.
+            let effect_line_lower = effect_line.to_lowercase();
+            let is_unbindable_self_replacement = scan_contains(&effect_line_lower, "instead")
+                && !scan_contains(&effect_line_lower, "would");
+
+            if is_instead || is_cross_line_dig_alt || is_instead_replacement_line(&effect_line) {
                 if let Some(condition) = def.condition.take() {
                     if let Some(base_item) = emitter.pop_last_spell() {
                         // Re-emit the merged ability at the BASE item's ORIGINAL
@@ -5367,7 +5433,54 @@ pub(crate) fn parse_oracle_ir(
                     }
                     // No previous ability to compose with — restore condition and push standalone.
                     def.condition = Some(condition);
+                } else if emitter.builder.peek_last_spell().is_some() {
+                    // CR 614.6: "If an event is replaced, it never happens."
+                    //
+                    // The line IS a self-replacement override of the preceding
+                    // ability, but no condition lowered for it (from the clause, the
+                    // trailing "instead if <cond>", or an ability word), so there is
+                    // nothing to branch on and the override CANNOT be bound.
+                    //
+                    // Publishing it as an independent ability — which is what used to
+                    // happen — is the one thing we must never do: the engine then
+                    // performs the base effect AND the replacement, unconditionally.
+                    // Anoint with Affliction ("Corrupted — Exile that creature instead
+                    // if its controller has three or more poison counters") published a
+                    // second, condition-less `ChangeZone -> Exile` and exiled the target
+                    // even when the printed "mana value 3 or less" gate had already
+                    // refused to, and even with zero poison counters in play.
+                    //
+                    // Fail honestly instead: the base ability stands as printed and the
+                    // unbindable override is reported as unimplemented. This mirrors the
+                    // intra-chain `InsteadLowering::ConditionUnlowerable` floor.
+                    def.effect = Box::new(Effect::unimplemented("instead_override", &effect_line));
+                    def.sub_ability = None;
+                    def.else_ability = None;
                 }
+            } else if is_unbindable_self_replacement && emitter.builder.peek_last_spell().is_some()
+            {
+                // CR 614.6 + CR 614.15: the residual self-replacement printings — a
+                // PARTIAL override whose antecedent is not a Dig ("search your library
+                // for up to three basic Forest cards instead of two"), or one that
+                // replaces a NON-FIRST clause of the base chain ("You may put that card
+                // onto the battlefield instead of putting it into your hand").
+                //
+                // These have a perfectly good condition, so it is tempting to hand them to
+                // the binder above. That would be WRONG, and silently so: the binder binds
+                // the FIRST emitted clause and parks the base's tail in `else_ability`,
+                // which the runtime walks ONLY when the swap does not fire. Nissa's
+                // Pilgrimage would search for three basic Forests and then never reveal
+                // them, put one onto the battlefield, or shuffle. That trades a
+                // double-execution for an effect LOSS — a different silent wrong.
+                //
+                // A faithful bind needs clause-level antecedent selection plus a tail that
+                // survives in BOTH branches. Until that exists, fail honestly: the base
+                // ability stands exactly as printed and the override is reported
+                // unimplemented. Never an independent ability.
+                def.effect = Box::new(Effect::unimplemented("instead_override", &effect_line));
+                def.condition = None;
+                def.sub_ability = None;
+                def.else_ability = None;
             }
             emitter.ability_at(item_line, def);
             continue;
@@ -6221,11 +6334,44 @@ fn extract_mana_spend_trigger_from_chain(def: &mut AbilityDefinition) {
     if !matches!(&*def.effect, Effect::Mana { .. }) {
         return;
     }
-    if let Some(grant) = strip_mana_spend_trigger_node(&mut def.sub_ability) {
+    if let Some(mut grant) = strip_mana_spend_trigger_node(&mut def.sub_ability) {
+        // CR 707.10c: "… copy that spell AND you may choose new targets for the copy"
+        // (Pyromancer's Goggles, Primal Wellspring). The retarget sentence could not
+        // bind on the ordinary clause-streaming path, and not by accident: THIS fold is
+        // a post-pass, so when the continuation recognizer went looking for the
+        // sentence's antecedent the `CopySpell` did not exist yet — the copy is born
+        // right here, one pass later. The sentence therefore survived as an honest
+        // `orphaned_copy_retarget` residual, and now that the copy is real we reclaim
+        // it. Without this the copy is modeled but permanently un-retargetable.
+        if let crate::types::mana::ManaSpellGrant::TriggerOnSpend { ability, .. } = &mut grant {
+            strip_orphaned_copy_retarget_node(&mut def.sub_ability, ability);
+        }
         if let Effect::Mana { grants, .. } = &mut *def.effect {
             grants.push(grant);
         }
     }
+}
+
+/// CR 707.10c: Walk the sub-ability chain for the `orphaned_copy_retarget` residual left
+/// by the retarget sentence, fold it into `copy_ability`'s `CopySpell`, and remove the
+/// node. Declines any gap node whose text is not a retarget clause, so an unrelated
+/// residual is never silently swallowed.
+fn strip_orphaned_copy_retarget_node(
+    slot: &mut Option<Box<AbilityDefinition>>,
+    copy_ability: &mut AbilityDefinition,
+) -> bool {
+    let Some(sub) = slot.as_mut() else {
+        return false;
+    };
+    if let Some(desc) = sub.effect.unimplemented_description() {
+        let lower = desc.to_lowercase();
+        if super::oracle_effect::sequence::absorb_orphaned_copy_retarget(copy_ability, &lower) {
+            // Remove this node, promote its child (usually None).
+            *slot = sub.sub_ability.take();
+            return true;
+        }
+    }
+    strip_orphaned_copy_retarget_node(&mut sub.sub_ability, copy_ability)
 }
 
 /// Recursively walk the sub_ability chain. If a node is an `Unimplemented`
@@ -6451,14 +6597,66 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         }
     }
     // CR 602.5: "if <condition>" gate (Lightning Storm "if ~ is on the stack").
+    // An unrecognized condition fails the whole gate (the `?`) — see
+    // `require_restriction_condition`.
     if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>("if ")).parse(lower.as_str()) {
         let condition_start = phrase.len() - rest.len();
         let condition_text = phrase[condition_start..].trim();
-        return Some(vec![ActivationRestriction::RequiresCondition {
-            condition: parse_restriction_condition(condition_text),
-        }]);
+        return Some(vec![require_restriction_condition(condition_text)?]);
     }
     None
+}
+
+/// CR 602.5: Build a `RequiresCondition` activation restriction, or fail.
+///
+/// The single authority for turning restriction text into an `ActivationRestriction`.
+/// It returns `None` — never `RequiresCondition { condition: None }` — when the
+/// condition does not parse.
+///
+/// This distinction is the whole point: `restrictions::evaluate_activation_restriction`
+/// evaluates a `None` condition with `Option::is_none_or`, i.e. as ALWAYS TRUE. So an
+/// unparsed condition stored as `None` does not merely lose the restriction — it
+/// consumes the source clause (removing it from the text that would otherwise become
+/// `Effect::Unimplemented`) and then reports the ability as fully supported while
+/// letting it be activated in precisely the situations the card forbids. Callers must
+/// propagate this `None` so the source text stays visible to the ordinary fallback.
+fn require_restriction_condition(condition_text: &str) -> Option<ActivationRestriction> {
+    Some(ActivationRestriction::RequiresCondition {
+        condition: Some(parse_restriction_condition(condition_text)?),
+    })
+}
+
+/// CR 602.5: Atomically commit an "activate only if <condition>" gate found while
+/// peeling activation constraints off the end of an ability line.
+///
+/// The single authority for that commit. Every peeling branch must route through it,
+/// because the commit is not one mutation but three that have to succeed or fail
+/// together: the trailing cadence suffix ("… and only once each turn") records its own
+/// restriction, the condition records another, and the caller truncates the source line
+/// to drop the text it just consumed.
+///
+/// Returns `false` having mutated NOTHING when the condition does not parse. The caller
+/// must then leave `remaining` intact so the clause stays in the ability text and
+/// surfaces as `Effect::Unimplemented`. Committing the cadence restriction while
+/// dropping the condition — the pre-`SharedRestrictionParse` behavior — produced an
+/// ability that was rate-limited but otherwise activatable at will, which is not what
+/// any of these cards say.
+fn commit_requires_condition(
+    condition_text: &str,
+    restrictions: &mut Vec<ActivationRestriction>,
+) -> bool {
+    let mut text = condition_text.trim().to_string();
+    // Stage the cadence restrictions so a failed condition parse commits none of them.
+    let mut staged: Vec<ActivationRestriction> = Vec::new();
+    strip_once_per_turn_suffix(&mut text, &mut staged);
+    let Some(condition) = parse_restriction_condition(&text) else {
+        return false;
+    };
+    restrictions.append(&mut staged);
+    restrictions.push(ActivationRestriction::RequiresCondition {
+        condition: Some(condition),
+    });
+    true
 }
 
 // CR 602.1b: Activation instructions after the colon restrict when an ability
@@ -6544,17 +6742,15 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
 
         if let Some((before, after)) = tp.rsplit_around(" and only if ") {
             if !before.original.trim().is_empty() {
-                let mut condition_text = after.original.trim().to_string();
-                strip_once_per_turn_suffix(&mut condition_text, &mut constraints.restrictions);
+                // Commit before truncating: an unparsed condition must leave `remaining`
+                // whole so the clause reaches the Unimplemented fallback.
+                if !commit_requires_condition(after.original, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = before
                     .original
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&condition_text),
-                    });
                 continue;
             }
         }
@@ -6792,80 +6988,62 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
 
         if let Some(idx) = tp.rfind("activate only if ") {
             if idx == 0 {
-                let mut condition_text = remaining["activate only if ".len()..].trim().to_string();
-                strip_once_per_turn_suffix(&mut condition_text, &mut constraints.restrictions);
+                let condition_text = remaining["activate only if ".len()..].to_string();
+                if !commit_requires_condition(&condition_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining.clear();
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&condition_text),
-                    });
                 break;
             }
             if lower[..idx].ends_with(". ") {
-                let mut condition_text = remaining[idx + "activate only if ".len()..]
-                    .trim()
-                    .to_string();
-                strip_once_per_turn_suffix(&mut condition_text, &mut constraints.restrictions);
+                let condition_text = remaining[idx + "activate only if ".len()..].to_string();
+                if !commit_requires_condition(&condition_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&condition_text),
-                    });
                 continue;
             }
         }
 
         if let Some(idx) = tp.rfind("activate only from ") {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate only from ".len()..]
-                    .trim()
-                    .to_string();
+                let restriction_text = remaining[idx + "activate only from ".len()..].trim();
+                let full_text = format!("from {restriction_text}");
+                if !commit_requires_condition(&full_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                let full_text = format!("from {restriction_text}");
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&full_text),
-                    });
                 continue;
             }
         }
 
         if let Some(idx) = tp.rfind("activate only ") {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate only ".len()..].trim().to_string();
+                let restriction_text = remaining[idx + "activate only ".len()..].to_string();
+                if !commit_requires_condition(&restriction_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&restriction_text),
-                    });
                 continue;
             }
         }
 
         if let Some(idx) = tp.rfind("activate no more than ") {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate no more than ".len()..]
-                    .trim()
-                    .to_string();
+                let restriction_text = remaining[idx + "activate no more than ".len()..].trim();
+                let full_text = format!("no more than {restriction_text}");
+                if !commit_requires_condition(&full_text, &mut constraints.restrictions) {
+                    break;
+                }
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
-                let full_text = format!("no more than {restriction_text}");
-                constraints
-                    .restrictions
-                    .push(ActivationRestriction::RequiresCondition {
-                        condition: parse_restriction_condition(&full_text),
-                    });
                 continue;
             }
         }

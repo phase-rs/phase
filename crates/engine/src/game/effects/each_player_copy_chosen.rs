@@ -25,8 +25,8 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::players;
 use crate::game::quantity::aggregate_property_over;
 use crate::types::ability::{
-    AggregateFunction, ContinuousModification, CopyScale, Effect, EffectError, EffectKind,
-    PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    AggregateFunction, ContinuousModification, CopyChooseScope, CopyScale, Effect, EffectError,
+    EffectKind, PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -45,6 +45,9 @@ pub(crate) struct CopyChosenParams {
     pub max: u32,
     pub copy_modifications: Vec<ContinuousModification>,
     pub scale: Option<CopyScale>,
+    /// CR 102.1 + CR 103.1: whose battlefield each chooser draws eligible objects
+    /// from, relative to the chooser.
+    pub choose_scope: CopyChooseScope,
     pub source_id: ObjectId,
     pub source_controller: PlayerId,
     pub scoped_players: Vec<PlayerId>,
@@ -59,6 +62,7 @@ impl CopyChosenParams {
             max: p.max,
             copy_modifications: p.copy_modifications.clone(),
             scale: p.scale.clone(),
+            choose_scope: p.choose_scope,
             source_id: p.source_id,
             source_controller: p.source_controller,
             scoped_players: p.scoped_players.clone(),
@@ -74,19 +78,21 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (choose_filter, min, max, copy_modifications, scale) = match &ability.effect {
+    let (choose_filter, min, max, copy_modifications, scale, choose_scope) = match &ability.effect {
         Effect::EachPlayerCopyChosen {
             choose_filter,
             min,
             max,
             copy_modifications,
             scale,
+            choose_scope,
         } => (
             choose_filter.clone(),
             *min,
             *max,
             copy_modifications.clone(),
             scale.clone(),
+            *choose_scope,
         ),
         _ => {
             return Err(EffectError::MissingParam(
@@ -112,6 +118,7 @@ pub fn resolve(
         max,
         copy_modifications,
         scale,
+        choose_scope,
         source_id: ability.source_id,
         source_controller: ability.controller,
         scoped_players: player_order.clone(),
@@ -147,7 +154,13 @@ pub(crate) fn advance_to_next_player(
 
         let ctx =
             FilterContext::from_source_with_controller(params.source_id, params.source_controller);
-        let eligible = compute_eligible(state, player, &params.choose_filter, &ctx);
+        let eligible = compute_eligible(
+            state,
+            player,
+            &params.choose_filter,
+            params.choose_scope,
+            &ctx,
+        );
 
         // CR 101.3: a player with no eligible object does nothing — skip.
         if eligible.is_empty() {
@@ -176,6 +189,7 @@ pub(crate) fn advance_to_next_player(
             choose_filter: params.choose_filter.clone(),
             copy_modifications: params.copy_modifications.clone(),
             scale: params.scale.clone(),
+            choose_scope: params.choose_scope,
             source_id: params.source_id,
             source_controller: params.source_controller,
             remaining_players: rest,
@@ -365,20 +379,34 @@ pub(crate) fn drain_pending(state: &mut GameState, events: &mut Vec<GameEvent>) 
     let _ = result;
 }
 
-/// Compute a player's own battlefield objects matching `choose_filter`.
+/// CR 102.1 + CR 103.1: The battlefield controller a chooser draws their
+/// eligible pool from, given the effect's `choose_scope`. `Chooser` = the
+/// chooser themselves; `Neighbor { direction }` = the seat-neighbor resolved by
+/// the `players::neighbor` authority.
+fn pool_controller(state: &GameState, chooser: PlayerId, scope: CopyChooseScope) -> PlayerId {
+    match scope {
+        CopyChooseScope::Chooser => chooser,
+        CopyChooseScope::Neighbor { direction } => players::neighbor(state, chooser, direction),
+    }
+}
+
+/// Compute the objects matching `choose_filter` on the battlefield of the
+/// controller `scope` designates relative to `player` (their own or a neighbor's).
 fn compute_eligible(
     state: &GameState,
     player: PlayerId,
     choose_filter: &TargetFilter,
+    scope: CopyChooseScope,
     ctx: &FilterContext<'_>,
 ) -> Vec<ObjectId> {
+    let controller = pool_controller(state, player, scope);
     state
         .battlefield
         .iter()
         .copied()
         .filter(|id| {
             state.objects.get(id).is_some_and(|obj| {
-                obj.controller == player
+                obj.controller == controller
                     && !obj.is_emblem
                     && matches_target_filter(state, *id, choose_filter, ctx)
             })
@@ -393,12 +421,16 @@ pub(crate) fn is_live_eligible_choice(
     player: PlayerId,
     id: ObjectId,
     choose_filter: &TargetFilter,
+    scope: CopyChooseScope,
     source_id: ObjectId,
     source_controller: PlayerId,
 ) -> bool {
     let ctx = FilterContext::from_source_with_controller(source_id, source_controller);
+    // CR 102.1 + CR 103.1: re-resolve the eligibility controller live so a
+    // seat-relative pool tracks any control change since the prompt was seeded.
+    let controller = pool_controller(state, player, scope);
     state.objects.get(&id).is_some_and(|obj| {
-        obj.controller == player
+        obj.controller == controller
             && !obj.is_emblem
             && state.battlefield.contains(&id)
             && matches_target_filter(state, id, choose_filter, &ctx)
@@ -422,6 +454,7 @@ fn make_pending(
         max: params.max,
         copy_modifications: params.copy_modifications.clone(),
         scale: params.scale.clone(),
+        choose_scope: params.choose_scope,
         source_id: params.source_id,
         source_controller: params.source_controller,
         scoped_players: params.scoped_players.clone(),
@@ -482,6 +515,22 @@ mod tests {
         copy_modifications: Vec<ContinuousModification>,
         scale: Option<CopyScale>,
     ) -> ResolvedAbility {
+        ability_scoped(
+            min,
+            max,
+            copy_modifications,
+            scale,
+            CopyChooseScope::Chooser,
+        )
+    }
+
+    fn ability_scoped(
+        min: u32,
+        max: u32,
+        copy_modifications: Vec<ContinuousModification>,
+        scale: Option<CopyScale>,
+        choose_scope: CopyChooseScope,
+    ) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::EachPlayerCopyChosen {
                 choose_filter: creature_filter(),
@@ -489,6 +538,7 @@ mod tests {
                 max,
                 copy_modifications,
                 scale,
+                choose_scope,
             },
             vec![],
             ObjectId(500),
@@ -779,6 +829,207 @@ mod tests {
         assert!(
             token.has_keyword(&crate::types::keywords::Keyword::Menace),
             "menace granted to the copy"
+        );
+    }
+
+    /// Runtime direction proof (Caught in a Parallel Universe class): with
+    /// `choose_scope: Neighbor { Left }` in a THREE-player ring, each chooser's
+    /// pool is their LEFT neighbor's battlefield — a case a 2-player ring cannot
+    /// distinguish (there `neighbor(_,Left) == neighbor(_,Right)`). In seat ring
+    /// [P0,P1,P2], `neighbor(_,Left) = next_player`: P0←P1, P1←P2, P2←P0 (wrap).
+    /// Each chooser has a single distinct creature → all forced singles → the
+    /// walk auto-resolves with no prompt. A Left→Right swap in the resolver map
+    /// would make P0 copy P2's creature (power 7) instead of P1's (power 6),
+    /// failing these assertions.
+    #[test]
+    fn neighbor_left_scope_draws_from_left_neighbor_three_player() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.active_player = PlayerId(0);
+        // One distinct creature per player, distinct base power for a load-bearing
+        // direction signal.
+        add_creature(&mut state, CardId(1), PlayerId(0), "Alpha", 5, false);
+        add_creature(&mut state, CardId(2), PlayerId(1), "Bravo", 6, false);
+        add_creature(&mut state, CardId(3), PlayerId(2), "Charlie", 7, false);
+
+        let ab = ability_scoped(
+            1,
+            1,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Menace,
+            }],
+            None,
+            CopyChooseScope::Neighbor {
+                direction: crate::types::ability::SeatDirection::Left,
+            },
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ab, &mut events).unwrap();
+
+        // Forced singles across the ring → no interactive prompt.
+        assert!(
+            !matches!(
+                state.waiting_for,
+                WaitingFor::EachPlayerCopyChosenSelection { .. }
+            ),
+            "every chooser's left-neighbor pool is a forced single → no prompt"
+        );
+
+        // Each player's token copies their LEFT neighbor's creature.
+        let token_for = |state: &GameState, owner: PlayerId| -> ObjectId {
+            let ids: Vec<ObjectId> = state
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|o| o.is_token && o.controller == owner)
+                })
+                .collect();
+            assert_eq!(ids.len(), 1, "exactly one token for {owner:?}");
+            ids[0]
+        };
+        for (owner, want_name, want_power) in [
+            (PlayerId(0), "Bravo", 6),   // P0's left neighbor is P1
+            (PlayerId(1), "Charlie", 7), // P1's left neighbor is P2
+            (PlayerId(2), "Alpha", 5),   // P2's left neighbor is P0 (wrap)
+        ] {
+            let tok = state.objects.get(&token_for(&state, owner)).unwrap();
+            assert_eq!(tok.name, want_name, "{owner:?} copies left neighbor");
+            assert_eq!(
+                tok.base_power,
+                Some(want_power),
+                "{owner:?} copies left neighbor's power"
+            );
+            assert!(
+                tok.has_keyword(&Keyword::Menace),
+                "copy modification (menace) applied for {owner:?}"
+            );
+        }
+    }
+
+    /// Runtime proof of the neighbor pool + CR 608.2c live revalidation
+    /// (2-player). P0's `Neighbor { Left }` pool is P1's battlefield: with P1
+    /// controlling two creatures P0 is prompted from P1's creatures (NOT P0's
+    /// own). `is_live_eligible_choice` accepts a neighbor's object and rejects a
+    /// non-neighbor (P0-controlled) object; the resolved token copies the chosen
+    /// neighbor creature.
+    #[test]
+    fn neighbor_left_scope_prompts_from_neighbor_pool_and_revalidates() {
+        use crate::game::engine::apply;
+        use crate::types::actions::GameAction;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let p0c = add_creature(&mut state, CardId(1), PlayerId(0), "Mine", 2, false);
+        let p1a = add_creature(&mut state, CardId(2), PlayerId(1), "NeighborA", 4, false);
+        let p1b = add_creature(&mut state, CardId(3), PlayerId(1), "NeighborB", 5, false);
+
+        let ab = ability_scoped(
+            1,
+            1,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Menace,
+            }],
+            None,
+            CopyChooseScope::Neighbor {
+                direction: crate::types::ability::SeatDirection::Left,
+            },
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ab, &mut events).unwrap();
+
+        // P0 is prompted from P1's (left-neighbor's) two creatures — not P0's own.
+        match &state.waiting_for {
+            WaitingFor::EachPlayerCopyChosenSelection {
+                player, eligible, ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                let ids: Vec<ObjectId> = eligible
+                    .iter()
+                    .filter_map(|t| match t {
+                        TargetRef::Object(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    ids.contains(&p1a) && ids.contains(&p1b),
+                    "P1's two creatures"
+                );
+                assert!(!ids.contains(&p0c), "P0's own creature is NOT eligible");
+            }
+            other => panic!("expected P0 EachPlayerCopyChosenSelection, got {other:?}"),
+        }
+
+        // CR 608.2c: neighbor revalidation — a non-neighbor (P0-controlled) object
+        // is rejected; the neighbor's object is accepted.
+        let scope = CopyChooseScope::Neighbor {
+            direction: crate::types::ability::SeatDirection::Left,
+        };
+        let filter = creature_filter();
+        assert!(
+            !is_live_eligible_choice(
+                &state,
+                PlayerId(0),
+                p0c,
+                &filter,
+                scope,
+                ObjectId(500),
+                PlayerId(0)
+            ),
+            "P0's own creature is not in P0's left-neighbor pool"
+        );
+        assert!(
+            is_live_eligible_choice(
+                &state,
+                PlayerId(0),
+                p1a,
+                &filter,
+                scope,
+                ObjectId(500),
+                PlayerId(0)
+            ),
+            "the left neighbor's creature is eligible"
+        );
+
+        // P0 chooses one of P1's creatures → P0's token copies it.
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(p1a)],
+            },
+        )
+        .expect("selection applies");
+
+        let p0_tokens: Vec<ObjectId> = state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|o| o.is_token && o.controller == PlayerId(0))
+            })
+            .collect();
+        assert_eq!(p0_tokens.len(), 1, "one P0 token");
+        let tok = state.objects.get(&p0_tokens[0]).unwrap();
+        assert_eq!(
+            tok.name, "NeighborA",
+            "P0's token copies the chosen neighbor creature"
+        );
+        assert_eq!(tok.base_power, Some(4));
+        assert!(tok.has_keyword(&Keyword::Menace));
+        assert!(
+            !matches!(
+                state.waiting_for,
+                WaitingFor::EachPlayerCopyChosenSelection { .. }
+            ),
+            "walk completes after the only prompted chooser resolves"
         );
     }
 }

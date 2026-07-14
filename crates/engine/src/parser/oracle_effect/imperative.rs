@@ -1778,7 +1778,9 @@ pub(super) fn parse_targeted_action_ast(
                 }
             ) {
                 count = QuantityExpr::Ref {
-                    qty: QuantityRef::PreviousEffectAmount,
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: crate::types::ability::DamageChannel::Total,
+                    },
                 };
             }
             let filter = parse_discard_card_filter(after_discard);
@@ -8241,7 +8243,8 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     // `parse_target("... spell with mana value X or less")` already scopes
     // the spell phrase to the stack through the shared target parser. Keep this
     // path on that building block and only apply the trailing X definition.
-    let target = super::apply_where_x_to_filter(target, where_x_expression.as_deref());
+    // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
+    let target = super::apply_where_x_to_filter(target, where_x_expression.as_deref())?;
     // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
     let unless_pay = parse_counter_unless_pay(rest)?;
     Some(ZoneCounterImperativeAst::Counter {

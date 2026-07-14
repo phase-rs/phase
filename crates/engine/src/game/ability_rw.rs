@@ -1910,6 +1910,8 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::CastVariantPaidInstead { .. }
         | AbilityCondition::HasMaxSpeed
         | AbilityCondition::IsMonarch
+        // CR 309.7: controller-state predicate; reads no object, writes nothing.
+        | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
         | AbilityCondition::IsRingBearer
@@ -2070,7 +2072,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
-        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::ChosenNumber
@@ -2370,6 +2372,9 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::IsCommander
+        // CR 205.3m: a unit variant with no nested TargetFilter/QuantityExpr/
+        // ControllerRef interior — nothing to descend, so no legacy referent.
+        | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::NotHistoric
@@ -2624,6 +2629,8 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::IsCommander
+        // CR 205.3m: no nested interior to carry a member-bound referent.
+        | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::NotHistoric
@@ -3028,6 +3035,7 @@ fn legacy_effect(x: &Effect) -> bool {
             max: _,
             copy_modifications,
             scale: _,
+            choose_scope: _,
         } => {
             legacy_target_filter(choose_filter)
                 || copy_modifications
@@ -3577,6 +3585,7 @@ fn walk_ability(
         player_scope,
         starting_with,
         repeat_for,
+        announced_x,
         multi_target,
         target_constraints,
         unless_pay,
@@ -3598,7 +3607,7 @@ fn walk_ability(
         optional_for: _,
         target_choice_timing: _,
         description: _,
-        min_x_value: _,
+        min_x_value: _, // u32, no read
         cant_be_copied: _,
         copy_count_status: _,
         forward_result: _,
@@ -3647,6 +3656,12 @@ fn walk_ability(
     }
     if let Some(rf) = repeat_for {
         acc.merge(rw_quantity_expr(rf));
+    }
+    // CR 601.2b: the announce-time-locked X definition is a live board read, merely
+    // read at announcement rather than at resolution. Same read-kind as any other
+    // quantity slot.
+    if let Some(ax) = announced_x {
+        acc.merge(rw_quantity_expr(ax));
     }
     if let Some(MultiTargetSpec { min, max }) = multi_target {
         acc.merge(rw_quantity_expr(min));
@@ -3699,6 +3714,7 @@ fn walk_definition(
         player_scope,
         starting_with,
         repeat_for,
+        announced_x,
         multi_target,
         target_constraints,
         unless_pay,
@@ -3758,6 +3774,12 @@ fn walk_definition(
     }
     if let Some(rf) = repeat_for {
         acc.merge(rw_quantity_expr(rf));
+    }
+    // CR 601.2b: the announce-time-locked X definition is a live board read, merely
+    // read at announcement rather than at resolution. Same read-kind as any other
+    // quantity slot.
+    if let Some(ax) = announced_x {
+        acc.merge(rw_quantity_expr(ax));
     }
     if let Some(MultiTargetSpec { min, max }) = multi_target {
         acc.merge(rw_quantity_expr(min));
@@ -4733,6 +4755,8 @@ fn rw_effect(
             cards: _,
             destination,
             tapped: _,
+            library_position: _,
+            library_players: _,
         } => {
             let mut p = RwProfile::empty();
             p.writes_external.set(StateKind::SetMembership);
@@ -5661,7 +5685,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // Resolution-local / turn- / commander-scoped: no per-source binding
         // (member-invariant under uniformity).
         QuantityRef::ExiledFromHandThisResolution
-        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::AttackedThisTurn { .. }
@@ -5886,6 +5910,8 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         | AbilityCondition::CastVariantPaidInstead { .. }
         | AbilityCondition::HasMaxSpeed
         | AbilityCondition::IsMonarch
+        // CR 309.7: controller-state predicate; reads no object, writes nothing.
+        | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
         | AbilityCondition::IsRingBearer

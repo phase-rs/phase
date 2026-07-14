@@ -876,6 +876,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.graveyard_cast_permissions_used_per_type.clear();
     // CR 601.2b: Reset per-turn CastFromHandFree once-per-turn tracking (Zaffai).
     state.hand_cast_free_permissions_used.clear();
+    // CR 118.9 + CR 601.2b + CR 400.7: Reset per-turn once-per-turn
+    // CastWithAlternativeCost grant tracking (As Foretold).
+    state.alt_cost_grant_permissions_used.clear();
     // CR 601.2a: Reset per-turn PlayFromExile source usage (Evelyn-style permissions).
     state.exile_play_permissions_used.clear();
     // CR 601.2a + CR 113.6b: Reset per-turn ExileCastPermission once-per-turn
@@ -2514,7 +2517,8 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                         .unwrap_or_else(|| super::players::next_player(state, state.active_player));
                     let valid_block_targets =
                         super::combat::get_valid_block_targets_for_player(state, defending);
-                    let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+                    let valid_blocker_ids =
+                        super::combat::ordered_valid_blocker_ids(&valid_block_targets);
                     let block_requirements =
                         super::combat::block_requirements_for_player(state, defending);
                     let blocker_constraints = super::combat::blocker_constraints_for_player(

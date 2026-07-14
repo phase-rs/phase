@@ -97,10 +97,17 @@ pub(crate) fn is_defiler_cost_pattern(lower: &str) -> bool {
 /// structural pre-filter; the lowering (`parse_spells_alternative_cost`)
 /// re-parses with combinators and strict-fails on non-mana / unparsed filters.
 pub(crate) fn is_spells_alternative_cost_pattern(lower: &str) -> bool {
-    lower_starts_with(lower, "you may pay ")
+    // CR 118.9 + CR 601.2b: an optional once-per-turn frequency prefix (As
+    // Foretold: "Once each turn, ...") precedes the "you may pay ..." grant.
+    // Strip it via the shared lowering combinator before the structural gate.
+    let after_frequency = opt(crate::parser::oracle_static::parse_alt_cost_frequency_prefix)
+        .parse(lower)
+        .map_or(lower, |(rest, _)| rest);
+    lower_starts_with(after_frequency, "you may pay ")
         && scan_contains(lower, "rather than pay")
         && scan_contains(lower, "mana cost for")
-        && scan_contains(lower, "spells you cast")
+        // Accept singular ("a spell you cast") and plural ("spells you cast").
+        && (scan_contains(lower, "spell you cast") || scan_contains(lower, "spells you cast"))
 }
 
 /// CR 118.9 + CR 701.59a: Collect-evidence alternative-cost grant static —

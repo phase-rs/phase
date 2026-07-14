@@ -8,6 +8,7 @@ import type {
   LegalActionsResult,
   ManaCost,
   PlayerId,
+  PersistedGameState,
   SubmitResult,
 } from "./types";
 import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
@@ -35,11 +36,12 @@ export interface DeckData {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 14 — PrecastCopyShortcut action and its two WaitingFor variants.
  * 13 — WaitingFor::MulliganBottomCards removed; mulligan bottoming folded
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 13;
+export const PROTOCOL_VERSION = 14;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -413,7 +415,7 @@ export class WebSocketAdapter implements EngineAdapter {
     return this.snapshot;
   }
 
-  restoreState(_state: GameState): void {
+  restoreState(_state: PersistedGameState): void {
     throw new AdapterError(
       AdapterErrorCode.WASM_ERROR,
       "Undo not supported in multiplayer",

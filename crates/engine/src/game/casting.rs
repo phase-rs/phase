@@ -1639,6 +1639,10 @@ fn transient_granted_spell_keywords_for(
 pub(super) struct GrantedSpellAlternativeCost {
     pub(super) cost: AbilityCost,
     pub(super) timing_permission: Option<CastTimingPermission>,
+    /// CR 118.9 + CR 601.2b: `Some(source_id)` when the grant is `OncePerTurn`
+    /// (As Foretold), so the caller records the per-turn slot at `finalize_cast`.
+    /// `None` for `Unlimited` grants (Fist of Suns, Rooftop Storm, Jodah).
+    pub(super) once_per_turn_source: Option<ObjectId>,
 }
 
 pub(super) fn granted_spell_alternative_cost(
@@ -1667,10 +1671,21 @@ pub(super) fn granted_spell_alternative_cost_for(
         let StaticMode::CastWithAlternativeCost {
             cost,
             timing_permission,
+            frequency,
         } = &def.mode
         else {
             continue;
         };
+
+        // CR 118.9 + CR 601.2b: a once-per-turn grant already applied this turn
+        // offers nothing further (As Foretold's slot is spent for the turn).
+        if *frequency == CastFrequency::OncePerTurn
+            && state
+                .alt_cost_grant_permissions_used
+                .contains(&source_obj.id)
+        {
+            continue;
+        }
 
         let matches = def.affected.as_ref().is_none_or(|filter| {
             super::filter::spell_object_matches_filter_from_state_for(
@@ -1688,6 +1703,8 @@ pub(super) fn granted_spell_alternative_cost_for(
             return Some(GrantedSpellAlternativeCost {
                 cost: cost.clone(),
                 timing_permission: *timing_permission,
+                once_per_turn_source: (*frequency == CastFrequency::OncePerTurn)
+                    .then_some(source_obj.id),
             });
         }
     }
@@ -10571,7 +10588,7 @@ fn continue_with_prepared(
 
     // Build the resolved ability from the ability_def, or a placeholder for auras
     // with no spell-level ability (aura targeting is via the Enchant keyword).
-    let resolved = if let Some(ref ability_def) = prepared.ability_def {
+    let mut resolved = if let Some(ref ability_def) = prepared.ability_def {
         // CR 601.2c: The player announcing a spell with modes chooses the mode(s).
         if let Some(ref modal_choice) = prepared.modal {
             let placeholder = ResolvedAbility::new(
@@ -10677,6 +10694,12 @@ fn continue_with_prepared(
             player,
         )
     };
+
+    // CR 601.2b: X is announced BEFORE targets are chosen (CR 601.2c). A text-defined,
+    // announce-locked X ("where X is <count> as you cast this spell") is measured here,
+    // once, and published onto the object's single X channel — every target count, damage
+    // division, and resolution-time amount below then reads the SAME locked number.
+    super::ability_utils::publish_announced_x(state, &mut resolved, player, prepared.object_id);
 
     // 5. Handle targeting -- ensure layers evaluated before target legality
     super::layers::flush_layers(state);
@@ -12016,17 +12039,15 @@ fn can_cast_prepared_now_with_probe(
             );
     }
 
-    // CR 702.34a + CR 118.3 + CR 119.8: Flashback's non-mana cost (e.g. "pay N
-    // life") is an additional cost. Pre-check affordability so a CantLoseLife
-    // lock or insufficient life filters the flashback from legal actions.
+    // CR 702.34a + CR 118.3 + CR 601.2h: Flashback's alternative cost must be
+    // payable in full. Pre-check every non-mana component so legal actions do
+    // not offer a cast that the payment pipeline must reject later.
     if prepared.casting_variant == CastingVariant::Flashback {
         if let Some(FlashbackCost::NonMana(ref cost)) =
             super::keywords::effective_flashback_cost(state, prepared.object_id)
         {
-            if let Some(amount) = find_pay_life_cost(cost, state, player, prepared.object_id) {
-                if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, amount) {
-                    return false;
-                }
+            if !cost.is_payable(state, player, prepared.object_id) {
+                return false;
             }
         }
     }
@@ -13664,44 +13685,29 @@ fn apply_mana_spell_grants(
     // target/mode setup stay under the trigger dispatcher.
     for unit in spent_units {
         for grant in &unit.grants {
-            let ManaSpellGrant::TriggerOnSpend {
-                restriction,
-                ability,
-            } = grant
-            else {
+            let ManaSpellGrant::TriggerOnSpend { filter, ability } = grant else {
                 continue;
             };
-            // CR 106.6: Gate the reflexive trigger on the spend filter. Most
-            // restrictions are evaluated purely from `SpellMeta` via
-            // `allows_spell`; the commander-relational filter
-            // (`SharesCreatureTypeWithCommander`) needs game state and is
-            // evaluated here, the single authoritative spend-check site.
-            let passes = match restriction.as_ref() {
-                None => true,
-                Some(crate::types::mana::ManaRestriction::SharesCreatureTypeWithCommander) => {
-                    spell_meta.as_ref().is_some_and(|meta| {
-                        // CR 205.3m + CR 903.3: the spell must be a creature AND
-                        // share at least one creature type with the controller's
-                        // commander(s).
-                        let is_creature = meta
-                            .types
-                            .iter()
-                            .any(|t| t.eq_ignore_ascii_case("Creature"));
-                        if !is_creature {
-                            return false;
-                        }
-                        let commander_types =
-                            super::commander::commander_creature_types(state, caster);
-                        meta.subtypes
-                            .iter()
-                            .any(|s| commander_types.iter().any(|c| c.eq_ignore_ascii_case(s)))
-                    })
-                }
-                Some(restriction) => spell_meta
-                    .as_ref()
-                    .is_some_and(|meta| restriction.allows_spell(meta)),
+            // CR 603.3: Gate the reflexive trigger on its EVENT filter — "which spell,
+            // cast with this mana, makes it fire". The filter is a `TargetFilter`, so it
+            // is evaluated by the one filter authority against the spell object itself
+            // (live in `state.objects` here — this fn already read its controller from
+            // it), rather than by a bespoke per-restriction ladder over `SpellMeta`.
+            //
+            // The commander-relational case keeps its exact pre-retype semantics: its
+            // `FilterProp::SharesCreatureTypeWithCommander` arm calls the SAME
+            // `commander::commander_creature_types` authority this site used to call
+            // inline (deck-pool-first, object-scan-fallback). That is deliberate — a
+            // `SharesQuality` reference filter would have resolved via an object scan
+            // only and could miss a registered-but-uninstantiated commander.
+            let filter_ctx = crate::game::filter::FilterContext {
+                source_id: unit.source_id,
+                source_controller: Some(caster),
+                ability: None,
+                recipient_id: None,
+                scoped_iteration_player: None,
             };
-            if !passes {
+            if !crate::game::filter::matches_target_filter(state, spell_id, filter, &filter_ctx) {
                 continue;
             }
             let timestamp = state.next_timestamp() as u32;
@@ -15150,6 +15156,12 @@ pub fn handle_activate_ability(
     // `else_ability`, and other typed fields survive into resolution
     // (issue #310 — same root cause as the spell-cast path).
     let mut resolved = build_resolved_from_def(&ability_def, source_id, player);
+    // CR 602.2b -> CR 601.2b: activating an ability follows the spell-announcement rules
+    // 601.2b-i identically, so a text-defined, announce-locked X ("where X is <count> as
+    // you activate this ability") is measured HERE — at announcement, before targets are
+    // chosen (CR 601.2c) — and published onto the object's single X channel. This is the
+    // SAME computation the cast path uses; a loyalty ability rides it too.
+    super::ability_utils::publish_announced_x(state, &mut resolved, player, source_id);
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking
     // before any branch path that pushes this ability onto the stack.
     resolved.ability_index = Some(ability_index);

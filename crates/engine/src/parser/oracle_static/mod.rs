@@ -37,6 +37,7 @@ mod prelude {
     pub(super) use super::super::oracle_target::{
         distribute_controller_to_or, parse_combat_status_prefix, parse_counter_suffix,
         parse_mana_value_suffix, parse_target, parse_that_clause_suffix, parse_type_phrase,
+        scope_target_spell_phrase,
     };
     pub(super) use super::super::oracle_util::{
         has_unconsumed_conditional, infer_core_type_for_subtype, parse_comparator_prefix,
@@ -48,8 +49,8 @@ mod prelude {
         AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, CombatRelation,
         CombatRelationSubject, Comparator, ContinuousModification, ControllerRef, CostCategory,
         CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PtStat, PtValueScope,
-        QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, StaticCondition,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SharedQualityRelation,
+        StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     pub(super) use crate::types::card_type::{
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
@@ -139,9 +140,9 @@ mod support {
 }
 
 pub(crate) use cost_mod::{
-    parse_activated_ability_cost_head, parse_alternative_keyword_cost,
-    parse_cast_spells_alternative_cost_multi, parse_collect_evidence_alt_cost,
-    parse_spells_alternative_cost,
+    parse_activated_ability_cost_head, parse_alt_cost_frequency_prefix,
+    parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
+    parse_collect_evidence_alt_cost, parse_spells_alternative_cost,
 };
 pub(crate) use evasion::{
     classify_block_exception, is_extra_blockers_static_candidate, is_forced_block_static_candidate,

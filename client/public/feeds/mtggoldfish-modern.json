@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-07-12T00:00:00Z",
+  "updated": "2026-07-13T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -602,6 +602,157 @@
       ]
     },
     {
+      "name": "Ruby Storm",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R",
+        "W"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 2,
+          "name": "Artist's Talent"
+        },
+        {
+          "count": 4,
+          "name": "Ruby Medallion"
+        },
+        {
+          "count": 4,
+          "name": "Ral, Monsoon Mage"
+        },
+        {
+          "count": 1,
+          "name": "Grapeshot"
+        },
+        {
+          "count": 4,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Flashback"
+        },
+        {
+          "count": 4,
+          "name": "Manamorphose"
+        },
+        {
+          "count": 4,
+          "name": "Pyretic Ritual"
+        },
+        {
+          "count": 1,
+          "name": "Gemstone Caverns"
+        },
+        {
+          "count": 1,
+          "name": "Elegant Parlor"
+        },
+        {
+          "count": 4,
+          "name": "Desperate Ritual"
+        },
+        {
+          "count": 4,
+          "name": "Reckless Impulse"
+        },
+        {
+          "count": 3,
+          "name": "Past in Flames"
+        },
+        {
+          "count": 1,
+          "name": "Commercial District"
+        },
+        {
+          "count": 3,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 1,
+          "name": "Sunbaked Canyon"
+        },
+        {
+          "count": 2,
+          "name": "Valakut Awakening"
+        },
+        {
+          "count": 2,
+          "name": "Wish"
+        },
+        {
+          "count": 2,
+          "name": "Arid Mesa"
+        },
+        {
+          "count": 4,
+          "name": "Wrenn's Resolve"
+        },
+        {
+          "count": 2,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 2,
+          "name": "Wooded Foothills"
+        },
+        {
+          "count": 3,
+          "name": "Hex Magic"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Prismatic Ending"
+        },
+        {
+          "count": 1,
+          "name": "Wear // Tear"
+        },
+        {
+          "count": 4,
+          "name": "Orim's Chant"
+        },
+        {
+          "count": 1,
+          "name": "Past in Flames"
+        },
+        {
+          "count": 1,
+          "name": "Grapeshot"
+        },
+        {
+          "count": 1,
+          "name": "Empty the Warrens"
+        },
+        {
+          "count": 1,
+          "name": "Brotherhood's End"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
+          "count": 1,
+          "name": "Stormscale Scion"
+        },
+        {
+          "count": 1,
+          "name": "Flashback"
+        }
+      ]
+    },
+    {
       "name": "Izzet Prowess",
       "author": "MTGGoldfish",
       "colors": [
@@ -853,7 +1004,7 @@
       ]
     },
     {
-      "name": "Ruby Storm",
+      "name": "Boros Ponza",
       "author": "MTGGoldfish",
       "colors": [
         "R",
@@ -864,142 +1015,106 @@
       ],
       "main": [
         {
+          "count": 4,
+          "name": "Erode"
+        },
+        {
+          "count": 4,
+          "name": "Cori Mountain Monastery"
+        },
+        {
+          "count": 4,
+          "name": "Demolition Field"
+        },
+        {
+          "count": 4,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 3,
+          "name": "Sunken Citadel"
+        },
+        {
+          "count": 4,
+          "name": "Field of Ruin"
+        },
+        {
           "count": 1,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 2,
-          "name": "Artist's Talent"
-        },
-        {
-          "count": 4,
-          "name": "Ruby Medallion"
-        },
-        {
-          "count": 4,
-          "name": "Ral, Monsoon Mage"
-        },
-        {
-          "count": 1,
-          "name": "Grapeshot"
-        },
-        {
-          "count": 4,
           "name": "Mountain"
         },
         {
-          "count": 1,
-          "name": "Flashback"
-        },
-        {
           "count": 4,
-          "name": "Manamorphose"
-        },
-        {
-          "count": 4,
-          "name": "Pyretic Ritual"
+          "name": "Galvanic Discharge"
         },
         {
           "count": 1,
-          "name": "Gemstone Caverns"
-        },
-        {
-          "count": 1,
-          "name": "Elegant Parlor"
+          "name": "The Mind Stone"
         },
         {
           "count": 4,
-          "name": "Desperate Ritual"
+          "name": "White Orchid Phantom"
+        },
+        {
+          "count": 2,
+          "name": "The Legend of Roku"
         },
         {
           "count": 4,
-          "name": "Reckless Impulse"
+          "name": "Cleansing Wildfire"
         },
         {
           "count": 3,
-          "name": "Past in Flames"
+          "name": "Sacred Foundry"
         },
         {
-          "count": 1,
-          "name": "Commercial District"
-        },
-        {
-          "count": 3,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 1,
-          "name": "Sunbaked Canyon"
-        },
-        {
-          "count": 2,
-          "name": "Valakut Awakening"
-        },
-        {
-          "count": 2,
-          "name": "Wish"
-        },
-        {
-          "count": 2,
-          "name": "Arid Mesa"
+          "count": 5,
+          "name": "Plains"
         },
         {
           "count": 4,
-          "name": "Wrenn's Resolve"
+          "name": "Solitude"
         },
         {
-          "count": 2,
-          "name": "Scalding Tarn"
+          "count": 4,
+          "name": "Wrath of the Skies"
         },
         {
-          "count": 2,
-          "name": "Wooded Foothills"
+          "count": 1,
+          "name": "Wrath of God"
         },
         {
-          "count": 3,
-          "name": "Hex Magic"
+          "count": 4,
+          "name": "Path to Exile"
         }
       ],
       "sideboard": [
         {
-          "count": 3,
-          "name": "Prismatic Ending"
-        },
-        {
           "count": 1,
-          "name": "Wear // Tear"
+          "name": "Kataki, War's Wage"
         },
         {
           "count": 4,
-          "name": "Orim's Chant"
+          "name": "High Noon"
+        },
+        {
+          "count": 2,
+          "name": "Vexing Bauble"
         },
         {
           "count": 1,
-          "name": "Past in Flames"
+          "name": "Avengers Disassembled"
+        },
+        {
+          "count": 3,
+          "name": "Wear // Tear"
+        },
+        {
+          "count": 3,
+          "name": "Rest in Peace"
         },
         {
           "count": 1,
-          "name": "Grapeshot"
-        },
-        {
-          "count": 1,
-          "name": "Empty the Warrens"
-        },
-        {
-          "count": 1,
-          "name": "Brotherhood's End"
-        },
-        {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 1,
-          "name": "Stormscale Scion"
-        },
-        {
-          "count": 1,
-          "name": "Flashback"
+          "name": "Celestial Purge"
         }
       ]
     },
@@ -1170,121 +1285,6 @@
         {
           "count": 3,
           "name": "Force of Vigor"
-        }
-      ]
-    },
-    {
-      "name": "Boros Ponza",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R",
-        "W"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Erode"
-        },
-        {
-          "count": 4,
-          "name": "Cori Mountain Monastery"
-        },
-        {
-          "count": 4,
-          "name": "Demolition Field"
-        },
-        {
-          "count": 4,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 3,
-          "name": "Sunken Citadel"
-        },
-        {
-          "count": 4,
-          "name": "Field of Ruin"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Galvanic Discharge"
-        },
-        {
-          "count": 1,
-          "name": "The Mind Stone"
-        },
-        {
-          "count": 4,
-          "name": "White Orchid Phantom"
-        },
-        {
-          "count": 2,
-          "name": "The Legend of Roku"
-        },
-        {
-          "count": 4,
-          "name": "Cleansing Wildfire"
-        },
-        {
-          "count": 3,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 5,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Solitude"
-        },
-        {
-          "count": 4,
-          "name": "Wrath of the Skies"
-        },
-        {
-          "count": 1,
-          "name": "Wrath of God"
-        },
-        {
-          "count": 4,
-          "name": "Path to Exile"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Kataki, War's Wage"
-        },
-        {
-          "count": 4,
-          "name": "High Noon"
-        },
-        {
-          "count": 2,
-          "name": "Vexing Bauble"
-        },
-        {
-          "count": 1,
-          "name": "Avengers Disassembled"
-        },
-        {
-          "count": 3,
-          "name": "Wear // Tear"
-        },
-        {
-          "count": 3,
-          "name": "Rest in Peace"
-        },
-        {
-          "count": 1,
-          "name": "Celestial Purge"
         }
       ]
     },

@@ -185,10 +185,13 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // CR 601.2b: choosing an additional cost's mode (e.g. behold a chosen
         // creature type) is a casting-cost-phase step; route to the ability bucket.
         | WaitingFor::CostTypeChoice { .. }
-        // CR 732.2a/b/c: loop-shortcut protocol (PR-7 Phase 3) — a forced mid-flow
-        // decision; route to the ability catch-all like the other opt-in choices.
+        // CR 732.2a/b/c: shortcut protocols are forced mid-flow decisions;
+        // route both the legacy loop and finite pre-cast families to the same
+        // ability catch-all like the other opt-in choices.
         | WaitingFor::LoopShortcut { .. }
-        | WaitingFor::RespondToShortcut { .. } => DecisionKind::ActivateAbility,
+        | WaitingFor::RespondToShortcut { .. }
+        | WaitingFor::PrecastCopyShortcutOffer { .. }
+        | WaitingFor::RespondToPrecastCopyShortcut { .. } => DecisionKind::ActivateAbility,
     }
 }
 
@@ -238,6 +241,31 @@ mod tests {
                 &dummy_action
             ),
             DecisionKind::ManaPayment
+        );
+        // Finite pre-cast shortcut waits use the same tactical-policy bucket
+        // as the legacy shortcut protocol.
+        assert_eq!(
+            classify(
+                &WaitingFor::PrecastCopyShortcutOffer {
+                    proposer: PlayerId(0),
+                    epoch: 1,
+                    route_count: 1,
+                },
+                &dummy_action
+            ),
+            DecisionKind::ActivateAbility
+        );
+        assert_eq!(
+            classify(
+                &WaitingFor::RespondToPrecastCopyShortcut {
+                    player: PlayerId(1),
+                    epoch: 1,
+                    breakpoint_ids: vec![2],
+                    remaining_players: Vec::new(),
+                },
+                &dummy_action
+            ),
+            DecisionKind::ActivateAbility
         );
         // Combat routing.
         assert_eq!(

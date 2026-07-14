@@ -163,6 +163,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         player_scope,
         starting_with,
         repeat_for,
+        announced_x,
         multi_target,
         target_constraints,
         unless_pay,
@@ -226,6 +227,14 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
     }
     if let Some(repeat_for) = repeat_for {
         acc = acc.or(scan_quantity_expr(repeat_for));
+    }
+    // CR 601.2b: the announce-time-locked definition of X ("where X is <count> as
+    // you cast this spell") is a live board read like any other quantity — it is
+    // merely READ EARLIER (at announcement) than a resolution-time slot. It is
+    // read-bearing and must be scanned, not classified as a cast-time snapshot;
+    // `chosen_x` (below) is the concrete VALUE this expression produces.
+    if let Some(announced_x) = announced_x {
+        acc = acc.or(scan_quantity_expr(announced_x));
     }
     // CR 601.2c / CR 115.1d: variable-count targeting bounds (min/max) are
     // `QuantityExpr`s that can read a projected/event resource (e.g. a die-result X).
@@ -541,6 +550,7 @@ fn scan_effect(x: &Effect) -> Axes {
             max: _,
             copy_modifications: _,
             scale: _,
+            choose_scope: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(choose_filter));
@@ -1825,7 +1835,7 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             },
         },
         QuantityRef::ExiledFromHandThisResolution => Axes::NONE,
-        QuantityRef::PreviousEffectAmount => Axes::NONE,
+        QuantityRef::PreviousEffectAmount { .. } => Axes::NONE,
         QuantityRef::LifeLostThisTurn { player } => {
             let mut acc = Axes {
                 event: false,
@@ -2233,6 +2243,8 @@ fn scan_ability_condition(x: &AbilityCondition) -> Axes {
         }
         AbilityCondition::HasMaxSpeed => Axes::NONE,
         AbilityCondition::IsMonarch => Axes::NONE,
+        // CR 309.7: controller-state predicate — touches no scan axis.
+        AbilityCondition::CompletedDungeon { .. } => Axes::NONE,
         AbilityCondition::IsInitiative => Axes::NONE,
         AbilityCondition::HasCityBlessing => Axes::NONE,
         AbilityCondition::IsRingBearer => Axes::NONE,
@@ -3153,6 +3165,9 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::IsCommander
+        // CR 205.3m + CR 903.3: reads commander designation + the candidate's own
+        // creature types — a board/object read, no player resource.
+        | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Other { .. } => Axes::NONE,
 
         // --- QuantityExpr-bearing: recurse so `Ref(LifeTotal)` / `PlayerCounter`
@@ -3460,6 +3475,7 @@ fn scan_replacement_condition(x: &ReplacementCondition) -> Axes {
         }
         ReplacementCondition::ClassLevelGE { level: _ } => Axes::NONE,
         ReplacementCondition::DuringUntapStep => Axes::NONE,
+        ReplacementCondition::DuringDrawStep { .. } => Axes::NONE,
         ReplacementCondition::ControllerControlsSource {
             source: _,
             controller: _,
@@ -3626,6 +3642,7 @@ fn ability_definition_axes(def: &AbilityDefinition) -> Axes {
         modal,
         mode_abilities,
         repeat_for,
+        announced_x,
         player_scope,
         starting_with,
         target_chooser,
@@ -3669,6 +3686,11 @@ fn ability_definition_axes(def: &AbilityDefinition) -> Axes {
     }
     if let Some(condition) = condition {
         acc = acc.or(scan_ability_condition(condition));
+    }
+    // CR 601.2b: the announce-time-locked definition of X is a live board read,
+    // merely read earlier (at announcement) than a resolution-time slot.
+    if let Some(announced_x) = announced_x {
+        acc = acc.or(scan_quantity_expr(announced_x));
     }
     if let Some(MultiTargetSpec { min, max }) = multi_target {
         acc = acc.or(scan_quantity_expr(min));
@@ -4670,6 +4692,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         player_scope: _, // iteration fan-out, pure player-filter eval
         starting_with: _, // APNAP start override, no prompt
         repeat_for: _, // "for each" count, pure quantity eval (game/quantity.rs)
+        announced_x: _, // CR 601.2b announce-time count, pure quantity eval, no prompt
         multi_target: _, // announce-time variable-count bounds (Resolution case caught by timing)
         target_constraints: _, // announce-time cross-target legality, no resolution prompt
         distribution: _, // CR 601.2d concrete pre-assigned portions (announce-time)

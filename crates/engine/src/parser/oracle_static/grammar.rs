@@ -1105,22 +1105,32 @@ pub(crate) fn remove_trailing_quote_connector(text: &mut String) {
 /// was restricted to `x`/`0`, so the fixed `+1` failed `digit`-matching and the
 /// whole pattern was rejected, dropping the equip static. The sign is returned
 /// separately per axis so the caller applies it uniformly to the dynamic
-/// quantity or the fixed magnitude.
-/// Parsed axes of a variable P/T grant: `(p_sign, p_mag, t_sign, t_mag)` where
-/// each `*_mag` is `None` for the variable X (dynamic) or `Some(n)` for a fixed
-/// integer magnitude.
-type VariablePtAxes = (i32, Option<i32>, i32, Option<i32>);
+/// One axis of a variable P/T grant: a fixed integer magnitude, the primary
+/// variable `x`, or the secondary variable `y`. `y` is meaningful only on a
+/// "+X/+Y" pump whose two axes bind to different quantities (Aspect of Wolf);
+/// the caller must accept a distinct `y` axis only when a paired
+/// "where X is <A>, and Y is <B>" binding was structurally parsed — otherwise
+/// the pattern is left unsupported (Snowblind's `-X/-Y`, whose X/Y are defined
+/// by later conditional sentences, must NOT synthesize a cost-X static).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PtAxisMag {
+    Fixed(i32),
+    VarX,
+    VarY,
+}
+
+/// Parsed axes of a variable P/T grant: `(p_sign, p_mag, t_sign, t_mag)`.
+type VariablePtAxes = (i32, PtAxisMag, i32, PtAxisMag);
 
 pub(crate) fn parse_variable_pt_pattern(
     input: &str,
 ) -> nom::IResult<&str, VariablePtAxes, OracleError<'_>> {
-    fn axis(input: &str) -> nom::IResult<&str, (i32, Option<i32>), OracleError<'_>> {
+    fn axis(input: &str) -> nom::IResult<&str, (i32, PtAxisMag), OracleError<'_>> {
         let (rest, sign) = alt((value(-1i32, tag("-")), value(1i32, tag("+")))).parse(input)?;
-        // `None` == the variable X (dynamic); `Some(n)` == a fixed magnitude
-        // (`0` included, so "+x/+0" still yields no toughness modification).
         let (rest, mag) = alt((
-            value(None, tag("x")),
-            map_res(digit1, |d: &str| d.parse::<i32>().map(Some)),
+            value(PtAxisMag::VarX, tag("x")),
+            value(PtAxisMag::VarY, tag("y")),
+            map_res(digit1, |d: &str| d.parse::<i32>().map(PtAxisMag::Fixed)),
         ))
         .parse(rest)?;
         Ok((rest, (sign, mag)))

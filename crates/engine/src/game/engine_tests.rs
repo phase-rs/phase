@@ -1699,8 +1699,14 @@ fn turn_face_up_restricted_mana_funds_special_action() {
         ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp),
     );
 
-    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph })
-        .expect("turn-face-up-restricted mana must fund the morph turn-up special action");
+    let result = apply_as_current(
+        &mut state,
+        GameAction::TurnFaceUp {
+            object_id: morph,
+            x: 0,
+        },
+    )
+    .expect("turn-face-up-restricted mana must fund the morph turn-up special action");
 
     assert!(
         !state.objects[&morph].face_down,
@@ -1739,7 +1745,13 @@ fn turn_face_up_empty_pool_cannot_pay_and_stays_face_down() {
     let mut state = setup_game_at_main_phase();
     let morph = setup_face_down_morph(&mut state, PlayerId(0));
 
-    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph });
+    let result = apply_as_current(
+        &mut state,
+        GameAction::TurnFaceUp {
+            object_id: morph,
+            x: 0,
+        },
+    );
     assert!(
         result.is_err(),
         "with no mana the {{3}} morph turn-up cost must be unpayable: {result:?}"
@@ -1772,7 +1784,13 @@ fn turn_face_up_rejects_unlock_door_restricted_mana() {
         ManaRestriction::OnlyForSpecialAction(SpecialAction::UnlockDoor),
     );
 
-    let result = apply_as_current(&mut state, GameAction::TurnFaceUp { object_id: morph });
+    let result = apply_as_current(
+        &mut state,
+        GameAction::TurnFaceUp {
+            object_id: morph,
+            x: 0,
+        },
+    );
     assert!(
         result.is_err(),
         "door-unlock-restricted mana must not pay a turn-face-up: {result:?}"
@@ -6820,6 +6838,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         assist_state: AssistState::NotOffered,
         activation_residual: crate::types::game_state::ActivationResidual::None,
+        alt_cost_grant_source: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
         player: PlayerId(0),
@@ -7210,6 +7229,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         assist_state: AssistState::NotOffered,
         activation_residual: crate::types::game_state::ActivationResidual::None,
+        alt_cost_grant_source: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
         player: PlayerId(0),

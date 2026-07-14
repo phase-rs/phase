@@ -384,7 +384,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
-        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. }
@@ -654,7 +654,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
-        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
@@ -849,7 +849,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
-        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
@@ -2375,7 +2375,21 @@ fn resolve_ref(
         }
         // CR 608.2c: Numeric result from the preceding effect in a sub_ability chain.
         // The resolver stamps this from the parent effect's semantic event class.
-        QuantityRef::PreviousEffectAmount => state.last_effect_amount.unwrap_or(0),
+        //
+        // CR 120.6 / CR 120.10: `channel` picks WHICH tally the preceding effect
+        // left behind. Both are stamped by the damage effects and cleared at
+        // depth-0, so the two channels are read from the same resolution scope —
+        // this arm only chooses between them. Mirrors the condition peer
+        // `AbilityCondition::PreviousEffectAmount`, which already reads both.
+        QuantityRef::PreviousEffectAmount { channel } => match channel {
+            // CR 120.6: the total amount dealt/lost/removed.
+            DamageChannel::Total => state.last_effect_amount.unwrap_or(0),
+            // CR 120.10: only the damage dealt BEYOND lethal — "the amount of
+            // excess damage dealt to that creature this way" (Goblin
+            // Negotiation, Hell to Pay, Lacerate Flesh), "that excess damage"
+            // (Contest of Claws). 0 when the preceding effect dealt no excess.
+            DamageChannel::Excess => state.last_effect_excess_amount.unwrap_or(0),
+        },
         // CR 608.2c: "for each [thing] this way" — read the most recent tracked set size.
         QuantityRef::TrackedSetSize => state
             .tracked_object_sets
@@ -2443,14 +2457,23 @@ fn resolve_ref(
                     .map(|(_, ids)| ids.clone())
                     .unwrap_or_default(),
                 // CR 603.2c + CR 603.10a: the current triggering event batch
-                // ("those creatures" on a batched dies trigger). The subjects are
+                // ("those creatures" on a batched dies trigger; "them" / "their
+                // total power" on a batched attack trigger). The subjects are
                 // read from `state.current_trigger_events`; each died creature's
                 // power comes from its last-known info (LKI), i.e. death-time
                 // power, via `aggregate_property_over`'s live-then-LKI extract.
+                //
+                // CR 508.1: `extract_sources_from_event` is the SET-valued
+                // extractor. The singleton `extract_source_from_event` collapses
+                // a multi-attacker `AttackersDeclared` to `None`, which reduced
+                // this aggregate over an EMPTY set — 0 attackers' worth of power
+                // on every board with 2+ attackers (Aloy, Shriekwood Devourer,
+                // Witch-king, Sky Scourge). Dies batches are unchanged: they
+                // arrive as one event per creature and are still collected here.
                 TrackedAnaphorSource::TriggeringBatch => state
                     .current_trigger_events
                     .iter()
-                    .filter_map(crate::game::targeting::extract_source_from_event)
+                    .flat_map(crate::game::targeting::extract_sources_from_event)
                     .collect(),
             };
             // Per-object aggregation delegated to the shared

@@ -12,7 +12,12 @@ import { flashInGameRolls } from "./diceContest";
 import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
-import { isMultiplayerMode, useGameStore, saveGame, saveCheckpoints } from "../stores/gameStore";
+import {
+  isMultiplayerMode,
+  useGameStore,
+  saveAuthoritativeGame,
+  saveCheckpoints,
+} from "../stores/gameStore";
 import { getOpponentDisplayName } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
@@ -323,7 +328,7 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   }
   const newState = snapshotResult.state;
   const { gameId } = useGameStore.getState();
-  if (gameId) saveGame(gameId, newState);
+  if (gameId) void saveAuthoritativeGame(gameId, adapter, newState);
 
   // 3c. Feed the throughput tracker: count stack entries that left the stack
   //     this action (resolved, countered, or otherwise removed), id-diffed so a
@@ -707,7 +712,7 @@ export async function restoreGameState(
     },
   });
   if (gameId) {
-    await saveGame(gameId, snapshot.state);
+    await saveAuthoritativeGame(gameId, adapter, snapshot.state);
     await saveCheckpoints(gameId, preservedCheckpoints);
   }
 
@@ -731,12 +736,12 @@ export async function dispatchResolveAll(
   aiSeats: { playerId: number; difficulty: string }[],
 ): Promise<void> {
   if (batchResolveInProgress) return;
-  const { adapter } = useGameStore.getState();
-  if (!adapter) {
+  const { adapter: batchAdapter } = useGameStore.getState();
+  if (!batchAdapter) {
     debugLog("dispatchResolveAll: no adapter");
     return;
   }
-  if (!adapter.resolveAll || aiSeats.length === 0) {
+  if (!batchAdapter.resolveAll || aiSeats.length === 0) {
     // No batch drain (multiplayer transports), or no AI deciders for the other
     // seats (local hotseat — every seat is a human, #4978): those seats are
     // humans, and CR 117.4 entitles each of them to their own priority window
@@ -771,7 +776,7 @@ export async function dispatchResolveAll(
       const instant = stackPressureFromLength(stackLen) === "Instant";
       const chunkSize = instant ? BATCH_CHUNK_INSTANT : BATCH_CHUNK_SIZE;
 
-      const batchResult: BatchResolveResult = await adapter.resolveAll(
+      const batchResult: BatchResolveResult = await batchAdapter.resolveAll(
         requester, aiSeats, chunkSize,
       );
 
@@ -801,7 +806,7 @@ export async function dispatchResolveAll(
       // Equivalent or fresher: only `WasmAdapter` implements `resolveAll`, and
       // worker FIFO guarantees this snapshot reflects at least the chunk's end
       // state.
-      const snapshot = await adapter.getSnapshot();
+      const snapshot = await batchAdapter.getSnapshot();
       useGameStore.getState().commitEngineSnapshot(snapshot);
 
       // Anything other than Priority ends the drain — GameOver included, since
@@ -829,9 +834,11 @@ export async function dispatchResolveAll(
       }
     }
 
-    const { gameId } = useGameStore.getState();
+    const { gameId, adapter } = useGameStore.getState();
     const newState = useGameStore.getState().gameState;
-    if (gameId && newState) saveGame(gameId, newState);
+    if (gameId && adapter && newState) {
+      await saveAuthoritativeGame(gameId, adapter, newState);
+    }
   } finally {
     batchResolveInProgress = false;
     setIsResolvingAll(false);
