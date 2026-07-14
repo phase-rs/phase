@@ -49,13 +49,13 @@ magus of the chains	Draw	Mandatory	none	Discard	nested-draw	IndividualDraw
 moldervine cloak	Draw	Optional	none	Mill	-	IndividualDraw
 necroplasm	Draw	Optional	none	Mill	-	IndividualDraw
 nightmare void	Draw	Optional	none	Mill	-	IndividualDraw
-notion thief	Draw	Mandatory	none	Unimplemented	nested-draw	IndividualDraw
+notion thief	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
 obstinate familiar	Draw	Optional	Prevent	none	-	IndividualDraw
 ormos, archive keeper	Draw	Mandatory	none	PutCounter	-	IndividualDraw
 out of the tombs	Draw	Mandatory	none	ChangeZone	-	IndividualDraw
 parallel thoughts	Draw	Optional	none	ChangeZone	-	IndividualDraw
 phial of galadriel	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
-plagiarize	Draw	Mandatory	none	Unimplemented	nested-draw	IndividualDraw
+plagiarize	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
 possessed portal	Draw	Mandatory	Prevent	none	-	IndividualDraw
 pursuit of knowledge	Draw	Mandatory	none	PutCounter	-	IndividualDraw
 quantum riddler	Draw	Mandatory	none	Draw	nested-draw	InstructionCount

@@ -443,6 +443,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
                 AsLongAsDrawGate::Unparsed => return None,
             };
         let effect_text = extract_replacement_effect(effect_source);
+        // CR 614.6 + CR 614.1a: drop a leading "[subject] skips that draw and …"
+        // conjunct so the real substitute (Notion Thief / Plagiarize:
+        // "you draw a card") parses as the execute rather than the whole compound
+        // collapsing to `Unimplemented`. The skip itself is the replacement (the
+        // original draw is replaced); a pure skip with no conjunct is untouched
+        // and still reaches the `body_is_draw_skip` → `Prevent` arm below.
+        let effect_text = effect_text.map(|e| strip_leading_draw_skip_conjunct(&e).unwrap_or(e));
         let mut def = ReplacementDefinition::new(ReplacementEvent::Draw)
             .draw_scope(draw_scope)
             .description(text.to_string());
@@ -6542,6 +6549,42 @@ fn body_is_draw_skip(lower_body: &str) -> bool {
         .is_ok()
 }
 
+/// CR 614.6 + CR 614.1a: A compound draw-substitute body "[subject] skip[s]
+/// that/the draw and <effect>" (Notion Thief, Plagiarize:
+/// "instead that player skips that draw and you draw a card") states the skip
+/// explicitly, but for a `ReplacementEvent::Draw` the skip IS the replacement —
+/// the original draw is replaced, so only <effect> is the substitute to run.
+/// Strip the leading "[subject] skip[s] that/the draw and " conjunct and return
+/// the remainder (e.g. "you draw a card") so it parses as the execute; return
+/// `None` when the body is not this compound shape, leaving a pure skip
+/// ("... skips that draw", no conjunct) to reach `body_is_draw_skip` → `Prevent`
+/// and any other body to the normal execute path unchanged.
+fn strip_leading_draw_skip_conjunct(body: &str) -> Option<String> {
+    let lower = body.to_lowercase();
+    let (_, rest) = nom_on_lower(body, &lower, |input| {
+        value(
+            (),
+            (
+                // Some extraction paths (Plagiarize) keep the "instead" lead-in on
+                // the substitute body; others (Notion Thief) strip it. Tolerate both.
+                opt(tag::<_, _, OracleError<'_>>("instead ")),
+                opt(alt((
+                    tag("that player "),
+                    tag("the player "),
+                    tag("you "),
+                    tag("they "),
+                ))),
+                alt((tag("skips "), tag("skip "))),
+                alt((tag("that draw"), tag("the draw"))),
+                tag(" and "),
+            ),
+        )
+        .parse(input)
+    })?;
+    let rest = rest.trim_start();
+    (!rest.is_empty()).then(|| rest.to_string())
+}
+
 /// CR 614.6 + CR 121.6 + CR 614.1a: Strip a leading optional draw-suppression
 /// modal — `"[instead] you may skip that draw [instead]"` — and return the
 /// remainder for an optional `"if you do, …"` rider (Island Sanctuary). Returns
@@ -6627,8 +6670,16 @@ fn parse_color_word(word: &str) -> Option<ManaColor> {
 }
 
 fn extract_replacement_effect(text: &str) -> Option<String> {
-    // Find ", " after "would" or "instead" clause
-    if let Some(effect) = strip_after(text, ", ").map(str::trim) {
+    // CR 614.1a: The substitute follows the replacement marker "instead". Prefer
+    // splitting at ", instead " so an antecedent that itself contains an earlier
+    // comma ("Until end of turn, if target player would draw a card, instead …" —
+    // Plagiarize) does not leak into the effect. Fall back to the first ", " for
+    // markers other than a comma-led "instead" (trailing-"instead" and
+    // marker-less forms are handled by the prefix/suffix strips below).
+    if let Some(effect) = strip_after(text, ", instead ")
+        .or_else(|| strip_after(text, ", "))
+        .map(str::trim)
+    {
         let lower = effect.to_lowercase();
         let effect = TextPair::new(effect, &lower)
             .trim_end()
@@ -16873,6 +16924,50 @@ mod tests {
                 }
             ) && *offset == 1
         ));
+    }
+
+    /// #5654: a compound draw-substitute "instead that player skips that draw and
+    /// you draw a card" (Notion Thief, Plagiarize) — the skip IS the replacement
+    /// (the original draw is replaced), so the execute is the substitute draw for
+    /// the controller. Before the fix the whole compound collapsed to
+    /// `Unimplemented` (Notion Thief), and Plagiarize's earlier "Until end of
+    /// turn," comma also leaked the antecedent into the effect. Both now parse to
+    /// a controller `Draw` execute. One recognizer + the ", instead " extraction
+    /// preference cover both cards.
+    #[test]
+    fn compound_draw_skip_and_draw_substitute_parses_controller_draw() {
+        for (text, name) in [
+            (
+                "If an opponent would draw a card except the first one they draw in each of their \
+                 draw steps, instead that player skips that draw and you draw a card.",
+                "Notion Thief",
+            ),
+            (
+                "Until end of turn, if target player would draw a card, instead that player skips \
+                 that draw and you draw a card.",
+                "Plagiarize",
+            ),
+        ] {
+            let def = parse_replacement_line(text, name)
+                .unwrap_or_else(|| panic!("{name} must parse a Draw replacement"));
+            assert_eq!(def.event, ReplacementEvent::Draw, "{name} event");
+            assert_eq!(
+                def.draw_scope,
+                Some(DrawReplacementScope::IndividualDraw),
+                "{name} draw_scope"
+            );
+            assert!(
+                matches!(
+                    def.execute.as_deref().map(|ability| &*ability.effect),
+                    Some(Effect::Draw {
+                        target: TargetFilter::Controller,
+                        ..
+                    })
+                ),
+                "{name}: the substitute must be a controller Draw, not Unimplemented; got {:?}",
+                def.execute.as_deref().map(|ability| &*ability.effect)
+            );
+        }
     }
 
     #[test]
