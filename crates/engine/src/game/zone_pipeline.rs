@@ -1439,6 +1439,15 @@ pub(crate) fn resolve_entering_aura_attachment(
     let Some(obj) = state.objects.get(&object_id) else {
         return EnteringAuraAttachment::NotApplicable;
     };
+    // CR 303.4 + CR 704.5m: entry-time attachment only applies to an Aura that is
+    // actually on the battlefield. Defensive guard — if an intermediate entry
+    // trigger or replacement moved the realized copy off the battlefield before
+    // this runs (it is the LAST step of `finish_copy_target_choice_entry`),
+    // attaching it or prompting for a host of a non-battlefield Aura would be
+    // invalid state; do nothing and let it resolve wherever it now lives.
+    if obj.zone != Zone::Battlefield {
+        return EnteringAuraAttachment::NotApplicable;
+    }
     // Only resolve entry attachment for an as-yet-unattached Aura; a copy that
     // was already attached by some other effect must not be re-homed here.
     if obj.attached_to.is_some() {
