@@ -93,6 +93,7 @@ impl GameSession {
         }
         let pending = self.pending_takeback.take().expect("checked above");
         self.state = pending.target_state;
+        engine::game::rekey_after_trusted_restore(&mut self.state);
         // The rolled-back state is the new baseline; snapshots from the
         // branch we just discarded no longer correspond to reachable
         // history, and taking another takeback back through them would

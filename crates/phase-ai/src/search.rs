@@ -760,12 +760,56 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::LoopShortcut { .. } => engine::ai_support::legal_actions(state)
             .into_iter()
             .find(|action| matches!(action, GameAction::DeclineShortcut)),
+        // CR 732.2a: the finite pre-cast family has the same conservative
+        // proposer fallback as the legacy shortcut. Ask the engine for its
+        // issued decline capability instead of fabricating a route response.
+        WaitingFor::PrecastCopyShortcutOffer { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::PrecastCopyShortcut {
+                        response: engine::types::actions::PrecastCopyShortcutResponse::Decline,
+                        ..
+                    }
+                )
+            }),
         // PR-7 Phase 4c (LOW-2): self-preservation via the single-authority
         // `smart_shortcut_response` — Shorten when the polled player has a meaningful
         // way to break the loop, else Accept.
         WaitingFor::RespondToShortcut { player, .. } => Some(GameAction::RespondToShortcut {
             response: engine::ai_support::smart_shortcut_response(state, *player),
         }),
+        // CR 732.2b/c: use the same meaningful-priority probe as the legacy
+        // responder. A finite route can only shorten at its engine-issued
+        // breakpoint, so translate a legacy-style Shorten to that concrete
+        // capability; if none is issued, accepting is the only legal fallback.
+        WaitingFor::RespondToPrecastCopyShortcut {
+            player,
+            epoch,
+            breakpoint_ids,
+            ..
+        } => {
+            let response = match engine::ai_support::smart_shortcut_response(state, *player) {
+                engine::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
+                    breakpoint_ids.first().map_or(
+                        engine::types::actions::PrecastCopyShortcutResponse::Accept,
+                        |breakpoint_id| {
+                            engine::types::actions::PrecastCopyShortcutResponse::Shorten {
+                                breakpoint_id: *breakpoint_id,
+                            }
+                        },
+                    )
+                }
+                engine::analysis::loop_check::ShortcutResponse::Accept => {
+                    engine::types::actions::PrecastCopyShortcutResponse::Accept
+                }
+            };
+            Some(GameAction::PrecastCopyShortcut {
+                epoch: *epoch,
+                response,
+            })
+        }
 
         // Combat declarations: an empty declaration is NOT always legal —
         // CR 508.1d / CR 701.15b require goaded / "attacks if able" creatures

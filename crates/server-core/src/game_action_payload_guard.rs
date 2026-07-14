@@ -506,6 +506,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::SetTriggerOrderTemplate { .. }
         // CR 732.2b/c: a typed enum + a single `u32` — nothing unbounded.
         | GameAction::RespondToShortcut { .. }
+        // CR 732.2a-c: opaque epoch/route/breakpoint ids and a typed response
+        // carry only bounded scalars.
+        | GameAction::PrecastCopyShortcut { .. }
         // CR 732.2a: the decline is payloadless — nothing to bound.
         | GameAction::DeclineShortcut
         | GameAction::Concede { .. } => {}

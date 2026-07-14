@@ -84,6 +84,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // (DeclareShortcutModal / RespondToShortcutModal).
     "LoopShortcut",
     "RespondToShortcut",
+    "PrecastCopyShortcutOffer",
+    "RespondToPrecastCopyShortcut",
     "ReplacementChoice",
     "CopyTargetChoice",
     "CopyRetarget",

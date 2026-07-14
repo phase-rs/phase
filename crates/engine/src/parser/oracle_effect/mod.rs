@@ -95,8 +95,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
-    ContinuousModification, ControlWindow, ControllerRef, CopyRetargetPermission, CopyScale,
-    DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
+    ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission,
+    CopyScale, DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
     DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction,
     GuessSubject, IntensityScope, IterationKindBinding, LibraryPosition, ManaProduction,
     ManaSpendPermission, MultiTargetSpec, NumberDistinctness, ObjectProperty, ObjectScope,
@@ -23682,10 +23682,10 @@ fn try_parse_conditional_protection_grant_ability(
 /// declines (returns `None`) unless the full multi-sentence shape parses, so an
 /// unrecognized variant stays an honest `Unimplemented` rather than misparsing.
 /// The scale sentence is optional (`scale: None` for the single-choice shape
-/// that never selects a second object). Note: Caught in a Parallel Universe is
-/// NOT covered by this path — it selects "a creature controlled by the player to
-/// their left" (a chooser-relative eligibility scope), so its choose clause does
-/// not match the `<type> they control` shape below and it stays `Unimplemented`.
+/// that never selects a second object). The choose clause is parameterized by a
+/// [`CopyChooseScope`]: "<type> they control" → `Chooser` (Human—Time Lord
+/// Meta-Crisis), "<type> controlled by the player to their {left|right}" →
+/// `Neighbor { direction }` (Caught in a Parallel Universe).
 pub(crate) fn try_parse_each_player_copy_chosen(
     text: &str,
     kind: AbilityKind,
@@ -23693,7 +23693,10 @@ pub(crate) fn try_parse_each_player_copy_chosen(
     let lower = text.to_ascii_lowercase();
     let i = lower.as_str();
 
-    // Segment 1: "each player chooses <cardinality> <type> they control."
+    // Segment 1: "each player chooses <cardinality> <type> <controller-clause>."
+    // The controller clause is either "they control" (each chooser's own
+    // battlefield → CopyChooseScope::Chooser) or "controlled by the player to
+    // their {left|right}" (a seat-neighbor's battlefield → Neighbor).
     let (i, _) = tag::<_, _, OracleError<'_>>("each player chooses ")
         .parse(i)
         .ok()?;
@@ -23703,18 +23706,36 @@ pub(crate) fn try_parse_each_player_copy_chosen(
     ))
     .parse(i)
     .ok()?;
-    // The type noun runs up to the controller clause; feed it to the shared
-    // type-phrase parser so any object class (not just "creature") is supported.
-    let (i, noun) = take_until::<_, _, OracleError<'_>>(" they control")
-        .parse(i)
-        .ok()?;
+    // The type noun runs up to whichever controller clause follows; feed it to
+    // the shared type-phrase parser so any object class (not just "creature") is
+    // supported.
+    let (i, noun) = alt((
+        take_until::<_, _, OracleError<'_>>(" they control"),
+        take_until::<_, _, OracleError<'_>>(" controlled by "),
+    ))
+    .parse(i)
+    .ok()?;
     let (choose_filter, noun_rest) = parse_type_phrase(noun);
     if !noun_rest.trim().is_empty() {
         return None;
     }
-    let (i, _) = tag::<_, _, OracleError<'_>>(" they control")
-        .parse(i)
-        .ok()?;
+    // Classify the controller clause into a typed CopyChooseScope. Fail-closed:
+    // an unrecognized clause fails both arms → None → honest Unimplemented.
+    let (i, choose_scope) = alt((
+        value(
+            CopyChooseScope::Chooser,
+            tag::<_, _, OracleError<'_>>(" they control"),
+        ),
+        map(
+            preceded(
+                tag::<_, _, OracleError<'_>>(" controlled by "),
+                super::oracle_target::parse_neighbor_seat_direction,
+            ),
+            |direction| CopyChooseScope::Neighbor { direction },
+        ),
+    ))
+    .parse(i)
+    .ok()?;
     let (i, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(i).ok()?;
     let i = i.trim_start();
 
@@ -23764,6 +23785,7 @@ pub(crate) fn try_parse_each_player_copy_chosen(
             max,
             copy_modifications,
             scale,
+            choose_scope,
         },
     );
     // CR 101.4: "each player" → scope over all players; the self-iterating

@@ -1855,7 +1855,8 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         // protocol — a legacy client never sets that mode.
         GameAction::DeclareShortcut { .. }
         | GameAction::RespondToShortcut { .. }
-        | GameAction::DeclineShortcut => {
+        | GameAction::DeclineShortcut
+        | GameAction::PrecastCopyShortcut { .. } => {
             AvailableActionConversion::Unsupported("local.loop-shortcut-unsupported")
         }
     }

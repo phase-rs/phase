@@ -17,6 +17,19 @@ use super::zones::Zone;
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::AttachTarget;
 
+/// CR 732.2a-c: response to the narrowly-scoped, pre-cast Chain-copy
+/// shortcut. This intentionally does not reuse the legacy loop-shortcut
+/// vocabulary: the route is an engine-proved finite reducer transcript, not a
+/// general loop certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum PrecastCopyShortcutResponse {
+    Propose { route_id: u64 },
+    Decline,
+    Accept,
+    Shorten { breakpoint_id: u64 },
+}
+
 /// CR 701.57a + CR 702.85a: Player decision for any "you may cast that card
 /// without paying its mana cost" mid-resolution choice (Discover, Cascade).
 /// Bool flags are not composable — this enum can grow new branches (e.g.,
@@ -815,6 +828,13 @@ pub enum GameAction {
     /// Restores ordinary priority instead of forcing a proposal. Carries no payload
     /// (no template/count/response — it is the absence of a proposal).
     DeclineShortcut,
+    /// CR 732.2a-c: the separate finite Chain-copy shortcut protocol. `epoch`
+    /// is an actor-scoped, engine-issued capability; stale route/response
+    /// submissions are rejected rather than applied to a later offer.
+    PrecastCopyShortcut {
+        epoch: u64,
+        response: PrecastCopyShortcutResponse,
+    },
 }
 
 /// CR 117.3d: The mutation a `GameAction::SetPriorityYield` performs on the
@@ -1517,6 +1537,7 @@ impl GameAction {
             | GameAction::DeclareShortcut { .. }
             | GameAction::RespondToShortcut { .. }
             | GameAction::DeclineShortcut
+            | GameAction::PrecastCopyShortcut { .. }
             | GameAction::ChooseActivationCostBranch { .. } => None,
         }
     }

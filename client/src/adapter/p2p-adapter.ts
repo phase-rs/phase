@@ -12,6 +12,7 @@ import type {
   LegalActionsResult,
   MatchConfig,
   PlayerId,
+  PersistedGameState,
   SubmitResult,
   WaitingFor,
 } from "./types";
@@ -34,6 +35,7 @@ import type { BrokerClient } from "../services/brokerClient";
 import {
   clearP2PHostSession,
   type PersistedP2PHostSession,
+  saveGame,
   saveP2PHostSession,
 } from "../services/gamePersistence";
 import { saveP2PSession } from "../services/p2pSession";
@@ -215,7 +217,9 @@ export function aiActorFromWaitingFor(
   // CR 732.2a: LoopShortcut's data field is `proposer`, not `player`; route to
   // the engine-derived authorized submitter (priority_player) exactly like the
   // `player in` states so an AI-owned controller seat drives the declare.
-  return "player" in waitingFor.data || waitingFor.type === "LoopShortcut"
+  return "player" in waitingFor.data
+    || waitingFor.type === "LoopShortcut"
+    || waitingFor.type === "PrecastCopyShortcutOffer"
     ? authorizedSubmitter
     : null;
 }
@@ -316,7 +320,7 @@ export class P2PHostAdapter implements EngineAdapter {
    * than threaded through `initialize()` so the EngineAdapter interface
    * stays uniform across fresh/resume flows.
    */
-  private resumeGameState: GameState | null = null;
+  private resumeGameState: PersistedGameState | null = null;
 
   constructor(
     private readonly hostDeckData: unknown,
@@ -364,7 +368,7 @@ export class P2PHostAdapter implements EngineAdapter {
       gameId: string;
       roomCode: string;
       hostDisplayName?: string;
-      resumeData?: { state: GameState; session: PersistedP2PHostSession };
+      resumeData?: { state: PersistedGameState; session: PersistedP2PHostSession };
     },
   ) {
     if (playerCount < 2 || playerCount > 6) {
@@ -550,6 +554,17 @@ export class P2PHostAdapter implements EngineAdapter {
     const snapshot = this.buildPersistedSession();
     if (!snapshot) return;
     void saveP2PHostSession(this.gameId, snapshot);
+  }
+
+  /** Persist the host authority as the engine's opaque trusted envelope. */
+  private persistAuthoritativeState(): void {
+    if (!this.gameId) return;
+    void this.wasm
+      .exportPersistenceState()
+      .then((json) => saveGame(this.gameId!, JSON.parse(json) as PersistedGameState))
+      .catch((err) => {
+        console.warn("[P2PHost] trusted state export failed:", err);
+      });
   }
 
   /**
@@ -741,6 +756,7 @@ export class P2PHostAdapter implements EngineAdapter {
       }
       const result = await this.wasm.submitAction(action, actor);
       await this.broadcastStateUpdate(result.events, result.log_entries);
+      this.persistAuthoritativeState();
       this.emit({
         type: "stateChanged",
         snapshot: await this.wasm.getSnapshot(),
@@ -1083,7 +1099,12 @@ export class P2PHostAdapter implements EngineAdapter {
     const result = await this.wasm.submitAction(action, actor);
     await this.broadcastStateUpdate(result.events, result.log_entries);
     await this.runAiLoop();
+    this.persistAuthoritativeState();
     return result;
+  }
+
+  async exportPersistenceState(): Promise<string> {
+    return this.wasm.exportPersistenceState();
   }
 
   /**
@@ -1131,7 +1152,7 @@ export class P2PHostAdapter implements EngineAdapter {
     return null;
   }
 
-  restoreState(_state: GameState): void {
+  restoreState(_state: PersistedGameState): void {
     throw new AdapterError("P2P_ERROR", "Undo not supported in P2P games", false);
   }
 
@@ -1279,6 +1300,7 @@ export class P2PHostAdapter implements EngineAdapter {
           // shifted to an AI seat — without this, the AI never gets a turn
           // and the game stalls (same pattern as concedePlayer/host submit).
           await this.runAiLoop();
+          this.persistAuthoritativeState();
           // Emit local stateChanged so host UI updates for opponent actions.
           this.emit({
             type: "stateChanged",
@@ -1476,6 +1498,7 @@ export class P2PHostAdapter implements EngineAdapter {
       const result = await this.wasm.submitAction(concedeAction, pid);
       await this.broadcastStateUpdate(result.events, result.log_entries);
       await this.runAiLoop();
+      this.persistAuthoritativeState();
       this.emit({
         type: "stateChanged",
         snapshot: await this.wasm.getSnapshot(),
@@ -1763,7 +1786,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     return null;
   }
 
-  restoreState(_state: GameState): void {
+  restoreState(_state: PersistedGameState): void {
     throw new AdapterError("P2P_ERROR", "Undo not supported in P2P games", false);
   }
 

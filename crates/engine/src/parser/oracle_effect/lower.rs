@@ -28,11 +28,11 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
-    AttackSubject, CastingPermission, Comparator, ConjureSource, ContinuousModification,
-    ControllerRef, DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission,
-    MultiTargetSpec, ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue,
-    QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    AttackSubject, CastPermissionConstraint, CastingPermission, Comparator, ConjureSource,
+    ContinuousModification, ControllerRef, DamageChannel, DamageSource, DelayedTriggerCondition,
+    Duration, Effect, EffectScope, FilterProp, GameRestriction, LibraryPosition,
+    ManaSpendPermission, MultiTargetSpec, ObjectScope, PlayerFilter, PreventionAmount,
+    PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
     TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
@@ -7397,6 +7397,20 @@ fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) ->
                 })
             })
         }
+        // CR 107.3i: an X-bearing P/T slot does not always reach here as
+        // `PtValue::Variable("X")`. When the clause grammar has already lowered the slot to
+        // a quantity, the unbound placeholder survives one level down, inside the
+        // expression tree — Tivash, Gloom Summoner's "create an X/X black Demon creature
+        // token with flying, where X is the amount of life you gained this turn" lowers to
+        // `PtValue::Quantity(Ref { Variable("X") })`, not `PtValue::Variable("X")`.
+        // Matching only the bare-placeholder shape left that X unbound, and the token
+        // entered as an 0/0 (dying immediately to CR 704.5f) while the face still rendered
+        // as supported. Recurse so the where-clause owns every X in the slot, at whatever
+        // depth it sits; `apply_where_x_quantity_expression` is a no-op on a slot that
+        // holds no X, so a concrete P/T is left untouched.
+        (PtValue::Quantity(quantity), Some(_)) => {
+            apply_where_x_quantity_expression(quantity, where_x_expression).map(PtValue::Quantity)
+        }
         (value, _) => Some(value),
     }
 }
@@ -7845,6 +7859,51 @@ fn bind_where_x_quantity(
     }
 }
 
+/// An absent slot has no X to bind, so `None` is left alone; a present one routes
+/// through the single authority above.
+fn bind_where_x_optional_quantity(
+    slot: Option<&mut QuantityExpr>,
+    where_x_expression: Option<&str>,
+    unbound: &mut Option<String>,
+) {
+    if let Some(slot) = slot {
+        bind_where_x_quantity(slot, where_x_expression, unbound);
+    }
+}
+
+/// CR 122.1 + CR 107.3i: "enters with X +1/+1 counters on it, where X is …" — the counter
+/// COUNT of an enters-with rider is an ordinary where-X quantity slot. Shared by every
+/// carrier of the `(CounterType, QuantityExpr)` rider shape (`Token`, `ChangeZone`,
+/// `ChangeZoneAll`) so the rider binds identically wherever it appears; G'raha Tia, Scion
+/// Reborn ("create a 1/1 … Hero … and put X +1/+1 counters on it") rides this slot, and it
+/// sits BESIDE the token's own `count`/`power`/`toughness` rather than inside them.
+fn bind_where_x_enter_with_counters(
+    entries: &mut [(CounterType, QuantityExpr)],
+    where_x_expression: Option<&str>,
+    unbound: &mut Option<String>,
+) {
+    for (_, count) in entries.iter_mut() {
+        bind_where_x_quantity(count, where_x_expression, unbound);
+    }
+}
+
+/// CR 613.4b: an absent P/T override has no X to bind. A present one routes through the
+/// same `PtValue` rewriter the `Token`/`Pump` arms use, so a failed bind is reported as
+/// `unbound` exactly as it is for a quantity slot.
+fn bind_where_x_optional_pt(
+    slot: &mut Option<PtValue>,
+    where_x_expression: Option<&str>,
+    unbound: &mut Option<String>,
+) {
+    let Some(value) = slot.as_ref() else {
+        return;
+    };
+    match apply_where_x_expression(value.clone(), where_x_expression) {
+        Some(bound) => *slot = Some(bound),
+        None => *unbound = where_x_expression.map(str::to_string),
+    }
+}
+
 pub(super) fn apply_where_x_effect_expression(
     effect: &mut Effect,
     where_x_expression: Option<&str>,
@@ -7870,23 +7929,131 @@ pub(super) fn apply_where_x_effect_expression(
             ..
         }
         // CR 701.47a: "amass Orcs X, where X is …" (Fall of Cair Andros) — "put N
-        // +1/+1 counters on that creature", so N is the bound quantity. Without
-        // this arm the where-X binding was never attempted and the bare
-        // `Variable("X")` SURVIVED — amassing 0 counters at runtime while the face
-        // still rendered as fully supported. This match is NOT exhaustive over the
-        // 64 `QuantityExpr`-carrying variants, and the `_ => {}` below turns every
-        // unenumerated one into that same silent fabrication rather than a red.
+        // +1/+1 counters on that creature", so N is the bound quantity.
         | Effect::Amass { count: amount, .. }
-        | Effect::Incubate { count: amount } => {
+        | Effect::Incubate { count: amount }
+        // The rest of the single-quantity carriers. Each of these owns exactly one
+        // `QuantityExpr` slot that a "where X is …" clause can define, and each was
+        // previously falling through the `_ => {}` below — which did not bind, so the bare
+        // `QuantityRef::Variable("X")` survived and resolved to 0 at runtime (amass 0 /
+        // surveil 0 / discard 0 / monstrosity 0) while the face still rendered as fully
+        // supported. The totality guard converted that fabrication into an honest red
+        // (#5753); binding them here is what turns the representable ones back to green.
+        | Effect::Adapt { count: amount, .. }
+        | Effect::AddPendingETBCounters { count: amount, .. }
+        | Effect::AdditionalPhase { count: amount, .. }
+        | Effect::AssembleContraptions { count: amount, .. }
+        | Effect::Bolster { count: amount, .. }
+        | Effect::ChooseCounterAdjustment { count: amount, .. }
+        | Effect::Cloak { count: amount, .. }
+        | Effect::Connive { count: amount, .. }
+        | Effect::CopyTokenOf { count: amount, .. }
+        | Effect::Discard { count: amount, .. }
+        | Effect::EachSourceDealsDamage { amount, .. }
+        | Effect::Endure { amount, .. }
+        | Effect::FlipCoins { count: amount, .. }
+        | Effect::GainEnergy { amount, .. }
+        | Effect::GivePlayerCounter { count: amount, .. }
+        | Effect::GrantExtraLoyaltyActivations { amount, .. }
+        | Effect::Intensify { amount, .. }
+        | Effect::Manifest { count: amount, .. }
+        | Effect::Monstrosity { count: amount, .. }
+        | Effect::PutAtLibraryPosition { count: amount, .. }
+        | Effect::PutChosenCounter { count: amount, .. }
+        | Effect::RemoveCounter { count: amount, .. }
+        | Effect::Renown { count: amount, .. }
+        | Effect::RevealUntil { count: amount, .. }
+        | Effect::RollDie { count: amount, .. }
+        | Effect::Sacrifice { count: amount, .. }
+        | Effect::SearchOutsideGame { count: amount, .. }
+        | Effect::SetLifeTotal { amount, .. }
+        | Effect::SkipNextStep { count: amount, .. }
+        | Effect::SkipNextTurn { count: amount, .. }
+        | Effect::Surveil { count: amount, .. } => {
             bind_where_x_quantity(amount, where_x_expression, &mut unbound_where_x);
+        }
+        // Multi-slot carriers: a where-X clause defines ONE X, and every slot that
+        // references it must bind to the same expression (CR 107.3i: X has a single value
+        // for the whole ability). Binding only the "main" count would leave the siblings
+        // as bare placeholders resolving to 0.
+        Effect::ChooseDrawnThisTurnPayOrTopdeck {
+            count,
+            life_payment,
+            ..
+        } => {
+            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            bind_where_x_quantity(life_payment, where_x_expression, &mut unbound_where_x);
+        }
+        Effect::CreateTokenCopyFromPool {
+            mv_bound, count, ..
+        } => {
+            bind_where_x_quantity(mv_bound, where_x_expression, &mut unbound_where_x);
+            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+        }
+        Effect::PutSticker {
+            count,
+            max_ticket_cost,
+            ..
+        } => {
+            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            bind_where_x_optional_quantity(
+                max_ticket_cost.as_mut(),
+                where_x_expression,
+                &mut unbound_where_x,
+            );
+        }
+        // The optional-count carriers: same single where-X slot, but absent by default
+        // (`RevealHand` with no count reveals the whole hand; `MoveCounters` with no count
+        // moves all of them). `None` has no X to bind and is left alone.
+        Effect::MoveCounters { count, .. }
+        | Effect::CastCopyOfCard { count, .. }
+        | Effect::RevealHand { count, .. } => {
+            bind_where_x_optional_quantity(
+                count.as_mut(),
+                where_x_expression,
+                &mut unbound_where_x,
+            );
+        }
+        Effect::ChooseAndSacrificeRest {
+            total_power_cap, ..
+        } => {
+            bind_where_x_optional_quantity(
+                total_power_cap.as_mut(),
+                where_x_expression,
+                &mut unbound_where_x,
+            );
+        }
+        // CR 122.1: the mass-move counterpart of `ChangeZone`'s enters-with rider.
+        Effect::ChangeZoneAll {
+            target,
+            enter_with_counters,
+            ..
+        } => {
+            bind_where_x_filter(target, where_x_expression, &mut unbound_where_x);
+            bind_where_x_enter_with_counters(
+                enter_with_counters,
+                where_x_expression,
+                &mut unbound_where_x,
+            );
         }
         Effect::Token {
             count,
             power,
             toughness,
+            enter_with_counters,
             ..
         } => {
             bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            // CR 122.1: the enters-with rider is a THIRD X site on a token, beside the
+            // token count and its P/T. G'raha Tia, Scion Reborn creates a fixed 1/1 Hero
+            // and puts X +1/+1 counters on it, so `count`/`power`/`toughness` are all
+            // concrete and X lives only here — binding the other three left this slot a
+            // bare placeholder and the Hero entered with 0 counters.
+            bind_where_x_enter_with_counters(
+                enter_with_counters,
+                where_x_expression,
+                &mut unbound_where_x,
+            );
             match (
                 apply_where_x_expression(power.clone(), where_x_expression),
                 apply_where_x_expression(toughness.clone(), where_x_expression),
@@ -7897,6 +8064,15 @@ pub(super) fn apply_where_x_effect_expression(
                 }
                 _ => unbound_where_x = where_x_expression.map(str::to_string),
             }
+        }
+        // CR 613.4b (layer 7b): "becomes an X/X creature, where X is …" — an animated
+        // permanent's base P/T is the same where-X quantity site as a token's, and
+        // `Animate` is the fourth `PtValue` carrier alongside `Token`/`Pump`/`PumpAll`.
+        Effect::Animate {
+            power, toughness, ..
+        } => {
+            bind_where_x_optional_pt(power, where_x_expression, &mut unbound_where_x);
+            bind_where_x_optional_pt(toughness, where_x_expression, &mut unbound_where_x);
         }
         // CR 107.3i + CR 109.4 + CR 109.5: "search/seek for up to X …, where X
         // is …" binds the search count (Oreskos Explorer). Eldritch Evolution
@@ -7913,22 +8089,65 @@ pub(super) fn apply_where_x_effect_expression(
         // makes the reanimation target only mana value 0 or less — silently
         // breaking the trigger's intended behavior. Mirrors the
         // `SearchLibrary`/`Seek` filter rewrite above.
-        Effect::ChangeZone { target, .. } => {
+        Effect::ChangeZone {
+            target,
+            enter_with_counters,
+            conditional_enter_with_counters,
+            ..
+        } => {
+            bind_where_x_filter(target, where_x_expression, &mut unbound_where_x);
+            // CR 122.1: same enters-with rider as `Token`/`ChangeZoneAll` — the moved
+            // permanent's counter count is a where-X site of its own.
+            bind_where_x_enter_with_counters(
+                enter_with_counters,
+                where_x_expression,
+                &mut unbound_where_x,
+            );
+            for (_, _, count) in conditional_enter_with_counters.iter_mut() {
+                bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            }
+        }
+        Effect::Destroy { target, .. } | Effect::Bounce { target, .. } => {
             bind_where_x_filter(target, where_x_expression, &mut unbound_where_x);
         }
-        Effect::Destroy { target, .. }
-        | Effect::Bounce { target, .. }
-        | Effect::BounceAll { target, .. }
-        | Effect::CastFromZone { target, .. } => {
+        // `BounceAll` carries an optional count ("return X target creatures …") beside its
+        // filter; the filter-only arm left that count a bare placeholder.
+        Effect::BounceAll { target, count, .. } => {
             bind_where_x_filter(target, where_x_expression, &mut unbound_where_x);
+            bind_where_x_optional_quantity(
+                count.as_mut(),
+                where_x_expression,
+                &mut unbound_where_x,
+            );
+        }
+        // CR 601.2e: a cast permission may be BOUNDED by X ("you may cast a spell with mana
+        // value less than X from among them, where X is that spell's mana value" — Kiora,
+        // Sovereign of the Deep). The bound lives in the permission constraint, not in the
+        // target filter, so the filter-only arm never reached it and the constraint kept a
+        // bare `Variable("X")` — permitting only mana value < 0, i.e. nothing at all.
+        Effect::CastFromZone {
+            target, constraint, ..
+        } => {
+            bind_where_x_filter(target, where_x_expression, &mut unbound_where_x);
+            if let Some(CastPermissionConstraint::ManaValue { value, .. }) = constraint.as_mut() {
+                bind_where_x_quantity(value, where_x_expression, &mut unbound_where_x);
+            }
         }
         Effect::Dig {
             count,
+            keep_count_expr,
             player,
             filter,
             ..
         } => {
             bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+            // "look at the top N …, keep X of them" — the KEPT count is a second, distinct
+            // quantity slot that the original arm did not bind.
+            bind_where_x_optional_quantity(
+                keep_count_expr.as_mut(),
+                where_x_expression,
+                &mut unbound_where_x,
+            );
             bind_where_x_filter(player, where_x_expression, &mut unbound_where_x);
             bind_where_x_filter(filter, where_x_expression, &mut unbound_where_x);
         }
@@ -8038,13 +8257,20 @@ pub(super) fn apply_where_x_effect_expression(
                 }
             }
         }
+        // Every remaining variant carries no `QuantityExpr` and no `PtValue`, so it has no
+        // X slot to bind. The arms above now cover all 62 `QuantityExpr` carriers and all 4
+        // `PtValue` carriers; this wildcard is reached only by variants with nothing to
+        // rewrite. It is NOT an escape hatch — the totality guard below still asserts the
+        // post-condition, so a FUTURE variant that adds a quantity slot without an arm here
+        // reds honestly instead of silently fabricating.
         _ => {}
     }
     // CR 107.3c — TOTALITY GUARD. The match above rewrites the quantity slots of the
-    // `Effect` variants it enumerates. It is NOT exhaustive: of the 64 variants that
-    // carry a `QuantityExpr`, 42 fall through the `_ => {}` above (task #95 binds the
-    // representable ones). Without this guard the wildcard's failure mode is a
-    // FABRICATION rather than a red — the effect keeps its bare `Variable("X")`, which
+    // `Effect` variants it enumerates. Enumeration is necessary but not sufficient: a
+    // variant can be enumerated and still leave an X unbound (a slot the arm forgets, or an
+    // expression `parse_where_x_quantity_expression` cannot represent). Without this guard
+    // the failure mode is a FABRICATION rather than a red — the effect keeps its bare
+    // `Variable("X")`, which
     // resolves to 0 at runtime (amass 0 / surveil 0 / discard 0) while the face still
     // renders as fully supported. That lie is invisible BOTH to a red-count ledger
     // (there is no `Unimplemented` node to count) and to the zero-raw-text invariant

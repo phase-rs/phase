@@ -431,11 +431,27 @@ fn rewrite_cost_x_in_effect(effect: &mut crate::types::ability::Effect) {
         | Effect::Mill { count: amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
-        | Effect::Token { count: amount, .. }
         | Effect::Dig { count: amount, .. }
         | Effect::DamageAll { amount, .. }
         | Effect::DamageEachPlayer { amount, .. } => {
             rewrite_variable_x_to_cost_x_paid(amount);
+        }
+        // CR 107.3c: a token's P/T is an X site just like `Pump`'s. `Token` was rewritten
+        // for its `count` only, so an X/X token minted by an X-cost ability kept a bare
+        // `Variable("X")` in its power/toughness — which resolves to 0, so Shark Typhoon's
+        // cycling trigger created an **0/0 Shark** that died immediately to state-based
+        // actions (CR 704.5f) while the card rendered as fully supported. The P/T rewriter
+        // already handled every shape needed here (including a `PtValue::Quantity` wrapping
+        // the placeholder); `Token` simply never reached it.
+        Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } => {
+            rewrite_variable_x_to_cost_x_paid(count);
+            rewrite_trigger_pt_variable_x(power);
+            rewrite_trigger_pt_variable_x(toughness);
         }
         Effect::Pump {
             power, toughness, ..
@@ -450,10 +466,71 @@ fn rewrite_cost_x_in_effect(effect: &mut crate::types::ability::Effect) {
     }
 }
 
+/// CR 107.3i: "Normally, all instances of X on an object have the same value at
+/// any given time." An ETB trigger's X therefore lives in every quantity slot of
+/// the ability, not only in `effect` — the counter count to distribute
+/// (`multi_target`), the number of repetitions (`repeat_for`), a target-set cap
+/// (`target_constraints`), and an intervening-if operand (`condition`) are all X
+/// sites.
+///
+/// Rewrite an `AbilityCondition`'s quantity operands. Mirrors
+/// `apply_where_x_ability_condition` (`oracle_effect/lower.rs`).
+fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityCondition) {
+    use super::oracle_replacement::rewrite_variable_x_to_cost_x_paid;
+    use crate::types::ability::AbilityCondition;
+    match cond {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            rewrite_variable_x_to_cost_x_paid(lhs);
+            rewrite_variable_x_to_cost_x_paid(rhs);
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            for c in conditions.iter_mut() {
+                rewrite_cost_x_in_condition(c);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Walk an `AbilityDefinition` tree and rewrite Variable("X") → CostXPaid.
-/// Mirrors `apply_where_x_ability_expression` (`oracle_effect/mod.rs`) so
-/// sub-abilities, else branches, and modal alternatives all inherit the rewrite.
+///
+/// Mirrors the SIBLING-FIELD SET of `apply_where_x_ability_expression`
+/// (`oracle_effect/lower.rs`) — `condition`, `repeat_for`, `multi_target`,
+/// `target_constraints`, `effect` — so sub-abilities, else branches, and modal
+/// alternatives all inherit the rewrite.
+///
+/// **Why the sibling fields matter more than `effect` here.** A bare
+/// `QuantityRef::Variable{"X"}` left in an `effect` slot is still bound at
+/// runtime: `resolve_ref` falls back to the trigger event's source object and
+/// reads its `cost_x_paid` (CR 107.3m). But `multi_target`, `repeat_for` and
+/// `target_constraints` are consumed during TARGET SELECTION, before the trigger
+/// resolves and before `current_trigger_event` is set — so that fallback is dead
+/// for them and an unrewritten X there silently resolves to **0**: zero counters
+/// distributed (Broodlord), zero repetitions (Jadelight Spelunker), an
+/// unbounded cap. Rewriting to `CostXPaid` reads
+/// `objects[source].cost_x_paid` directly, with no dependence on the event, so
+/// it is correct at both selection time and resolution time.
 fn rewrite_cost_x_in_ability(def: &mut crate::types::ability::AbilityDefinition) {
+    use super::oracle_replacement::rewrite_variable_x_to_cost_x_paid;
+    use crate::types::game_state::TargetSelectionConstraint;
+
+    if let Some(cond) = def.condition.as_mut() {
+        rewrite_cost_x_in_condition(cond);
+    }
+    if let Some(repeat_for) = def.repeat_for.as_mut() {
+        rewrite_variable_x_to_cost_x_paid(repeat_for);
+    }
+    if let Some(spec) = def.multi_target.as_mut() {
+        spec.map_quantities(|mut expr| {
+            rewrite_variable_x_to_cost_x_paid(&mut expr);
+            expr
+        });
+    }
+    for constraint in def.target_constraints.iter_mut() {
+        if let TargetSelectionConstraint::TotalManaValue { value, .. } = constraint {
+            rewrite_variable_x_to_cost_x_paid(value);
+        }
+    }
     rewrite_cost_x_in_effect(def.effect.as_mut());
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_cost_x_in_ability(sub);
@@ -12046,6 +12123,15 @@ fn parse_your_zone_token(input: &str) -> nom::IResult<&str, Zone, OracleError<'_
     alt((
         value(Zone::Library, tag("your library")),
         value(Zone::Graveyard, tag("your graveyard")),
+        // CR 400.1: source zones expressed player-agnostically — bare plural
+        // "graveyards"/"libraries" (any player's), "a graveyard", or "the
+        // battlefield" (Ketramose, the New Dawn: "…from graveyards and/or the
+        // battlefield"). The batched trigger keys on the zone TYPE the exile
+        // came from, so these lower to the same `Zone` as the "your" forms.
+        value(Zone::Graveyard, tag("graveyards")),
+        value(Zone::Graveyard, tag("a graveyard")),
+        value(Zone::Library, tag("libraries")),
+        value(Zone::Battlefield, tag("the battlefield")),
     ))
     .parse(input)
 }
@@ -12086,9 +12172,21 @@ fn try_parse_one_or_more_put_into_exile_from(
         let Ok((after_zones, zones)) = parse_disjunctive_zone_set(rest) else {
             continue;
         };
-        // Trailing text (after the optional zone-set) may be empty or a
-        // constraint clause we don't handle here. Any non-empty trailing text
-        // means this isn't a clean match — bail so another parser can try.
+        // CR 603.1 + CR 603.2: an optional trailing " during your turn" is part of
+        // the trigger's event/condition — it restricts the batched
+        // trigger to the controller's own turn (Ketramose, the New Dawn — "…are
+        // put into exile from graveyards and/or the battlefield during your
+        // turn"). Peel it here rather than bailing, so the disjunctive origin
+        // (graveyards + battlefield) is captured AND the own-turn gate applies —
+        // otherwise the line falls through to a less-precise parser that drops
+        // both (firing on any turn and on exile from any zone, e.g. hand).
+        let (after_zones, only_during_your_turn) =
+            match value((), tag::<_, _, OracleError<'_>>(" during your turn")).parse(after_zones) {
+                Ok((tail, ())) => (tail, true),
+                Err(_) => (after_zones, false),
+            };
+        // Any other non-empty trailing text is an unhandled constraint clause —
+        // bail so another parser can try.
         if !after_zones.is_empty() {
             continue;
         }
@@ -12098,6 +12196,9 @@ fn try_parse_one_or_more_put_into_exile_from(
         def.origin_zones = zones;
         def.destination = Some(Zone::Exile);
         def.batched = true;
+        if only_during_your_turn {
+            def.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
+        }
         // CR 113.6 / CR 113.6b: this batched "cards are put into exile from
         // library/graveyard" ability is a permanent's triggered ability whose source
         // (e.g. Laelia the Blade Reforged, Rakshasa Vizier) is on the battlefield, and

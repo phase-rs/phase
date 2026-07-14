@@ -12,7 +12,7 @@ use engine::game::{load_and_hydrate_decks, rehydrate_game_from_card_db};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, PersistedGameState};
 use engine::types::identifiers::ObjectId;
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaCost;
@@ -594,7 +594,7 @@ impl GameSession {
 
         PersistedSession {
             game_code: self.game_code.clone(),
-            state: self.state.clone(),
+            state: PersistedGameState::capture(self.state.clone()),
             player_tokens: self.player_tokens.clone(),
             display_names: self.display_names.clone(),
             timer_seconds: self.timer_seconds,
@@ -616,7 +616,7 @@ impl GameSession {
     /// - `log_player_names` from the persisted display names
     /// - `rng` re-seeded with fresh randomness
     pub fn from_persisted(ps: PersistedSession, db: &CardDatabase) -> Self {
-        let mut state = ps.state;
+        let mut state = ps.state.into_game_state();
 
         // Restore #[serde(skip)] fields
         state.all_card_names = db.card_names().into();
@@ -1464,12 +1464,19 @@ pub fn generate_player_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::database::card_db::CardDatabase;
     use engine::game::deck_loading::DeckEntry;
+    use engine::game::engine::apply;
+    use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::ability::TargetRef;
+    use engine::types::actions::PrecastCopyShortcutResponse;
     use engine::types::card::CardFace;
     use engine::types::card_type::CardType;
-    use engine::types::game_state::WaitingFor;
+    use engine::types::game_state::{CastPaymentMode, PersistedGameState, WaitingFor};
     use engine::types::mana::ManaCost;
     use engine::types::phase::{Phase, PhaseStop, PhaseStopScope};
+    use engine::types::zones::Zone;
     use seat_reducer::types::SeatMutation;
 
     fn make_deck() -> PlayerDeckPayload {
@@ -2021,6 +2028,41 @@ mod tests {
 
     use crate::takeback::TakebackOutcome;
 
+    fn precast_offer_runner() -> (GameRunner, u64) {
+        const CHAIN_OF_SMOG: &str = "Target player discards two cards. That player may copy this spell and may choose a new target for that copy.";
+        let db = CardDatabase::from_mtgjson(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../data/mtgjson/test_fixture.json"),
+        )
+        .expect("parser fixture must contain Witherbloom Apprentice");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_real_card(P0, "Witherbloom Apprentice", Zone::Battlefield, &db);
+        let chain = scenario
+            .add_spell_to_hand_from_oracle(P0, "Chain of Smog", false, CHAIN_OF_SMOG)
+            .id();
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&chain].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: chain,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast Chain through the engine reducer");
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P0)),
+            })
+            .expect("target Chain at P0");
+        let epoch = match &runner.state().waiting_for {
+            WaitingFor::PrecastCopyShortcutOffer { epoch, .. } => *epoch,
+            ref other => panic!("expected live pre-cast offer, got {other:?}"),
+        };
+        (runner, epoch)
+    }
+
     /// Two human players: a request stays `Pending` until the other player
     /// approves, then the rolled-back state matches the pre-action snapshot.
     #[test]
@@ -2064,6 +2106,90 @@ mod tests {
             "approved takeback should restore the pre-action waiting_for"
         );
         assert!(session.pending_takeback.is_none());
+    }
+
+    /// A takeback restores a live shortcut offer through the same rekeying
+    /// boundary as persisted sessions. The old offer capability must not be
+    /// usable after the approved rollback.
+    #[test]
+    fn approved_takeback_rekeys_precast_shortcut_capabilities() {
+        let (mut mgr, code, _token0, _token1) = setup_two_player_game();
+        let (runner, stale_epoch) = precast_offer_runner();
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.state = runner.state().clone();
+        session.push_takeback_snapshot(P0);
+        apply(
+            &mut session.state,
+            P0,
+            GameAction::PrecastCopyShortcut {
+                epoch: stale_epoch,
+                response: PrecastCopyShortcutResponse::Decline,
+            },
+        )
+        .expect("mutate away from the offer before requesting takeback");
+
+        assert_eq!(session.request_takeback(P0), Ok(TakebackOutcome::Pending));
+        assert_eq!(
+            session.respond_takeback(P1, true),
+            Ok(TakebackOutcome::Approved)
+        );
+        let fresh_epoch = match &session.state.waiting_for {
+            WaitingFor::PrecastCopyShortcutOffer { epoch, .. } => *epoch,
+            ref other => panic!("approved takeback must reissue the offer, got {other:?}"),
+        };
+        assert_ne!(fresh_epoch, stale_epoch);
+        assert!(apply(
+            &mut session.state,
+            P0,
+            GameAction::PrecastCopyShortcut {
+                epoch: stale_epoch,
+                response: PrecastCopyShortcutResponse::Decline,
+            },
+        )
+        .is_err());
+    }
+
+    /// Existing server snapshots wrote a raw `GameState` at `state`. That
+    /// untrusted representation has no private shortcut transcript, so it
+    /// must deserialize and resume at ordinary priority rather than preserving
+    /// a protocol wait it cannot validate.
+    #[test]
+    fn persisted_session_restores_legacy_raw_state_and_current_trusted_envelope() {
+        let (mgr, code, _token0, _token1) = setup_two_player_game();
+        let (runner, stale_epoch) = precast_offer_runner();
+        let mut persisted = mgr.sessions[&code].to_persisted();
+
+        let mut legacy_json = serde_json::to_value(&persisted)
+            .expect("current persisted session serializes before compatibility rewrite");
+        legacy_json["state"] = serde_json::to_value(runner.state())
+            .expect("historical raw GameState representation serializes");
+        let legacy: PersistedSession = serde_json::from_value(legacy_json)
+            .expect("legacy raw persisted session remains decodable");
+        assert!(matches!(&legacy.state, PersistedGameState::Raw(_)));
+
+        let db = CardDatabase::from_mtgjson(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../data/mtgjson/test_fixture.json"),
+        )
+        .expect("parser fixture must contain Witherbloom Apprentice");
+        let legacy_restored = GameSession::from_persisted(legacy, &db);
+        assert!(matches!(
+            legacy_restored.state.waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ));
+
+        persisted.state = PersistedGameState::capture(runner.state().clone());
+        let trusted: PersistedSession = serde_json::from_value(
+            serde_json::to_value(persisted).expect("trusted session serializes"),
+        )
+        .expect("trusted persisted session remains decodable");
+        assert!(matches!(&trusted.state, PersistedGameState::Trusted(_)));
+        let trusted_restored = GameSession::from_persisted(trusted, &db);
+        let fresh_epoch = match trusted_restored.state.waiting_for {
+            WaitingFor::PrecastCopyShortcutOffer { epoch, .. } => epoch,
+            ref other => panic!("trusted restore must reissue its offer, got {other:?}"),
+        };
+        assert_ne!(fresh_epoch, stale_epoch);
     }
 
     /// Player A acts, then player B acts. A's takeback request must restore

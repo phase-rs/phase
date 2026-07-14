@@ -23,7 +23,7 @@ use engine::game::{
     PlayerDeckList, ReplayPlayer,
 };
 use engine::types::format::{FormatConfig, GameFormat};
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{PersistedGameState, TrustedGameStateEnvelope, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
@@ -33,6 +33,12 @@ use engine::game::resolve_player_deck_list;
 use engine::starter_decks;
 use phase_ai::deck_profile::{ArchetypeClassification, DeckArchetype, DeckProfile};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx, SeatMutation, SeatState};
+
+fn decode_restored_game_state(json_str: &str) -> Result<GameState, JsValue> {
+    serde_json::from_str::<PersistedGameState>(json_str)
+        .map(PersistedGameState::into_game_state)
+        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {e}")))
+}
 
 /// Result of `get_legal_actions_js` — bundles actions with the engine's auto-pass
 /// recommendation so frontends don't need to classify action meaningfulness.
@@ -1349,7 +1355,7 @@ pub fn export_game_state_json() -> Result<String, JsValue> {
         // randomness logic lives in the engine (`GameState::capture_rng_word_pos`),
         // keeping this WASM boundary a thin serialization step.
         state.capture_rng_word_pos();
-        serde_json::to_string(state)
+        serde_json::to_string(&TrustedGameStateEnvelope::capture(state.clone()))
             .map_err(|e| JsValue::from_str(&format!("Failed to serialize GameState: {e}")))
     })?
 }
@@ -1368,8 +1374,7 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
             "restore_game_state refused: undo is disabled in multiplayer sessions",
         ));
     }
-    let mut state: GameState = serde_json::from_str(json_str)
-        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
+    let mut state = decode_restored_game_state(json_str)?;
     // Reseed the skipped `rng` and fast-forward it to the offset captured at
     // export (issue #5466) so the restored game draws the values that would have
     // come NEXT rather than replaying from origin. The engine owns this logic
@@ -1432,8 +1437,7 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
         ));
     }
 
-    let mut state: GameState = serde_json::from_str(json_str)
-        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
+    let mut state = decode_restored_game_state(json_str)?;
 
     // Deliberately re-roll a fresh seed on multiplayer host resume so continued
     // play diverges from any pre-save sequence (mirrors server-core). This is a

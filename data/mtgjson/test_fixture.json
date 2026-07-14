@@ -11106,6 +11106,38 @@
                 ]
             }
         ],
+        "Witherbloom Apprentice": [
+            {
+                "name": "Witherbloom Apprentice",
+                "manaCost": "{B}{G}",
+                "manaValue": 2.0,
+                "colors": [
+                    "B",
+                    "G"
+                ],
+                "colorIdentity": [
+                    "B",
+                    "G"
+                ],
+                "types": [
+                    "Creature"
+                ],
+                "subtypes": [
+                    "Human",
+                    "Druid"
+                ],
+                "supertypes": [],
+                "power": "2",
+                "toughness": "2",
+                "text": "Magecraft — Whenever you cast or copy an instant or sorcery spell, each opponent loses 1 life and you gain 1 life.",
+                "layout": "normal",
+                "type": "Creature — Human Druid",
+                "keywords": [],
+                "identifiers": {
+                    "scryfallOracleId": "696f554d-0485-48a5-9273-3f6fb7d16a5d"
+                }
+            }
+        ],
         "Walk the Plank": [
             {
                 "colorIdentity": [
