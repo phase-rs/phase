@@ -1,11 +1,14 @@
 //! Reactive self-protection tactical policy.
 //!
-//! Rejects the AI casting OR activating "save yourself" effects when there is
-//! no immediate threat to react to and it is not the combat phase. Empirically
-//! observed: AI casting Teferi's Protection on turn 3 against an empty board; AI
-//! repeatedly paying "discard a card: ~ gains protection from everything" until
-//! its hand is empty; AI activating Sylvan Safekeeper ("sacrifice a land: target
-//! creature you control gains shroud") on turn 1 for no reason (issue #771).
+//! Rejects the AI casting OR activating "save yourself" effects without a
+//! payoff. Casts retain the broad immediate-threat/combat gate; activated
+//! object-protection abilities require an exact recipient, an answerable stack
+//! threat, or a concrete combat interaction. Empirically observed: AI casting
+//! Teferi's Protection on turn 3 against an empty board; AI repeatedly paying
+//! "discard a card: ~ gains protection from everything" until its hand is empty;
+//! AI activating Sylvan Safekeeper ("sacrifice a land: target creature you
+//! control gains shroud") on turn 1 for no reason (issue #771); and AI paying 3
+//! life for Arco-Flagellant's indestructible grant once every turn.
 //!
 //! Classification and threat assessment live in `self_protection_classify` —
 //! this policy is the spell/activation gate only. Land-sacrifice outlets also
@@ -23,6 +26,7 @@ use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::self_protection_classify::{
     any_immediate_threat, combat_step_allows_protection, is_self_protection_effect,
+    self_protection_activation_payoff,
 };
 use crate::features::DeckFeatures;
 
@@ -48,18 +52,46 @@ impl TacticalPolicy for ReactiveSelfProtectionPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        if !matches!(
-            ctx.candidate.action,
-            GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
-        ) {
-            return PolicyVerdict::neutral(PolicyReason::new("reactive_self_protection_na"));
-        }
-
         let effects = ctx.effects();
         if !effects
             .iter()
             .any(|e: &&engine::types::ability::Effect| is_self_protection_effect(e))
         {
+            return PolicyVerdict::neutral(PolicyReason::new("reactive_self_protection_na"));
+        }
+
+        if let GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } = &ctx.candidate.action
+        {
+            let Some(ability) = ctx
+                .state
+                .objects
+                .get(source_id)
+                .and_then(|object| object.abilities.get(*ability_index))
+            else {
+                return PolicyVerdict::neutral(PolicyReason::new("reactive_self_protection_na"));
+            };
+            return match self_protection_activation_payoff(
+                ctx.state,
+                ctx.ai_player,
+                *source_id,
+                ability,
+            ) {
+                Some(true) => PolicyVerdict::neutral(PolicyReason::new(
+                    "reactive_self_protection_exact_payoff",
+                )),
+                Some(false) => PolicyVerdict::Reject {
+                    reason: PolicyReason::new("reactive_self_protection_no_payoff"),
+                },
+                None => {
+                    PolicyVerdict::neutral(PolicyReason::new("reactive_self_protection_unmodeled"))
+                }
+            };
+        }
+
+        if !matches!(ctx.candidate.action, GameAction::CastSpell { .. }) {
             return PolicyVerdict::neutral(PolicyReason::new("reactive_self_protection_na"));
         }
 
@@ -179,7 +211,7 @@ mod tests {
             static_abilities: vec![StaticDefinition {
                 mode: StaticMode::Continuous,
                 affected: Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::You),
+                    TypedFilter::creature().controller(ControllerRef::You),
                 )),
                 modifications: vec![ContinuousModification::AddKeyword {
                     keyword: Keyword::Indestructible,
@@ -326,11 +358,41 @@ mod tests {
     }
 
     #[test]
+    fn arco_flagellant_oracle_reaches_typed_pay_life_indestructible_activation() {
+        use engine::parser::oracle::parse_oracle_text;
+        use engine::types::ability::AbilityCost;
+
+        let parsed = parse_oracle_text(
+            "Pay 3 life: Arco-Flagellant gains indestructible until end of turn.",
+            "Arco-Flagellant",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let ability = parsed
+            .abilities
+            .iter()
+            .find(|ability| ability.kind == AbilityKind::Activated)
+            .expect("activated ability must parse");
+        assert!(matches!(
+            ability.cost.as_ref(),
+            Some(AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 3 }
+            })
+        ));
+        assert!(is_self_protection_effect(&ability.effect));
+        assert!(!matches!(
+            ability.effect.as_ref(),
+            Effect::Unimplemented { .. }
+        ));
+    }
+
+    #[test]
     fn classifier_recognises_parent_target_grant_to_you() {
         assert!(is_self_protection_effect(&grant_effect(
             Some(TargetFilter::ParentTarget),
             Some(TargetFilter::Typed(
-                TypedFilter::default().controller(ControllerRef::You)
+                TypedFilter::creature().controller(ControllerRef::You)
             )),
             Keyword::Shroud,
         )));
@@ -363,6 +425,41 @@ mod tests {
     }
 
     #[test]
+    fn activation_self_ref_indestructible_low_life_without_threat_rejected() {
+        let mut state = GameState::new_two_player(42);
+        state.players[AI.0 as usize].life = 5;
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        );
+
+        assert!(matches!(
+            activate_verdict(&state, id),
+            PolicyVerdict::Reject { .. }
+        ));
+    }
+
+    #[test]
+    fn activation_redundant_self_indestructible_rejected() {
+        let mut state = GameState::new_two_player(42);
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .keywords
+            .push(Keyword::Indestructible);
+
+        assert!(matches!(
+            activate_verdict(&state, id),
+            PolicyVerdict::Reject { .. }
+        ));
+    }
+
+    #[test]
     fn activation_parent_target_protection_no_threat_rejected() {
         let mut state = GameState::new_two_player(42);
         let id = ai_object_with_activated(
@@ -370,7 +467,7 @@ mod tests {
             grant_effect(
                 Some(TargetFilter::ParentTarget),
                 Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::You),
+                    TypedFilter::creature().controller(ControllerRef::You),
                 )),
                 Keyword::Shroud,
             ),
@@ -443,10 +540,163 @@ mod tests {
 
         match activate_verdict(&state, id) {
             PolicyVerdict::Score { delta, reason } => {
-                assert_eq!(reason.kind, "reactive_self_protection_threat_present");
+                assert_eq!(reason.kind, "reactive_self_protection_exact_payoff");
                 assert_eq!(delta, 0.0);
             }
             PolicyVerdict::Reject { .. } => panic!("unexpected reject"),
+        }
+    }
+
+    #[test]
+    fn destruction_of_another_creature_does_not_justify_self_indestructible() {
+        use engine::types::ability::{ResolvedAbility, TargetRef};
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new_two_player(42);
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            AI,
+            "Other Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&other)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let opp = PlayerId(1);
+        let spell_id = create_object(
+            &mut state,
+            CardId(99),
+            opp,
+            "Doom Blade".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(other)],
+            spell_id,
+            opp,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: opp,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        assert!(matches!(
+            activate_verdict(&state, id),
+            PolicyVerdict::Reject { .. }
+        ));
+    }
+
+    #[test]
+    fn lethal_damage_justifies_self_indestructible() {
+        use engine::types::ability::{ResolvedAbility, TargetRef};
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new_two_player(42);
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        );
+        state.objects.get_mut(&id).unwrap().toughness = Some(3);
+        let opp = PlayerId(1);
+        let spell_id = create_object(
+            &mut state,
+            CardId(99),
+            opp,
+            "Lightning Bolt".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Object(id)],
+            spell_id,
+            opp,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: opp,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Score { reason, .. } => {
+                assert_eq!(reason.kind, "reactive_self_protection_exact_payoff");
+            }
+            PolicyVerdict::Reject { .. } => panic!("lethal damage is an indestructible payoff"),
+        }
+    }
+
+    #[test]
+    fn nonlethal_damage_to_self_fails_open() {
+        use engine::types::ability::{ResolvedAbility, TargetRef};
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new_two_player(42);
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        );
+        state.objects.get_mut(&id).unwrap().toughness = Some(3);
+        let opp = PlayerId(1);
+        let spell_id = create_object(&mut state, CardId(99), opp, "Ping".to_string(), Zone::Stack);
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Object(id)],
+            spell_id,
+            opp,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: opp,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Score { reason, .. } => {
+                assert_eq!(reason.kind, "reactive_self_protection_unmodeled");
+            }
+            PolicyVerdict::Reject { .. } => panic!("ambiguous damage must fail open"),
         }
     }
 
@@ -487,11 +737,12 @@ mod tests {
 
         state.active_player = opp;
         match activate_verdict(&state, id) {
-            PolicyVerdict::Score { delta, reason } => {
-                assert_eq!(reason.kind, "reactive_self_protection_threat_present");
-                assert_eq!(delta, 0.0);
+            PolicyVerdict::Reject { reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_no_payoff");
             }
-            PolicyVerdict::Reject { .. } => panic!("unexpected reject"),
+            PolicyVerdict::Score { .. } => {
+                panic!("board pressure alone cannot justify self-indestructible")
+            }
         }
     }
 
@@ -506,7 +757,7 @@ mod tests {
             grant_effect(
                 Some(TargetFilter::ParentTarget),
                 Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::You),
+                    TypedFilter::creature().controller(ControllerRef::You),
                 )),
                 Keyword::Protection(ProtectionTarget::ChosenColor),
             ),
@@ -520,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn protection_allowed_during_own_combat() {
+    fn protection_without_attacker_or_legal_blocker_rejected_during_own_combat() {
         use engine::types::keywords::ProtectionTarget;
         use engine::types::phase::Phase;
 
@@ -532,17 +783,16 @@ mod tests {
             grant_effect(
                 Some(TargetFilter::ParentTarget),
                 Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::You),
+                    TypedFilter::creature().controller(ControllerRef::You),
                 )),
                 Keyword::Protection(ProtectionTarget::ChosenColor),
             ),
         );
         match activate_verdict(&state, id) {
-            PolicyVerdict::Score { delta, reason } => {
-                assert_eq!(reason.kind, "reactive_self_protection_combat_payoff");
-                assert_eq!(delta, 0.0);
+            PolicyVerdict::Reject { reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_no_payoff");
             }
-            PolicyVerdict::Reject { .. } => panic!("combat protection must be allowed"),
+            PolicyVerdict::Score { .. } => panic!("empty combat has no protection payoff"),
         }
     }
 
@@ -559,7 +809,7 @@ mod tests {
             grant_effect(
                 Some(TargetFilter::ParentTarget),
                 Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::You),
+                    TypedFilter::creature().controller(ControllerRef::You),
                 )),
                 Keyword::Protection(ProtectionTarget::ChosenColor),
             ),

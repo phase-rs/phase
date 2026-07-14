@@ -11,12 +11,18 @@ use engine::types::ability::{
     StaticDefinition, TargetFilter,
 };
 use engine::types::game_state::GameState;
+use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 
+use engine::game::combat::get_valid_block_targets_for_player;
+use engine::game::effects::effect::generic_effect_application_filter;
+use engine::game::filter::{matches_target_filter, FilterContext};
+use engine::game::functioning_abilities::active_static_definitions;
 use engine::game::keywords::source_matches_protection_target;
+use engine::game::targeting::find_legal_targets;
 use engine::types::ability::TargetRef;
 use engine::types::card_type::CoreType;
 use engine::types::keywords::{HexproofFilter, ProtectionTarget};
@@ -26,7 +32,9 @@ use crate::eval::threat_level;
 use crate::features::landfall::ability_searches_library_for_land;
 use crate::features::mana_ramp::target_filter_references_land;
 use crate::policies::context::collect_ability_effects;
-use crate::policies::effect_classify::{effect_polarity, extract_target_filter, EffectPolarity};
+use crate::policies::effect_classify::{
+    effect_polarity, extract_target_filter, lethal_to_creature, EffectPolarity,
+};
 
 /// Threat-level threshold above which protection casts/activations are unblocked.
 pub(crate) const THREAT_FLOOR: f64 = 0.45;
@@ -471,6 +479,474 @@ fn hexproof_from_blocks_source(
     }
 }
 
+#[derive(Debug, Clone)]
+struct DefensiveOpportunity {
+    grant: DefensiveGrant,
+    recipients: Vec<ObjectId>,
+}
+
+/// Exact, effect-specific payoff for an object-scoped defensive grant.
+///
+/// `None` is deliberate: the classifier cannot prove the recipient or outcome,
+/// so callers must preserve the existing fail-open behavior. This keeps player
+/// protection, conditional grants, and other unsupported shapes playable while
+/// allowing exact gating for the self-indestructible/shroud/hexproof/protection
+/// family.
+pub(crate) fn self_protection_effect_payoff(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    effect: &Effect,
+) -> Option<bool> {
+    let opportunities = defensive_opportunities(state, ai_player, source_id, effect)?;
+    let mut ambiguous = false;
+
+    for opportunity in &opportunities {
+        match stack_payoff_for_opportunity(state, ai_player, opportunity) {
+            Some(true) => return Some(true),
+            Some(false) => {}
+            None => ambiguous = true,
+        }
+        match combat_payoff_for_opportunity(state, opportunity) {
+            Some(true) => return Some(true),
+            Some(false) => {}
+            None => ambiguous = true,
+        }
+    }
+
+    if ambiguous {
+        None
+    } else {
+        Some(false)
+    }
+}
+
+/// Exact activation payoff when every effect in the chain is a supported
+/// object-scoped self-protection effect. Mixed and unsupported chains fail open.
+pub(crate) fn self_protection_activation_payoff(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> Option<bool> {
+    let effects = collect_chain_effects(ability);
+    if effects.is_empty()
+        || effects
+            .iter()
+            .any(|effect| !is_self_protection_effect(effect))
+    {
+        return None;
+    }
+
+    let mut ambiguous = false;
+    for effect in effects {
+        match self_protection_effect_payoff(state, ai_player, source_id, effect) {
+            Some(true) => return Some(true),
+            Some(false) => {}
+            None => ambiguous = true,
+        }
+    }
+    if ambiguous {
+        None
+    } else {
+        Some(false)
+    }
+}
+
+fn defensive_opportunities(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    effect: &Effect,
+) -> Option<Vec<DefensiveOpportunity>> {
+    let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = effect
+    else {
+        return None;
+    };
+    if static_abilities.is_empty() {
+        return None;
+    }
+
+    let mut opportunities = Vec::new();
+    for static_def in static_abilities {
+        if static_def.condition.is_some() || static_def.per_player_condition.is_some() {
+            return None;
+        }
+        if !static_definition_is_self_protection(static_def, target.as_ref()) {
+            return None;
+        }
+        if !matches!(
+            &static_def.mode,
+            StaticMode::Continuous
+                | StaticMode::CantBeTargeted
+                | StaticMode::Shroud
+                | StaticMode::Hexproof
+        ) && static_mode_is_defensive(&static_def.mode)
+        {
+            return None;
+        }
+        if static_def
+            .modifications
+            .iter()
+            .any(|modification| !modification_is_defensive(modification))
+        {
+            return None;
+        }
+
+        let recipients = generic_effect_object_recipients(
+            state,
+            ai_player,
+            source_id,
+            target.as_ref(),
+            static_def.affected.as_ref(),
+        )?;
+        let mut grants = grant_from_static_mode(&static_def.mode);
+        for modification in &static_def.modifications {
+            grants.extend(grants_from_modification(modification));
+        }
+        if grants.is_empty() {
+            return None;
+        }
+        opportunities.extend(grants.into_iter().map(|grant| DefensiveOpportunity {
+            grant,
+            recipients: recipients.clone(),
+        }));
+    }
+    Some(opportunities)
+}
+
+fn generic_effect_object_recipients(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    target: Option<&TargetFilter>,
+    affected: Option<&TargetFilter>,
+) -> Option<Vec<ObjectId>> {
+    let application = generic_effect_application_filter(target, affected)?;
+
+    if let Some(selection) = target.filter(|filter| !filter.is_context_ref()) {
+        let legal = find_legal_targets(state, selection, ai_player, source_id);
+        if legal
+            .iter()
+            .any(|target| matches!(target, TargetRef::Player(_)))
+        {
+            return None;
+        }
+        return Some(
+            legal
+                .into_iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect(),
+        );
+    }
+
+    match application {
+        TargetFilter::SelfRef => Some(vec![source_id]),
+        TargetFilter::SpecificObject { id } => Some(vec![*id]),
+        TargetFilter::Typed(typed)
+            if typed.controller.as_ref() == Some(&ControllerRef::You)
+                && (!typed.type_filters.is_empty() || !typed.properties.is_empty()) =>
+        {
+            let ctx = FilterContext::from_source_with_controller(source_id, ai_player);
+            Some(
+                state
+                    .battlefield
+                    .iter()
+                    .copied()
+                    .filter(|id| matches_target_filter(state, *id, application, &ctx))
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn stack_payoff_for_opportunity(
+    state: &GameState,
+    ai_player: PlayerId,
+    opportunity: &DefensiveOpportunity,
+) -> Option<bool> {
+    let mut ambiguous = false;
+    for entry in &state.stack {
+        if entry.controller == ai_player {
+            continue;
+        }
+        let Some(root) = entry.ability() else {
+            continue;
+        };
+        let source = state.objects.get(&entry.source_id);
+        let mut node = Some(root);
+        while let Some(ability) = node {
+            if ability.condition.is_some() || ability.else_ability.is_some() {
+                ambiguous = true;
+            } else {
+                for target in &ability.targets {
+                    let TargetRef::Object(recipient_id) = target else {
+                        continue;
+                    };
+                    if !opportunity.recipients.contains(recipient_id)
+                        || grant_already_effective(state, *recipient_id, &opportunity.grant)
+                    {
+                        continue;
+                    }
+                    match grant_answers_targeted_effect(
+                        state,
+                        &opportunity.grant,
+                        &ability.effect,
+                        *recipient_id,
+                        source,
+                    ) {
+                        Some(true) => return Some(true),
+                        Some(false) => {}
+                        None => ambiguous = true,
+                    }
+                }
+
+                if let Some(filter) = harmful_mass_filter(&ability.effect) {
+                    let ctx = FilterContext::from_source_with_controller(
+                        entry.source_id,
+                        entry.controller,
+                    );
+                    for recipient_id in &opportunity.recipients {
+                        if grant_already_effective(state, *recipient_id, &opportunity.grant)
+                            || !matches_target_filter(state, *recipient_id, filter, &ctx)
+                        {
+                            continue;
+                        }
+                        match grant_answers_mass_effect(
+                            state,
+                            &opportunity.grant,
+                            &ability.effect,
+                            *recipient_id,
+                            source,
+                        ) {
+                            Some(true) => return Some(true),
+                            Some(false) => {}
+                            None => ambiguous = true,
+                        }
+                    }
+                }
+            }
+            node = ability.sub_ability.as_deref();
+        }
+    }
+    if ambiguous {
+        None
+    } else {
+        Some(false)
+    }
+}
+
+fn grant_answers_targeted_effect(
+    state: &GameState,
+    grant: &DefensiveGrant,
+    effect: &Effect,
+    recipient_id: ObjectId,
+    source: Option<&engine::game::game_object::GameObject>,
+) -> Option<bool> {
+    if !matches!(effect_polarity(effect), EffectPolarity::Harmful) {
+        return Some(false);
+    }
+    let protected = state.objects.get(&recipient_id)?;
+    match grant {
+        DefensiveGrant::CantBeTargeted => Some(harmful_effect_uses_object_targeting(effect)),
+        DefensiveGrant::HexproofFrom(filter) => Some(
+            harmful_effect_uses_object_targeting(effect)
+                && source
+                    .is_some_and(|source| hexproof_from_blocks_source(filter, protected, source)),
+        ),
+        DefensiveGrant::Protection(protection) => Some(
+            harmful_effect_uses_object_targeting(effect)
+                && source.is_some_and(|source| {
+                    source_matches_protection_target(protection, protected, source)
+                }),
+        ),
+        DefensiveGrant::Indestructible => match effect {
+            Effect::Destroy { .. } => Some(true),
+            Effect::DealDamage { .. } => match lethal_to_creature(state, recipient_id, &[effect]) {
+                Some(true) => Some(true),
+                Some(false) | None => None,
+            },
+            _ => Some(false),
+        },
+        DefensiveGrant::PreventDamage => None,
+    }
+}
+
+fn harmful_mass_filter(effect: &Effect) -> Option<&TargetFilter> {
+    use engine::types::zones::Zone;
+    match effect {
+        Effect::DestroyAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::BounceAll { target, .. } => Some(target),
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile | Zone::Graveyard | Zone::Hand,
+            target,
+            ..
+        } => Some(target),
+        _ => None,
+    }
+}
+
+fn grant_answers_mass_effect(
+    state: &GameState,
+    grant: &DefensiveGrant,
+    effect: &Effect,
+    recipient_id: ObjectId,
+    source: Option<&engine::game::game_object::GameObject>,
+) -> Option<bool> {
+    let protected = state.objects.get(&recipient_id)?;
+    match (grant, effect) {
+        (DefensiveGrant::Indestructible, Effect::DestroyAll { .. }) => Some(true),
+        (DefensiveGrant::Indestructible, Effect::DamageAll { .. }) => {
+            match lethal_to_creature(state, recipient_id, &[effect]) {
+                Some(true) => Some(true),
+                Some(false) | None => None,
+            }
+        }
+        (DefensiveGrant::Protection(protection), Effect::DamageAll { .. }) => {
+            source.map(|source| source_matches_protection_target(protection, protected, source))
+        }
+        (DefensiveGrant::PreventDamage, Effect::DamageAll { .. }) => None,
+        _ => Some(false),
+    }
+}
+
+fn grant_already_effective(
+    state: &GameState,
+    recipient_id: ObjectId,
+    grant: &DefensiveGrant,
+) -> bool {
+    let Some(object) = state.objects.get(&recipient_id) else {
+        return false;
+    };
+    match grant {
+        DefensiveGrant::CantBeTargeted => {
+            object.has_keyword(&Keyword::Shroud)
+                || object.has_keyword(&Keyword::Hexproof)
+                || active_static_definitions(state, object)
+                    .any(|def| matches!(&def.mode, StaticMode::CantBeTargeted))
+        }
+        DefensiveGrant::HexproofFrom(filter) => object
+            .keywords
+            .contains(&Keyword::HexproofFrom(filter.clone())),
+        DefensiveGrant::Protection(protection) => object
+            .keywords
+            .contains(&Keyword::Protection(protection.clone())),
+        DefensiveGrant::Indestructible => object.has_keyword(&Keyword::Indestructible),
+        DefensiveGrant::PreventDamage => false,
+    }
+}
+
+fn combat_payoff_for_opportunity(
+    state: &GameState,
+    opportunity: &DefensiveOpportunity,
+) -> Option<bool> {
+    let Some(combat) = state.combat.as_ref() else {
+        return Some(false);
+    };
+    match state.phase {
+        // CR 509.1a-b: before blockers are declared, protection can remove a
+        // genuinely legal blocker from the defending player's choices.
+        Phase::DeclareAttackers => {
+            let DefensiveGrant::Protection(protection) = &opportunity.grant else {
+                return Some(false);
+            };
+            for recipient_id in &opportunity.recipients {
+                if grant_already_effective(state, *recipient_id, &opportunity.grant) {
+                    continue;
+                }
+                let Some(attacker) = combat
+                    .attackers
+                    .iter()
+                    .find(|attacker| attacker.object_id == *recipient_id)
+                else {
+                    continue;
+                };
+                let blockers = get_valid_block_targets_for_player(state, attacker.defending_player);
+                for (blocker_id, targets) in blockers {
+                    if !targets.contains(recipient_id) {
+                        continue;
+                    }
+                    let Some(protected) = state.objects.get(recipient_id) else {
+                        continue;
+                    };
+                    if state.objects.get(&blocker_id).is_some_and(|blocker| {
+                        source_matches_protection_target(protection, protected, blocker)
+                    }) {
+                        return Some(true);
+                    }
+                }
+            }
+            Some(false)
+        }
+        // CR 509.1g + CR 510.1: after declaration, only actual attacker/blocker
+        // pairs can create a combat payoff. Indestructible lethality is not
+        // derivable from pairing alone, so that case deliberately fails open.
+        Phase::DeclareBlockers => {
+            let mut saw_indestructible_pair = false;
+            for recipient_id in &opportunity.recipients {
+                if grant_already_effective(state, *recipient_id, &opportunity.grant) {
+                    continue;
+                }
+                let paired_ids: Vec<ObjectId> = combat
+                    .blocker_assignments
+                    .get(recipient_id)
+                    .into_iter()
+                    .flatten()
+                    .chain(
+                        combat
+                            .blocker_to_attacker
+                            .get(recipient_id)
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .copied()
+                    .collect();
+                if paired_ids.is_empty() {
+                    continue;
+                }
+                match &opportunity.grant {
+                    DefensiveGrant::Protection(protection) => {
+                        let Some(protected) = state.objects.get(recipient_id) else {
+                            continue;
+                        };
+                        if paired_ids.iter().any(|paired_id| {
+                            state.objects.get(paired_id).is_some_and(|paired| {
+                                source_matches_protection_target(protection, protected, paired)
+                            })
+                        }) {
+                            return Some(true);
+                        }
+                    }
+                    DefensiveGrant::Indestructible => saw_indestructible_pair = true,
+                    DefensiveGrant::CantBeTargeted
+                    | DefensiveGrant::HexproofFrom(_)
+                    | DefensiveGrant::PreventDamage => {}
+                }
+            }
+            if saw_indestructible_pair {
+                None
+            } else {
+                Some(false)
+            }
+        }
+        // CR 510.4: before regular damage completes, first/double-strike
+        // participation is source-specific. The engine has no public query for
+        // that distinction, so fail open rather than duplicate the rule here.
+        Phase::CombatDamage if !combat.regular_damage_done => None,
+        Phase::CombatDamage => Some(false),
+        _ => Some(false),
+    }
+}
+
 /// Whether a land-sacrifice self-protection activation has a concrete payoff
 /// right now. Requires a harmful stack effect answerable by the actual grant;
 /// protection also has combat-step payoff (CR 509.1b color dodge). Deliberately
@@ -874,5 +1350,88 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         id
+    }
+
+    #[test]
+    fn protection_evasion_requires_an_untapped_legal_blocker() {
+        use engine::game::combat::{AttackerInfo, CombatState};
+        use engine::types::mana::ManaColor;
+
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let opp = PlayerId(1);
+        let attacker = create_test_creature(&mut state, ai);
+        let blocker = create_test_creature(&mut state, opp);
+        state.objects.get_mut(&blocker).unwrap().color = vec![ManaColor::Red];
+        state.phase = Phase::DeclareAttackers;
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, opp)],
+            ..Default::default()
+        });
+        let effect = grant_effect(
+            Some(TargetFilter::SelfRef),
+            None,
+            Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+        );
+
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, attacker, &effect),
+            Some(true)
+        );
+
+        state.objects.get_mut(&blocker).unwrap().tapped = true;
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, attacker, &effect),
+            Some(false),
+            "the engine's legal-blocker population excludes tapped creatures"
+        );
+    }
+
+    #[test]
+    fn self_indestructible_has_no_payoff_after_empty_blocker_declaration() {
+        use engine::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let opp = PlayerId(1);
+        let attacker = create_test_creature(&mut state, ai);
+        state.phase = Phase::DeclareBlockers;
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, opp)],
+            blockers_declared_by: vec![opp],
+            ..Default::default()
+        });
+        let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible);
+
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, attacker, &effect),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn combat_damage_after_regular_damage_has_no_protection_payoff() {
+        use engine::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let opp = PlayerId(1);
+        let attacker = create_test_creature(&mut state, ai);
+        let blocker = create_test_creature(&mut state, opp);
+        state.phase = Phase::CombatDamage;
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, opp)],
+            regular_damage_done: true,
+            ..Default::default()
+        };
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        state.combat = Some(combat);
+        let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible);
+
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, attacker, &effect),
+            Some(false)
+        );
     }
 }

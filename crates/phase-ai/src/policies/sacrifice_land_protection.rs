@@ -26,6 +26,7 @@ use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::self_protection_classify::{
     any_land_sacrifice_protection_payoff, is_land_sacrifice_self_protection_activation,
+    self_protection_activation_payoff,
 };
 use crate::features::DeckFeatures;
 
@@ -57,8 +58,8 @@ impl TacticalPolicy for SacrificeLandProtectionPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        let ability = match activation_ability(ctx) {
-            Some(ability) => ability,
+        let (source_id, ability) = match activation_ability(ctx) {
+            Some(activation) => activation,
             None => {
                 return PolicyVerdict::neutral(PolicyReason::new("sacrifice_land_protection_na"));
             }
@@ -68,7 +69,12 @@ impl TacticalPolicy for SacrificeLandProtectionPolicy {
             return PolicyVerdict::neutral(PolicyReason::new("sacrifice_land_protection_na"));
         }
 
-        if any_land_sacrifice_protection_payoff(ctx.state, ctx.ai_player, ability) {
+        let exact_payoff =
+            self_protection_activation_payoff(ctx.state, ctx.ai_player, source_id, ability);
+        if exact_payoff == Some(true)
+            || (exact_payoff.is_none()
+                && any_land_sacrifice_protection_payoff(ctx.state, ctx.ai_player, ability))
+        {
             return PolicyVerdict::neutral(PolicyReason::new(
                 "sacrifice_land_protection_answerable_threat",
             ));
@@ -88,7 +94,9 @@ impl TacticalPolicy for SacrificeLandProtectionPolicy {
     }
 }
 
-fn activation_ability<'a>(ctx: &'a PolicyContext<'a>) -> Option<&'a AbilityDefinition> {
+fn activation_ability<'a>(
+    ctx: &'a PolicyContext<'a>,
+) -> Option<(engine::types::identifiers::ObjectId, &'a AbilityDefinition)> {
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
@@ -100,6 +108,7 @@ fn activation_ability<'a>(ctx: &'a PolicyContext<'a>) -> Option<&'a AbilityDefin
         .objects
         .get(source_id)
         .and_then(|object| object.abilities.get(*ability_index))
+        .map(|ability| (*source_id, ability))
 }
 
 fn count_controlled_lands(ctx: &PolicyContext<'_>) -> usize {
