@@ -14817,7 +14817,7 @@ fn distribute_x_counters_among_any_number_allows_zero_targets() {
 }
 
 #[test]
-fn distribute_fixed_counters_among_any_number_requires_one_target() {
+fn distribute_fixed_counters_among_any_number_allows_zero_targets() {
     let clause = parse_effect_clause(
         "distribute two +1/+1 counters among any number of target creatures you control",
         &mut ParseContext::default(),
@@ -14826,7 +14826,7 @@ fn distribute_fixed_counters_among_any_number_requires_one_target() {
     assert_eq!(
         clause.multi_target,
         Some(MultiTargetSpec::bounded_expr(
-            QuantityExpr::Fixed { value: 1 },
+            QuantityExpr::Fixed { value: 0 },
             QuantityExpr::Fixed { value: 2 },
         ))
     );
