@@ -27,7 +27,8 @@ use engine::game::planeswalker;
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CopyCountStatus, Effect, QuantityExpr,
-    ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef, TargetSelectionMode,
+    QuantityModification, ReplacementDefinition, ResolvedAbility, SubAbilityLink, TargetFilter,
+    TargetRef, TargetSelectionMode,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -36,6 +37,7 @@ use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 use std::sync::Arc;
 
@@ -101,6 +103,42 @@ fn create_planeswalker(
     obj.abilities = Arc::new(vec![make_loyalty_ability(1)]);
     obj.entered_battlefield_turn = Some(state.turn_number);
     id
+}
+
+fn install_competing_counter_addition_replacements(state: &mut GameState) {
+    let doubler = create_object(
+        state,
+        CardId(state.next_object_id),
+        PlayerId(0),
+        "Counter Doubler".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&doubler)
+        .unwrap()
+        .replacement_definitions
+        .push(
+            ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(QuantityModification::DOUBLE),
+        );
+
+    let plus = create_object(
+        state,
+        CardId(state.next_object_id),
+        PlayerId(0),
+        "Counter Plus".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&plus)
+        .unwrap()
+        .replacement_definitions
+        .push(
+            ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(QuantityModification::Plus { value: 1 }),
+        );
 }
 
 fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility {
@@ -315,6 +353,79 @@ fn targeted_loyalty_activation_cancel_does_not_spend_loyalty_window() {
     assert!(
         matches!(retry, WaitingFor::TargetSelection { .. }),
         "after cancelling target selection, the same loyalty ability can be started again"
+    );
+}
+
+/// CR 606.3 + CR 616.1: A targeted positive-loyalty activation records the
+/// once-per-turn loyalty activation after its counter-addition cost resumes from
+/// a replacement-ordering choice.
+#[test]
+fn targeted_loyalty_replacement_pause_spends_loyalty_window() {
+    let mut state = setup_main_phase();
+    install_competing_counter_addition_replacements(&mut state);
+    let pw = create_planeswalker(&mut state, PlayerId(0), "Jace", 3);
+    {
+        let obj = state.objects.get_mut(&pw).unwrap();
+        obj.abilities = Arc::new(vec![make_targeted_loyalty_ability(1)]);
+    }
+
+    let mut events = Vec::new();
+    let waiting =
+        planeswalker::handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events).unwrap();
+    state.waiting_for = waiting;
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(PlayerId(1))],
+        },
+    )
+    .expect("target selection should begin loyalty cost payment");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "competing counter-addition replacements must pause loyalty cost payment"
+    );
+    assert_eq!(
+        state.objects[&pw].loyalty_activations_this_turn, 0,
+        "paused loyalty cost has not completed yet"
+    );
+
+    for _ in 0..4 {
+        if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            break;
+        }
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("replacement choice should resume loyalty activation");
+    }
+
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+    assert_eq!(
+        state.objects[&pw].loyalty_activations_this_turn, 1,
+        "completed activation must consume the planeswalker's loyalty window"
+    );
+    assert_eq!(
+        state
+            .loyalty_abilities_activated_this_turn
+            .get(&PlayerId(0))
+            .copied(),
+        Some(1),
+        "per-player loyalty activation history must survive replacement resume"
+    );
+
+    state.stack.clear();
+    assert!(
+        !planeswalker::can_activate_loyalty_ability(&state, pw, PlayerId(0), 0),
+        "retry after replacement-resumed activation must be rejected"
     );
 }
 

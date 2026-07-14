@@ -228,6 +228,7 @@ pub(crate) fn handle_choice(
                     pending.ability,
                     pending.activation_cost.as_ref(),
                     pending.activation_residual,
+                    pending.pending_loyalty_activation_player,
                     events,
                 );
             }
