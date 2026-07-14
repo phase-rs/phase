@@ -9550,6 +9550,15 @@ pub(super) fn initiate_cast_during_resolution(
         graveyard_replacement,
         cost,
     } = request;
+    // CR 608.2g + CR 712.8a: a paid cast granted by an effect uses the
+    // casting card's front face and printed mana cost unless that effect
+    // explicitly says to cast it transformed. Intrinsic graveyard methods such
+    // as disturb are separate alternatives and must not silently replace a
+    // Tinybones-style full-cost cast.
+    let full_cost_front_face = matches!(
+        &cost,
+        crate::types::ability::ResolutionCastCost::FullCost { .. }
+    ) && !cast_transformed;
     // CR 608.2g + CR 609.4b + CR 118.9: resolve the payment shape once.
     // `Free` zeroes the cost and auto-pays (Cascade/Discover/Suspend).
     // `FullCost` charges the card's live printed cost (`SelfManaCost`) and
@@ -9626,7 +9635,7 @@ pub(super) fn initiate_cast_during_resolution(
         state,
         player,
         hit_card,
-        None,
+        full_cost_front_face.then_some(CastingVariant::Normal),
         None,
         Some(casting_permission_index),
         CastingMode::Actual,
