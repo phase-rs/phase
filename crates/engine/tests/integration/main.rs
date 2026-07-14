@@ -448,6 +448,7 @@ mod issue_4752_blood_artist_each_player_sacrifice;
 mod issue_4786_wrenn_realmbreaker;
 mod issue_4792_isochron_scepter;
 mod issue_4824_light_paws_aura_attach;
+mod issue_4825_feather_the_redeemed;
 mod issue_4829_zenith_chronicler;
 mod issue_4830_orvar_land_copy;
 mod issue_4831_bloodthorn_flail_equip;

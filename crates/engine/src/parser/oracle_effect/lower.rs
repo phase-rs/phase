@@ -30,7 +30,7 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, CastPermissionConstraint, CastingPermission, Comparator, ConjureSource,
     ContinuousModification, ControllerRef, DamageChannel, DamageSource, DelayedTriggerCondition,
-    Duration, Effect, EffectScope, FilterProp, GameRestriction, LibraryPosition,
+    Duration, Effect, EffectScope, ExiledSpellReturn, FilterProp, GameRestriction, LibraryPosition,
     ManaSpendPermission, MultiTargetSpec, ObjectScope, PlayerFilter, PreventionAmount,
     PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
@@ -1879,6 +1879,117 @@ pub(super) fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
     if let Some(sub) = def.sub_ability.as_mut() {
         fold_enters_this_way_counter_rider(sub);
     }
+}
+
+/// CR 603.7a + CR 608.2c: fold the "If you do, return it to your hand at the
+/// beginning of the next end step" continuation of an "exile [the resolving
+/// spell] instead of putting it into [a/your] graveyard as it resolves" clause
+/// (Feather, the Redeemed class) into the carrier effect's typed `then_return`
+/// rider (`ExiledSpellReturn { destination, timing }`).
+///
+/// The generic `CreateDelayedTrigger`-at-trigger-resolution lowering is wrong
+/// for this class: per CR 603.7a a delayed trigger created "as the result of a
+/// replacement effect being applied" exists only once the replacement is
+/// APPLIED — i.e. when the spell actually lands in exile during its own stack
+/// resolution — not when Feather's trigger resolves. Creating it eagerly would
+/// return a spell that was countered in response (the replacement never
+/// applied). The rider routes through the per-object marker so the stack
+/// router arms the one-shot return trigger at replacement-application time.
+///
+/// Deliberately conservative: any structural mismatch leaves the sub-ability
+/// unfolded, so `swallow_check` keeps flagging unrepresented text instead of
+/// silently dropping it.
+pub(super) fn fold_exile_resolving_return_rider(def: &mut AbilityDefinition) {
+    if matches!(
+        *def.effect,
+        Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+    ) {
+        if let Some(sub) = def.sub_ability.take() {
+            if is_exile_resolving_return_rider(&sub) {
+                if let Effect::ExileResolvingSpellInsteadOfGraveyard { then_return } =
+                    &mut *def.effect
+                {
+                    // CR 603.7a: Feather's return axes — owner's hand, at the
+                    // beginning of the next end step.
+                    *then_return = Some(ExiledSpellReturn {
+                        destination: Zone::Hand,
+                        timing: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                    });
+                }
+                // The rider is fully represented by the typed rider — consume
+                // the sub.
+            } else {
+                def.sub_ability = Some(sub);
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        fold_exile_resolving_return_rider(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        fold_exile_resolving_return_rider(else_branch);
+    }
+}
+
+/// Structural match for the return rider: an "if you do"-gated
+/// `CreateDelayedTrigger` at the next end step whose sole body returns the
+/// resolving spell (the `ParentTarget`/`SelfRef` anaphor) to its owner's hand.
+fn is_exile_resolving_return_rider(sub: &AbilityDefinition) -> bool {
+    // CR 608.2c: "If you do" — the optional-effect-performed gate on the rider.
+    if !sub
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_optional_effect_performed)
+    {
+        return false;
+    }
+    if sub.sub_ability.is_some() || sub.else_ability.is_some() {
+        return false;
+    }
+    let Effect::CreateDelayedTrigger {
+        condition,
+        effect: inner,
+        uses_tracked_set,
+    } = &*sub.effect
+    else {
+        return false;
+    };
+    if *uses_tracked_set {
+        return false;
+    }
+    // CR 603.7a: "at the beginning of the next end step".
+    if !matches!(
+        condition,
+        DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+    ) {
+        return false;
+    }
+    // CR 603.7a: the fold produces an UNCONDITIONAL return — a delayed-trigger
+    // body carrying its own condition, else-branch, or continuation would be
+    // silently promoted to unconditional if folded, so bail. One tolerated
+    // exception: the assembly-pass wrapper lift CLONES (not moves) the outer
+    // "if you do" gate, so the inner body legitimately carries a duplicate
+    // `is_optional_effect_performed` condition — already enforced on the sub
+    // above, hence unconditional once folded.
+    if inner.sub_ability.is_some() || inner.else_ability.is_some() {
+        return false;
+    }
+    if !inner
+        .condition
+        .as_ref()
+        .is_none_or(AbilityCondition::is_optional_effect_performed)
+    {
+        return false;
+    }
+    // "return it to your hand" — the anaphoric return-to-hand of the spell.
+    matches!(
+        &*inner.effect,
+        Effect::Bounce {
+            target: TargetFilter::ParentTarget | TargetFilter::SelfRef,
+            destination: None | Some(Zone::Hand),
+            ..
+        }
+    )
 }
 
 pub(super) fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {

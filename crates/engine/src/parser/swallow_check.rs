@@ -1421,9 +1421,12 @@ fn effect_is_replacement_carrier(effect: &Effect) -> bool {
         // CR 614.1a + CR 901.9c: "if a player would planeswalk as a result of rolling
         // the planar die, [effect] instead" (Fixed Point in Time).
         | Effect::CreatePlaneswalkReplacement { .. }
-        // CR 608.2m: "exile it instead of putting it into its owner's graveyard" — the
-        // variant name IS the replacement, and it takes no parameters to inspect.
-        | Effect::ExileResolvingSpellInsteadOfGraveyard => true,
+        // CR 614.1a + CR 608.2n: "exile it instead of putting it into its owner's
+        // graveyard" replaces the CR 608.2n graveyard-put default — the variant
+        // name IS the replacement, with or without the `then_return` rider (the
+        // Feather return-rider parameterization is a second replacement folded
+        // into the same carrier, so it stays exempt either way).
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => true,
         _ => false,
     }
 }

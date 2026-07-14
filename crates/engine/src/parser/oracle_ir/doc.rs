@@ -1308,7 +1308,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::PayCost { .. } => {}
         Effect::CastFromZone { .. } => {}
         Effect::FreeCastFromZones { .. } => {}
-        Effect::ExileResolvingSpellInsteadOfGraveyard => {}
+        Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => {}
         Effect::PreventDamage { .. } => {}
         Effect::CreateDamageReplacement { .. } => {}
         // Nested-definition boundary — intentionally NOT recursed. Both carry a

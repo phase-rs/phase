@@ -3282,8 +3282,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Cascade => {}
         Effect::Ripple { .. } => {}
         // CR 614.1a: the "exile it instead of putting it into a graveyard as it
-        // resolves" rider acts on the triggering spell; no displayable parameter.
-        Effect::ExileResolvingSpellInsteadOfGraveyard => {}
+        // resolves" rider acts on the triggering spell; the only displayable
+        // parameter is the optional Feather-class return rider.
+        Effect::ExileResolvingSpellInsteadOfGraveyard { then_return } => {
+            if let Some(rider) = then_return {
+                d.push(("return to".into(), format!("{:?}", rider.destination)));
+                d.push(("return at".into(), format!("{:?}", rider.timing)));
+            }
+        }
         // CR 702.94a: MiracleCast is an internal engine effect, not parsed from Oracle text.
         Effect::MiracleCast { .. } => {}
         // CR 702.35a: MadnessCast is synthesized from Keyword::Madness.

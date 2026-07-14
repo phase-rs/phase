@@ -7,8 +7,9 @@ use crate::types::ability::{
     additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
     AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
     BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
-    ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ModalChoice, ReplacementDefinition,
-    SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellReturn, ModalChoice,
+    ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
+    TriggerDefinition,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -969,6 +970,18 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exile_from_stack_linked_source: Option<ObjectId>,
 
+    /// CR 603.7a + CR 614.1a: While set alongside the exile-instead rider, the
+    /// stack-resolution router arms a one-shot delayed trigger returning this
+    /// spell to the rider's `destination` at its `timing` — at the moment the
+    /// replacement is actually APPLIED (the spell lands in exile), per
+    /// CR 603.7a. Set by `Effect::ExileResolvingSpellInsteadOfGraveyard
+    /// { then_return: Some(..) }` (Feather, the Redeemed's "If you do, return
+    /// it to your hand at the beginning of the next end step"). Transient:
+    /// cleared on any zone exit, so a spell countered before it would have
+    /// resolved never arms a return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exile_from_stack_return_rider: Option<ExiledSpellReturn>,
+
     /// CR 305.1 + CR 603.4: Transient field tracking the zone a land was played
     /// from. Consumed by ETB trigger processing for conditions like "without
     /// being played"; permanents put onto the battlefield by effects leave this
@@ -1166,6 +1179,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         cast_controller: _,
         cast_spell_keywords: _,
         exile_from_stack_linked_source: _,
+        exile_from_stack_return_rider: _,
         played_from_zone: _,
         mana_spent_to_cast: _,
         colors_spent_to_cast: _,
@@ -1757,6 +1771,7 @@ impl GameObject {
             cast_controller: None,
             cast_spell_keywords: Vec::new(),
             exile_from_stack_linked_source: None,
+            exile_from_stack_return_rider: None,
             played_from_zone: None,
             mana_spent_to_cast: false,
             colors_spent_to_cast: ColoredManaCount::default(),

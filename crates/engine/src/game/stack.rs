@@ -1275,6 +1275,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // trigger context, then bail so the replacement-choice resume
                 // path delivers the redirected move.
                 let stack_exile_link_source = stack_exile_linked_source(state, entry.id);
+                // CR 603.7a: snapshot the Feather return-rider marker BEFORE the
+                // move — every zone exit clears the transient rider fields
+                // (zones.rs), so the post-move arm site below must read the
+                // pre-move value.
+                let return_rider = state
+                    .objects
+                    .get(&entry.id)
+                    .and_then(|o| o.exile_from_stack_return_rider.clone());
                 let req = ZoneMoveRequest::spell_resolution_default(entry.id, dest);
                 match zone_pipeline::move_object(state, req, events) {
                     ZoneMoveResult::Done => {
@@ -1297,9 +1305,35 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     link_source,
                                 );
                             }
+                            // CR 603.7a: the exile-instead replacement has now
+                            // actually been APPLIED (the spell landed in
+                            // exile), so this is the moment Feather's "If you
+                            // do, return it to your hand at the beginning of
+                            // the next end step" delayed trigger is created —
+                            // never earlier (a countered spell's marker was
+                            // cleared on its stack exit and never reaches
+                            // here).
+                            if let Some(rider) = return_rider {
+                                effects::exile_resolving_spell::arm_return_to_hand(
+                                    state,
+                                    entry.id,
+                                    entry.controller,
+                                    stack_exile_link_source.unwrap_or(entry.id),
+                                    rider.destination,
+                                    rider.timing,
+                                );
+                            }
                         }
                     }
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        // NOTE: the `return_rider` snapshot is intentionally
+                        // dropped on this bail — a parked move here can only be
+                        // a Graveyard-destination replacement-ordering prompt
+                        // (RIP/Leyline redirects match Graveyard destinations
+                        // only), so no stack→Exile move that could arm the
+                        // return rider can currently park. If a stack→Exile
+                        // replacement choice is ever added, the rider must be
+                        // carried through the pending-resolution resume path.
                         events.push(GameEvent::StackResolved {
                             object_id: entry.id,
                         });
