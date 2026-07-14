@@ -2964,6 +2964,21 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    // CR 302.6 + CR 508.1a: trailing continuity exemption "..., except for
+    // creatures [the/that player] hasn't controlled continuously since the
+    // beginning of the turn" (Total War). The exempted set — creatures NOT
+    // controlled continuously — is removed from the population, so only
+    // creatures the player HAS controlled continuously are affected. Placed
+    // after the controller/"didn't attack" relative clauses because the
+    // exemption trails them; the early `except for <type-list>` block sees the
+    // text before those clauses are consumed and does not reach it. Reuses the
+    // same `ControlledContinuouslySinceTurnBegan` restriction Siren's Call
+    // attaches via the ActivePlayerPunisher continuity path.
+    if let Some((prop, consumed)) = parse_except_continuity_exemption_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // Check zone suffix: "card from a graveyard", "card in your graveyard", "from exile", etc.
     if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
         properties.extend(zone_props);
@@ -6780,6 +6795,49 @@ fn parse_except_for_type_list_suffix(
     }
 
     Some((neg_types, props, consumed))
+}
+
+/// CR 302.6 + CR 508.1a: a trailing continuity exemption on a target filter —
+/// "..., except for creatures [the/that player] hasn't controlled continuously
+/// since the beginning of the turn" (Total War). The exempted set is the
+/// creatures NOT controlled continuously since the turn began, so excluding it
+/// restricts the population to creatures the player HAS controlled continuously:
+/// `FilterProp::ControlledContinuouslySinceTurnBegan`. This is the "except
+/// for <predicate>" sibling of the type-list exclusion above; it reaches the
+/// same restriction Siren's Call attaches via its `ignore this effect for each
+/// creature ... didn't control continuously ...` ActivePlayerPunisher path
+/// (`parser/oracle.rs::parse_continuity_exemption_clause`), for the destroy /
+/// affect-all shape that trails the population phrase instead.
+fn parse_except_continuity_exemption_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = text.trim_start();
+    // Optional list/clause comma the exemption trails ("didn't attack, except…").
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(",")).parse(trimmed).ok()?;
+    let rest = rest.trim_start();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("except for creatures")
+        .parse(rest)
+        .ok()?;
+    // Optional subject anaphor: " the player" / " that player" / "".
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>(" the player"),
+        tag(" that player"),
+    )))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>(" hasn't controlled"),
+        tag(" haven't controlled"),
+        tag(" didn't control"),
+        tag(" doesn't control"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" continuously since the beginning of the turn")
+        .parse(rest)
+        .ok()?;
+    Some((
+        FilterProp::ControlledContinuouslySinceTurnBegan,
+        text.len() - rest.len(),
+    ))
 }
 
 /// CR 205.3 + CR 205.4b: "that isn't a <Subtype>" / "that's not a <Subtype>"

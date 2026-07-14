@@ -2920,28 +2920,18 @@ fn sub_ability_is_continuity_exemption(sub: Option<&AbilityDefinition>) -> bool 
     parse_continuity_exemption_clause(text.trim()).is_ok_and(|(rest, ())| rest.trim().is_empty())
 }
 
-// KNOWN GAP (Total War, tracked as a separate follow-up): this recognizer
-// covers only Siren's Call's "ignore this effect for each creature ... didn't
-// control continuously since the beginning of the turn" phrasing. Total War
-// carries the SAME CR 302.6 + CR 508.1a continuity exemption, but through a
-// DIFFERENT shape:
-//   - it is a triggered ability ("Whenever a player attacks with one or more
-//     creatures ..."), NOT an `ActivePlayerPunisher` delayed trigger, so it
-//     never reaches `apply_active_player_punisher`, the only caller of
-//     `sub_ability_is_continuity_exemption` above; and
-//   - it phrases the exemption as "except for creatures the player hasn't
-//     controlled continuously ...", which the "ignore this effect for each
-//     creature ..." tag below does not match.
-// As a result Total War's continuity exemption is currently silently dropped —
-// its DestroyAll filter parses only as [Untapped, Not(AttackedThisTurn)] with
-// no `ControlledContinuouslySinceTurnBegan` restriction and no `Unimplemented`
-// marker. This is a distinct dropped-modifier root cause (NOT the player-scope
-// bug fixed alongside it in `condition_introduces_attacking_player`) and is
-// intentionally left unfixed here. Fixing it means recognizing the "except for
-// <continuity>" clause on the triggered-ability DestroyAll effect body and
-// attaching `FilterProp::ControlledContinuouslySinceTurnBegan` — either by
-// generalizing this recognizer's phrasing or adding a sibling on the effect
-// parse path.
+// CR 302.6 + CR 508.1a: this recognizer covers only Siren's Call's "ignore this
+// effect for each creature ... didn't control continuously since the beginning
+// of the turn" phrasing, reached via `apply_active_player_punisher` (the only
+// caller of `sub_ability_is_continuity_exemption` above). Total War carries the
+// SAME continuity exemption but through a DIFFERENT shape — a triggered ability
+// ("Whenever a player attacks with one or more creatures ...") whose exemption
+// is phrased "except for creatures the player hasn't controlled continuously
+// ..." trailing the target population. That form is now handled at the target
+// filter parse path by `oracle_target::parse_except_continuity_exemption_suffix`
+// (attaching the same `FilterProp::ControlledContinuouslySinceTurnBegan`), so
+// this `ignore this effect ...` recognizer stays deliberately narrow to Siren's
+// Call's ActivePlayerPunisher shape.
 fn parse_continuity_exemption_clause(i: &str) -> OracleResult<'_, ()> {
     let (i, _) = tag::<_, _, OracleError<'_>>("ignore this effect for each creature").parse(i)?;
     // Optional subject anaphor: " the player" / " that player" / "".
