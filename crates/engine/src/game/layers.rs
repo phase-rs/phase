@@ -1752,6 +1752,29 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
     }
 
+    // CR 613.1 + CR 611.2c: Stack-zone continuous effects grant keywords to objects ON THE
+    // STACK — a spell that "gains rebound" (Taigam, Ojutai Master; CR 702.88a: rebound
+    // "functions while the spell is on the stack") or "gains mobilize 1" (Waystone's
+    // Guidance), and any `StackSpell`-filtered static (Secret Arcade's "permanent spells you
+    // control"). Reset those stack objects' keywords to their base set each layers pass, for
+    // the same reason the hand loop above does: the pass's contract is RESET-then-APPLY, and
+    // the grant policy in `apply_continuous_effect_filtered` explicitly relies on it ("...
+    // resets `obj.keywords = obj.base_keywords.clone()` each pass, so this never accumulates
+    // unbounded across re-evaluations"). Without the reset a summing keyword (CR 702.164b
+    // Toxic) would accumulate one instance per evaluation, and a grant would outlive the
+    // transient continuous effect that produced it.
+    //
+    // Scoped narrowly to `keywords` for the same reason as the hand loop: keyword grants are
+    // the only characteristic any currently-supported static modifies on a stack object.
+    // Extend this reset set before landing a static that modifies them.
+    let stack_ids = super::targeting::zone_object_ids(state, crate::types::zones::Zone::Stack);
+    for id in stack_ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.sync_missing_base_characteristics();
+            obj.keywords = obj.base_keywords.clone();
+        }
+    }
+
     // CR 611.2 + CR 613.1: Rebuild the static-effect-source index from the
     // just-reset base `static_definitions` so the Copy / main gathers below
     // iterate the current pass's generator set. MUST run AFTER the Step-1 reset
@@ -4566,9 +4589,14 @@ fn apply_continuous_effect_to(
 /// zone marker of its own is never silently dropped in favor of a sibling
 /// disjunct's explicit one. Falls back to `[Zone::Battlefield]` when the
 /// whole tree carries no explicit zone marker anywhere.
-fn continuous_effect_scan_zones(filter: &TargetFilter) -> Vec<Zone> {
+///
+/// CR 613.1: the layer system computes the characteristics of an OBJECT — not only of a
+/// permanent — so the scan domain must be able to reach an object wherever it lives. A
+/// `SpecificObject` leaf is an IDENTITY reference resolved against `state`, which is why this
+/// takes `state`: see [`collect_scan_zones`].
+fn continuous_effect_scan_zones(state: &GameState, filter: &TargetFilter) -> Vec<Zone> {
     let mut zones = Vec::new();
-    collect_scan_zones(filter, &mut zones);
+    collect_scan_zones(state, filter, &mut zones);
     if zones.is_empty() {
         zones.push(Zone::Battlefield);
     }
@@ -4585,12 +4613,12 @@ fn continuous_effect_scan_zones(filter: &TargetFilter) -> Vec<Zone> {
 /// [`TargetFilter::extract_in_zone`] (which this function supersedes for
 /// affected-filter scanning specifically; `extract_in_zone` keeps its
 /// existing single-zone contract for its other callers).
-fn collect_scan_zones(filter: &TargetFilter, out: &mut Vec<Zone>) {
+fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zone>) {
     match filter {
         TargetFilter::Or { filters } => {
             for f in filters {
                 let mut branch_zones = Vec::new();
-                collect_scan_zones(f, &mut branch_zones);
+                collect_scan_zones(state, f, &mut branch_zones);
                 if branch_zones.is_empty() {
                     branch_zones.push(Zone::Battlefield);
                 }
@@ -4603,10 +4631,36 @@ fn collect_scan_zones(filter: &TargetFilter, out: &mut Vec<Zone>) {
         }
         TargetFilter::And { filters } => {
             for f in filters {
-                collect_scan_zones(f, out);
+                collect_scan_zones(state, f, out);
             }
         }
-        TargetFilter::Not { filter } => collect_scan_zones(filter, out),
+        TargetFilter::Not { filter } => collect_scan_zones(state, filter, out),
+        // CR 613.1 + CR 611.2c: `SpecificObject` is the IDENTITY filter — it denotes exactly
+        // one object, already bound at resolution time (CR 611.2c: "the set of objects it
+        // affects is determined when that continuous effect begins"). It therefore carries no
+        // zone marker of its own, and `extract_in_zone()` answers `None` for it. Left to the
+        // battlefield default below, a grant bound to an object that is NOT on the battlefield
+        // would be scanned for in a population that cannot contain it and silently dropped.
+        //
+        // CR 613.1 speaks of an OBJECT's characteristics, not a permanent's, so the correct
+        // scan domain for an identity filter is simply WHERE THAT OBJECT ACTUALLY IS. This is
+        // what lets a keyword granted to a spell ON THE STACK land at all — e.g. Taigam,
+        // Ojutai Master's "that spell gains rebound" (CR 702.88a: rebound "functions while the
+        // spell is on the stack"), or Waystone's Guidance's "that spell gains mobilize 1".
+        //
+        // CR 400.7a then follows for free: ObjectId is stable across the zone change, so once
+        // a permanent spell resolves, the same TCE is re-scanned in `Zone::Battlefield` and
+        // keeps applying to the permanent the spell became.
+        //
+        // An object that no longer exists contributes no zone; the filter could not match it
+        // anyway, so the effect is inert rather than misdirected.
+        TargetFilter::SpecificObject { id } => {
+            if let Some(zone) = state.objects.get(id).map(|obj| obj.zone) {
+                if !out.contains(&zone) {
+                    out.push(zone);
+                }
+            }
+        }
         other => {
             if let Some(zone) = other.extract_in_zone() {
                 if !out.contains(&zone) {
@@ -4644,7 +4698,7 @@ fn apply_continuous_effect_filtered(
     // silently dropping a sibling disjunct's implicit-battlefield
     // population. For a filter with no `Or` anywhere this produces exactly
     // one zone, identical to the previous single-zone behavior.
-    let scan_zones = continuous_effect_scan_zones(&effect.affected_filter);
+    let scan_zones = continuous_effect_scan_zones(state, &effect.affected_filter);
 
     let ctx = FilterContext::from_source(state, effect.source_id);
     let mut affected_ids: Vec<ObjectId> = Vec::new();
@@ -5882,7 +5936,10 @@ mod tests {
                 ),
             ],
         };
-        let zones = continuous_effect_scan_zones(&nested);
+        // No `SpecificObject` leaf here, so the state is not consulted — an empty game is
+        // sufficient to exercise the pure filter-tree walk.
+        let state = GameState::new_two_player(0);
+        let zones = continuous_effect_scan_zones(&state, &nested);
         assert!(
             zones.contains(&Zone::Battlefield),
             "the battlefield-implicit disjunct must not be dropped: {zones:?}"
@@ -5904,9 +5961,11 @@ mod tests {
     // common case.
     #[test]
     fn continuous_effect_scan_zones_matches_extract_in_zone_for_non_or_filters() {
+        let state = GameState::new_two_player(0);
+
         let no_zone = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
         assert_eq!(
-            continuous_effect_scan_zones(&no_zone),
+            continuous_effect_scan_zones(&state, &no_zone),
             vec![Zone::Battlefield]
         );
 
@@ -5915,7 +5974,7 @@ mod tests {
                 zone: Zone::Graveyard,
             }]));
         assert_eq!(
-            continuous_effect_scan_zones(&explicit_zone),
+            continuous_effect_scan_zones(&state, &explicit_zone),
             vec![Zone::Graveyard]
         );
 
@@ -5926,8 +5985,55 @@ mod tests {
             ],
         };
         assert_eq!(
-            continuous_effect_scan_zones(&flat_stack_and),
+            continuous_effect_scan_zones(&state, &flat_stack_and),
             vec![Zone::Stack]
+        );
+    }
+
+    /// CR 613.1 + CR 611.2c (task #125): the `SpecificObject` IDENTITY filter must be scanned
+    /// in the zone the object is ACTUALLY IN, not in the battlefield-implicit default.
+    ///
+    /// This is the unit-level discriminator for the stack-grant defect. `SpecificObject`
+    /// carries no zone marker, so `extract_in_zone()` answers `None` for it and the old
+    /// `unwrap_or(Battlefield)` fallback sent every identity-bound continuous effect looking
+    /// for its recipient on the battlefield — dropping the grant outright whenever the
+    /// recipient was a spell on the stack.
+    ///
+    /// The two arms differ ONLY in the recipient's zone, so a scan that ignored the object's
+    /// real zone could not pass both.
+    #[test]
+    fn specific_object_scan_zone_follows_the_objects_actual_zone() {
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(0);
+
+        let on_bf = crate::game::zones::create_object(
+            &mut state,
+            CardId(900),
+            crate::types::player::PlayerId(0),
+            "Battlefield Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        let on_stack = crate::game::zones::create_object(
+            &mut state,
+            CardId(901),
+            crate::types::player::PlayerId(0),
+            "Stack Recipient".to_string(),
+            Zone::Stack,
+        );
+
+        assert_eq!(
+            continuous_effect_scan_zones(&state, &TargetFilter::SpecificObject { id: on_bf }),
+            vec![Zone::Battlefield],
+            "an identity filter bound to a battlefield permanent still scans the battlefield — \
+             the pre-existing behavior must be unchanged"
+        );
+        assert_eq!(
+            continuous_effect_scan_zones(&state, &TargetFilter::SpecificObject { id: on_stack }),
+            vec![Zone::Stack],
+            "CR 613.1: an identity filter bound to a SPELL ON THE STACK must scan the stack. \
+             Pre-fix this answered [Battlefield], the stack object was never in the scanned \
+             population, and the keyword grant was silently dropped."
         );
     }
 

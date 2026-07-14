@@ -670,6 +670,7 @@ mod split_offstack_mana_value;
 mod springheart_nantuko_bestow_landfall;
 mod springheart_realdb_repro;
 mod squirrel_mob_dynamic_pump;
+mod stack_object_keyword_grants;
 mod std_counters_grammar_axes;
 mod std_longtail_b_delayed_effects;
 mod std_s07_batch5a;
