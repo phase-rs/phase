@@ -9408,23 +9408,41 @@ pub enum EntryAttackDestination {
     },
 }
 
-/// CR 603.7a + CR 400.7: rider on the "exile [the resolving spell] instead of
-/// putting it into a graveyard as it resolves" replacement
-/// (`Effect::ExileResolvingSpellInsteadOfGraveyard`) — after the spell is
-/// actually exiled, return it to `destination` at `timing`. `None` on the
-/// carrier = plain exile with no return (Rod of Absorption). `Some` = the
-/// Feather, the Redeemed class (`Zone::Hand`, `AtNextPhase { End }`). The two
-/// axes (destination zone, return timing) are typed so a future class member
-/// ("return it to the battlefield" / "at the beginning of the next upkeep")
-/// is a parameter value, not a new variant.
+/// CR 603.7a + CR 702.170c: the "If you do, ..." consequence of the
+/// "exile [the resolving spell] instead of putting it into a graveyard as it
+/// resolves" replacement (`Effect::ExileResolvingSpellInsteadOfGraveyard`),
+/// applied ONLY at the moment the replacement is actually applied — i.e. when
+/// the spell lands in exile during its own stack resolution. A spell countered
+/// or fizzled in response never reaches the exile-instead move, so it never
+/// takes the rider (CR 603.7a: a consequence created "as the result of a
+/// replacement effect being applied" exists only once the replacement applies).
+///
+/// `None` on the carrier = plain exile with no consequence (Rod of Absorption).
+/// The two members are distinct post-application actions on the exiled card, so
+/// they are a sum type, not a struct with more fields — but both live within the
+/// same CR 603.7a application moment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExiledSpellReturn {
-    /// CR 603.7a: zone the exiled card is returned to when the delayed trigger
-    /// fires (Feather: its owner's hand).
-    pub destination: Zone,
-    /// CR 603.7b: when the one-shot return trigger fires (Feather: at the
-    /// beginning of the next end step).
-    pub timing: DelayedTriggerCondition,
+pub enum ExiledSpellRider {
+    /// CR 603.7a + CR 603.7b: Feather, the Redeemed — "return it to your hand
+    /// at the beginning of the next end step". Arms a one-shot delayed trigger
+    /// returning the exiled card to `destination` at `timing`. The two axes are
+    /// typed so a future class member ("return it to the battlefield" / "at the
+    /// beginning of the next upkeep") is a parameter value, not a new variant.
+    ReturnTo {
+        /// CR 603.7a: zone the exiled card is returned to when the delayed
+        /// trigger fires (Feather: its owner's hand).
+        destination: Zone,
+        /// CR 603.7b: when the one-shot return trigger fires (Feather: at the
+        /// beginning of the next end step).
+        timing: DelayedTriggerCondition,
+    },
+    /// CR 702.170c: Lilah, Undefeated Slickshot — "it becomes plotted". Grants
+    /// the Plotted casting permission to the exiled card's owner and emits
+    /// `BecomesPlotted`, so the card is castable from exile without paying its
+    /// mana cost on a later turn (CR 702.170d). Because plotting requires the
+    /// card to already be in exile (CR 702.170c), this too must run only at
+    /// replacement-application time — never when the trigger resolves.
+    BecomePlotted,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -11365,18 +11383,20 @@ pub enum Effect {
     /// linked-exile payoff). This effect is the trigger-driven, link-establishing
     /// form for the resolving spell itself.
     ExileResolvingSpellInsteadOfGraveyard {
-        /// CR 614.1a + CR 603.7a: "If you do, return it to your hand at the
-        /// beginning of the next end step" (Feather, the Redeemed). When
+        /// CR 614.1a + CR 603.7a + CR 702.170c: the "If you do, ..."
+        /// consequence of the exile-instead replacement (Feather, the
+        /// Redeemed's "return it to your hand at the beginning of the next end
+        /// step"; Lilah, Undefeated Slickshot's "it becomes plotted"). When
         /// `Some`, the stamped rider also marks the spell so that — at the
         /// moment the replacement is actually applied and the spell lands in
-        /// exile — the stack router arms a one-shot delayed trigger returning
-        /// the exiled card to the rider's `destination` at its `timing`.
-        /// The delayed trigger is created when the replacement is APPLIED
-        /// (CR 603.7a), not when this effect resolves, so a spell countered in
-        /// response never arms a return. `None` = plain exile, no return
+        /// exile — the stack router applies the rider (arming Feather's return
+        /// delayed trigger, or granting Lilah's plotted permission). The
+        /// consequence is applied when the replacement is APPLIED (CR 603.7a),
+        /// not when this effect resolves, so a spell countered or fizzled in
+        /// response never takes it. `None` = plain exile, no consequence
         /// (Rod of Absorption).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        then_return: Option<ExiledSpellReturn>,
+        on_exile: Option<ExiledSpellRider>,
     },
     /// CR 615: Prevent damage to a target.
     PreventDamage {

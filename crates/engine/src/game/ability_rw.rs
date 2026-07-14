@@ -5030,7 +5030,7 @@ fn rw_effect(
             p.writes_external.set(StateKind::StackShape);
             (p, None)
         }
-        Effect::ExileResolvingSpellInsteadOfGraveyard { then_return: _ } => {
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: _ } => {
             (ext_write(StateKind::StackShape), None)
         }
 

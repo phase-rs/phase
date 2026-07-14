@@ -33,7 +33,7 @@ use super::lower::{
     effect_publishes_revealed_subject, extract_bounded_target_multi_target,
     extract_exact_target_multi_target, extract_optional_target_multi_target,
     extract_verb_up_to_multi_target, fold_copy_spell_gains_haste_and_quoted_grant,
-    fold_enters_this_way_counter_rider, fold_exile_resolving_return_rider,
+    fold_enters_this_way_counter_rider, fold_exile_resolving_rider,
     fold_search_choose_type_conditional_destination, fold_token_it_has_grants_into_token_statics,
     gate_other_revealed_card_on_multiplayer_reveal,
     gate_reflexive_rider_on_declined_optional_target, is_exile_until_cast_bottom_cleanup,
@@ -2382,12 +2382,12 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // attaching object.
     rewire_result_anchored_subchain(&mut result);
     fold_enters_this_way_counter_rider(&mut result);
-    // CR 603.7a + CR 608.2c: fold Feather's "If you do, return it to your hand
-    // at the beginning of the next end step" rider onto the exile-resolving
-    // carrier's typed `then_return` rider so the return trigger is armed when
-    // the replacement is APPLIED (spell lands in exile), not when the trigger
-    // resolves.
-    fold_exile_resolving_return_rider(&mut result);
+    // CR 603.7a + CR 608.2c + CR 702.170c: fold the exile-instead "If you do,
+    // ..." continuation (Feather's return-to-hand, Lilah's become-plotted) onto
+    // the exile-resolving carrier's typed `on_exile` rider so the consequence is
+    // applied when the replacement is APPLIED (spell lands in exile), not when
+    // the trigger resolves.
+    fold_exile_resolving_rider(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
     retarget_counter_additional_cost_to_target(&mut result);
     // CR 608.2c: two-target "put a counter on the you-control creature, then those

@@ -3283,13 +3283,21 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Ripple { .. } => {}
         // CR 614.1a: the "exile it instead of putting it into a graveyard as it
         // resolves" rider acts on the triggering spell; the only displayable
-        // parameter is the optional Feather-class return rider.
-        Effect::ExileResolvingSpellInsteadOfGraveyard { then_return } => {
-            if let Some(rider) = then_return {
-                d.push(("return to".into(), format!("{:?}", rider.destination)));
-                d.push(("return at".into(), format!("{:?}", rider.timing)));
+        // parameter is the optional "If you do, ..." consequence rider.
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile } => match on_exile {
+            Some(crate::types::ability::ExiledSpellRider::ReturnTo {
+                destination,
+                timing,
+            }) => {
+                d.push(("return to".into(), format!("{destination:?}")));
+                d.push(("return at".into(), format!("{timing:?}")));
             }
-        }
+            // CR 702.170c: Lilah's exiled spell becomes plotted.
+            Some(crate::types::ability::ExiledSpellRider::BecomePlotted) => {
+                d.push(("then".into(), "becomes plotted".into()));
+            }
+            None => {}
+        },
         // CR 702.94a: MiracleCast is an internal engine effect, not parsed from Oracle text.
         Effect::MiracleCast { .. } => {}
         // CR 702.35a: MadnessCast is synthesized from Keyword::Madness.

@@ -7,7 +7,7 @@ use crate::types::ability::{
     additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
     AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
     BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
-    ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellReturn, ModalChoice,
+    ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellRider, ModalChoice,
     ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
     TriggerDefinition,
 };
@@ -970,17 +970,17 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exile_from_stack_linked_source: Option<ObjectId>,
 
-    /// CR 603.7a + CR 614.1a: While set alongside the exile-instead rider, the
-    /// stack-resolution router arms a one-shot delayed trigger returning this
-    /// spell to the rider's `destination` at its `timing` — at the moment the
-    /// replacement is actually APPLIED (the spell lands in exile), per
-    /// CR 603.7a. Set by `Effect::ExileResolvingSpellInsteadOfGraveyard
-    /// { then_return: Some(..) }` (Feather, the Redeemed's "If you do, return
-    /// it to your hand at the beginning of the next end step"). Transient:
-    /// cleared on any zone exit, so a spell countered before it would have
-    /// resolved never arms a return.
+    /// CR 603.7a + CR 614.1a + CR 702.170c: While set alongside the
+    /// exile-instead rider, the stack-resolution router applies the "If you do,
+    /// ..." consequence at the moment the replacement is actually APPLIED (the
+    /// spell lands in exile), per CR 603.7a — arming Feather, the Redeemed's
+    /// return-to-hand delayed trigger, or granting Lilah, Undefeated
+    /// Slickshot's plotted permission. Set by
+    /// `Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: Some(..) }`.
+    /// Transient: cleared on any zone exit, so a spell countered or fizzled
+    /// before it would have resolved never takes the consequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exile_from_stack_return_rider: Option<ExiledSpellReturn>,
+    pub exile_from_stack_rider: Option<ExiledSpellRider>,
 
     /// CR 305.1 + CR 603.4: Transient field tracking the zone a land was played
     /// from. Consumed by ETB trigger processing for conditions like "without
@@ -1179,7 +1179,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         cast_controller: _,
         cast_spell_keywords: _,
         exile_from_stack_linked_source: _,
-        exile_from_stack_return_rider: _,
+        exile_from_stack_rider: _,
         played_from_zone: _,
         mana_spent_to_cast: _,
         colors_spent_to_cast: _,
@@ -1771,7 +1771,7 @@ impl GameObject {
             cast_controller: None,
             cast_spell_keywords: Vec::new(),
             exile_from_stack_linked_source: None,
-            exile_from_stack_return_rider: None,
+            exile_from_stack_rider: None,
             played_from_zone: None,
             mana_spent_to_cast: false,
             colors_spent_to_cast: ColoredManaCount::default(),

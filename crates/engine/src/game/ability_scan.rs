@@ -1071,10 +1071,10 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(filter));
             acc
         }
-        // The `then_return` rider is fixed at parse time and only read by the
+        // The `on_exile` rider is fixed at parse time and only read by the
         // stack-resolution router when the replacement applies — no game-state
         // read happens at scan time, so NONE stays correct.
-        Effect::ExileResolvingSpellInsteadOfGraveyard { then_return: _ } => Axes::NONE,
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: _ } => Axes::NONE,
         Effect::PreventDamage {
             amount_dynamic,
             target,

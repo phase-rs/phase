@@ -1423,9 +1423,9 @@ fn effect_is_replacement_carrier(effect: &Effect) -> bool {
         | Effect::CreatePlaneswalkReplacement { .. }
         // CR 614.1a + CR 608.2n: "exile it instead of putting it into its owner's
         // graveyard" replaces the CR 608.2n graveyard-put default — the variant
-        // name IS the replacement, with or without the `then_return` rider (the
-        // Feather return-rider parameterization is a second replacement folded
-        // into the same carrier, so it stays exempt either way).
+        // name IS the replacement, with or without the `on_exile` rider (the
+        // Feather return / Lilah plot parameterization is a second consequence
+        // folded into the same carrier, so it stays exempt either way).
         | Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => true,
         _ => false,
     }
@@ -2646,52 +2646,52 @@ fn dig_if_you_do_is_only_if_marker(stripped: &str) -> bool {
     !(has_if_marker && !has_as_if_marker && !has_even_if_marker)
 }
 
-/// CR 603.7a + CR 608.2c: the Feather, the Redeemed class carries a
-/// `then_return` rider on `Effect::ExileResolvingSpellInsteadOfGraveyard`
-/// representing "If you do, return it to your hand at the beginning of the next
-/// end step". `then_return: Some(_)` means the return clause is modelled (the
-/// riderless Rod of Absorption form is `None` and has no "if you do" text to
-/// account for).
-fn any_ability_has_exile_resolving_return_rider(parsed: &ParsedAbilities) -> bool {
+/// CR 603.7a + CR 608.2c + CR 702.170c: the exile-instead carrier
+/// (`Effect::ExileResolvingSpellInsteadOfGraveyard`) carries an `on_exile`
+/// rider representing the "If you do, ..." consequence — Feather, the Redeemed's
+/// "return it to your hand at the beginning of the next end step" or Lilah,
+/// Undefeated Slickshot's "it becomes plotted". `on_exile: Some(_)` means the
+/// consequence clause is modelled (the riderless Rod of Absorption form is
+/// `None` and has no "if you do" text to account for).
+fn any_ability_has_exile_resolving_rider(parsed: &ParsedAbilities) -> bool {
     parsed.triggers.iter().any(|t| {
         t.execute
             .as_deref()
-            .is_some_and(def_tree_has_exile_resolving_return_rider)
+            .is_some_and(def_tree_has_exile_resolving_rider)
     }) || parsed
         .abilities
         .iter()
-        .any(def_tree_has_exile_resolving_return_rider)
+        .any(def_tree_has_exile_resolving_rider)
 }
 
-fn def_tree_has_exile_resolving_return_rider(def: &AbilityDefinition) -> bool {
+fn def_tree_has_exile_resolving_rider(def: &AbilityDefinition) -> bool {
     if matches!(
         &*def.effect,
-        Effect::ExileResolvingSpellInsteadOfGraveyard {
-            then_return: Some(_)
-        }
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: Some(_) }
     ) {
         return true;
     }
     if let Some(ref sub) = def.sub_ability {
-        if def_tree_has_exile_resolving_return_rider(sub) {
+        if def_tree_has_exile_resolving_rider(sub) {
             return true;
         }
     }
     if let Some(ref else_ab) = def.else_ability {
-        if def_tree_has_exile_resolving_return_rider(else_ab) {
+        if def_tree_has_exile_resolving_rider(else_ab) {
             return true;
         }
     }
     def.mode_abilities
         .iter()
-        .any(def_tree_has_exile_resolving_return_rider)
+        .any(def_tree_has_exile_resolving_rider)
 }
 
-/// CR 608.2c: the "if you do" linking Feather's return to its exile is a
-/// back-reference, not an independent game-state condition — represented by the
-/// `then_return` rider. Suppress only when "if you do" is the sole bare "if"
-/// marker left in the classified text (mirrors `dig_if_you_do_is_only_if_marker`).
-fn exile_resolving_return_if_you_do_is_only_if_marker(stripped: &str) -> bool {
+/// CR 608.2c: the "if you do" linking the exile-instead consequence (Feather's
+/// return, Lilah's plot) to its exile is a back-reference, not an independent
+/// game-state condition — represented by the `on_exile` rider. Suppress only
+/// when "if you do" is the sole bare "if" marker left in the classified text
+/// (mirrors `dig_if_you_do_is_only_if_marker`).
+fn exile_resolving_rider_if_you_do_is_only_if_marker(stripped: &str) -> bool {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !stripped.contains("if you do") {
         return false;
@@ -3103,16 +3103,17 @@ fn detect_condition_if(
     if any_optional_ability_has_dig(parsed) && dig_if_you_do_is_only_if_marker(&stripped) {
         return;
     }
-    // CR 603.7a + CR 608.2c: "exile that card instead of putting it into your
-    // graveyard as it resolves. If you do, return it to your hand at the
-    // beginning of the next end step" (Feather, the Redeemed). The "if you do"
-    // is the CR 608.2c back-reference linking the return to the exile actually
-    // being applied — represented by the typed `then_return` rider on
-    // `Effect::ExileResolvingSpellInsteadOfGraveyard` (the one-shot return
-    // trigger is armed only when the replacement applies). Not a swallowed
-    // game-state condition.
-    if any_ability_has_exile_resolving_return_rider(parsed)
-        && exile_resolving_return_if_you_do_is_only_if_marker(&stripped)
+    // CR 603.7a + CR 608.2c + CR 702.170c: "exile that {card,spell} instead of
+    // putting it into your graveyard as it resolves. If you do, [return it to
+    // your hand at the beginning of the next end step | it becomes plotted]"
+    // (Feather, the Redeemed / Lilah, Undefeated Slickshot). The "if you do" is
+    // the CR 608.2c back-reference linking the consequence to the exile actually
+    // being applied — represented by the typed `on_exile` rider on
+    // `Effect::ExileResolvingSpellInsteadOfGraveyard` (the consequence is
+    // applied only when the replacement applies). Not a swallowed game-state
+    // condition.
+    if any_ability_has_exile_resolving_rider(parsed)
+        && exile_resolving_rider_if_you_do_is_only_if_marker(&stripped)
     {
         return;
     }
@@ -4609,9 +4610,9 @@ mod tests {
 
     /// CR 603.7a + CR 608.2c: Feather, the Redeemed's "If you do, return it to
     /// your hand at the beginning of the next end step" is represented by the
-    /// `then_return` rider on `Effect::ExileResolvingSpellInsteadOfGraveyard`,
+    /// `on_exile` rider on `Effect::ExileResolvingSpellInsteadOfGraveyard`,
     /// so Detector G must NOT flag it as a swallowed `Condition_If`. Reverting
-    /// the `any_ability_has_exile_resolving_return_rider` exemption re-fires the
+    /// the `any_ability_has_exile_resolving_rider` exemption re-fires the
     /// swallow (the coverage-honesty regression this guards against).
     #[test]
     fn feather_return_rider_is_not_a_swallowed_condition_if() {
@@ -4625,6 +4626,29 @@ mod tests {
         assert!(
             !has_swallowed_detector(&parsed, "Condition_If"),
             "Feather's folded return rider must not surface as a swallowed Condition_If: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 702.170c + CR 608.2c: Lilah, Undefeated Slickshot's "If you do, it
+    /// becomes plotted" folds onto the same `on_exile` rider (as
+    /// `ExiledSpellRider::BecomePlotted`), so — like Feather — Detector G must
+    /// NOT flag its "if you do" as a swallowed `Condition_If`. This guards the
+    /// coverage-honesty regression that the plot-grant fold could otherwise
+    /// introduce (the folded grant leaves no `GrantCastingPermission { Plotted }`
+    /// node for the `any_ability_has_plotted_grant` suppression to see).
+    #[test]
+    fn lilah_plotted_rider_is_not_a_swallowed_condition_if() {
+        let parsed = parse_named(
+            "Prowess\nWhenever you cast a multicolored instant or sorcery spell from your hand, \
+             exile that spell instead of putting it into your graveyard as it resolves. If you \
+             do, it becomes plotted.",
+            "Lilah, Undefeated Slickshot",
+            &["Legendary", "Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "Lilah's folded plotted rider must not surface as a swallowed Condition_If: {:?}",
             parsed.parse_warnings
         );
     }
