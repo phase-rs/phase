@@ -85,6 +85,8 @@ The CLI models freshness using:
 - CI status as evidence only, not as a pre-review or merge-when-ready gate;
 - labels and merge-queue membership.
 
+**Freshness invariant.** Before accepting `held`, `blocked`, `queued`, or a previously approved no-action result, the sweep must compare the current `headRefOid` with the most recent locally recorded head. A different head is a mandatory re-review candidate (or `update_branch_for_handler` when it conflicts), never an inherited hold. Likewise, an author comment/review created **or edited** after the latest GitHub-visible maintainer comment/review is an unacknowledged follow-up even if a later local event recorded a hold. Local event timestamps are observations, not contributor responses. If the scanner cannot prove that it has the relevant recent comment history, it must surface the PR for review rather than preserve the state. Explicit capability-policy deferrals and self/standing skips remain policy decisions, not inherited review states.
+
 ## Maintainer-Caused Staleness
 
 Before blocking a PR on "needs rebase", classify **why** it went stale. Causation, not size, decides who does the work.
