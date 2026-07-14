@@ -1785,6 +1785,8 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     };
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.replacement_definitions.retain(|r| !expires_at_eot(r));
+        std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
+            .retain(|r| !expires_at_eot(r));
     }
     state
         .pending_damage_replacements
