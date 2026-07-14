@@ -31,6 +31,9 @@ use engine::types::PlayerId;
 /// Anoint with Affliction {1}{B} — Instant. Verbatim Oracle text.
 const ANOINT: &str = "Exile target creature if it has mana value 3 or less.\nCorrupted — Exile that creature instead if its controller has three or more poison counters.";
 
+/// Gather the Pack {1}{G} — Sorcery. Verbatim Oracle text.
+const GATHER_THE_PACK: &str = "Reveal the top five cards of your library. You may put a creature card from among them into your hand. Put the rest into your graveyard.\nSpell mastery — If there are two or more instant and/or sorcery cards in your graveyard, put up to two creature cards from among the revealed cards into your hand instead of one.";
+
 /// CR 614.6 DOUBLE-EXECUTION WITNESS (board state).
 ///
 /// Anoint with Affliction exiles the target ONLY if its mana value is 3 or less.
@@ -85,6 +88,104 @@ fn anoint_with_affliction_cross_line_override_does_not_exile_unconditionally() {
 
 fn poison_counters(runner: &GameRunner, player: PlayerId) -> u32 {
     runner.state().players[player.0 as usize].poison_counters
+}
+
+/// SHAPE (CR 614.15 PARTIAL replacement): "… instead of one" replaces only the
+/// COUNT of the printed Dig — not the whole instruction.
+///
+/// RED before the fix: the "Spell mastery —" line matched none of the cross-line
+/// gate's whole-clause forms (it ends "instead of one", not a bare "instead"), so it
+/// was published as a SECOND top-level ability — and its body, parsed in isolation,
+/// had lowered to `ChangeZone { destination: Hand, target: Creature, up_to,
+/// multi_target: 0..2 }`: a targeted BOUNCE of up to two creatures off the
+/// battlefield. With spell mastery on, casting Gather the Pack both dug AND offered
+/// to bounce two creatures — an effect the card does not have.
+///
+/// The override must instead bind as an alternative `Dig` that keeps the printed
+/// Dig's source (top five), its `reveal`, and its rest-to-graveyard rider, changing
+/// only the keep count (1 -> 2). Asserting the effect KIND is what discriminates a
+/// faithful rebuild from a naive whole-effect swap that would silently drop the
+/// reveal and the rest-to-graveyard.
+#[test]
+fn gather_the_pack_binds_the_partial_override_as_an_alternative_dig() {
+    use engine::types::ability::Effect;
+
+    let parsed = parse_oracle_text(
+        GATHER_THE_PACK,
+        "Gather the Pack",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "CR 614.6: the spell-mastery override replaces the printed Dig's count; it \
+         must be bound INTO that Dig, never published as a second ability (which \
+         resolved as a stray creature bounce). Got: {:#?}",
+        parsed.abilities
+    );
+
+    let base = &parsed.abilities[0];
+    let Effect::Dig {
+        keep_count: base_keep,
+        count: base_count,
+        reveal: base_reveal,
+        rest_destination: base_rest,
+        ..
+    } = base.effect.as_ref()
+    else {
+        panic!("base must remain the printed Dig, got {:?}", base.effect);
+    };
+    assert_eq!(*base_keep, Some(1), "printed Dig keeps one creature card");
+    assert!(*base_reveal, "printed Dig reveals");
+
+    let sub = base
+        .sub_ability
+        .as_ref()
+        .expect("the override must be bound as the Dig's sub_ability");
+    assert!(
+        matches!(
+            sub.condition,
+            Some(AbilityCondition::ConditionInstead { .. })
+        ),
+        "CR 614.1a: the override must be a ConditionInstead branch so the runtime \
+         SWAPS the Dig rather than running both. Got: {:?}",
+        sub.condition
+    );
+
+    // CR 614.15: the override replaces only the PART it names ("instead of one").
+    // Everything else about the Dig — source size, reveal, rest destination — must
+    // survive the rebuild, which is exactly what a bare ChangeZone would have lost.
+    let Effect::Dig {
+        keep_count: alt_keep,
+        count: alt_count,
+        reveal: alt_reveal,
+        rest_destination: alt_rest,
+        ..
+    } = sub.effect.as_ref()
+    else {
+        panic!(
+            "the alternative must be a full Dig, not a bare ChangeZone (that drops \
+             the reveal, the library source and the rest-to-graveyard rider). Got: {:?}",
+            sub.effect
+        );
+    };
+    assert_eq!(
+        *alt_keep,
+        Some(2),
+        "spell mastery keeps TWO creature cards, not one"
+    );
+    assert_eq!(
+        alt_count, base_count,
+        "the alternative reuses the printed Dig's source (top five)"
+    );
+    assert_eq!(alt_reveal, base_reveal, "the alternative still reveals");
+    assert_eq!(
+        alt_rest, base_rest,
+        "the alternative still puts the rest into the graveyard"
+    );
 }
 
 /// SHAPE (CR 614.15 + CR 614.6): the cross-line override must be BOUND to the

@@ -3983,6 +3983,32 @@ fn build_instead_def(
     InsteadLowering::Branch(Box::new(result))
 }
 
+/// CR 614.15: an "instead" marker replaces "part or all" of the ability's effect,
+/// and the printed grammar says WHICH. A bare trailing "instead" replaces the whole
+/// clause ("create two of those tokens instead"). A trailing "instead of <N>"
+/// replaces only a PART — the antecedent's quantity — and names the OLD value it is
+/// displacing ("put up to two creature cards … into your hand instead of one",
+/// "search your library for up to three basic Forest cards instead of two").
+///
+/// That trailing "of <N>" is redundant with the antecedent, which still holds the old
+/// value, so it carries nothing the branch needs: it is a marker, not an operand.
+/// This recognizes both printings as the same replacement marker so the alternative
+/// grammar is not blocked by the one that spells out what it replaces.
+///
+/// Anything else after "instead" ("instead of putting it into your hand") names a
+/// non-quantity part and is NOT accepted here — that is a different replacement axis,
+/// and silently treating it as a whole-clause marker would drop the part it names.
+fn is_replacement_marker_tail(after_instead_lower: &str) -> bool {
+    let tail = after_instead_lower.trim().trim_end_matches('.').trim();
+    if tail.is_empty() {
+        return true;
+    }
+    nom_parse_lower(tail, |input| {
+        all_consuming(preceded(tag("of "), nom_primitives::parse_number)).parse(input)
+    })
+    .is_some()
+}
+
 /// CR 608.2c: "If <cond>, you may instead <reveal-N-from-among-body>" — conditional
 /// alternative selection for a preceding `Effect::Dig`. The "instead" body re-uses
 /// the preceding Dig's source (top N cards) but swaps keep_count/up_to/filter/destination.
@@ -3997,7 +4023,7 @@ fn build_instead_def(
 /// caller wraps the preceding Dig as `else_ability`. Class coverage: any card of form
 /// "look at top N / reveal a <filter> card from among them ... if <cond>, you may
 /// instead reveal M <filter'> cards from among them" (CR 608.2c replacement effect).
-pub(super) fn try_parse_dig_instead_alternative(
+pub(crate) fn try_parse_dig_instead_alternative(
     text: &str,
     previous: Option<&AbilityDefinition>,
     kind: AbilityKind,
@@ -4048,7 +4074,7 @@ pub(super) fn try_parse_dig_instead_alternative(
             let body_rest_pair = TextPair::new(body_rest, &body_rest_lower);
             let (body_rest, suffix_had_instead) =
                 if let Some((before, after)) = body_rest_pair.split_around(" instead") {
-                    if after.original.trim().is_empty() {
+                    if is_replacement_marker_tail(after.lower) {
                         (before.original.trim(), true)
                     } else {
                         (body_rest, false)

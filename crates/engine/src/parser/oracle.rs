@@ -5308,6 +5308,43 @@ pub(crate) fn parse_oracle_ir(
             } else {
                 parse_effect_chain_with_context(parse_line, AbilityKind::Spell, &mut ctx)
             };
+
+            // CR 614.15 + CR 608.2c: a PARTIAL cross-line self-replacement whose
+            // antecedent is a `Dig` ("Reveal the top five cards of your library. You
+            // may put a creature card from among them into your hand. Put the rest
+            // into your graveyard." / "Spell mastery — If <cond>, put up to TWO
+            // creature cards from among the revealed cards into your hand INSTEAD OF
+            // ONE.").
+            //
+            // The override's body cannot stand on its own: parsed in isolation it
+            // lowers to a bare `ChangeZone`, dropping the reveal, the library source
+            // and the rest-to-graveyard rider that the printed Dig carries. Binding
+            // THAT as the replacement would trade the double-execution for an effect
+            // LOSS. `try_parse_dig_instead_alternative` is the existing
+            // antecedent-parameterized handler for exactly this: it rebuilds the
+            // alternative as a full `Dig` that reuses the preceding Dig's source and
+            // reveal-mode and swaps only what the override actually changes
+            // (keep_count / up_to / filter / destination). It is reached intra-chain
+            // via the chunk ladder; here we hand it the previous LINE's def as the
+            // antecedent, which is the same relationship across a line boundary.
+            //
+            // The resulting alternative carries its own condition, so it flows into
+            // the ability-word merge and the cross-line binder below exactly like any
+            // other override — the binder wraps it in `ConditionInstead` and parks the
+            // printed Dig as the `else_ability` fallback.
+            let dig_alt = emitter.builder.peek_last_spell().and_then(|previous| {
+                crate::parser::oracle_effect::conditions::try_parse_dig_instead_alternative(
+                    &effect_line,
+                    Some(previous),
+                    AbilityKind::Spell,
+                    &mut ctx,
+                )
+            });
+            let is_cross_line_dig_alt = dig_alt.is_some();
+            if let Some(alt) = dig_alt {
+                def = alt;
+            }
+
             def.min_x_value = spell_min_x_value;
             def.description = Some(description);
             // CR 608.2c: Compose ability word condition with chain-extracted condition.
@@ -5345,7 +5382,7 @@ pub(crate) fn parse_oracle_ir(
             // replaces the preceding ability's effect. Compose them so the engine
             // resolves the binary choice: the "instead" sub carries the condition;
             // the base ability becomes the fallback when it is not met.
-            if is_instead || is_instead_replacement_line(&effect_line) {
+            if is_instead || is_cross_line_dig_alt || is_instead_replacement_line(&effect_line) {
                 if let Some(condition) = def.condition.take() {
                     if let Some(base_item) = emitter.pop_last_spell() {
                         // Re-emit the merged ability at the BASE item's ORIGINAL
