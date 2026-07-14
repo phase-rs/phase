@@ -1,13 +1,13 @@
 #[cfg(test)]
 use crate::types::ability::TapStateChange;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardTypeSetSource,
-    CastManaSpentMetric, CombatRelationSubject, ControllerRef, CounterMoveSelection, DamageSource,
-    Effect, EffectScope, FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition,
-    ModalSelectionConstraint, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
-    TypedFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
+    CardTypeSetSource, CastManaSpentMetric, CombatRelationSubject, ControllerRef,
+    CounterMoveSelection, DamageSource, Effect, EffectScope, FilterProp, GameRestriction,
+    ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectScope,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope,
+    SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition,
+    TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -385,6 +385,14 @@ pub fn kicker_instead_spell_has_legal_targets(
     object_id: ObjectId,
     player: PlayerId,
 ) -> bool {
+    let has_kicker_cost = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.additional_cost.as_ref())
+        .is_some_and(|additional| matches!(additional, AdditionalCost::Kicker { .. }));
+    if !has_kicker_cost {
+        return false;
+    }
     let Some(sub) = ability_def.sub_ability.as_deref() else {
         return false;
     };

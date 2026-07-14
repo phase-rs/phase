@@ -22648,6 +22648,66 @@ fn kozileks_command_modes_scry_draw_and_exile_graveyard_end_to_end() {
 
 const DEADLY_ORACLE: &str = "As an additional cost to cast this spell, you may collect evidence 6.\nDestroy all creatures. If evidence was collected, exile a card from an opponent's graveyard. Then search its owner's graveyard, hand, and library for any number of cards with that name and exile them. That player shuffles, then draws a card for each card exiled from their hand this way.";
 
+#[test]
+fn optional_instead_damage_spells_require_a_legal_target_to_be_castable() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+
+    const VOLTAGE_ORACLE: &str = "As an additional cost to cast this spell, you may sacrifice an artifact.\nVoltage Surge deals 2 damage to target creature or planeswalker. If this spell's additional cost was paid, Voltage Surge deals 4 damage instead.";
+    const TORCH_ORACLE: &str = "Bargain (You may sacrifice an artifact, enchantment, or token as you cast this spell.)\nTorch the Tower deals 2 damage to target creature or planeswalker. If this spell was bargained, instead it deals 3 damage to that permanent and you scry 1.\nIf a permanent dealt damage by Torch the Tower would die this turn, exile it instead.";
+
+    for (name, oracle, keywords) in [
+        ("Voltage Surge", VOLTAGE_ORACLE, &[][..]),
+        ("Torch the Tower", TORCH_ORACLE, &["bargain"][..]),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Red);
+        let spell_id = {
+            let mut spell = scenario.add_spell_to_hand(P0, name, true);
+            spell
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 0,
+                })
+                .from_oracle_text_with_keywords(keywords, oracle);
+            spell.id()
+        };
+
+        assert!(
+            !can_cast_object_now(&scenario.state, P0, spell_id),
+            "{name} must not be castable with no creature or planeswalker target"
+        );
+        assert!(
+            !crate::ai_support::legal_actions(&scenario.state)
+                .iter()
+                .any(|action| {
+                    matches!(
+                        action,
+                        GameAction::CastSpell { object_id, .. } if *object_id == spell_id
+                    )
+                }),
+            "{name} must not be advertised with no legal target"
+        );
+
+        scenario.add_creature(P1, "Legal target", 2, 2);
+        assert!(
+            can_cast_object_now(&scenario.state, P0, spell_id),
+            "{name} must become castable when a creature target exists"
+        );
+        assert!(
+            crate::ai_support::legal_actions(&scenario.state)
+                .iter()
+                .any(|action| {
+                    matches!(
+                        action,
+                        GameAction::CastSpell { object_id, .. } if *object_id == spell_id
+                    )
+                }),
+            "{name} must be advertised when a legal target exists"
+        );
+    }
+}
+
 /// Deadly Cover-Up fixture: P1 owns two `Grizzly Bears` in GY + one in hand
 /// (same-named), a `Llanowar Elves` decoy in GY and hand, and a two-card library
 /// with no Bears (so a draw is the only library change). P0 owns a same-named
