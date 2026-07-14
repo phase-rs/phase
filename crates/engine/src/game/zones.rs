@@ -123,11 +123,18 @@ pub(crate) fn capture_attachment_snapshot(
 /// revert (CR 712.14), exile permission clearing (CR 113.6e), monstrous reset
 /// (CR 701.37b), counter clearing (CR 122.2), layer pruning, and mana-tap
 /// cleanup.
+/// `attachments` MUST be captured by the caller BEFORE
+/// `sever_battlefield_attachment_graph_on_exit` runs. This function cannot capture it
+/// itself: in `move_to_zone` the sever happens first, so by the time we get here the
+/// live object's attachment list is already empty. CR 608.2h needs the pre-sever set
+/// (see the `LKISnapshot::attachments` doc comment), so the caller — which is the only
+/// code that still has it — supplies it.
 pub(crate) fn apply_zone_exit_cleanup(
     state: &mut GameState,
     object_id: ObjectId,
     from: Zone,
     to: Zone,
+    attachments: Vec<crate::types::game_state::AttachmentSnapshot>,
 ) {
     // CR 400.7: An object that changes zones becomes a new object with no
     // memory of its previous existence. Both the short-lived `revealed_cards`
@@ -194,6 +201,12 @@ pub(crate) fn apply_zone_exit_cleanup(
                 // CR 701.60b: Capture suspected status at zone exit for
                 // "was suspected" look-back riders.
                 is_suspected: obj.is_suspected,
+                // CR 608.2h: The attachment set as it stood BEFORE SBA unattached it
+                // (CR 704.5m/n), so a source-referential intervening-if re-checked at
+                // resolution ("if this creature is enchanted" — Dreampod Druid) reads
+                // last known information once its source has left the battlefield.
+                // Supplied by the caller: the sever already ran by the time we get here.
+                attachments,
             };
             state.lki_cache.insert(object_id, lki);
         }
@@ -759,7 +772,15 @@ pub fn move_to_zone(
     // exist without corrupting leave-trigger filters.
     super::merge::restore_pre_merge_tokenness_for_leave(state, object_id);
 
-    apply_zone_exit_cleanup(state, object_id, from, to);
+    // CR 608.2h: hand the LKI the PRE-SEVER attachment set captured above — the sever
+    // has already emptied the live object's attachment list by this point.
+    apply_zone_exit_cleanup(
+        state,
+        object_id,
+        from,
+        to,
+        zone_change_record.attachments.clone(),
+    );
 
     remove_from_zone(state, object_id, from, owner);
     if redirect_attraction_to_command {
@@ -1153,7 +1174,14 @@ pub fn move_to_library_at_index(
 
     sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
 
-    apply_zone_exit_cleanup(state, object_id, from, Zone::Library);
+    // CR 608.2h: hand the LKI the PRE-SEVER attachment set captured above.
+    apply_zone_exit_cleanup(
+        state,
+        object_id,
+        from,
+        Zone::Library,
+        zone_change_record.attachments.clone(),
+    );
 
     remove_from_zone(state, object_id, from, owner);
 

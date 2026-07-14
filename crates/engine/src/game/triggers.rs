@@ -6918,8 +6918,23 @@ pub(crate) fn check_trigger_condition(
         // the engine's normal TargetFilter matcher so properties such as
         // enchanted/equipped, attacked this turn, and other composable
         // source-state checks do not need bespoke TriggerCondition siblings.
+        //
+        // CR 608.2h + CR 113.7a: this arm asks the filter about the SOURCE ITSELF as
+        // the subject, and the CR 603.4 re-check happens at RESOLUTION — by which time
+        // the source may be gone. A token that has left the battlefield ceased to exist
+        // (CR 111.7 / CR 704.5d) and was purged from `state.objects`, so a live-only
+        // lookup cannot see the subject at all and fails closed for EVERY property.
+        // That is not a rules answer: CR 608.2h routes information about a source that
+        // is "no longer in the public zone it was expected to be in" to its LAST KNOWN
+        // INFORMATION, and CR 113.7a keeps the ability resolving regardless.
+        //
+        // `subject_filter_matches_with_lki` is the single authority for that fallback
+        // (shared with `match_sacrificed` / `match_connives` / the exploit matcher): it
+        // matches the LIVE object first and consults `state.lki_cache` only when the
+        // object no longer carries its battlefield appearance. Live state always wins,
+        // so this is a strict no-op for any source that still exists on the battlefield.
         TriggerCondition::SourceMatchesFilter { filter } => source_id.is_some_and(|id| {
-            matches_target_filter(state, id, filter, &FilterContext::from_source(state, id))
+            super::trigger_matchers::subject_filter_matches_with_lki(state, id, filter, id)
         }),
         // CR 603.4 + CR 120.1: "if any of that damage was dealt by a [filter]"
         // evaluates the triggering damage source as it was when the damage was
@@ -12198,6 +12213,7 @@ pub mod tests {
                 counters,
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         );
 

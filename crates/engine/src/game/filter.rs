@@ -1454,7 +1454,12 @@ pub fn matches_target_filter_on_lki_snapshot(
         cast_from_zone: None,
         played_from_zone: None,
         to_zone: Zone::Battlefield,
-        attachments: vec![],
+        // CR 608.2h: Carry the exit-time attachment set so a source-referential
+        // predicate ("if this creature is enchanted" — Dreampod Druid) reads LAST
+        // KNOWN INFORMATION rather than the empty set. SBA unattaches everything the
+        // instant the host leaves the battlefield (CR 704.5m/n), so the live board can
+        // never answer this for a source that is already gone.
+        attachments: lki.attachments.clone(),
         linked_exile_snapshot: vec![],
         is_token: false,
         combat_status: Default::default(),
@@ -5929,6 +5934,7 @@ mod tests {
                 counters: Default::default(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         );
 
@@ -10204,6 +10210,7 @@ mod tests {
             counters: Default::default(),
             tapped: false,
             is_suspected: false,
+            attachments: Vec::new(),
         };
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
@@ -10249,6 +10256,7 @@ mod tests {
             counters: Default::default(),
             tapped: false,
             is_suspected: false,
+            attachments: Vec::new(),
         };
         let filter =
             TargetFilter::Typed(
@@ -10396,6 +10404,7 @@ mod tests {
             counters: Default::default(),
             tapped,
             is_suspected: false,
+            attachments: Vec::new(),
         };
 
         // Left the battlefield TAPPED.
@@ -11312,6 +11321,7 @@ mod tests {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            attachments: Vec::new(),
         };
         let land_lki = LKISnapshot {
             name: "Test Land".to_string(),
@@ -11332,6 +11342,7 @@ mod tests {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            attachments: Vec::new(),
         };
 
         let filter =
@@ -11477,6 +11488,7 @@ mod tests {
                 chosen_attributes: vec![],
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         );
 
@@ -11547,6 +11559,7 @@ mod tests {
                 chosen_attributes: vec![],
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         );
 

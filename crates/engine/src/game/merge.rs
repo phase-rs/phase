@@ -612,7 +612,20 @@ fn put_component_into_zone(
     // existence (clears revealed/activation history, captures last-known info).
     // It was part of a battlefield permanent, so its prior context is the
     // battlefield — but no battlefield-exit event is emitted for it.
-    crate::game::zones::apply_zone_exit_cleanup(state, component_id, Zone::Battlefield, dest);
+    // CR 608.2h: no sever has run on this path, so the component's live attachment list is
+    // still intact — capture it here for the LKI, through the one shared authority.
+    let attachments = state
+        .objects
+        .get(&component_id)
+        .map(|obj| crate::game::zones::capture_attachment_snapshot(state, obj))
+        .unwrap_or_default();
+    crate::game::zones::apply_zone_exit_cleanup(
+        state,
+        component_id,
+        Zone::Battlefield,
+        dest,
+        attachments,
+    );
 
     // CR 730.2: the component is absorbed into the survivor and is not an
     // independent member of the battlefield list; defensively ensure it is not

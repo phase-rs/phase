@@ -293,7 +293,14 @@ fn combine_card_with_host(
 ) {
     if let Some(zone) = state.objects.get(&augment_id).map(|obj| obj.zone) {
         let owner = state.objects[&augment_id].owner;
-        zones::apply_zone_exit_cleanup(state, augment_id, zone, Zone::Battlefield);
+        // CR 608.2h: no sever has run on this path, so the live attachment list is still
+        // intact — capture it here for the LKI, through the one shared authority.
+        let attachments = state
+            .objects
+            .get(&augment_id)
+            .map(|obj| zones::capture_attachment_snapshot(state, obj))
+            .unwrap_or_default();
+        zones::apply_zone_exit_cleanup(state, augment_id, zone, Zone::Battlefield, attachments);
         zones::remove_from_zone(state, augment_id, zone, owner);
     }
     if let Some(augment) = state.objects.get_mut(&augment_id) {

@@ -261,6 +261,23 @@ pub struct LKISnapshot {
     /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to `false`.
     #[serde(default)]
     pub is_suspected: bool,
+    /// CR 608.2h + CR 400.7: Attachments (Auras/Equipment) as they last existed on
+    /// the battlefield. Attachment is a battlefield-only relationship — SBA unattaches
+    /// everything the instant the host leaves (CR 704.5m/n) — so a source-referential
+    /// intervening-if ("if this creature is enchanted" — Dreampod Druid; "if he's
+    /// equipped" — Whiplash) re-checked at resolution (CR 603.4) has nothing live to
+    /// read once its source is gone. CR 608.2h routes that question to LAST KNOWN
+    /// INFORMATION, so the attachment set must be captured on battlefield exit like
+    /// every other look-back characteristic here.
+    ///
+    /// Captured via [`capture_attachment_snapshot`](crate::game::zones::capture_attachment_snapshot),
+    /// the same authority that fills `ZoneChangeRecord::attachments` — one snapshot
+    /// shape, one capture site.
+    ///
+    /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to an empty set,
+    /// which is exactly the pre-change fail-closed behavior.
+    #[serde(default)]
+    pub attachments: Vec<AttachmentSnapshot>,
 }
 
 /// CR 106.3 + CR 601.2h: Snapshot of the source of one mana spent to cast a spell.

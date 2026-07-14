@@ -1773,6 +1773,15 @@ impl GameObject {
             // still on the battlefield (cost-paid snapshot precedes the sacrifice
             // zone-change that resets the flag), so `self.is_suspected` is authoritative.
             is_suspected: self.is_suspected,
+            // Empty by construction, NOT by choice: classifying an attachment as
+            // Aura/Equipment requires looking each attached object up in `GameState`
+            // (see `zones::capture_attachment_snapshot`), and this method has only
+            // `&self`. Callers that need the attachment look-back (the CR 608.2h
+            // battlefield-exit LKI) go through `apply_zone_exit_cleanup`, which does
+            // have `&GameState` and populates it. The damage-source and mana-spent
+            // snapshots that use this method never ask an attachment predicate, so an
+            // empty set here is the same fail-closed answer they got before.
+            attachments: Vec::new(),
         }
     }
 

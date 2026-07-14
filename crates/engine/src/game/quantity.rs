@@ -5436,6 +5436,7 @@ mod tests {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            attachments: Vec::new(),
         };
 
         state.attacker_declarations_this_turn = vec![
@@ -11296,6 +11297,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         );
         state.current_trigger_event =
@@ -11359,6 +11361,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         });
         let power = resolve_quantity_with_targets(
@@ -11507,6 +11510,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         });
         let resolved = resolve_quantity_with_targets(
@@ -11586,6 +11590,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         });
         assert!(
@@ -11664,6 +11669,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         });
         assert!(
@@ -11728,6 +11734,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         };
         // Both fields set, with DIFFERENT mana values so the winning path is
@@ -11789,6 +11796,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         });
         let expr = QuantityExpr::Ref {
@@ -11843,6 +11851,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 7));
@@ -11908,6 +11917,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         };
         ability.set_effect_context_object_recursive(snapshot("Effect Context", 5));
@@ -11950,6 +11960,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         );
         assert!(!state.lki_cache.is_empty());
@@ -12587,6 +12598,7 @@ mod tests {
                     chosen_attributes: vec![],
                     tapped: false,
                     is_suspected: false,
+                    attachments: Vec::new(),
                 },
             );
             state.exile_links.push(ExileLink {
