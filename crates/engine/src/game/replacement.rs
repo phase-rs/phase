@@ -5621,6 +5621,30 @@ fn object_replacement_candidate_applies(
         // not change the current event.
         return false;
     }
+    // CR 614.1c + CR 707.9: An optional enter-as-copy replacement is
+    // applicable only when the copied-object filter has a legal source. In
+    // particular, Echoing Deeps with empty graveyards must enter untapped;
+    // accepting its replacement would otherwise apply the tap modifier and
+    // then silently find no object to copy.
+    if replacement_mode_is_optional(&repl_def.mode) {
+        if let Some(real_work) =
+            EventModifiers::first_non_modifier_ability(repl_def.execute.as_deref())
+        {
+            if let Effect::BecomeCopy { target, .. } = &*real_work.effect {
+                if super::engine_replacement::find_copy_targets(
+                    state,
+                    target,
+                    obj.id,
+                    replacement_player,
+                    None,
+                )
+                .is_empty()
+                {
+                    return false;
+                }
+            }
+        }
+    }
 
     // CR 122.1a + CR 614.1a: counter-type filters restrict counter replacements
     // to the named counter type.

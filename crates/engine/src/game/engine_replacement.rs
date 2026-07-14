@@ -2287,7 +2287,7 @@ pub(super) fn apply_etb_counters(
     true
 }
 
-fn find_copy_targets(
+pub(super) fn find_copy_targets(
     state: &GameState,
     filter: &TargetFilter,
     source_id: ObjectId,

@@ -3411,6 +3411,59 @@ fn echoing_deeps_copying_sunken_citadel_prompts_for_the_copied_color_choice() {
     assert_eq!(copy.chosen_color(), Some(ManaColor::Blue));
 }
 
+/// CR 614.1c + CR 707.9: Echoing Deeps can enter tapped as a copy only when
+/// a land card exists in a graveyard. With no copy source, it enters untapped
+/// and must not expose an invalid accept-replacement action to the AI.
+#[test]
+fn echoing_deeps_with_empty_graveyards_enters_untapped_without_copy_offer() {
+    let mut state = setup_game_at_main_phase();
+    let deeps = zones::create_object(
+        &mut state,
+        CardId(9_023),
+        PlayerId(0),
+        "Echoing Deeps".to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&deeps)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_oracle_to_object(
+        &mut state,
+        deeps,
+        "Echoing Deeps",
+        "You may have this land enter tapped as a copy of any land card in a graveyard, except it's a Cave in addition to its other types.\n{T}: Add {C}.",
+    );
+    assert!(state
+        .players
+        .iter()
+        .all(|player| player.graveyard.is_empty()));
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: deeps,
+            card_id: CardId(9_023),
+        },
+    )
+    .expect("Echoing Deeps should be playable with empty graveyards");
+
+    assert!(
+        matches!(result.waiting_for, WaitingFor::Priority { .. }),
+        "an impossible copy must not offer an accept-replacement action, got {:?}",
+        result.waiting_for
+    );
+    let entered = &state.objects[&deeps];
+    assert_eq!(entered.zone, Zone::Battlefield);
+    assert!(
+        !entered.tapped,
+        "an un-copied Echoing Deeps enters untapped"
+    );
+}
+
 /// CR 614.12a + CR 707.9: Callidus Assassin grants its copy a "When this
 /// creature enters" trigger as part of the entering-as-copy bundle. The
 /// ETB event for the copy must fire *after* the player chooses a target
