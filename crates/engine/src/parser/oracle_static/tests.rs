@@ -22548,6 +22548,157 @@ fn static_creature_cards_not_on_battlefield_have_flash() {
     }
 }
 
+// CR 611.3 + CR 205.1b + CR 109.4/CR 109.5: Dune Chanter — the compound-subject
+// off-battlefield-owned land-type static. Same structural gap shape as #5406's
+// compound-subject chosen-type static: "Lands you control" (battlefield,
+// controller-scoped) and "land cards you own that aren't on the battlefield"
+// (off-battlefield, owner-scoped) are two independently-resolvable conjuncts
+// that `parse_land_type_change_subject`'s fixed-arm match can't reach and that
+// `parse_continuous_subject_filter` previously had no branch for at all, so the
+// whole line silently dropped the off-battlefield half of the subject.
+#[test]
+fn parser_shape_dune_chanter_compound_owned_land_type_static() {
+    use crate::types::zones::Zone;
+
+    let def = parse_static_line(
+        "Lands you control and land cards you own that aren't on the battlefield are Deserts in addition to their other types.",
+    )
+    .expect("Dune Chanter's compound-subject additive land-type static must parse");
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!("affected must be Or of both conjuncts: {:?}", def.affected);
+    };
+    assert_eq!(filters.len(), 2, "one disjunct per conjunct: {filters:?}");
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Land)
+                && tf.controller == Some(ControllerRef::You)
+                && !tf.properties.iter().any(|p| matches!(p, FilterProp::InAnyZone { .. })))),
+        "battlefield conjunct must be a controller-scoped Land filter with no zone property: {:?}",
+        def.affected
+    );
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Land)
+                && tf.controller == Some(ControllerRef::You)
+                && tf.properties.iter().any(|p| matches!(p, FilterProp::InAnyZone { zones }
+                    if zones.contains(&Zone::Hand)
+                        && zones.contains(&Zone::Graveyard)
+                        && zones.contains(&Zone::Exile)
+                        && zones.contains(&Zone::Command))))),
+        "off-battlefield conjunct must be an owner-scoped Land filter with the off-battlefield zone set: {:?}",
+        def.affected
+    );
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddSubtype {
+            subtype: "Desert".to_string(),
+        }],
+        "additive Desert subtype grant only (no basic-land-type machinery — Desert isn't a basic land type): {:?}",
+        def.modifications
+    );
+}
+
+// Dune Chanter's full printed oracle text: the compound-subject static must be
+// present AND its sibling single-subject static ("Lands you control have '{T}:
+// Add one mana of any color.'") must parse unchanged, AND the activated mill
+// ability must still parse — proving the fix is additive, not a regression on
+// the rest of the card.
+#[test]
+fn parse_dune_chanter_full_oracle_adds_compound_static_and_preserves_siblings() {
+    let oracle = "Reach\nLands you control and land cards you own that aren't on the battlefield are Deserts in addition to their other types.\nLands you control have \"{T}: Add one mana of any color.\"\n{T}: Mill two cards. You gain 1 life for each land card milled this way.";
+    let result = crate::parser::oracle::parse_oracle_text(
+        oracle,
+        "Dune Chanter",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let has_compound_static = result.statics.iter().any(|def| {
+        matches!(def.affected, Some(TargetFilter::Or { ref filters }) if filters.len() == 2)
+            && def.modifications
+                == vec![ContinuousModification::AddSubtype {
+                    subtype: "Desert".to_string(),
+                }]
+    });
+    assert!(
+        has_compound_static,
+        "Dune Chanter must produce the compound-subject Desert static: {:?}",
+        result.statics
+    );
+
+    let has_mana_grant = result.statics.iter().any(|def| {
+        matches!(def.affected, Some(TargetFilter::Typed(ref tf))
+            if tf.type_filters.contains(&TypeFilter::Land) && tf.controller == Some(ControllerRef::You))
+            && def
+                .modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+    });
+    assert!(
+        has_mana_grant,
+        "the sibling 'Lands you control have mana ability' static must still parse unchanged: {:?}",
+        result.statics
+    );
+
+    assert!(
+        !result.abilities.is_empty(),
+        "the mill activated ability must still parse: {:?}",
+        result.abilities
+    );
+}
+
+// No-regression: a single-subject additive land-type line (no " and ") has
+// nothing for the compound conjunct machinery to split on and must stay a
+// plain Typed filter, not be widened into an Or.
+#[test]
+fn single_subject_additive_land_type_static_not_hijacked_by_compound_conjunct_branch() {
+    let def = parse_static_line("Lands you control are Deserts in addition to their other types.")
+        .expect("single-subject additive land-type static must still parse");
+    assert!(
+        !matches!(def.affected, Some(TargetFilter::Or { .. })),
+        "single subject must not be widened into an Or: {:?}",
+        def.affected
+    );
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddSubtype {
+            subtype: "Desert".to_string(),
+        }]
+    );
+}
+
+// No-regression: `parse_owned_off_battlefield_subject_filter` was extracted
+// from `parse_spells_have_keyword`'s Pattern 2 (Leyline of Anticipation class)
+// as a behavior-preserving refactor — the filter's controller and off-
+// battlefield zone scoping must be byte-for-byte the same after extraction,
+// not just the coarse `type_filters.contains(Creature)` the older test checks.
+#[test]
+fn spells_have_keyword_pattern2_owned_off_battlefield_filter_shape_preserved() {
+    use crate::types::zones::Zone;
+
+    let def =
+        parse_static_line("Creature cards you own that aren't on the battlefield have flash.")
+            .expect("Leyline of Anticipation-style flash grant must still parse");
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::InAnyZone { zones }
+                    if zones.contains(&Zone::Hand)
+                        && zones.contains(&Zone::Graveyard)
+                        && zones.contains(&Zone::Exile)
+                        && zones.contains(&Zone::Command))),
+                "must carry the off-battlefield zone scope: {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("Expected Some(Typed filter), got {other:?}"),
+    }
+}
+
 // --- Group: legendary + colored qualifiers on spell-keyword statics ---
 // CR 205.4a (supertype) + CR 105.2 (color count). Amazing Spider-Man's back
 // face grants web-slinging only to "legendary spells … that's one or more
