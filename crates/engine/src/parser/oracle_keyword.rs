@@ -1841,8 +1841,40 @@ pub(crate) struct KeywordLineTail {
 /// declaration. A router may advance its source index ONLY on this value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RoutedKeywordLine {
-    pub(crate) keyword: Keyword,
+    /// `None` when the line is a COMPLETE keyword declaration that has nothing to
+    /// emit because MTGJSON is the typed authority for it (CR 702.124 Partner).
+    /// The line is still fully accounted for, so the router consumes it — it just
+    /// pushes no keyword. Without this the line would fall through and become a
+    /// FALSE `Unimplemented` on a card that is fully supported.
+    pub(crate) keyword: Option<Keyword>,
     pub(crate) tail: KeywordLineTail,
+}
+
+/// CR 702.124: the Partner family's typed keyword comes from MTGJSON, not from the
+/// Oracle line. `parse_keyword_line_core` deliberately DECLINES "partner with
+/// [Name]" (see the `value(None, tag("partner with "))` arm) because the cascade
+/// sees LOWERCASED text and re-parsing would emit a duplicate keyword with mangled
+/// casing — "alphinaud leveilleur" instead of "Alphinaud Leveilleur".
+///
+/// That refusal was harmless while priority 13 silently skipped the line. Under
+/// consume-on-success it is NOT: measured on the full pool, it turned 60 fully
+/// supported faces into false `Unimplemented`s. The line IS a complete declaration;
+/// it simply has nothing left to contribute. Recognize it so the router consumes it
+/// and emits nothing.
+///
+/// Still all-consuming: "Partner if you control an artifact" is rejected, because a
+/// bare declaration must have an empty remainder.
+fn is_partner_declaration_line(lower: &str) -> bool {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("partner with ").parse(lower) {
+        return !rest.trim().is_empty();
+    }
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("partner\u{2014}").parse(lower) {
+        return !rest.trim().is_empty();
+    }
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("partner").parse(lower) {
+        return rest.trim().is_empty();
+    }
+    false
 }
 
 /// CR 602.5b: the modeled modifier sentence, as a combinator.
@@ -1938,6 +1970,24 @@ pub(crate) fn parse_router_keyword_line(line: &str) -> Option<RoutedKeywordLine>
     let had_reminder = semantic.len() != trimmed.len();
     let lower = semantic.to_lowercase();
 
+    let permitted_remainder_of = |had_punct: bool| match (had_punct, had_reminder) {
+        (false, false) => PermittedKeywordRemainder::None,
+        (true, false) => PermittedKeywordRemainder::TerminalPunctuation,
+        (false, true) => PermittedKeywordRemainder::ReminderText,
+        (true, true) => PermittedKeywordRemainder::TerminalPunctuationAndReminderText,
+    };
+
+    // 2b. MTGJSON-authoritative declarations: fully accounted for, nothing to emit.
+    if is_partner_declaration_line(&lower) {
+        return Some(RoutedKeywordLine {
+            keyword: None,
+            tail: KeywordLineTail {
+                modifiers: Vec::new(),
+                permitted_remainder: permitted_remainder_of(false),
+            },
+        });
+    }
+
     // 3. Remainder-preserving core — it never erases a suffix.
     let (keyword, unconsumed) = parse_keyword_line_core(&lower)?;
 
@@ -1947,18 +1997,11 @@ pub(crate) fn parse_router_keyword_line(line: &str) -> Option<RoutedKeywordLine>
     // 5. Modeled modifiers are applied exhaustively before the keyword escapes.
     let keyword = apply_keyword_line_modifiers(keyword, &modifiers)?;
 
-    let permitted_remainder = match (had_terminal_punctuation, had_reminder) {
-        (false, false) => PermittedKeywordRemainder::None,
-        (true, false) => PermittedKeywordRemainder::TerminalPunctuation,
-        (false, true) => PermittedKeywordRemainder::ReminderText,
-        (true, true) => PermittedKeywordRemainder::TerminalPunctuationAndReminderText,
-    };
-
     Some(RoutedKeywordLine {
-        keyword,
+        keyword: Some(keyword),
         tail: KeywordLineTail {
             modifiers,
-            permitted_remainder,
+            permitted_remainder: permitted_remainder_of(had_terminal_punctuation),
         },
     })
 }

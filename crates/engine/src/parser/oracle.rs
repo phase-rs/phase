@@ -5208,7 +5208,9 @@ pub(crate) fn parse_oracle_ir(
             // through to spell-effect parsing and becomes an honest, exact-unit
             // `Effect::Unimplemented` rather than vanishing.
             if let Some(routed) = parse_router_keyword_line(&line) {
-                emitter.keyword_at(item_line, routed.keyword);
+                if let Some(keyword) = routed.keyword {
+                    emitter.keyword_at(item_line, keyword);
+                }
                 i += 1;
                 continue;
             }
@@ -5568,7 +5570,9 @@ pub(crate) fn parse_oracle_ir(
         // support. A strict parse is now the only licence to advance; anything
         // else falls through to priority 14a/15 and stays honestly red.
         if let Some(routed) = parse_router_keyword_line(&line) {
-            emitter.keyword_at(item_line, routed.keyword);
+            if let Some(keyword) = routed.keyword {
+                emitter.keyword_at(item_line, keyword);
+            }
             i += 1;
             continue;
         }
