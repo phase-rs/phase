@@ -1770,7 +1770,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         ControllerRef, FilterProp, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr,
-        QuantityRef, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        QuantityRef, StaticDefinition, TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -2986,6 +2987,143 @@ mod tests {
             assert_eq!(
                 attacking, expect_tapped,
                 "enchantment={is_enchantment}: attacking rider must be gated on the moved object's type (CR 508.4 / CR 614.12)"
+            );
+        }
+    }
+
+    /// CR 601.2c + CR 115.1d (Ill-Gotten Gains class, issue #5784): drives the
+    /// FULL at-resolution round trip for a bounded, non-targeted
+    /// graveyard-to-hand return — not just that the parsed clause carries a
+    /// `multi_target`, but that it survives into a real `EffectZoneChoice`
+    /// pause with the correct cardinality AND that submitting a PARTIAL
+    /// choice (fewer than the eligible cards, within the bound) moves only
+    /// the chosen cards, leaving the rest in the graveyard. The existing
+    /// `targeted_up_to_two_graveyard_bounce_moves_chosen_creature` sibling
+    /// (`game::effects::bounce`) bypasses this picker entirely by injecting a
+    /// pre-resolved `TargetRef` directly; this test is the missing
+    /// non-targeted counterpart, using the real parser output (not a
+    /// hand-built `Effect::ChangeZone`) end to end.
+    #[test]
+    fn ill_gotten_gains_return_clause_resolves_partial_choice_through_effect_zone_choice() {
+        use crate::parser::parse_oracle_text;
+
+        let parsed = parse_oracle_text(
+            "Exile Ill-Gotten Gains. Each player discards their hand, then returns up to three cards from their graveyard to their hand.",
+            "Ill-Gotten Gains",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let return_clause = parsed.abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("discard sub-ability")
+            .sub_ability
+            .as_ref()
+            .expect("return sub-ability");
+        assert_eq!(
+            return_clause.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "a non-targeted 'returns up to N cards ...' clause must resolve as a \
+             resolution-time choice, not stack-time targeting, got {:?}",
+            return_clause.target_choice_timing
+        );
+        assert_eq!(
+            return_clause.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 })),
+            "the 'up to three' count must survive parsed-chain construction, got {:?}",
+            return_clause.multi_target
+        );
+
+        // Four eligible cards in the graveyard — more than the bound of three,
+        // so a genuine sub-maximal choice is possible (not just "take all").
+        let mut state = GameState::new_two_player(42);
+        let cards: Vec<ObjectId> = (1..=4)
+            .map(|n| {
+                create_object(
+                    &mut state,
+                    CardId(n),
+                    PlayerId(0),
+                    format!("Graveyard Card {n}"),
+                    Zone::Graveyard,
+                )
+            })
+            .collect();
+
+        let mut ability = ResolvedAbility::new(
+            return_clause.effect.as_ref().clone(),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = return_clause.multi_target.clone();
+        ability.target_choice_timing = return_clause.target_choice_timing;
+        // CR 115.10: the target filter is owner-scoped via `ControllerRef::
+        // ScopedPlayer` ("each player ... their graveyard"). This clause is
+        // being resolved standalone (outside the "each player" iteration
+        // wrapper that would normally set this per-iteration), so pin it
+        // explicitly to the acting player rather than relying on a fallback.
+        ability.scoped_player = Some(PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let (offered, count, min_count) = match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                zone: Zone::Graveyard,
+                destination: Some(Zone::Hand),
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                (cards.clone(), *count, *min_count)
+            }
+            other => panic!("expected a graveyard-to-hand EffectZoneChoice, got {other:?}"),
+        };
+        assert_eq!(
+            min_count, 0,
+            "\"up to\" must allow choosing fewer than the bound"
+        );
+        assert_eq!(count, 3, "the bound must be exactly three, not unbounded");
+        for card in &cards {
+            assert!(
+                offered.contains(card),
+                "all four eligible graveyard cards must be offered, missing {card:?}"
+            );
+        }
+
+        // Choose two of the four — a genuine partial selection, both within
+        // the bound (<=3) and below the number of eligible cards (<4).
+        let chosen = vec![cards[0], cards[1]];
+        let unchosen = [cards[2], cards[3]];
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: chosen.clone(),
+            },
+        )
+        .unwrap();
+
+        for card in &chosen {
+            assert!(
+                state.players[0].hand.contains(card),
+                "chosen card {card:?} must move to hand"
+            );
+            assert!(
+                !state.players[0].graveyard.contains(card),
+                "chosen card {card:?} must leave the graveyard"
+            );
+        }
+        for card in &unchosen {
+            assert!(
+                state.players[0].graveyard.contains(card),
+                "unchosen card {card:?} must remain in the graveyard"
+            );
+            assert!(
+                !state.players[0].hand.contains(card),
+                "unchosen card {card:?} must not move"
             );
         }
     }
