@@ -37,20 +37,19 @@
 //! is on, and no test in this file claims to witness a defect it did not actually go red on.
 //!
 //! CR references (each grep-verified against docs/MagicCompRules.txt):
-//!   - CR 613.1:   an object's characteristics are computed by applying all applicable
-//!                 continuous effects in layers. It speaks of OBJECTS, not permanents.
-//!   - CR 611.2c:  the set of objects a resolution-generated continuous effect affects is
-//!                 determined when the effect begins, and does not change afterward.
-//!   - CR 400.7a:  effects from triggered abilities that change the characteristics of a
-//!                 PERMANENT SPELL on the stack continue to apply to the permanent that
-//!                 spell becomes. (Waystone: the creature keeps mobilize after it resolves.)
-//!   - CR 702.88a: rebound is a static ability that FUNCTIONS WHILE THE SPELL IS ON THE
-//!                 STACK; a rebound spell cast from hand is exiled as it resolves instead of
-//!                 being put into its owner's graveyard, and offers a next-upkeep recast.
-//!   - CR 608.2n:  an instant/sorcery goes to its owner's graveyard as the final step of
-//!                 resolution — the destination rebound displaces. This is what makes the
-//!                 Exile assertion a real end-to-end discriminator rather than a restatement
-//!                 of the keyword assertion.
+//!
+//! - CR 613.1: an object's characteristics are computed by applying all applicable continuous
+//!   effects in layers. It speaks of OBJECTS, not permanents.
+//! - CR 611.2c: the set of objects a resolution-generated continuous effect affects is
+//!   determined when the effect begins, and does not change afterward.
+//! - CR 400.7a: effects from triggered abilities that change the characteristics of a PERMANENT
+//!   SPELL on the stack continue to apply to the permanent that spell becomes.
+//! - CR 702.88a: rebound is a static ability that FUNCTIONS WHILE THE SPELL IS ON THE STACK; a
+//!   rebound spell cast from hand is exiled as it resolves instead of being put into its
+//!   owner's graveyard, and offers a next-upkeep recast.
+//! - CR 608.2n: an instant/sorcery goes to its owner's graveyard as the final step of
+//!   resolution — the destination rebound displaces. This is what makes the Exile assertion a
+//!   real end-to-end discriminator rather than a restatement of the keyword assertion.
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};

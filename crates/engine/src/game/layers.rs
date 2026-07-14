@@ -4590,6 +4590,25 @@ fn apply_continuous_effect_to(
 /// disjunct's explicit one. Falls back to `[Zone::Battlefield]` when the
 /// whole tree carries no explicit zone marker anywhere.
 ///
+/// The zones whose live keyword state THIS PASS materializes onto the object (and, crucially,
+/// RESETS to base at the top of every pass — see `evaluate_layers` Step 1). It is the same set
+/// on both sides by construction: the pass may only write a characteristic into a zone where it
+/// also clears it, or the write is a leak that nothing ever reclaims.
+///
+/// * `Battlefield` — `seed_live_characteristics_from_base` resets the full characteristic set.
+/// * `Hand` — CR 702.94a hand-zone keyword grants; keywords-only reset.
+/// * `Stack` — CR 613.1 stack-object keyword grants (Taigam's rebound, Waystone's mobilize, and
+///   `StackSpell`-filtered statics); keywords-only reset.
+///
+/// Every OTHER zone (library, graveyard, exile) is owned by `off_zone_characteristics`, which
+/// computes keywords ON DEMAND from base + active effects and never materializes them.
+/// `keywords::object_has_effective_keyword_kind` is the reader that routes by exactly this
+/// split. Materializing into an off-zone object from here would install a second writer behind
+/// that authority's back.
+fn layer_pass_materializes_keywords(zone: Zone) -> bool {
+    matches!(zone, Zone::Battlefield | Zone::Hand | Zone::Stack)
+}
+
 /// CR 613.1: the layer system computes the characteristics of an OBJECT — not only of a
 /// permanent — so the scan domain must be able to reach an object wherever it lives. A
 /// `SpecificObject` leaf is an IDENTITY reference resolved against `state`, which is why this
@@ -4640,22 +4659,39 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
         // affects is determined when that continuous effect begins"). It therefore carries no
         // zone marker of its own, and `extract_in_zone()` answers `None` for it. Left to the
         // battlefield default below, a grant bound to an object that is NOT on the battlefield
-        // would be scanned for in a population that cannot contain it and silently dropped.
+        // is scanned for in a population that cannot contain it, and is silently dropped.
         //
-        // CR 613.1 speaks of an OBJECT's characteristics, not a permanent's, so the correct
-        // scan domain for an identity filter is simply WHERE THAT OBJECT ACTUALLY IS. This is
-        // what lets a keyword granted to a spell ON THE STACK land at all — e.g. Taigam,
-        // Ojutai Master's "that spell gains rebound" (CR 702.88a: rebound "functions while the
-        // spell is on the stack"), or Waystone's Guidance's "that spell gains mobilize 1".
+        // CR 613.1 computes the characteristics of an OBJECT, not only of a permanent, so an
+        // identity filter must be scanned WHERE ITS OBJECT ACTUALLY IS. That is what lets a
+        // keyword granted to a spell ON THE STACK land at all — Taigam, Ojutai Master's "that
+        // spell gains rebound" (CR 702.88a: rebound "functions while the spell is on the
+        // stack") and Waystone's Guidance's "that spell gains mobilize 1".
         //
-        // CR 400.7a then follows for free: ObjectId is stable across the zone change, so once
-        // a permanent spell resolves, the same TCE is re-scanned in `Zone::Battlefield` and
-        // keeps applying to the permanent the spell became.
+        // CR 400.7a then follows for free: `ObjectId` is stable across the zone change, so
+        // once a permanent spell resolves, the same effect is re-scanned in `Zone::Battlefield`
+        // and keeps applying to the permanent the spell became.
         //
-        // An object that no longer exists contributes no zone; the filter could not match it
-        // anyway, so the effect is inert rather than misdirected.
+        // ...BUT ONLY INTO ZONES THIS PASS OWNS — see `layer_pass_materializes_keywords`.
+        // The layer pass is not the only keyword authority: `off_zone_characteristics` computes
+        // hand/library/graveyard/exile keywords ON DEMAND from base + effects, and
+        // `keywords::object_has_effective_keyword_kind` routes every non-battlefield object to
+        // it. Following an identity filter into an off-zone object would make this pass a
+        // SECOND writer of state that on-demand authority already owns. That is not
+        // hypothetical: doing so regresses granted-Suspend-in-exile (the exiled card's upkeep
+        // trigger stops ticking) and the meld entry replacement. So an object parked in a zone
+        // this pass does not own contributes no zone here, stays out of the scanned population,
+        // and remains exactly as inert-through-this-path as it was before — its grant is still
+        // delivered, by the authority that owns it.
+        //
+        // An object that no longer exists likewise contributes no zone; the filter could not
+        // match it anyway, so the effect is inert rather than misdirected.
         TargetFilter::SpecificObject { id } => {
-            if let Some(zone) = state.objects.get(id).map(|obj| obj.zone) {
+            if let Some(zone) = state
+                .objects
+                .get(id)
+                .map(|obj| obj.zone)
+                .filter(|zone| layer_pass_materializes_keywords(*zone))
+            {
                 if !out.contains(&zone) {
                     out.push(zone);
                 }
@@ -6034,6 +6070,29 @@ mod tests {
             "CR 613.1: an identity filter bound to a SPELL ON THE STACK must scan the stack. \
              Pre-fix this answered [Battlefield], the stack object was never in the scanned \
              population, and the keyword grant was silently dropped."
+        );
+
+        // BOUNDARY — the identity filter must NOT follow its object into a zone this pass does
+        // not own. `off_zone_characteristics` is the on-demand authority for exile (and
+        // library/graveyard); materializing a keyword there from the layer pass installs a
+        // second writer behind its back. This is not theoretical: an earlier revision of this
+        // fix followed the object into ANY zone and regressed granted-Suspend-in-exile (the
+        // exiled card's upkeep trigger silently stopped ticking its time counter) plus the meld
+        // entry replacement. The effect is still delivered for such an object — by the
+        // authority that owns it, not by this pass.
+        let in_exile = crate::game::zones::create_object(
+            &mut state,
+            CardId(902),
+            crate::types::player::PlayerId(0),
+            "Exiled Recipient".to_string(),
+            Zone::Exile,
+        );
+        assert_eq!(
+            continuous_effect_scan_zones(&state, &TargetFilter::SpecificObject { id: in_exile }),
+            vec![Zone::Battlefield],
+            "an identity filter bound to an EXILED object must contribute no zone of its own \
+             (falling back to the battlefield default, where it simply matches nothing). \
+             off_zone_characteristics owns exile keywords; this pass must not write them."
         );
     }
 
