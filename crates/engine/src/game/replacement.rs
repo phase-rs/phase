@@ -5327,6 +5327,41 @@ fn object_replacement_candidate_applies(
     {
         return false;
     }
+    // CR 712.14a + CR 714.3a: A Saga exiled by its final chapter and returned
+    // transformed enters showing its creature back face. Its front-face
+    // intrinsic lore replacement must not apply to that entry; otherwise NEO
+    // transforming Sagas such as Fable and Kumano return with a stray lore
+    // counter. A transformed back face that actually is a Saga still receives
+    // its intrinsic lore counter through the entry pipeline.
+    if is_entering
+        && matches!(
+            event,
+            ProposedEvent::ZoneChange {
+                enter_transformed: true,
+                ..
+            }
+        )
+        && obj.back_face.as_ref().is_some_and(|back| {
+            !back
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Saga")
+        })
+        && repl_def.event == ReplacementEvent::Moved
+        && repl_def.destination_zone == Some(Zone::Battlefield)
+        && matches!(repl_def.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            repl_def.execute.as_ref().map(|execute| &*execute.effect),
+            Some(Effect::PutCounter {
+                counter_type: CounterType::Lore,
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        )
+    {
+        return false;
+    }
     // CR 614.12: off-battlefield entering/discarded objects only apply their
     // own self-replacement effects.
     if is_entering
