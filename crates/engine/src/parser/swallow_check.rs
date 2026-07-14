@@ -7998,6 +7998,221 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
              — if this goes quiet the detector is dead and the assertions above are vacuous"
         );
     }
+
+    // ── Plan 02 step 6: per-unit audit independence, and the two detectors whose
+    //    typed arms were never exercised ───────────────────────────────────────
+
+    /// PLAN 02'S FLAGSHIP CLAIM, and until now it had no true fixture anywhere:
+    /// *an unsupported unit does not suppress the audit of a sibling unit.*
+    ///
+    /// Every existing "does not hide" test pairs a swallowed line with a line that is
+    /// *exempted* (represented, or carved out) — none pairs it with a line that
+    /// genuinely produced `Effect::Unimplemented`. That is the one shape the old
+    /// card-wide suppression actually broke: a single unparseable line silenced every
+    /// detector on the whole card (measured: 2,563 faces).
+    ///
+    /// Line 0 is unsupported. Line 1 is Protection Racket's upkeep trigger, which
+    /// parses cleanly and drops its "in turn order" clause (CR 101.4). The audit must
+    /// still report line 1.
+    ///
+    /// REVERT DISCRIMINATOR: in `check_swallowed_clauses`, pass the card-wide `result`
+    /// instead of the unit-scoped `scoped` to `any_ability_has_unimplemented` (i.e.
+    /// restore the card-wide rule) and line 0's `Unimplemented` suppresses line 1 —
+    /// the `APNAP` assertion below goes red. Watched fail→pass.
+    #[test]
+    fn unsupported_unit_does_not_suppress_the_audit_of_a_sibling_unit() {
+        let parsed = parse_named(
+            "Whenever this enchantment untaps, chronoshift the aetheric weave.\n\
+             At the beginning of your upkeep, repeat the following process for each opponent in turn order. Reveal the top card of your library. That player may pay life equal to that card's mana value. If they do, exile that card. Otherwise, put it into your hand.",
+            "Synthetic Mixed-Support Card",
+            &["Enchantment"],
+        );
+
+        // REACH GUARD 1 (non-vacuity): there must actually BE an unsupported sibling.
+        // Without it the test would pass trivially on a fully-supported card and would
+        // be asserting nothing at all about suppression.
+        let has_unsupported = any_ability_has_unimplemented(&parsed)
+            || parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_ref())
+                .any(|execute| def_tree_has_unimplemented(execute));
+        assert!(
+            has_unsupported,
+            "line 0 must be genuinely UNSUPPORTED for this fixture to test anything; if the \
+             parser learned to model it, swap line 0 for another unsupported line"
+        );
+
+        // REACH GUARD 2 (non-vacuity): the sibling must have REACHED expectation
+        // comparison — it parsed, so its warning cannot be an artifact of its own failure.
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_ref())
+                .any(|execute| !def_tree_has_unimplemented(execute)),
+            "the Protection Racket upkeep trigger must parse without Unimplemented"
+        );
+
+        // THE CLAIM: the supported sibling is still audited even though line 0 is
+        // unsupported. Card-wide suppression would silence exactly this.
+        assert!(
+            has_swallowed_detector(&parsed, "APNAP"),
+            "the unsupported line 0 must NOT suppress the swallowed-clause audit of line 1"
+        );
+
+        // ...and the diagnostic is attributed to the line that raised it, not to line 0.
+        let apnap_line = parsed
+            .parse_warnings
+            .iter()
+            .find_map(|warning| match warning {
+                OracleDiagnostic::SwallowedClause {
+                    detector,
+                    line_index,
+                    ..
+                } if detector == "APNAP" => Some(*line_index),
+                _ => None,
+            })
+            .expect("APNAP diagnostic must exist");
+        assert_eq!(
+            apnap_line, 1,
+            "the swallowed clause belongs to line 1 (the trigger), not to the unsupported line 0"
+        );
+    }
+
+    /// `ActivateOnlyDuring` had ZERO tests of any kind: the detector is wired into
+    /// `check_swallowed_clauses` but nothing exercised it, positively or negatively.
+    ///
+    /// POSITIVE (a): CR 602.5b. "Activate only during your upkeep" IS typed — the timing
+    /// grammar maps it to `ActivationRestriction::DuringYourUpkeep` (verified: the parse
+    /// yields `activation_restrictions == [DuringYourUpkeep]`, no `Unimplemented`). The
+    /// detector must therefore stay SILENT.
+    ///
+    /// NOTE for anyone extending this: task #66 says "activate only during <step>" windows
+    /// are a parser gap. That is true only for steps with no `ActivationRestriction`
+    /// variant. `your upkeep` / `your turn` / `combat` all have one and DO get typed. Do
+    /// not infer from #66 that every phrasing in this family is untyped — this fixture was
+    /// originally written on that assumption and it was wrong.
+    #[test]
+    fn activate_only_during_is_silent_when_the_timing_window_is_typed() {
+        let parsed = parse_named(
+            "{T}: Draw a card. Activate only during your upkeep.",
+            "Synthetic Upkeep-Only Activator",
+            &["Artifact"],
+        );
+
+        // REACH GUARD: the window must actually be TYPED, or the silence below proves
+        // nothing about the evidence arm.
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(|ability| !ability.activation_restrictions.is_empty()),
+            "the upkeep window must be typed onto activation_restrictions"
+        );
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "the line must parse — a self-suppressing Unimplemented would make this vacuous"
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "ActivateOnlyDuring"),
+            "a TYPED timing window must not be reported as swallowed"
+        );
+    }
+
+    /// The OTHER half of the `ActivateOnlyDuring` input space, pinned to what the parser
+    /// ACTUALLY does — which is not what it looks like from the detector alone.
+    ///
+    /// `ActivationRestriction` has variants for `your upkeep`, `your turn`, and `combat`,
+    /// but NOT for `your end step`. An untypeable window does NOT get silently dropped:
+    /// it produces an honest `Effect::Unimplemented`, and the per-unit suppression rule
+    /// (see `check_swallowed_clauses`) then correctly declines to ALSO report it as a
+    /// swallowed clause — the unit already declared its gap explicitly, and
+    /// double-counting one defect is exactly what that rule exists to prevent.
+    ///
+    /// So this is a coverage-honesty pin, not a swallow pin: the semantics are visibly
+    /// red, not invisibly green. If someone ever makes this line parse "successfully"
+    /// without typing the window, the first assertion goes red and the swallow becomes
+    /// silent — which is the regression that matters.
+    ///
+    /// CONSEQUENCE WORTH KNOWING (filed, not claimed): both reachable input classes for
+    /// this detector are silent — a TYPED window supplies evidence, and an UNTYPEABLE one
+    /// self-suppresses via `Unimplemented`. Whether `ActivateOnlyDuring` can fire on ANY
+    /// real card is therefore an open question requiring a corpus scan; it may be a
+    /// zero-hit detector. Not asserted here, because I have not computed that count.
+    #[test]
+    fn untypeable_activation_window_is_an_honest_unimplemented_not_a_silent_swallow() {
+        let parsed = parse_named(
+            "{T}: Draw a card. Activate only during your end step.",
+            "Synthetic End-Step-Only Activator",
+            &["Artifact"],
+        );
+
+        // THE CLAIM: the dropped CR 602.5b window is declared, not hidden.
+        assert!(
+            any_ability_has_unimplemented(&parsed),
+            "an untypeable activation window must surface as an explicit Effect::Unimplemented \
+             (honest red), never as a quietly-accepted line"
+        );
+
+        // ...and because the unit owns an explicit gap, it is not ALSO double-reported as a
+        // swallowed clause. This is the documented per-unit suppression rule, pinned.
+        assert!(
+            !has_swallowed_detector(&parsed, "ActivateOnlyDuring"),
+            "a unit that already declared an Unimplemented must not be double-counted with a \
+             swallowed-clause warning for the same defect"
+        );
+    }
+
+    /// Sibling-negative for the pair above: a LIMIT is not a TIMING window. CR 602.5b's
+    /// "Activate only once each turn" is typed as `ActivationRestriction::OnlyOnceEachTurn`,
+    /// so it must not raise the timing expectation.
+    #[test]
+    fn activate_limit_does_not_raise_the_timing_expectation() {
+        let parsed = parse_named(
+            "{T}: Draw a card. Activate only once each turn.",
+            "Synthetic Once-Each-Turn Activator",
+            &["Artifact"],
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "ActivateOnlyDuring"),
+            "a once-each-turn LIMIT must not raise the 'activate only during' TIMING expectation"
+        );
+    }
+
+    /// The `APNAP` typed-evidence arm (`any_ability_has_apnap_ordering`) had no positive
+    /// fixture: the detector's only test was a pinned KNOWN GAP asserting it FIRES.
+    /// Nothing asserted it stays SILENT when the ordering IS typed — so the evidence arm
+    /// could have been deleted outright and the suite would still have passed. That is
+    /// the vacuous-detector class this campaign keeps getting burned by: a leg only ever
+    /// seen through its failure path is not tested.
+    ///
+    /// REVERT DISCRIMINATOR: make `any_ability_has_apnap_ordering` return `false` (i.e.
+    /// delete the typed `starting_with` arm) and this goes red — the detector would then
+    /// report a card whose ordering the AST actually carries.
+    #[test]
+    fn apnap_typed_starting_with_evidence_arm_is_not_vacuous() {
+        let parsed = parse_named(
+            "Starting with you, each player votes for time or money.",
+            "Synthetic Vote Orderer",
+            &["Sorcery"],
+        );
+
+        // REACH GUARD: the ordering must actually be TYPED on the AST. Without this, the
+        // assertion below could pass for the wrong reason (no expectation raised at all).
+        assert!(
+            super::any_ability_has_apnap_ordering(&parsed),
+            "the vote's starting player must be typed on the AST for this test to be about \
+             the evidence arm at all"
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "APNAP"),
+            "a typed 'starting with' ordering must SILENCE the APNAP detector — if this fires, \
+             the typed evidence arm is not being consulted"
+        );
+    }
 }
 
 #[cfg(test)]
