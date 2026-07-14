@@ -26695,6 +26695,61 @@ fn parse_you_gain_protection_from_everything_targets_controller() {
     );
 }
 
+/// "you gain protection from everything UNTIL YOUR NEXT TURN" (The One Ring) —
+/// the timed variant of the grant covered by
+/// `parse_you_gain_protection_from_everything_targets_controller`. The
+/// player-scoped protection must carry `Duration::UntilNextTurnOf { Controller }`
+/// so it expires at the START of the controller's next turn, NOT at end of turn
+/// and NOT permanently. Guards the "until your next turn" duration from
+/// collapsing to `UntilEndOfTurn` (which would drop protection a full turn early).
+#[test]
+fn parse_you_gain_protection_from_everything_until_your_next_turn_carries_duration() {
+    use crate::types::ability::{ContinuousModification, Duration, PlayerScope};
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let def = parse_effect_chain(
+        "you gain protection from everything until your next turn",
+        AbilityKind::Spell,
+    );
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected GenericEffect for timed protection, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(static_abilities.len(), 1, "expected one StaticDefinition");
+    let sd = &static_abilities[0];
+    assert_eq!(
+        sd.affected,
+        Some(TargetFilter::Controller),
+        "affected filter must be Controller (player-scoped), got {:?}",
+        sd.affected
+    );
+    assert!(
+        sd.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Everything)
+            }
+        )),
+        "expected AddKeyword(Protection(Everything)) in {:?}",
+        sd.modifications
+    );
+    assert_eq!(
+        *duration,
+        Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller
+        }),
+        "timed protection must expire at the controller's next turn, got {:?}",
+        duration
+    );
+}
+
 /// CR 702: "gain flying until end of turn" without "you" subject must keep
 /// `affected: SelfRef` — the grant is creature-scoped, not player-scoped.
 /// Guards against the player-routing logic leaking into creature pump
