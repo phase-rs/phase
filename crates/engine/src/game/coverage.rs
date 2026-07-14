@@ -4266,6 +4266,63 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
     d
 }
 
+/// Extract detail pairs from a `ReplacementDefinition` (non-effect fields).
+///
+/// Mirrors `trigger_details`/`static_details`: the replacement's scoping and
+/// modification fields must be projected into the parse signature so two
+/// replacements that differ only in *whom* or *what* they apply to produce
+/// distinct `ParsedItem`s. Without this, a scope-only fix (e.g. a self-scoped
+/// damage shield flipping `valid_card` from `None` to `Some(SelfRef)`) shows a
+/// false "no card-parse changes detected" diff.
+fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
+    let mut d = Vec::new();
+    // Recipient scope — the field a shield-scoping fix changes.
+    if let Some(vc) = &repl.valid_card {
+        d.push(("scope".into(), fmt_target(vc)));
+    }
+    if let Some(vp) = &repl.valid_player {
+        d.push(("player scope".into(), format!("{vp:?}")));
+    }
+    // Mode discriminant (Mandatory / Optional / MayCost).
+    match &repl.mode {
+        ReplacementMode::Mandatory => {}
+        ReplacementMode::Optional { .. } => d.push(("mode".into(), "optional".into())),
+        ReplacementMode::MayCost { .. } => d.push(("mode".into(), "may pay cost".into())),
+    }
+    // Shield kind, including the prevented amount (ShieldKind::Prevention).
+    if !repl.shield_kind.is_none() {
+        d.push(("shield".into(), format!("{:?}", repl.shield_kind)));
+    }
+    if let Some(src) = &repl.damage_source_filter {
+        d.push(("damage from".into(), fmt_target(src)));
+    }
+    if let Some(tgt) = &repl.damage_target_filter {
+        d.push(("damage to".into(), format!("{tgt:?}")));
+    }
+    if let Some(scope) = &repl.combat_scope {
+        d.push(("combat".into(), format!("{scope:?}")));
+    }
+    if let Some(dm) = &repl.damage_modification {
+        d.push(("damage mod".into(), format!("{dm:?}")));
+    }
+    if let Some(qm) = &repl.quantity_modification {
+        d.push(("quantity mod".into(), format!("{qm:?}")));
+    }
+    if let Some(zone) = &repl.destination_zone {
+        d.push(("to zone".into(), fmt_zone(zone)));
+    }
+    if let Some(cond) = &repl.condition {
+        d.push(("condition".into(), format!("{cond:?}")));
+    }
+    if let Some(redirect) = &repl.redirect_target {
+        d.push(("redirect to".into(), fmt_target(redirect)));
+    }
+    if let Some(scope) = &repl.draw_scope {
+        d.push(("draw scope".into(), format!("{scope:?}")));
+    }
+    d
+}
+
 /// Extract a human-readable label for a keyword.
 fn keyword_label(kw: &Keyword) -> String {
     serde_json::to_value(kw)
@@ -4377,7 +4434,7 @@ pub fn build_parse_details(
             label: format!("{}", repl.event),
             source_text: repl.description.clone(),
             supported: execute_supported,
-            details: vec![],
+            details: replacement_details(repl),
             children,
         });
     }
@@ -10574,6 +10631,46 @@ mod tests {
                 .iter()
                 .any(|k| k == "damage_source_filter"),
             "an absent damage_source_filter must not appear",
+        );
+    }
+
+    #[test]
+    fn replacement_signature_exposes_valid_card_scope() {
+        // #5673: the replacement projection hardcoded `details: vec![]` and never
+        // projected `valid_card`, so a fix that changes *whom* a shield applies to
+        // (e.g. a self-scoped damage shield flipping `valid_card` from `None` to
+        // `Some(SelfRef)`, Swans of Bryn Argoll / #5652) produced a byte-identical
+        // parse signature — a false "No card-parse changes detected" sticky.
+        let details = |vc: Option<TargetFilter>| -> Vec<(String, String)> {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::DealtDamage);
+            if let Some(vc) = vc {
+                repl = repl.valid_card(vc);
+            }
+            let mut face = make_face();
+            face.replacements = vec![repl];
+            let items = build_parse_details_for_face(&face);
+            let repl_item = items
+                .iter()
+                .find(|i| i.category == ParseCategory::Replacement)
+                .expect("replacement item must be projected");
+            repl_item.details.clone()
+        };
+
+        let unscoped = details(None);
+        let self_scoped = details(Some(TargetFilter::SelfRef));
+
+        // The scoping fix must change the projected signature, not be swallowed.
+        assert_ne!(
+            unscoped, self_scoped,
+            "a valid_card scope change must produce a different replacement signature",
+        );
+        assert!(
+            self_scoped.iter().any(|(k, _)| k == "scope"),
+            "a set valid_card must appear as a `scope` detail row; got {self_scoped:?}",
+        );
+        assert!(
+            !unscoped.iter().any(|(k, _)| k == "scope"),
+            "an absent valid_card must not appear, so unqualified signatures stay stable",
         );
     }
 
