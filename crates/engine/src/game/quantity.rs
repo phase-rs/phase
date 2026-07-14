@@ -243,6 +243,9 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             // CR 608.2c: the other revealer's card is a per-resolution referent,
             // resolved only at resolution time (never a static CDA read).
             | ObjectScope::OtherRevealedCard
+            // CR 607.2a: the source-linked exiled card is read from live exile
+            // links only at resolution time, never as a static CDA read.
+            | ObjectScope::OwnedLinkedExileCard
             | ObjectScope::Demonstrative
             | ObjectScope::AmassedArmy => true,
         }
@@ -3676,6 +3679,7 @@ fn object_for_scope<'a>(
         ObjectScope::CostPaidObject
         | ObjectScope::Anaphoric
         | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
         | ObjectScope::AmassedArmy => None,
     }
@@ -3729,6 +3733,7 @@ fn object_id_for_scope(
         ObjectScope::CostPaidObject
         | ObjectScope::Anaphoric
         | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
         | ObjectScope::AmassedArmy => None,
     }
@@ -4264,6 +4269,8 @@ where
         // toughness, so this is a fail-closed placeholder. Extend by mirroring the
         // `last_revealed_ids` by-exclusion read in `resolve_object_mana_value`.
         ObjectScope::OtherRevealedCard => 0,
+        // MV-only referent; no P/T semantics.
+        ObjectScope::OwnedLinkedExileCard => 0,
     }
 }
 
@@ -4462,6 +4469,21 @@ fn resolve_object_mana_value(
                         obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
                     )
                 })
+                .unwrap_or(0)
+        }
+        // CR 607.2a + CR 108.3: mana value of the source-linked exiled card the
+        // ability's controller owns ("... than it" in "the card you own exiled
+        // this way and each other card exiled this way with lesser mana value
+        // than it").
+        ObjectScope::OwnedLinkedExileCard => {
+            let Some(ability) = ability else {
+                return 0;
+            };
+            let controller = ability.original_controller.unwrap_or(ability.controller);
+            crate::game::players::linked_exile_cards_for_source(state, ability.source_id)
+                .iter()
+                .find(|link| link.owner == controller)
+                .map(|link| u32_to_i32_saturating(link.mana_value))
                 .unwrap_or(0)
         }
     }
