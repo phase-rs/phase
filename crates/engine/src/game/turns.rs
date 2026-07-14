@@ -18,7 +18,6 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{HandSizeModification, StaticMode, StaticModeKind};
-use crate::types::zones::Zone;
 
 use super::combat;
 use super::combat_damage;
@@ -26,7 +25,6 @@ use super::day_night;
 use super::functioning_abilities::static_kind_present;
 use super::priority;
 use super::turn_control;
-use super::zones;
 
 const PHASE_ORDER: [Phase; 12] = [
     Phase::Untap,
@@ -1692,81 +1690,15 @@ fn execute_draw_for(
     active: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    // CR 121.1 + CR 614.1a + CR 614.6 + CR 704.3: Route through the
-    // single-authority `draw_through_replacement` helper so post-replacement
-    // continuations (Jace WinTheGame, Abundance reveal-until) drain in the
-    // same step as the draw — never leaking into the next priority pass.
+    // CR 121.1 + CR 121.6b + CR 704.3: Route the mandatory draw-step draw
+    // through `start_draw_sequence`, the single draw authority, so replacement
+    // continuations drain in the same step and a paused individual draw resumes
+    // before priority.
     //
-    // The closure applies draw-step-specific bookkeeping (sets
-    // `has_drawn_this_turn` per CR 504.1) and intentionally mirrors the
-    // pre-existing inline behavior of this function — it does NOT call
-    // `record_first_draw_and_enqueue_miracle` (the hook used by
-    // `apply_draw_after_replacement` for spell-resolution draws).
-    //
-    // CR 702.94a (pre-existing gap): the natural draw-step draw therefore
-    // does not enqueue a `MiracleOffer`. Whether the draw-step draw SHOULD
-    // trigger miracle ("the first card you've drawn this turn") is a
-    // separate rules question outside this fix's scope. Do not silently
-    // "fix" by adding the miracle hook here without first verifying the
-    // CR 702.94a reading against draw-step vs spell-resolution draws.
-    let result = crate::game::effects::draw::draw_through_replacement(
-        state,
-        active,
-        1,
-        events,
-        |state, event, events| {
-            let ProposedEvent::Draw {
-                player_id, count, ..
-            } = event
-            else {
-                return;
-            };
-            let allowed = crate::game::effects::draw::allowed_draw_count(state, player_id, count);
-
-            // CR 121.1 + CR 613.11: route card selection through the single
-            // `select_cards_to_draw` authority so a `DrawFromBottom` static is
-            // honored on the turn-based draw step too.
-            let cards_to_draw = crate::game::effects::draw::select_cards_to_draw(
-                state,
-                player_id,
-                allowed as usize,
-            );
-
-            // CR 704.5b: Attempting to draw from an empty library causes a game loss.
-            if allowed > 0 && cards_to_draw.len() < allowed as usize {
-                if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
-                    p.drew_from_empty_library = true;
-                }
-            }
-
-            for obj_id in cards_to_draw {
-                zones::move_to_zone(state, obj_id, Zone::Hand, events);
-                // CR 121.1 + CR 504.1: Increment counters BEFORE emitting so
-                // `nth_in_step` (1-indexed) reflects this draw — the draw
-                // step's mandatory draw is `nth_in_step == 1` and is the
-                // anchor for `ExceptFirstDrawInDrawStep` exception clauses.
-                let (nth_in_turn, nth_in_step) =
-                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
-                        p.has_drawn_this_turn = true;
-                        p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
-                        p.cards_drawn_this_step = p.cards_drawn_this_step.saturating_add(1);
-                        (p.cards_drawn_this_turn, p.cards_drawn_this_step)
-                    } else {
-                        (1, 1)
-                    };
-                // CR 121.1: Emit CardDrawn so "whenever a player draws" triggers fire.
-                events.push(GameEvent::CardDrawn {
-                    player_id,
-                    object_id: obj_id,
-                    nth_in_turn,
-                    nth_in_step,
-                });
-                crate::game::effects::drawn_this_turn_choice::record_drawn_card(
-                    state, player_id, obj_id,
-                );
-            }
-        },
-    );
+    // CR 702.94a: A miracle card drawn as this player's first card of the turn
+    // now correctly queues its reveal offer. The prior draw-step-only suppression
+    // was a rules gap: Miracle does not limit the source of that first draw.
+    let result = crate::game::effects::draw::start_draw_sequence(state, active, 1, events);
 
     if matches!(result, ReplacementResult::NeedsChoice(_)) {
         return Some(state.waiting_for.clone());
@@ -2670,6 +2602,7 @@ mod tests {
     use crate::types::card_type::Supertype;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
     use std::sync::Arc;
 
     fn setup() -> GameState {
@@ -7233,7 +7166,7 @@ mod tests {
 
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(1);
-        let source = zones::create_object(
+        let source = crate::game::zones::create_object(
             &mut state,
             CardId(1),
             PlayerId(0),
