@@ -243,6 +243,7 @@ fn gather_the_pack_binds_the_partial_override_as_an_alternative_dig() {
 /// This discriminates the two ways the runtime witness above could go green:
 ///   * BOUND (what we want): one ability, override as a ConditionInstead branch.
 ///   * merely NEUTERED: two abilities, the second an inert `Unimplemented`.
+///
 /// Without this, a regression that degraded the branch back to an honest-red
 /// sibling would still pass the runtime assertion.
 #[test]
