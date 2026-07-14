@@ -22120,6 +22120,11 @@ pub mod tests {
     fn printed_casualty_no_copy_when_not_paid() {
         let mut state = setup();
         let caster = PlayerId(0);
+        let mut face = crate::types::card::CardFace::default();
+        face.card_type.core_types.push(CoreType::Instant);
+        face.keywords.push(Keyword::Casualty(2));
+        crate::database::synthesis::synthesize_casualty(&mut face);
+        let casualty_trigger = face.triggers.remove(0);
 
         let spell = create_object(
             &mut state,
@@ -22140,6 +22145,7 @@ pub mod tests {
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             });
             obj.keywords.push(Keyword::Casualty(2));
+            obj.trigger_definitions.push(casualty_trigger);
         }
         let ability = ResolvedAbility::new(
             Effect::Draw {
