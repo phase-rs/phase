@@ -9870,13 +9870,48 @@ fn build_oracle_face_inner(
     // square-bracketed span from the spell's rules text. `parse_oracle_with_cleave_brackets`
     // is the single authority for the dual (printed-cost / cleave-cost) parse,
     // shared with the test scenario harness so the two pipelines cannot diverge.
-    let (parsed, cleave_variant) = parse_oracle_with_cleave_brackets(
+    let (mut parsed, cleave_variant) = parse_oracle_with_cleave_brackets(
         raw_oracle_text,
         face_name,
         &parser_keyword_names,
         &types,
         &subtypes,
     );
+
+    // CR 205.1a + CR 613.1d: the parenthetical "loses all other creature
+    // types" rider is rules text, even though the Oracle parser strips it as
+    // reminder text. Preserve replacement semantics on the conditional type
+    // grant before building the face (Goddric's Celebration).
+    if raw_oracle_text
+        .to_ascii_lowercase()
+        .contains("loses all other creature types")
+    {
+        for definition in &mut parsed.statics {
+            if definition.condition.is_some()
+                && definition.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddSubtype { .. }
+                    )
+                })
+                && !definition.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::RemoveAllSubtypes {
+                            set: crate::types::card_type::SubtypeSet::Creature
+                        }
+                    )
+                })
+            {
+                definition.modifications.insert(
+                    0,
+                    ContinuousModification::RemoveAllSubtypes {
+                        set: crate::types::card_type::SubtypeSet::Creature,
+                    },
+                );
+            }
+        }
+    }
 
     let extracted_keywords = parsed.extracted_keywords;
     let extracted_has_craft = extracted_keywords
@@ -9926,6 +9961,23 @@ fn build_oracle_face_inner(
     // keywords (e.g., Morph) and CR 113.2c multi-instance keywords (Cascade/Storm/
     // Myriad/Exalted) — see the helper's doc comment for the per-class rules.
     merge_extracted_keywords(&mut keywords, extracted_keywords);
+
+    // CR 611.3a + CR 702: MTGJSON can list a keyword that is granted only by a
+    // conditional static (Goddric's flying). Keep it on the static and drop the
+    // unconditional copy unless a standalone keyword line corroborates it.
+    keywords.retain(|keyword| {
+        oracle_corroborated.iter().any(|entry| entry == keyword)
+            || !parsed.statics.iter().any(|definition| {
+                definition.condition.is_some()
+                    && definition.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddKeyword { keyword: granted }
+                                if granted == keyword
+                        )
+                    })
+            })
+    });
 
     // CR 702.124j: "Partner with [Name]" — upgrade Generic → With(name).
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces

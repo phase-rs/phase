@@ -12,6 +12,7 @@
 use crate::database::mtgjson::{AtomicCard, AtomicIdentifiers};
 use crate::types::ability::{AbilityKind, Effect};
 use crate::types::card::CardFace;
+use crate::types::keywords::Keyword;
 use crate::types::triggers::TriggerMode;
 
 /// Build an `AtomicCard` for a single card face from its oracle `text`.
@@ -51,6 +52,38 @@ fn atomic(name: &str, type_line: &str, types: &[&str], text: &str) -> AtomicCard
 
 fn parse_face(card: &AtomicCard) -> CardFace {
     crate::database::synthesis::build_oracle_face(card, None)
+}
+
+#[test]
+fn goddric_conditional_flying_is_not_a_printed_keyword() {
+    let text = "Haste\nCelebration — As long as two or more nonland permanents entered the battlefield under your control this turn, Goddric is a Dragon with base power and toughness 4/4, flying, and \"{R}: Dragons you control get +1/+0 until end of turn.\" (It loses all other creature types.)";
+    let mut card = atomic(
+        "Goddric, Cloaked Reveler",
+        "Legendary Creature — Human Noble",
+        &["Creature"],
+        text,
+    );
+    card.subtypes = vec!["Human".to_string(), "Noble".to_string()];
+    card.keywords = Some(vec!["Flying".to_string(), "Haste".to_string()]);
+
+    let face = parse_face(&card);
+    assert!(face.keywords.contains(&Keyword::Haste));
+    assert!(!face.keywords.contains(&Keyword::Flying));
+    let celebration = face
+        .static_abilities
+        .iter()
+        .find(|definition| definition.condition.is_some())
+        .expect("Goddric must retain its conditional Celebration static");
+    assert!(celebration.modifications.contains(
+        &crate::types::ability::ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying
+        }
+    ));
+    assert!(celebration.modifications.contains(
+        &crate::types::ability::ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature
+        }
+    ));
 }
 
 /// Find an `Effect::Meld` anywhere in a face's abilities or trigger payloads,

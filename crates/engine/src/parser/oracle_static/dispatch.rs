@@ -714,6 +714,10 @@ pub(crate) fn parse_static_line_inner(
         // the full line as an honest `Unimplemented` residual.
         return None;
     }
+    if let Some(def) = parse_inverted_base_pt_type_grant(&text, &raw_lower) {
+        return Some(def);
+    }
+
     if let Some(def) = parse_arcane_adaptation_chosen_type_static(&tp, &text) {
         return Some(def);
     }

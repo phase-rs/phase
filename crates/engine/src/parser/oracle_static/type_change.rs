@@ -5,6 +5,59 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 
+/// CR 611.3a + CR 613.1d/f + CR 613.4b: an inverted conditional type change
+/// whose base P/T follows the type name and is followed by granted abilities.
+/// Goddric's Celebration is the type specimen; quoted pump text must not be
+/// mistaken for a modification of the source itself.
+pub(crate) fn parse_inverted_base_pt_type_grant(
+    text: &str,
+    raw_lower: &str,
+) -> Option<StaticDefinition> {
+    let body = super::oracle_modal::strip_ability_word_with_name(text)
+        .filter(|(word, _)| super::oracle_modal::is_known_ability_word(word))
+        .map_or_else(|| text.to_string(), |(_, body)| body);
+    let lower = body.to_lowercase();
+    let split = super::shared::try_split_inverted_as_long_as(&TextPair::new(&body, &lower))?;
+
+    let effect_lower = split.effect_text.to_lowercase();
+    let effect = TextPair::new(&split.effect_text, &effect_lower);
+    let typed = nom_tag_tp(&effect, "~ is a ").or_else(|| nom_tag_tp(&effect, "~ is an "))?;
+    let (type_text, base_text) = typed.split_around(" with base power and toughness ")?;
+    let (tail, (power, toughness)) =
+        super::grammar::parse_pt_mod_with_remainder(base_text.original).ok()?;
+
+    let mut modifications = Vec::new();
+    if nom_primitives::scan_contains(raw_lower, "loses all other creature types") {
+        modifications.push(ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        });
+    }
+    modifications.extend(
+        super::oracle_effect::animation::parse_becomes_type_modifications(type_text.original),
+    );
+    modifications.push(ContinuousModification::SetPower { value: power });
+    modifications.push(ContinuousModification::SetToughness { value: toughness });
+
+    let grants = tail.trim().trim_start_matches(',').trim();
+    if !grants.is_empty() {
+        modifications.extend(super::keyword_grant::parse_continuous_modifications(
+            &format!("has {grants}"),
+        ));
+    }
+    if modifications.is_empty() {
+        return None;
+    }
+
+    let condition = super::shared::parse_static_condition(&split.condition_text)?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(modifications)
+            .condition(condition)
+            .description(text.to_string()),
+    )
+}
+
 /// CR 607.2d: Parse a self-chosen type static ability line.
 pub(crate) fn parse_self_chosen_type_static(input: &str) -> OracleResult<'_, ChosenSubtypeKind> {
     let (input, kind) = alt((
