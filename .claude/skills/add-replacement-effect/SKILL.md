@@ -19,7 +19,7 @@ Replacement effects modify or prevent game events before they happen (MTG Rule 6
 |------|----------------|-------------------|
 | **614.1** | Replacement effects modify events, don't use the stack | Handled in `replacement.rs` pipeline, not `effects/` |
 | **614.12** | Self-replacement effects apply even when the card isn't on the battlefield yet | `find_applicable_replacements()` scans the entering object in addition to battlefield |
-| **614.16** | "As [permanent] enters" choices are replacement effects | Must resolve *before* zone change completes — see Interactive Replacements below |
+| **614.1c + 614.12a** | "As [permanent] enters" effects are replacement effects; a required choice is made before the permanent enters | Must resolve *before* zone change completes — see Interactive Replacements below |
 | **616.1** | Multiple replacements on same event: affected player/controller chooses order | `pipeline_loop()` returns `NeedsChoice` when multiple candidates exist |
 | **614.6** | A replacement can only apply once to a given event | `applied: HashSet<ReplacementId>` on `ProposedEvent` tracks this |
 
@@ -101,7 +101,7 @@ ReplacementResult::Execute(modified_event) → caller processes the event
 - Handles `Effect::BecomeCopy` specially by returning `WaitingFor::CopyTargetChoice` (CR 707.9 — "enter as a copy").
 - Delegates everything else to `effects::resolve_ability_chain()`, so any `AbilityDefinition` variant is supported as a follow-up — not just a hand-picked pair.
 
-**For effects that must happen *before* the zone change** (like "choose a basic land type" — CR 614.16), see Interactive Replacements below. Those pause the pipeline mid-flight rather than using the post-delivery lifecycle.
+**For effects that must happen *before* the zone change** (like "choose a basic land type" — CR 614.12a), see Interactive Replacements below. Those pause the pipeline mid-flight rather than using the post-delivery lifecycle.
 
 ---
 
