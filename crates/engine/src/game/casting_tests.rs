@@ -23097,6 +23097,81 @@ fn kozileks_command_modes_scry_draw_and_exile_graveyard_end_to_end() {
 
 const DEADLY_ORACLE: &str = "As an additional cost to cast this spell, you may collect evidence 6.\nDestroy all creatures. If evidence was collected, exile a card from an opponent's graveyard. Then search its owner's graveyard, hand, and library for any number of cards with that name and exile them. That player shuffles, then draws a card for each card exiled from their hand this way.";
 
+fn resolve_voltage_surge(
+    sacrifice_artifact: bool,
+) -> (
+    crate::game::scenario::CastOutcome,
+    ObjectId,
+    Option<ObjectId>,
+) {
+    use crate::game::scenario::{GameScenario, P0, P1};
+
+    const VOLTAGE_ORACLE: &str = "As an additional cost to cast this spell, you may sacrifice an artifact.\nVoltage Surge deals 2 damage to target creature or planeswalker. If this spell's additional cost was paid, Voltage Surge deals 4 damage instead.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, ManaColor::Red);
+    let target = scenario
+        .add_creature(P1, "Dennick, Pious Apprentice", 2, 5)
+        .id();
+    let artifact = sacrifice_artifact.then(|| {
+        let id = create_object(
+            &mut scenario.state,
+            CardId(91_001),
+            P0,
+            "Blood Token".to_string(),
+            Zone::Battlefield,
+        );
+        scenario
+            .state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        id
+    });
+    let mut spell =
+        scenario.add_spell_to_hand_from_oracle(P0, "Voltage Surge", true, VOLTAGE_ORACLE);
+    spell.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic: 0,
+    });
+    let spell_id = spell.id();
+    let mut runner = scenario.build();
+    let cast = runner.cast(spell_id).target_object(target);
+    let outcome = if let Some(artifact) = artifact {
+        cast.accept_optional().sacrifice_with(&[artifact]).resolve()
+    } else {
+        cast.decline_optional().resolve()
+    };
+    (outcome, target, artifact)
+}
+
+#[test]
+fn voltage_surge_deals_two_without_a_sacrificeable_artifact() {
+    let (outcome, target, artifact) = resolve_voltage_surge(false);
+    assert!(artifact.is_none());
+    assert_eq!(
+        outcome.state().objects[&target].damage_marked,
+        2,
+        "Voltage Surge must remain castable and deal 2 when its optional sacrifice cost is unavailable"
+    );
+}
+
+#[test]
+fn voltage_surge_deals_four_when_its_artifact_cost_is_paid() {
+    let (outcome, target, artifact) = resolve_voltage_surge(true);
+    let artifact = artifact.expect("artifact fixture must exist");
+    assert_eq!(
+        outcome.state().objects[&target].damage_marked,
+        4,
+        "paying Voltage Surge's optional sacrifice cost must replace 2 damage with 4"
+    );
+    outcome.assert_zone(&[artifact], Zone::Graveyard);
+}
+
 /// Deadly Cover-Up fixture: P1 owns two `Grizzly Bears` in GY + one in hand
 /// (same-named), a `Llanowar Elves` decoy in GY and hand, and a two-card library
 /// with no Bears (so a draw is the only library change). P0 owns a same-named
