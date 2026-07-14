@@ -997,6 +997,7 @@ mod tomb_oubliette_discard_sacrifice_runtime;
 mod tomb_sandfall_cell_life_loss_runtime;
 mod tomb_veils_of_fear_life_loss_runtime;
 mod tracked_set_anaphor_source;
+mod torch_the_tower_die_exile;
 mod trench_behemoth_landfall_force_attack;
 mod triumphant_chomp;
 mod tromokratis;

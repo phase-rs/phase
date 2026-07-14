@@ -1600,6 +1600,8 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
         tag("that creature"),
         tag("that planeswalker"),
         tag("that token"),
+        tag("a permanent dealt damage by ~"),
+        tag("a creature dealt damage by ~"),
         tag("a permanent dealt damage this way"),
         tag("a creature dealt damage this way"),
         tag("it"),

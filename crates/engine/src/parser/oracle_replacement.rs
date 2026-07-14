@@ -276,7 +276,8 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "If ~ would die, {effect}" ---
-    if nom_primitives::scan_contains(&norm_lower, "~ would die")
+    if (nom_primitives::scan_contains(&norm_lower, "~ would die")
+        && !nom_primitives::scan_contains(&norm_lower, "dealt damage by ~ would die this turn"))
         || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed")
     {
         let mut def = ReplacementDefinition::new(ReplacementEvent::Destroy)

@@ -11,8 +11,8 @@
 
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::effect_chain::{
-    ClauseDisposition, ClauseId, EffectChainIr, OtherwiseKind, PriorModifier, ReplaceMeaningKind,
-    ReplicateKind,
+    AbsorbKind, ClauseDisposition, ClauseId, EffectChainIr, OtherwiseKind, PriorModifier,
+    ReplaceMeaningKind, ReplicateKind,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastFromZoneDriver,
@@ -1141,14 +1141,38 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
                 }
                 true
-            } else if let ClauseDisposition::Absorb { rider, kind: _ } = &clause_ir.disposition {
+            } else if let ClauseDisposition::Absorb { rider, kind } = &clause_ir.disposition {
                 // CR 614.1a / CR 701.19c: attach the rider as the tail of the prior
                 // def's sub_ability chain instead of overwriting it — multi-target
                 // damage spells (Serpentine Spike) populate the chain with
-                // continuation events, so the rider must attach AFTER them. Both
-                // `AbsorbKind`s share this mechanic (`kind` is provenance only).
+                // continuation events, so the rider must attach AFTER them.
                 if let Some(last_def) = defs.last_mut() {
                     append_to_deepest_sub_ability(last_def, Some(rider.clone()));
+                }
+                // CR 608.2c: a die-exile rider printed after an optional
+                // "instead" damage clause is independent of that choice.
+                // The bargained branch reaches the appended tail; the
+                // unbargained branch needs the same tail in else_ability.
+                // The override and its Scry continuation can still be
+                // separate top-level defs at this assembly stage.
+                if matches!(kind, AbsorbKind::DieExile) {
+                    'find_override: for root in defs.iter_mut().rev() {
+                        let mut cursor = Some(root);
+                        while let Some(def) = cursor {
+                            if matches!(
+                                def.condition,
+                                Some(AbilityCondition::AdditionalCostPaidInstead)
+                            ) {
+                                if let Some(base_chain) = def.else_ability.as_mut() {
+                                    append_to_deepest_sub_ability(base_chain, Some(rider.clone()));
+                                } else {
+                                    def.else_ability = Some(rider.clone());
+                                }
+                                break 'find_override;
+                            }
+                            cursor = def.sub_ability.as_deref_mut();
+                        }
+                    }
                 }
                 true
             } else if let ClauseDisposition::BranchOtherwise {
