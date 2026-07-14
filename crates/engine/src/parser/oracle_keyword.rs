@@ -21,7 +21,7 @@ use crate::types::ability::{
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, EmbalmCost,
-    EternalizeCost, FlashbackCost, Keyword, WardCost,
+    EscapeCost, EternalizeCost, FlashbackCost, Keyword, WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -1239,7 +1239,14 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     // First try direct parse (handles simple keywords like "flying")
     let direct: Keyword = text.parse().unwrap();
     if !matches!(direct, Keyword::Unknown(_)) {
-        return Some((direct, ""));
+        // `FromStr` swallowed the WHOLE line, and it does so leniently: it also
+        // accepts the space-separated parameterized forms ("impending 5—{1}{B}"),
+        // where a trailing clause is absorbed without trace. A bare keyword has no
+        // parameter and nothing to measure ("flying" -> ""); a parameterized one is
+        // measured exactly as the colon-form path measures it.
+        let unconsumed = split_once_on(text, " ")
+            .map_or("", |(_, (_name, param))| mana_cost_remainder(param.trim()));
+        return Some((direct, unconsumed));
     }
 
     // CR 702.29e: "basic landcycling {cost}" — multi-word typecycling variant.
@@ -1250,7 +1257,9 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
             let colon_form = format!("typecycling:Basic Land:{cost_str}");
             let parsed: Keyword = colon_form.parse().unwrap();
             if !matches!(parsed, Keyword::Unknown(_)) {
-                return Some((parsed, ""));
+                // `FromStr` accepted "{1} if you control an artifact" and quietly
+                // kept only the "{1}". Report what it actually left behind.
+                return Some((parsed, mana_cost_remainder(cost_str)));
             }
         }
     }
@@ -1276,7 +1285,8 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
                 let colon_form = format!("typecycling:{subtype}:{cost_str}");
                 let parsed: Keyword = colon_form.parse().unwrap();
                 if !matches!(parsed, Keyword::Unknown(_)) {
-                    return Some((parsed, ""));
+                    // Same lenient-FromStr trap as Basic landcycling above.
+                    return Some((parsed, mana_cost_remainder(cost_str)));
                 }
             }
         }
@@ -1396,7 +1406,34 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         .is_ok()
     {
         if let Some(kw) = super::oracle_special::parse_escape_keyword(text) {
-            return Some((kw, ""));
+            // CR 702.138a: the escape cost is ONE sentence —
+            // "Escape—{W}, Exile two other cards from your graveyard."
+            //
+            // Two ways this branch could quietly absorb trailing card text, and both
+            // are closed here:
+            //
+            // 1. `parse_oracle_cost` NEVER fails. It returns
+            //    `AbilityCost::Unimplemented` for prose it cannot type, so a keyword
+            //    can come back "successfully" carrying raw leftovers in a cost slot.
+            // 2. Worse, its sub-parsers match a PREFIX and drop the rest, so
+            //    "Exile two other cards from your graveyard. if you control an
+            //    artifact" types cleanly as an exile cost with the conditional
+            //    silently gone — no `Unimplemented` to detect.
+            //
+            // Neither is visible from the returned cost, so bound the declaration at
+            // its sentence terminator and report everything after it. The strict
+            // router then declines and the line falls through to an honest
+            // `Effect::Unimplemented`; the permissive grant wrapper is unaffected.
+            let after_sentence = split_once_on(text, ".").map_or("", |(_, (_, after))| after);
+            let unconsumed = match &kw {
+                Keyword::Escape(EscapeCost::NonMana(cost))
+                    if !ability_cost_is_fully_typed(cost) =>
+                {
+                    text
+                }
+                _ => after_sentence,
+            };
+            return Some((kw, unconsumed));
         }
     }
 
@@ -1415,7 +1452,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-            return Some((Keyword::Specialize(cost), ""));
+            return Some((Keyword::Specialize(cost), mana_cost_remainder(cost_str)));
         }
     }
 
@@ -1424,7 +1461,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-            return Some((Keyword::LevelUp(cost), ""));
+            return Some((Keyword::LevelUp(cost), mana_cost_remainder(cost_str)));
         }
     }
 
@@ -1434,7 +1471,10 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-            return Some((Keyword::MoreThanMeetsTheEye(cost), ""));
+            return Some((
+                Keyword::MoreThanMeetsTheEye(cost),
+                mana_cost_remainder(cost_str),
+            ));
         }
     }
 
@@ -1442,9 +1482,12 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     // Delegates to nom combinator for number parsing.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("discover ").parse(text) {
         if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest.trim()) {
-            if rem.is_empty() {
-                return Some((Keyword::Discover(n), ""));
-            }
+            // Report the tail instead of DEMANDING it be empty. The real printed
+            // line is "Discover 4." — requiring an empty remainder rejected the
+            // terminal period and lost the keyword outright. Terminal punctuation
+            // is a permitted `P` tail; the strict router classifies it, and a
+            // semantic clause here still fails the tail parser.
+            return Some((Keyword::Discover(n), rem));
         }
     }
 
@@ -1465,8 +1508,13 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("commander ninjutsu ").parse(text) {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
+            // `parse_mtgjson_mana_cost` is lenient in the same way `FromStr` is: it
+            // takes the symbols it knows and says nothing about the rest.
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-            return Some((Keyword::CommanderNinjutsu(cost), ""));
+            return Some((
+                Keyword::CommanderNinjutsu(cost),
+                mana_cost_remainder(cost_str),
+            ));
         }
     }
 
@@ -1484,7 +1532,10 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
                 .trim();
             if !cost_str.is_empty() {
                 let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-                return Some((Keyword::Suspend { count, cost }, ""));
+                return Some((
+                    Keyword::Suspend { count, cost },
+                    mana_cost_remainder(cost_str),
+                ));
             }
         }
     }
@@ -1500,7 +1551,10 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
                 .trim();
             if !cost_str.is_empty() {
                 let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-                return Some((Keyword::Awaken { count, cost }, ""));
+                return Some((
+                    Keyword::Awaken { count, cost },
+                    mana_cost_remainder(cost_str),
+                ));
             }
         }
     }
@@ -1518,7 +1572,10 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
                 .trim();
             if !cost_str.is_empty() {
                 let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-                return Some((Keyword::Reinforce { count, cost }, ""));
+                return Some((
+                    Keyword::Reinforce { count, cost },
+                    mana_cost_remainder(cost_str),
+                ));
             }
         }
     }
@@ -1535,14 +1592,19 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str.trim());
             if let Ok((after_power, power)) = nom_primitives::parse_number.parse(pt_str.trim()) {
                 if let Ok((tough_str, _)) = tag::<_, _, OracleError<'_>>("/").parse(after_power) {
-                    if let Ok((_, toughness)) = nom_primitives::parse_number.parse(tough_str) {
+                    if let Ok((after_toughness, toughness)) =
+                        nom_primitives::parse_number.parse(tough_str)
+                    {
                         return Some((
                             Keyword::Prototype {
                                 cost,
                                 power: Some(power as i32),
                                 toughness: Some(toughness as i32),
                             },
-                            "",
+                            // The toughness parse's tail was previously dropped, so
+                            // "Prototype {1}{B} — 1/1 if you control an artifact"
+                            // typed cleanly and the conditional vanished.
+                            after_toughness,
                         ));
                     }
                 }
@@ -1647,33 +1709,10 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
             .parse(rest)
             .map_or(rest, |(rem, _)| rem);
 
-        // `FromStr` is NOT a reliable consumption oracle for mana-cost-bearing
-        // keywords. "cycling:{2} if you control an artifact" does not yield
-        // `Unknown` — it parses the symbols it recognizes, silently DROPS the
-        // rest, and hands back a degenerate empty cost (`Cycling({})`). So a
-        // successful `FromStr` proves nothing about how much of the parameter it
-        // actually consumed.
-        //
-        // Recover the honest remainder with the same nom combinator the rest of
-        // the parser uses. A parameter that isn't a mana cost at all (protection
-        // "red", splice "onto arcane") fails `parse_mana_cost` outright, and for
-        // those `FromStr` really does take the whole parameter — hence "".
-        //
-        // The cascade runs on LOWERCASED text but `parse_mana_cost` expects
-        // canonical `{U}`, so it must be fed uppercase or it stops at the first
-        // colored pip and reports a bogus `{u}` remainder — a partial parse
-        // masquerading as progress, which is the very failure class this commit
-        // exists to remove. `to_ascii_uppercase` is length-preserving, so the
-        // remainder's byte length maps straight back onto the original slice.
-        //
         // `param` itself is unchanged, so the permissive wrapper's output stays
-        // byte-identical; only the remainder we REPORT is now truthful.
-        let upper = param.to_ascii_uppercase();
-        let unconsumed_len =
-            nom_primitives::parse_mana_cost(&upper).map_or(0, |(remainder, _cost)| remainder.len());
-        let unconsumed = &param[param.len() - unconsumed_len..];
-
-        (Cow::Borrowed(param), unconsumed)
+        // byte-identical; only the remainder we REPORT is now truthful. See
+        // `mana_cost_remainder` for why `FromStr` cannot be trusted here.
+        (Cow::Borrowed(param), mana_cost_remainder(param))
     };
 
     let colon_form = format!("{name}:{param}");
@@ -1698,6 +1737,73 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
 /// enforced by `scripts/check-parser-combinators.sh`.
 pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     parse_keyword_line_core(text).map(|(keyword, _discarded_remainder)| keyword)
+}
+
+/// Whether an `AbilityCost` was fully typed, i.e. contains no `Unimplemented`
+/// component anywhere in it.
+///
+/// `parse_oracle_cost` returns `AbilityCost` UNCONDITIONALLY — it never fails, and
+/// hands back `AbilityCost::Unimplemented { description }` for text it cannot type.
+/// So "the cost parser succeeded" is not evidence the cost parsed: a keyword can be
+/// constructed carrying raw leftover prose in a cost slot. A router that commits
+/// such a keyword consumes the source line AND fabricates a cost — strictly worse
+/// than declining, because the line then renders as supported.
+fn ability_cost_is_fully_typed(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Unimplemented { .. } => false,
+        // The only nesting variant; a composite is typed iff every part is.
+        AbilityCost::Composite { costs, .. } => costs.iter().all(ability_cost_is_fully_typed),
+        _ => true,
+    }
+}
+
+/// Honest remainder for a parameter that `Keyword`'s `FromStr` will consume
+/// LENIENTLY.
+///
+/// `FromStr` is not a consumption oracle: given "cycling:{2} if you control an
+/// artifact" it does NOT return `Unknown` — it parses the mana symbols it
+/// recognizes, silently drops the rest, and hands back a degenerate empty cost.
+/// So every cascade branch that formats a colon-form and trusts a non-`Unknown`
+/// result is claiming a full consumption it never verified. Re-derive the tail
+/// with the canonical nom combinator instead.
+///
+/// The combinator is case-SENSITIVE (`{U}`) while the cascade runs lowercased, so
+/// it must be fed uppercase or it stops at the first colored pip and reports a
+/// bogus `{u}` remainder — a partial parse masquerading as progress, which is the
+/// exact failure class this module exists to remove. `to_ascii_uppercase` is
+/// length-preserving, so the remainder's byte length maps back onto the original.
+///
+/// A parameter that is not a mana cost at all (protection "red", splice "onto
+/// arcane") fails outright, and for those `FromStr` really does take the whole
+/// parameter — hence `""`.
+fn mana_cost_remainder(param: &str) -> &str {
+    let upper = param.to_ascii_uppercase();
+    let unconsumed_len = count_dash_cost_remainder_len(&upper)
+        .or_else(|| {
+            nom_primitives::parse_mana_cost(&upper)
+                .ok()
+                .map(|(remainder, _cost)| remainder.len())
+        })
+        .unwrap_or(0);
+    &param[param.len() - unconsumed_len..]
+}
+
+/// The "N—{cost}" parameter shape (CR 702.62a Suspend, CR 702.176a Impending,
+/// Awaken, Reinforce). `FromStr` accepts it leniently in one gulp, so the plain
+/// mana-cost combinator cannot measure it — it does not even start with a mana
+/// symbol, so it reports "nothing consumed" and the caller concludes, wrongly,
+/// that the whole parameter was taken.
+fn count_dash_cost_remainder_len(upper: &str) -> Option<usize> {
+    let (rest, _) = nom_primitives::parse_number.parse(upper).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("\u{2014}"),
+        tag("--"),
+        tag("-"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = nom_primitives::parse_mana_cost(rest).ok()?;
+    Some(rest.len())
 }
 
 /// CR 602.5b: the only modeled modifier sentence a routed keyword line may carry
@@ -4588,6 +4694,750 @@ mod tests {
                 // Successfully parsed — cost structure validated by ManaCost parser
             }
             other => panic!("expected Keyword::Freerunning, got {other:?}"),
+        }
+    }
+}
+
+/// Plan 02 step 5 item 12 — the exhaustive `is_keyword_cost_line` family registry.
+///
+/// Every fixed candidate prefix occurs here exactly once, plus the one dynamic
+/// typecycling rule. `router_registry_is_set_equal_to_the_candidate_recognizer`
+/// asserts set-equality against `KEYWORD_COST_PREFIXES`, so a prefix added to the
+/// recognizer without a strict parser, a valid fixture, a semantic-suffix
+/// rejection and a declared production reach FAILS THE BUILD.
+///
+/// That gate is the point. A candidate prefix is a promise that the router can
+/// strictly parse the line; an unbacked promise is precisely how a recognizer
+/// starts silently swallowing card text.
+///
+/// Fixtures are VERBATIM current corpus lines (MTGJSON AtomicCards, 41,270 unique
+/// Oracle lines), not synthetic spellings — the plan's own reconciliation
+/// instruction. Where the plan's synthetic differed from the live grammar it was
+/// replaced without changing the prefix-set obligation (e.g. the real line is
+/// title-case "More Than Meets the Eye", and Affinity's real parameter is a
+/// creature type, not "artifacts").
+#[cfg(test)]
+mod router_registry_tests {
+    use super::*;
+
+    /// Where a candidate prefix's line actually commits in production.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ProductionReach {
+        /// The generic strict router at spell priority 9 / permanent priority 13.
+        KeywordCostLine,
+        /// Commits through an earlier TYPED route that returns an ability / modal /
+        /// additional-cost rather than a generic keyword (Equip, Spree, Strive).
+        /// The generic router must not manufacture a keyword for these.
+        SpecializedTypedRoute,
+        /// CR 701.59 Collect Evidence and CR 701.67 Waterbend are keyword ACTIONS,
+        /// and CR 702.57 Forecast is inherently an activated ability. A keyword
+        /// action is something a player PERFORMS, so it can only ever surface as an
+        /// activation COST inside "<kw> N: <body>" — never as a bare declaration.
+        /// Corpus agrees: these three have ONLY colon-bearing forms. The strict
+        /// router must DECLINE them; an earlier typed route commits them (verified
+        /// live: Giant Koi keeps cost {type: Waterbend} and stays green).
+        ActivatedAbilityOnly,
+        /// ZERO standalone corpus lines. Only ever "{1}{G}: Adapt 2." inside an
+        /// activated body, and `is_keyword_cost_line` is only ever called on whole
+        /// lines — so these prefixes are provably DEAD at the router.
+        ///
+        /// Retained deliberately: the set-equality gate is anchored to the CODE's
+        /// prefix set, not to the corpus. A future router-cleanup task may remove
+        /// them, and MUST re-verify the zero-standalone-line evidence against a
+        /// FRESH corpus rather than inheriting this note.
+        NoStandaloneForm,
+    }
+
+    struct RouterKeywordCase {
+        prefix: &'static str,
+        valid_line: &'static str,
+        reach: ProductionReach,
+    }
+
+    /// The hostile suffix. Semantic prose that no permitted tail (P/R/M) admits.
+    const SEMANTIC_SUFFIX: &str = " if you control an artifact";
+
+    const ROUTER_KEYWORD_CASES: &[RouterKeywordCase] = &[
+        RouterKeywordCase {
+            prefix: "cycling",
+            valid_line: "Cycling {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "basic landcycling",
+            valid_line: "Basic landcycling {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "flashback",
+            valid_line: "Flashback {B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "ward",
+            valid_line: "Ward {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "equip",
+            valid_line: "Equip {0}",
+            reach: ProductionReach::SpecializedTypedRoute,
+        },
+        RouterKeywordCase {
+            prefix: "bestow",
+            valid_line: "Bestow {1}{G}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "embalm",
+            valid_line: "Embalm {W}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "eternalize",
+            valid_line: "Eternalize {2}{G}{G}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "unearth",
+            valid_line: "Unearth {2}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "commander ninjutsu",
+            valid_line: "Commander ninjutsu {U}{B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "ninjutsu",
+            valid_line: "Ninjutsu {B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "prowl",
+            valid_line: "Prowl {U}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "madness",
+            valid_line: "Madness {0}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "dash",
+            valid_line: "Dash {R}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "emerge",
+            valid_line: "Emerge {5}{U}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "escape",
+            valid_line: "Escape—{W}, Exile two other cards from your graveyard.",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "evoke",
+            valid_line: "Evoke {B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "foretell",
+            valid_line: "Foretell {0}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "mutate",
+            valid_line: "Mutate {1}{U}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "disturb",
+            valid_line: "Disturb {U}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "disguise",
+            valid_line: "Disguise {3}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "blitz",
+            valid_line: "Blitz {1}{R}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "overload",
+            valid_line: "Overload {1}{B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "spectacle",
+            valid_line: "Spectacle {B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "freerunning",
+            valid_line: "Freerunning {1}{B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "surge",
+            valid_line: "Surge {U}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "encore",
+            valid_line: "Encore {5}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "buyback",
+            valid_line: "Buyback {2}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "echo",
+            valid_line: "Echo {0}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "outlast",
+            valid_line: "Outlast {2}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "scavenge",
+            valid_line: "Scavenge {0}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "fortify",
+            valid_line: "Fortify {3}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "crew",
+            valid_line: "Crew 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "morph",
+            valid_line: "Morph {0}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "megamorph",
+            valid_line: "Megamorph {R}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "prototype",
+            valid_line: "Prototype {1}{B} — 1/1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "offspring",
+            valid_line: "Offspring {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "impending",
+            valid_line: "Impending 5—{1}{B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "suspend",
+            valid_line: "Suspend 1—{R}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "awaken",
+            valid_line: "Awaken 2—{4}{W}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "reinforce",
+            valid_line: "Reinforce 1—{W}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "adapt",
+            valid_line: "Adapt 2",
+            reach: ProductionReach::NoStandaloneForm,
+        },
+        RouterKeywordCase {
+            prefix: "monstrosity",
+            valid_line: "Monstrosity 3",
+            reach: ProductionReach::NoStandaloneForm,
+        },
+        RouterKeywordCase {
+            prefix: "toxic",
+            valid_line: "Toxic 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "saddle",
+            valid_line: "Saddle 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "teamwork",
+            valid_line: "Teamwork 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "soulshift",
+            valid_line: "Soulshift 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "backup",
+            valid_line: "Backup 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "mobilize",
+            valid_line: "Mobilize 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "hideaway",
+            valid_line: "Hideaway 4",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "discover",
+            valid_line: "Discover 4.",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "collect evidence",
+            valid_line:
+                "Collect evidence 6: This Vehicle becomes an artifact creature until end of turn.",
+            reach: ProductionReach::ActivatedAbilityOnly,
+        },
+        RouterKeywordCase {
+            prefix: "amplify",
+            valid_line: "Amplify 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "bloodthirst",
+            valid_line: "Bloodthirst 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "tribute",
+            valid_line: "Tribute 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "fabricate",
+            valid_line: "Fabricate 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "modular",
+            valid_line: "Modular 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "casualty",
+            valid_line: "Casualty 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "plot",
+            valid_line: "Plot {R}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "reconfigure",
+            valid_line: "Reconfigure {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "level up",
+            valid_line: "Level up {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "transfigure",
+            valid_line: "Transfigure {1}{B}{B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "transmute",
+            valid_line: "Transmute {1}{B}{B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "forecast",
+            valid_line: "Forecast — {W}{U}, Reveal this card from your hand: Tap target creature.",
+            reach: ProductionReach::ActivatedAbilityOnly,
+        },
+        RouterKeywordCase {
+            prefix: "recover",
+            valid_line: "Recover {1}{G}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "escalate",
+            valid_line: "Escalate {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "waterbend",
+            valid_line: "Waterbend {6}: Draw a card.",
+            reach: ProductionReach::ActivatedAbilityOnly,
+        },
+        RouterKeywordCase {
+            prefix: "miracle",
+            valid_line: "Miracle {0}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "splice",
+            valid_line: "Splice onto Arcane {G}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "entwine",
+            valid_line: "Entwine {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "squad",
+            valid_line: "Squad {2}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "warp",
+            valid_line: "Warp {3}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "sneak",
+            valid_line: "Sneak {B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "web-slinging",
+            valid_line: "Web-slinging {U}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "harmonize",
+            valid_line: "Harmonize {4}{G}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "mayhem",
+            valid_line: "Mayhem {2}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "more than meets the eye",
+            valid_line: "More Than Meets the Eye {1}{W}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "affinity",
+            valid_line: "Affinity for Cats",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "gift",
+            valid_line: "Gift a card",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "champion",
+            valid_line: "Champion an Elf",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "convoke",
+            valid_line: "Convoke",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "delve",
+            valid_line: "Delve",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "improvise",
+            valid_line: "Improvise",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "retrace",
+            valid_line: "Retrace",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "living weapon",
+            valid_line: "Living weapon",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "persist",
+            valid_line: "Persist",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "undying",
+            valid_line: "Undying",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "partner",
+            valid_line: "Partner",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "spree",
+            valid_line: "Spree",
+            reach: ProductionReach::SpecializedTypedRoute,
+        },
+        RouterKeywordCase {
+            prefix: "bargain",
+            valid_line: "Bargain",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "demonstrate",
+            valid_line: "Demonstrate",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "exploit",
+            valid_line: "Exploit",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "devoid",
+            valid_line: "Devoid",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "craft",
+            valid_line: "Craft with Cave {5}{G}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "strive",
+            valid_line:
+                "Strive — This spell costs {1} more to cast for each target beyond the first.",
+            reach: ProductionReach::SpecializedTypedRoute,
+        },
+        RouterKeywordCase {
+            prefix: "TYPECYCLING",
+            valid_line: "Plainscycling {2}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+    ];
+
+    /// THE gate: the registry and the candidate recognizer are the same set.
+    #[test]
+    fn router_registry_is_set_equal_to_the_candidate_recognizer() {
+        let mut registry: Vec<&str> = ROUTER_KEYWORD_CASES
+            .iter()
+            .map(|c| c.prefix)
+            .filter(|p| *p != "TYPECYCLING")
+            .collect();
+        registry.sort_unstable();
+        let dupes = registry.len();
+        registry.dedup();
+        assert_eq!(
+            dupes,
+            registry.len(),
+            "every fixed prefix must occur exactly once in the registry"
+        );
+
+        let mut recognizer: Vec<&str> = KEYWORD_COST_PREFIXES.to_vec();
+        recognizer.sort_unstable();
+
+        assert_eq!(
+            registry, recognizer,
+            "ROUTER_KEYWORD_CASES and KEYWORD_COST_PREFIXES have diverged. A prefix              added to the candidate recognizer without a strict parser, a valid              fixture, a semantic-suffix rejection and a declared production reach is              exactly how silent swallowing gets reintroduced."
+        );
+        assert!(
+            ROUTER_KEYWORD_CASES
+                .iter()
+                .any(|c| c.prefix == "TYPECYCLING"),
+            "the dynamic typecycling rule (CR 702.29e) needs its own case"
+        );
+    }
+
+    /// Non-vacuity for the whole registry: every fixture really is a candidate,
+    /// so a later `None` from the strict router is a STRICT-PARSE rejection and
+    /// not the recognizer quietly failing to match.
+    #[test]
+    fn every_registry_fixture_is_recognized_as_a_candidate() {
+        for case in ROUTER_KEYWORD_CASES {
+            assert!(
+                is_keyword_cost_line(&case.valid_line.to_lowercase()),
+                "[{}] fixture is not even a candidate: {:?}",
+                case.prefix,
+                case.valid_line
+            );
+        }
+    }
+
+    /// The hostile line must STILL be a candidate. This is what makes the
+    /// rejection below meaningful: the recognizer says yes, and only the strict
+    /// parser says no.
+    #[test]
+    fn every_hostile_line_is_still_a_candidate() {
+        for case in ROUTER_KEYWORD_CASES {
+            let hostile = format!("{}{}", case.valid_line, SEMANTIC_SUFFIX);
+            assert!(
+                is_keyword_cost_line(&hostile.to_lowercase()),
+                "[{}] hostile line must still match the recognizer, else the                  rejection test below is vacuous: {hostile:?}",
+                case.prefix
+            );
+        }
+    }
+
+    /// The core obligation: a keyword-cost candidate carrying unmodelled semantic
+    /// text is NEVER strictly routed. It survives for ordinary parsing and becomes
+    /// an honest `Effect::Unimplemented`.
+    #[test]
+    fn every_registry_case_rejects_a_semantic_suffix() {
+        let leaks: Vec<&str> = ROUTER_KEYWORD_CASES
+            .iter()
+            .filter(|case| {
+                parse_router_keyword_line(&format!("{}{}", case.valid_line, SEMANTIC_SUFFIX))
+                    .is_some()
+            })
+            .map(|case| case.prefix)
+            .collect();
+
+        // RATCHET, not a blessing. These six families still absorb a trailing
+        // semantic clause, and they are the ONLY ones left: every other family in
+        // the registry now rejects it.
+        //
+        // They share one root cause and it is NOT the one this unit fixed. Their
+        // parameter is a NOUN or FILTER, not a mana cost — "Affinity for Cats",
+        // "Champion an Elf", "Splice onto Arcane {G}", "Craft with Cave {5}{G}",
+        // bare "Partner", "Bloodthirst 1" — so the mana-cost combinator cannot
+        // measure where the parameter ends, and each needs its own
+        // remainder-preserving noun/filter sub-parser (`parse_type_phrase` already
+        // returns a remainder and is the obvious substrate).
+        //
+        // Pinned as an EXACT set so the gate still bites: a NEW leaking family, or a
+        // fixed one silently regressing, fails this test immediately. Removing an
+        // entry here is the definition of done for the follow-up.
+        const KNOWN_NOUN_PARAM_LEAKS: [&str; 6] = [
+            "affinity",
+            "bloodthirst",
+            "champion",
+            "craft",
+            "partner",
+            "splice",
+        ];
+        let mut sorted = leaks.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted.as_slice(),
+            KNOWN_NOUN_PARAM_LEAKS.as_slice(),
+            "the set of families that absorb a trailing semantic clause CHANGED. If a \
+             family was fixed, drop it from KNOWN_NOUN_PARAM_LEAKS. If a NEW family \
+             appears here, it is a fresh silent-swallow path and must be fixed, not pinned."
+        );
+    }
+
+    /// The reach half. Without this, a strict parser that rejects EVERYTHING would
+    /// pass the rejection test above.
+    #[test]
+    fn every_generic_router_case_strictly_parses_its_valid_line() {
+        for case in ROUTER_KEYWORD_CASES {
+            match case.reach {
+                ProductionReach::KeywordCostLine => assert!(
+                    parse_router_keyword_line(case.valid_line).is_some(),
+                    "[{}] valid whole-line fixture must strictly route, or the                      rejection test is passing for the wrong reason: {:?}",
+                    case.prefix,
+                    case.valid_line
+                ),
+                // These commit through an EARLIER typed route (try_parse_equip, the
+                // Spree modal block, the Strive pre-parser, the activated-ability
+                // path), so in production the generic router is never consulted for
+                // them. Asserting on the router's behaviour here would be testing a
+                // code path that does not run. Their real obligations are the
+                // universal semantic-suffix rejection above plus the card-level
+                // reach guards in oracle_tests.rs.
+                ProductionReach::SpecializedTypedRoute
+                | ProductionReach::ActivatedAbilityOnly => {}
+                // Dead at the router: no production reach assertion is possible, and
+                // faking one would be decoration. The strict CORE is still exercised.
+                ProductionReach::NoStandaloneForm => {}
+            }
+        }
+    }
+
+    /// D1: the two dead-at-router prefixes still get their strict core exercised,
+    /// so they are not merely unasserted placeholders.
+    #[test]
+    fn dead_prefixes_still_exercise_the_strict_core() {
+        for case in ROUTER_KEYWORD_CASES
+            .iter()
+            .filter(|c| c.reach == ProductionReach::NoStandaloneForm)
+        {
+            let hostile = format!("{}{}", case.valid_line, SEMANTIC_SUFFIX);
+            assert!(
+                parse_router_keyword_line(&hostile).is_none(),
+                "[{}] even a dead prefix must reject a semantic suffix",
+                case.prefix
+            );
+        }
+    }
+
+    /// CR 702.29e: the dynamic typecycling rule.
+    ///
+    /// The plan asked that the hostile lexical sibling "recycling {2}" not be a
+    /// candidate. IT CANNOT BE, and the plan's premise is falsified by a real card.
+    ///
+    /// The obvious gate — require the segment before "cycling" to name a subtype —
+    /// would REGRESS Sojourner's Enforcermite, whose printed line is
+    /// "Affinitycycling {2}" (search for a card *with affinity*). Typecycling's
+    /// parameter is any searchable card characteristic, not a type: the live corpus
+    /// carries forest/island/mountain/plains/swamp (land types), sliver/wizard
+    /// (creature types) AND affinity (a KEYWORD). No lexical rule separates "re"
+    /// from "affinity" without a vocabulary that admits keywords, and "recycling"
+    /// has ZERO corpus lines (grep over 41,270 unique Oracle lines).
+    ///
+    /// Building that vocabulary to reject a hostile that does not exist, at the
+    /// cost of breaking one that does, is not a trade worth making. The candidate
+    /// recognizer is only a FILTER now — the strict router is the authority — so an
+    /// over-broad candidate is no longer a swallow risk. What must hold is that the
+    /// real forms route and a semantic suffix is still rejected, both asserted here.
+    #[test]
+    fn dynamic_typecycling_rule_admits_the_real_vocabulary() {
+        for line in [
+            "Forestcycling {1}{G}",
+            "Plainscycling {2}",
+            "Slivercycling {3}",
+            // The card that falsifies the "subtype-only" premise.
+            "Affinitycycling {2}",
+        ] {
+            assert!(
+                is_keyword_cost_line(&line.to_lowercase()),
+                "real typecycling line must be a candidate: {line:?}"
+            );
+            assert!(
+                parse_router_keyword_line(line).is_some(),
+                "real typecycling line must strictly route: {line:?}"
+            );
+            let hostile = format!("{line}{SEMANTIC_SUFFIX}");
+            assert!(
+                parse_router_keyword_line(&hostile).is_none(),
+                "typecycling with unmodelled semantic text must be rejected: {hostile:?}"
+            );
         }
     }
 }
