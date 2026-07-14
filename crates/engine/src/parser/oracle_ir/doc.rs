@@ -45,8 +45,15 @@ use crate::types::mana::ManaCost;
 ///
 /// Reserved by `OracleDocBuilder::begin_item` *before* branch parsing, so a
 /// nested parser can name its owning item without the item existing yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
-pub(crate) struct OracleItemId(pub(crate) u32);
+///
+/// `Deserialize` + `pub`: this id is part of the `OracleDiagnostic::SwallowedClause`
+/// wire payload (`CardFace::parse_warnings` → `card-data.json`), so it must survive a
+/// round-trip through the card DB loaders. Re-exported from `oracle_ir::diagnostic`
+/// so consumers outside this crate-private module can name it.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct OracleItemId(pub u32);
 
 /// Document-global identity for one independently auditable unit: an item, a
 /// clause, a modal mode, a trigger/static/replacement execute body, a granted
@@ -71,8 +78,8 @@ pub(crate) struct OracleUnitId {
 /// known, byte range not) is an enum value, not a second flag.
 // No `Ord`: `Exact < ChainRelative` would be a meaningless magnitude claim on a
 // qualifier this enum's own docs call orthogonal to containment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
-pub(crate) enum SpanPrecision {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SpanPrecision {
     /// The span is the unit's exact byte/line extent. Safe to render.
     Exact,
     /// The span's byte range is exact **within the effect chain** it was parsed
@@ -106,15 +113,31 @@ pub(crate) enum SpanPrecision {
 // the item map is keyed by an explicit `(usize, u32)` tuple, not by this type.
 // If a future unit needs ordering, hand-implement it over
 // `(start_byte, end_byte, ordinal_within_span)` and never over `precision`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
-pub(crate) struct OracleSourceSpan {
-    pub(crate) first_line: usize,
-    pub(crate) last_line: usize,
-    pub(crate) start_byte: usize,
-    pub(crate) end_byte: usize,
+///
+/// `Deserialize` + `pub`: a span is part of the `OracleDiagnostic::SwallowedClause` wire
+/// payload (`CardFace::parse_warnings` → `card-data.json`), so it must survive a
+/// round-trip through the card DB loaders. Re-exported from `oracle_ir::diagnostic`.
+///
+/// # The span an audit diagnostic carries is a UNIT span, and it is LINE-GRANULAR
+///
+/// `Exact` on a diagnostic's `unit_span` means the bounds locate **the audit unit**
+/// exactly — not a clause within it. No producer mints a sub-line ITEM span:
+/// `DocEmitter::exact_span` hands every item on a line the whole line's byte range
+/// (`byte_range(line)`), so two clauses on one physical line are addressed by the same
+/// bytes and are distinguished only by `ordinal_within_span`. `audit_units` therefore
+/// groups them into ONE unit, and both share one `unit_span` — the line-granularity
+/// ceiling `feature.rs` documents. A renderer must not present a `unit_span` as a
+/// *clause* position. When the recognizer bring-up gives items real sub-line spans, the
+/// units subdivide on their own and this narrows with no change here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct OracleSourceSpan {
+    pub first_line: usize,
+    pub last_line: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
     /// Whether the bounds above locate this unit exactly. See `SpanPrecision`.
-    pub(crate) precision: SpanPrecision,
-    pub(crate) ordinal_within_span: u32,
+    pub precision: SpanPrecision,
+    pub ordinal_within_span: u32,
 }
 
 impl OracleSourceSpan {

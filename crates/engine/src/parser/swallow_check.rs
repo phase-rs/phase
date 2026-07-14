@@ -25,7 +25,9 @@ use super::oracle::{is_draft_matters_sentence, ParsedAbilities};
 use super::oracle_effect::player_lookback_relative_clause_owns_suffix;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use super::oracle_ir::doc::OracleItemIr;
-use super::oracle_ir::feature::{audit_units, scope_to_unit, ItemIdTracks, OracleSemanticFeature};
+use super::oracle_ir::feature::{
+    audit_units, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
+};
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Comparator,
@@ -82,23 +84,42 @@ fn truncate(s: &str, max: usize) -> &str {
     }
 }
 
-/// Stamp the owning item's source line onto everything that item's detectors
-/// emitted.
+/// Stamp the owning unit's provenance — line, span, and evidence items — onto
+/// everything that unit's detectors emitted.
 ///
-/// Detectors are deliberately provenance-agnostic: a detector knows *evidence*,
-/// not line numbers. Attribution belongs to the loop that scoped the item, because
-/// that loop is the only thing that knows which line it scoped. Threading a
-/// `line_index` parameter through all fourteen detectors instead would mean a
-/// single forgotten call site silently keeps `line_index: 0` — which does not read
-/// as "unattributed", it reads as *line 1*.
+/// Detectors are deliberately provenance-agnostic: a detector knows *evidence*, not
+/// where it is. Attribution belongs to the loop that scoped the unit, because that loop
+/// is the only thing that knows which unit it scoped. Threading provenance through all
+/// fifteen detectors instead would mean a single forgotten call site silently keeps the
+/// unattributed default — and `line_index: 0` does not read as "unattributed", it reads
+/// as *line 1*. (That is also why the span is an `Option` and not a zeroed
+/// `OracleSourceSpan`: absence must be expressible.)
+///
+/// The provenance is the UNIT's, not an item's, and that is the honest scope: the
+/// audit's evidence half is the unit's pooled items, so no single item can be named. See
+/// `OracleDiagnostic::SwallowedClause`.
 ///
 /// Exhaustive on purpose: a future audit-emitted diagnostic variant must make a
-/// deliberate decision about how it carries provenance rather than silently
-/// inheriting line 0.
-fn stamp_line(item_diagnostics: &mut [OracleDiagnostic], first_line: usize) {
-    for diagnostic in item_diagnostics {
+/// deliberate decision about how it carries provenance rather than silently inheriting
+/// the unattributed default.
+fn stamp_provenance(unit_diagnostics: &mut [OracleDiagnostic], unit: &AuditUnit<'_>) {
+    for diagnostic in unit_diagnostics {
         match diagnostic {
-            OracleDiagnostic::SwallowedClause { line_index, .. } => *line_index = first_line,
+            OracleDiagnostic::SwallowedClause {
+                line_index,
+                unit_span,
+                items,
+                ..
+            } => {
+                *line_index = unit.first_line;
+                *unit_span = Some(unit.span.clone());
+                *items = unit.item_ids();
+                debug_assert!(
+                    unit.span.first_line <= unit.first_line
+                        && unit.first_line <= unit.span.last_line,
+                    "a unit's attributed line must lie inside the span of the text it owns",
+                );
+            }
             // The swallow audit emits `SwallowedClause` and nothing else. These
             // three are parse-time diagnostics that reach the document's channel by
             // other routes and are never constructed here.
@@ -197,7 +218,7 @@ pub(crate) fn check_swallowed_clauses(
         detect_apnap(&cleaned, fragment, &scoped, &mut found);
         detect_modal_dynamic_max_dropped(&cleaned, fragment, &evidence, &mut found);
 
-        stamp_line(&mut found, unit.first_line);
+        stamp_provenance(&mut found, &unit);
         diagnostics.append(&mut found);
     }
 }
@@ -363,11 +384,10 @@ fn detect_replacement(
     {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::Replacement.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::Replacement.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector A: Replacement_Instead ─────────────────────────────────────
@@ -418,13 +438,10 @@ fn detect_replacement_instead(
     if any_ability_has_replacement_carrier(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ReplacementInstead
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ReplacementInstead.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector B: ActivateOnlyDuring ──────────────────────────────────────
@@ -445,13 +462,10 @@ fn detect_activate_only_during(
     if any_ability_has_constraint(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ActivateOnlyDuring
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ActivateOnlyDuring.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector C: ActivateLimit ───────────────────────────────────────────
@@ -476,11 +490,10 @@ fn detect_activate_limit(
     if any_ability_has_limit(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ActivateLimit.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ActivateLimit.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector D: Duration_UntilEndOfTurn ─────────────────────────────────
@@ -543,13 +556,10 @@ fn detect_duration_until_eot(
     {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::DurationUntilEndOfTurn
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::DurationUntilEndOfTurn.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector E: Optional_YouMay ─────────────────────────────────────────
@@ -624,13 +634,10 @@ fn detect_optional_you_may(
     if any_static_has_granted_trigger_with_optional(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::OptionalYouMay
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::OptionalYouMay.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── AST predicates ──────────────────────────────────────────────────────
@@ -2288,11 +2295,10 @@ fn detect_dynamic_qty(
             return;
         }
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::DynamicQty.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::DynamicQty.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector M: Modal_DynamicMaxDropped ─────────────────────────────────
@@ -2353,13 +2359,10 @@ fn detect_modal_dynamic_max_dropped(
     if evidence.has_slot("dynamic_max_choices") {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ModalDynamicMaxDropped
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ModalDynamicMaxDropped.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 /// CR 701.38: True when every dynamic-quantity marker in `cleaned` belongs to a
@@ -3239,11 +3242,10 @@ fn detect_condition_if(
     {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ConditionIf.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ConditionIf.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 /// Remove sentences containing CR-implicit "if" phrases. These do not
@@ -3487,13 +3489,10 @@ fn detect_condition_unless(
     {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ConditionUnless
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ConditionUnless.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector I: Condition_AsLongAs ──────────────────────────────────────
@@ -3556,13 +3555,10 @@ fn detect_condition_as_long_as(
     if any_static_has_attached_subject_qualifier_grant(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ConditionAsLongAs
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ConditionAsLongAs.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 /// CR 611.3a + CR 613: an inverted attached-subject grant
@@ -4066,13 +4062,10 @@ fn detect_duration_this_turn(
     }) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::DurationThisTurn
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::DurationThisTurn.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector K: Duration_NextTurn ───────────────────────────────────────
@@ -4115,13 +4108,10 @@ fn detect_duration_next_turn(
     }) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::DurationNextTurn
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::DurationNextTurn.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector L: Optional_MayHave ────────────────────────────────────────
@@ -4164,13 +4154,10 @@ fn detect_optional_may_have(
     }) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::OptionalMayHave
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::OptionalMayHave.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector M: APNAP ───────────────────────────────────────────────────
@@ -4195,11 +4182,10 @@ fn detect_apnap(
     if any_ability_has_apnap_ordering(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::Apnap.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::Apnap.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Cascade-vs-AST structural diff (option 3) ──────────────────────────
@@ -4400,6 +4386,152 @@ mod tests {
                 } if warning_detector == detector
             )
         })
+    }
+
+    /// Every swallow finding on this face, with its stamped unit provenance.
+    fn swallows(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+    ) -> Vec<(
+        &str,
+        usize,
+        &crate::parser::oracle_ir::diagnostic::OracleSourceSpan,
+    )> {
+        parsed
+            .parse_warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                OracleDiagnostic::SwallowedClause {
+                    detector,
+                    line_index,
+                    unit_span,
+                    ..
+                } => Some((
+                    detector.as_str(),
+                    *line_index,
+                    unit_span
+                        .as_ref()
+                        .expect("the audit stamps a unit span on every finding it emits"),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // ── Unit provenance (Plan 02 gate 5, as amended by the t124 ruling) ──────────
+
+    /// THE COLLAPSE, PINNED BY NAME.
+    ///
+    /// Aether Revolt raises TWO swallowed semantics from ONE physical source line: an
+    /// `as long as` revolt condition and an `if … would … instead` replacement condition.
+    /// They are genuinely distinct clauses — and their diagnostics carry the SAME
+    /// `unit_span`, so a consumer cannot locate them separately.
+    ///
+    /// That is NOT a defect in this payload. It is the line-granularity ceiling of the
+    /// span SUBSTRATE: `DocEmitter::exact_span` hands every item on a line the whole
+    /// line's byte range, so `audit_units` groups both clauses into one unit, and one
+    /// unit has exactly one span. Sub-line item spans are the prerequisite that lifts it;
+    /// when they land, the units subdivide on their own and these two spans separate.
+    ///
+    /// Asserted BY NAME so that whoever lands sub-line spans must consciously flip this
+    /// test, rather than leave a silently stale collapse behind.
+    #[test]
+    fn same_line_clauses_share_the_unit_span_until_subline_item_spans_exist() {
+        let text = "Revolt — As long as a permanent left the battlefield under your control \
+                    this turn, if a source you control would deal noncombat damage to an \
+                    opponent or a permanent an opponent controls, it deals that much damage \
+                    plus 2 instead.\nWhenever you get one or more {E}, this enchantment deals \
+                    that much damage to any target.";
+        let parsed = parse_named(text, "Aether Revolt", &["Enchantment"]);
+
+        let found = swallows(&parsed);
+        assert_eq!(
+            found.len(),
+            2,
+            "two clauses on line 0 each swallow a semantic: {found:?}"
+        );
+        assert_ne!(
+            found[0].0, found[1].0,
+            "the two findings are DIFFERENT detectors — distinct clauses, not one clause twice",
+        );
+
+        // Both are attributed to line 0 …
+        assert_eq!((found[0].1, found[1].1), (0, 0));
+        // … and — the ceiling — they SHARE one span. Distinct byte spans for the two
+        // clauses are unreachable until items carry sub-line spans.
+        assert_eq!(
+            found[0].2, found[1].2,
+            "same-line clauses share the unit span; flip this only when items carry sub-line spans",
+        );
+        // The span is the unit's own line, exactly located and card-absolute.
+        let span = found[0].2;
+        assert_eq!((span.first_line, span.last_line), (0, 0));
+        assert_eq!(span.start_byte, 0);
+        assert_eq!(
+            span.end_byte,
+            text.lines().next().expect("line 0").len(),
+            "the unit span is the exact byte extent of the line it owns",
+        );
+    }
+
+    /// NON-VACUITY for the collapse above: the span is not a constant.
+    ///
+    /// Captain Eberhart swallows a `this turn` duration on line 1 AND another on line 2.
+    /// Those are two units, so they must carry DIFFERENT, non-overlapping spans. Without
+    /// this, `same_line_clauses_share_the_unit_span…` would pass just as happily against
+    /// a span that never varied at all.
+    #[test]
+    fn different_units_carry_different_spans() {
+        let text = "Double strike\nSpells cast from among cards you drew this turn cost {1} \
+                    less to cast.\nSpells cast from among cards your opponents drew this turn \
+                    cost {1} more to cast.";
+        let parsed = parse_named(text, "Captain Eberhart", &["Creature"]);
+
+        let found = swallows(&parsed);
+        assert_eq!(found.len(), 2, "one finding per line: {found:?}");
+        assert_eq!(
+            (found[0].1, found[1].1),
+            (1, 2),
+            "attributed to lines 1 and 2"
+        );
+        assert_ne!(
+            found[0].2, found[1].2,
+            "distinct units must carry distinct spans — otherwise the span is inert",
+        );
+        assert!(
+            found[0].2.end_byte <= found[1].2.start_byte,
+            "unit spans are disjoint and in source order: {:?} then {:?}",
+            found[0].2,
+            found[1].2,
+        );
+    }
+
+    /// The evidence set is the unit's POOLED items, and it is honestly `0..N`.
+    /// A finding names every item the audit consulted — never one hand-picked id.
+    #[test]
+    fn findings_carry_the_units_pooled_evidence_items() {
+        let text = "Revolt — As long as a permanent left the battlefield under your control \
+                    this turn, if a source you control would deal noncombat damage to an \
+                    opponent or a permanent an opponent controls, it deals that much damage \
+                    plus 2 instead.\nWhenever you get one or more {E}, this enchantment deals \
+                    that much damage to any target.";
+        let parsed = parse_named(text, "Aether Revolt", &["Enchantment"]);
+
+        let items: Vec<_> = parsed
+            .parse_warnings
+            .iter()
+            .filter(|warning| matches!(warning, OracleDiagnostic::SwallowedClause { .. }))
+            .map(|warning| warning.evidence_items().to_vec())
+            .collect();
+
+        assert_eq!(items.len(), 2);
+        assert!(
+            !items[0].is_empty(),
+            "line 0 lowered an item; the finding must name the evidence it was judged against",
+        );
+        assert_eq!(
+            items[0], items[1],
+            "both findings came from ONE unit, so they carry ONE evidence set",
+        );
     }
 
     fn find_search_outside_game(def: &AbilityDefinition) -> Option<&Effect> {

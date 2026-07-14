@@ -11128,12 +11128,10 @@ mod tests {
 
     #[test]
     fn apnap_swallowed_clause_warning_counts_as_coverage_gap() {
-        let warnings = vec![OracleDiagnostic::SwallowedClause {
-            detector: "APNAP".to_string(),
-            description: "Repeat the following process for each opponent in turn order."
-                .to_string(),
-            line_index: 0,
-        }];
+        let warnings = vec![OracleDiagnostic::swallowed_clause(
+            "APNAP",
+            "Repeat the following process for each opponent in turn order.",
+        )];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
         assert_eq!(missing, vec!["Swallow:APNAP"]);
@@ -11142,11 +11140,10 @@ mod tests {
     #[test]
     fn swallowed_clause_warning_counts_as_coverage_gap() {
         let warnings = vec![
-            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
-                detector: "Condition_If".to_string(),
-                description: "If foo, draw a card.".to_string(),
-                line_index: 0,
-            },
+            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::swallowed_clause(
+                "Condition_If",
+                "If foo, draw a card.",
+            ),
         ];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
@@ -11248,11 +11245,10 @@ mod tests {
     /// exactly `"Swallow:{detector}"`, so this locks it.
     #[test]
     fn check_parse_warnings_flags_swallowed_clause() {
-        let warnings = vec![OracleDiagnostic::SwallowedClause {
-            detector: "Condition_If".into(),
-            description: "if you control a creature, …".into(),
-            line_index: 0,
-        }];
+        let warnings = vec![OracleDiagnostic::swallowed_clause(
+            "Condition_If",
+            "if you control a creature, …",
+        )];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
         assert_eq!(missing, vec!["Swallow:Condition_If".to_string()]);
@@ -11263,16 +11259,11 @@ mod tests {
     #[test]
     fn check_parse_warnings_dedupes_same_detector() {
         let warnings = vec![
-            OracleDiagnostic::SwallowedClause {
-                detector: "DynamicQty".into(),
-                description: "equal to the number of charge counters".into(),
-                line_index: 0,
-            },
-            OracleDiagnostic::SwallowedClause {
-                detector: "DynamicQty".into(),
-                description: "equal to that card's mana value".into(),
-                line_index: 1,
-            },
+            OracleDiagnostic::swallowed_clause(
+                "DynamicQty",
+                "equal to the number of charge counters",
+            ),
+            OracleDiagnostic::swallowed_clause("DynamicQty", "equal to that card's mana value"),
         ];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
@@ -11285,11 +11276,10 @@ mod tests {
     /// sub-effects must not be counted as supported.
     #[test]
     fn check_parse_warnings_flags_optional_you_may() {
-        let warnings = vec![OracleDiagnostic::SwallowedClause {
-            detector: "Optional_YouMay".into(),
-            description: "you may reveal that card and put it into your hand".into(),
-            line_index: 0,
-        }];
+        let warnings = vec![OracleDiagnostic::swallowed_clause(
+            "Optional_YouMay",
+            "you may reveal that card and put it into your hand",
+        )];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
         assert_eq!(missing, vec!["Swallow:Optional_YouMay".to_string()]);

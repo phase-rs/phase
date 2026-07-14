@@ -1,6 +1,5 @@
 ---
 source: crates/engine/tests/integration/oracle_parser.rs
-assertion_line: 662
 expression: result
 ---
 {
@@ -195,7 +194,18 @@ expression: result
       "type": "SwallowedClause",
       "detector": "Duration_UntilEndOfTurn",
       "description": "When this creature dies, return it to the battlefield. It's an Aura enchantment with enchant creature you control and \"{G}{W}: Enchanted cre",
-      "line_index": 1
+      "line_index": 1,
+      "unit_span": {
+        "first_line": 1,
+        "last_line": 1,
+        "start_byte": 62,
+        "end_byte": 282,
+        "precision": "Exact",
+        "ordinal_within_span": 0
+      },
+      "items": [
+        1
+      ]
     }
   ]
 }
