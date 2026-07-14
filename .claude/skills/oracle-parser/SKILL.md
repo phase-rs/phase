@@ -416,7 +416,7 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `0` | Semicolon-separated keyword line ("Defender; reach"); colon guard excludes activated abilities | per-part keyword extraction | `oracle.rs` |
 | `1` | Modal block: "Choose one —" header + mode lines, or Spree + `+` lines (consumes multiple lines) | `parse_oracle_block()` + `lower_oracle_block()` | `oracle_modal.rs` |
 | — | "Equip {cost}" / "Equip — {cost}" (not "Equipped …"); "Crew N" with trailing cadence sentence | `try_parse_equip()`, `parse_crew_keyword()` | `oracle.rs` |
-| `1b` | Keyword-only line (guard: "{kw} abilities you activate cost {N} less" is a static, not a keyword line) | `extract_granted_keyword_list()` (permissive — see §3a) | `oracle_keyword.rs` |
+| `1b` | Keyword-only line (guard: "{kw} abilities you activate cost {N} less" is a static, not a keyword line) | `parse_router_keyword_list()` (strict — see §3a) | `oracle_keyword.rs` |
 | `2` | "Enchant {filter}" | skip (handled externally) | — |
 | — | Commander-permission / deck-construction copy-limit sentences (skip); named equip "<Name> — Equip {cost}" | `try_parse_equip()` | `oracle.rs` |
 | `11` | Planeswalker loyalty `+N:` / `−N:` / `0:` / `[+N]:` (runs here despite the label) | `try_parse_loyalty_line()` | `oracle.rs` |
