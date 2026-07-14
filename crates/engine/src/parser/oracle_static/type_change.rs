@@ -2265,7 +2265,7 @@ pub(crate) fn parse_compound_multi_zone_color_static(
         _ => return None,
     }
 
-    let modifications = nom_on_lower(
+    let (modifications, _) = nom_on_lower(
         predicate_tp.original,
         predicate_tp.lower,
         parse_multi_zone_color_predicate,
