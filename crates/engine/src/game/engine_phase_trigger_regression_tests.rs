@@ -394,6 +394,45 @@ fn put_boundless_go_shintai(state: &mut GameState) -> ObjectId {
     id
 }
 
+fn put_kitt_kanto(state: &mut GameState) -> ObjectId {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "When Kitt Kanto enters, create a 1/1 green and white Citizen creature token.\nAt the beginning of combat on each player's turn, you may tap two untapped creatures you control. When you do, target creature that player controls gets +2/+2 and gains trample until end of turn. Goad that creature.",
+        "Kitt Kanto, Mayhem Diva",
+        &[],
+        &["Creature".to_string()],
+        &["Cat".to_string(), "Bard".to_string(), "Druid".to_string()],
+    );
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .any(|trigger| trigger.phase == Some(Phase::BeginCombat)),
+        "parser must produce Kitt's beginning-of-combat trigger, got {parsed:?}"
+    );
+
+    let id = create_object(
+        state,
+        CardId(3262),
+        PlayerId(0),
+        "Kitt Kanto, Mayhem Diva".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.card_types.subtypes.push("Cat".to_string());
+    obj.card_types.subtypes.push("Bard".to_string());
+    obj.card_types.subtypes.push("Druid".to_string());
+    obj.power = Some(3);
+    obj.toughness = Some(3);
+    for trigger in parsed.triggers {
+        if trigger.phase == Some(Phase::BeginCombat) {
+            obj.trigger_definitions.push(trigger);
+        }
+    }
+    obj.base_card_types = obj.card_types.clone();
+    id
+}
+
 fn shintai_p1p1_counters(state: &GameState, id: ObjectId) -> u32 {
     state
         .objects
@@ -552,6 +591,168 @@ fn issue_1243_end_step_may_pay_trigger_accept_pays_and_resolves_reflexive() {
         state.players[0].mana_pool.mana.len(),
         0,
         "the {{1}} must actually be paid on accept"
+    );
+}
+
+/// CR 118.12 + CR 603.12 + CR 701.26a + CR 102.1: Kitt Kanto's
+/// beginning-of-combat trigger asks its controller to tap two untapped
+/// creatures they control as a resolution-time optional cost. If paid, the
+/// reflexive target must be a creature controlled by the active player whose
+/// turn it is.
+#[test]
+fn issue_3262_kitt_kanto_taps_two_then_targets_active_player_creature() {
+    let mut state = new_game(42);
+    state.turn_number = 2;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(1);
+    state.priority_player = PlayerId(1);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(1),
+    };
+
+    put_kitt_kanto(&mut state);
+    let first_cost_creature =
+        put_pt_creature(&mut state, 32620, PlayerId(0), "First Citizen", 1, 1);
+    let second_cost_creature =
+        put_pt_creature(&mut state, 32621, PlayerId(0), "Second Citizen", 1, 1);
+    let active_player_creature = put_pt_creature(
+        &mut state,
+        32622,
+        PlayerId(1),
+        "Active Player Creature",
+        1,
+        1,
+    );
+    let controller_creature =
+        put_pt_creature(&mut state, 32623, PlayerId(0), "Controller Creature", 1, 1);
+
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::BeginCombat);
+    assert!(
+        !state.stack.is_empty() || state.pending_trigger.is_some(),
+        "Kitt's beginning-of-combat trigger must fire on each player's turn"
+    );
+
+    let mut saw_may_prompt = false;
+    let mut saw_tap_cost_prompt = false;
+    let mut saw_reflexive_target_prompt = false;
+    for _ in 0..30 {
+        match state.waiting_for.clone() {
+            WaitingFor::Priority { player } => {
+                if state.stack.is_empty() {
+                    break;
+                }
+                apply(&mut state, player, GameAction::PassPriority).unwrap();
+            }
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                saw_may_prompt = true;
+                apply(
+                    &mut state,
+                    player,
+                    GameAction::DecideOptionalEffect { accept: true },
+                )
+                .unwrap();
+            }
+            WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::TapCreatures { .. },
+                choices,
+                count,
+                ..
+            } => {
+                saw_tap_cost_prompt = true;
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 2);
+                assert!(choices.contains(&first_cost_creature));
+                assert!(choices.contains(&second_cost_creature));
+                assert!(!choices.contains(&active_player_creature));
+                apply(
+                    &mut state,
+                    player,
+                    GameAction::SelectCards {
+                        cards: vec![first_cost_creature, second_cost_creature],
+                    },
+                )
+                .unwrap();
+            }
+            WaitingFor::TriggerTargetSelection {
+                player,
+                target_slots,
+                ..
+            } => {
+                assert_eq!(
+                    state
+                        .pending_trigger
+                        .as_ref()
+                        .map(|pending| pending.ability.scoped_player),
+                    Some(Some(PlayerId(1))),
+                    "reflexive pending trigger must retain the active-player scoped binding"
+                );
+                let legal_targets = &target_slots[0].legal_targets;
+                assert!(
+                    legal_targets.contains(&TargetRef::Object(active_player_creature)),
+                    "reflexive target prompt must include the active player's creature, got {legal_targets:?}"
+                );
+                assert!(
+                    !legal_targets.contains(&TargetRef::Object(controller_creature)),
+                    "reflexive target prompt must not include the controller's own creature"
+                );
+                saw_reflexive_target_prompt = true;
+                apply(
+                    &mut state,
+                    player,
+                    GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(active_player_creature)],
+                    },
+                )
+                .unwrap();
+            }
+            WaitingFor::TargetSelection {
+                player,
+                target_slots,
+                ..
+            } => {
+                let legal_targets = &target_slots[0].legal_targets;
+                assert!(
+                    legal_targets.contains(&TargetRef::Object(active_player_creature)),
+                    "reflexive target prompt must include the active player's creature, got {legal_targets:?}"
+                );
+                assert!(
+                    !legal_targets.contains(&TargetRef::Object(controller_creature)),
+                    "reflexive target prompt must not include the controller's own creature"
+                );
+                saw_reflexive_target_prompt = true;
+                apply(
+                    &mut state,
+                    player,
+                    GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(active_player_creature)],
+                    },
+                )
+                .unwrap();
+            }
+            _ => break,
+        }
+    }
+
+    assert!(saw_may_prompt, "Kitt must offer the optional tap cost");
+    assert!(
+        saw_tap_cost_prompt,
+        "accepting Kitt's cost must surface a tap-creatures PayCost prompt"
+    );
+    assert!(
+        saw_reflexive_target_prompt,
+        "paying the tap cost must create the WhenYouDo target prompt"
+    );
+    assert!(state.objects[&first_cost_creature].tapped);
+    assert!(state.objects[&second_cost_creature].tapped);
+    assert_eq!(state.objects[&active_player_creature].power, Some(3));
+    assert_eq!(state.objects[&active_player_creature].toughness, Some(3));
+    assert_eq!(
+        state.objects[&controller_creature].power,
+        Some(1),
+        "\"that player controls\" must not retarget the controller's creature"
     );
 }
 

@@ -3215,6 +3215,9 @@ pub enum CostResume {
         #[serde(rename = "ManaAbility")]
         mana_ability: Box<PendingManaAbility>,
     },
+    /// CR 118.12: Resume a resolution-time `Effect::PayCost` after the payer
+    /// selects objects for an interactive cost such as tapping creatures.
+    Resolution,
 }
 
 /// CR 601.2h + CR 702.48c: Identifies which spell-cost component a
@@ -5747,7 +5750,7 @@ impl WaitingFor {
                     spell: pending_cast,
                     ..
                 } => Some(pending_cast),
-                CostResume::ManaAbility { .. } => None,
+                CostResume::ManaAbility { .. } | CostResume::Resolution => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
@@ -5780,7 +5783,7 @@ impl WaitingFor {
                     spell: pending_cast,
                     ..
                 } => Some(pending_cast),
-                CostResume::ManaAbility { .. } => None,
+                CostResume::ManaAbility { .. } | CostResume::Resolution => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
