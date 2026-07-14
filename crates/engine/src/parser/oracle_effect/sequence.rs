@@ -6823,6 +6823,8 @@ pub(super) fn parse_followup_continuation_ast(
         // (e.g., Assassin's Trophy / Ranging Raptors / Harrow compound), the
         // explicit "put it onto the battlefield" chunk in the same sentence is
         // a paraphrase and must be absorbed to avoid a duplicate ChangeZone.
+        // Third-person search text uses "puts it" (Field of Ruin) and has the
+        // same meaning as the imperative "put it" form.
         //
         // CR 701.23i + CR 608.2c: Iterated-search variants (Winds of Abandon class)
         // surface a plural subject ("those players put those cards onto the
@@ -6842,10 +6844,14 @@ pub(super) fn parse_followup_continuation_ast(
                 bare,
                 "put that card onto the battlefield"
                     | "put it onto the battlefield"
+                    | "puts that card onto the battlefield"
+                    | "puts it onto the battlefield"
                     | "put them onto the battlefield"
                     | "put those cards onto the battlefield"
                     | "put that card onto the battlefield tapped"
                     | "put it onto the battlefield tapped"
+                    | "puts that card onto the battlefield tapped"
+                    | "puts it onto the battlefield tapped"
                     | "put them onto the battlefield tapped"
                     | "put those cards onto the battlefield tapped"
             )
