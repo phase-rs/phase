@@ -338,6 +338,138 @@ fn worldsouls_rage_resolves_hand_graveyard_both_and_neither_land_matrix() {
 }
 
 #[test]
+fn worldsouls_rage_object_target_and_x_one_allow_a_land_subset() {
+    let mut state = setup_game_at_main_phase();
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 2);
+    add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+
+    let hand_land = create_object(
+        &mut state,
+        CardId(9_026),
+        PlayerId(0),
+        "Hand Land".to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&hand_land)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    let graveyard_land = create_object(
+        &mut state,
+        CardId(9_027),
+        PlayerId(0),
+        "Graveyard Land".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&graveyard_land)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    let damage_target = create_object(
+        &mut state,
+        CardId(9_028),
+        PlayerId(1),
+        "Damage Target".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&damage_target).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(4);
+    }
+
+    let spell = create_object(
+        &mut state,
+        CardId(9_029),
+        PlayerId(0),
+        "Worldsoul's Rage".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red, ManaCostShard::Green],
+            generic: 0,
+        };
+        Arc::make_mut(&mut obj.abilities).push(parse_effect_chain(
+            "~ deals X damage to any target. Put up to X land cards from your hand and/or graveyard onto the battlefield tapped.",
+            AbilityKind::Spell,
+        ));
+    }
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(9_029),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("Rage should begin casting");
+    apply_as_current(&mut state, GameAction::ChooseX { value: 1 }).expect("X=1 should be payable");
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(damage_target)),
+        },
+    )
+    .expect("the opposing creature is a legal damage target");
+
+    let mut saw_choice = false;
+    for _ in 0..8 {
+        match state.waiting_for.clone() {
+            WaitingFor::Priority { .. } if !state.stack.is_empty() => {
+                apply_as_current(&mut state, GameAction::PassPriority)
+                    .expect("priority should pass");
+            }
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                up_to,
+                ..
+            } => {
+                saw_choice = true;
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 1);
+                assert_eq!(min_count, 0);
+                assert!(up_to);
+                assert_eq!(cards.len(), 2);
+                assert!(cards.contains(&hand_land));
+                assert!(cards.contains(&graveyard_land));
+                apply_as_current(
+                    &mut state,
+                    GameAction::SelectCards {
+                        cards: vec![graveyard_land],
+                    },
+                )
+                .expect("one eligible land should be selectable");
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected Rage resolution boundary: {other:?}"),
+        }
+    }
+
+    assert!(saw_choice);
+    assert!(state.stack.is_empty());
+    assert_eq!(state.objects[&damage_target].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&damage_target].damage_marked, 1);
+    assert_eq!(state.objects[&graveyard_land].zone, Zone::Battlefield);
+    assert!(state.objects[&graveyard_land].tapped);
+    assert_eq!(state.objects[&hand_land].zone, Zone::Hand);
+}
+
+#[test]
 fn ability_condition_currently_met_gates_on_board_relative_quantity() {
     let mut state = GameState::new_two_player(42);
     // Hideaway-shaped source: a {T}-cost ability gated by "creatures you
