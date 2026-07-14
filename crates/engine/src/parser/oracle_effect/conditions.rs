@@ -3270,13 +3270,15 @@ fn parse_mana_spent_vs_mana_value_target_condition(
     ))
 }
 
-/// CR 122.1f + CR 109.4 + CR 608.2c: "if its controller is poisoned" on a
-/// targeted spell effect — a player is "poisoned" iff they have one or more
-/// poison counters (CR 122.1f), and "its controller" anaphors to the controller
-/// of the ability's first object target (the countered spell). Corrupted
-/// Resolve. Mirrors `parse_no_mana_spent_to_cast_target_condition_text`: reuses
-/// `QuantityCheck` over an existing `QuantityRef` building block rather than a
-/// bespoke condition variant, the poison threshold `>= 1` expressing "poisoned".
+/// CR 122.1f + CR 109.4 + CR 608.2c: a poison predicate on the controller of the
+/// ability's first object target — "if its controller is poisoned" (Corrupted
+/// Resolve) and "if its controller has three or more poison counters" (the
+/// Corrupted ability word: Bring the Ending, Anoint with Affliction). Both read
+/// the SAME player counter through the SAME `QuantityRef` and the SAME `GE`
+/// comparator; only the threshold differs, so the predicate is parameterized on
+/// its threshold rather than split into sibling combinators. Mirrors
+/// `parse_no_mana_spent_to_cast_target_condition_text`: reuses `QuantityCheck`
+/// over an existing `QuantityRef` building block rather than a bespoke variant.
 fn parse_target_controller_poisoned_condition_text(text: &str) -> Option<AbilityCondition> {
     let lower = text.to_ascii_lowercase();
     nom_parse_lower(&lower, |input| {
@@ -3294,9 +3296,10 @@ fn parse_target_controller_poisoned_condition(input: &str) -> OracleResult<'_, A
             tag("this spell's "),
             tag("the spell's "),
         )),
-        tag("controller is poisoned"),
+        tag("controller "),
     )
         .parse(input)?;
+    let (rest, threshold) = parse_target_controller_poison_threshold(rest)?;
     Ok((
         rest,
         AbilityCondition::QuantityCheck {
@@ -3305,11 +3308,31 @@ fn parse_target_controller_poisoned_condition(input: &str) -> OracleResult<'_, A
                     kind: crate::types::player::PlayerCounterKind::Poison,
                 },
             },
-            // CR 122.1f: "poisoned" == one or more poison counters.
             comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: 1 },
+            rhs: QuantityExpr::Fixed { value: threshold },
         },
     ))
+}
+
+/// CR 122.1f: the poison threshold the predicate compares against. "poisoned" is
+/// DEFINED as one or more poison counters, so it is exactly the `>= 1` case of
+/// the same `<N> or more poison counters` shape the Corrupted ability word spells
+/// out — one axis, two printings, not two combinators.
+fn parse_target_controller_poison_threshold(input: &str) -> OracleResult<'_, i32> {
+    alt((
+        value(1, tag("is poisoned")),
+        map(
+            preceded(
+                tag("has "),
+                terminated(
+                    nom_primitives::parse_number,
+                    tag(" or more poison counters"),
+                ),
+            ),
+            |count| count as i32,
+        ),
+    ))
+    .parse(input)
 }
 
 pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
@@ -3882,9 +3905,35 @@ fn condition_names_an_event(cond_text: &str) -> bool {
     nom_primitives::scan_contains(&cond_text.to_lowercase(), "would")
 }
 
+/// CR 608.2c + CR 614.15: the SINGLE AUTHORITY for lowering the condition of an
+/// "instead" self-replacement override — wherever that override is printed.
+///
+/// A self-replacement override can be printed inside the clause chain it replaces
+/// ("… create two of those tokens instead", handled by `build_instead_def`) or as
+/// a SEPARATE ability on its own line, "particularly when preceded by an ability
+/// word" (CR 614.15 — "Corrupted — Counter that spell instead if …", handled by
+/// the cross-line binder in `oracle.rs`). Both callers MUST lower the condition
+/// through here.
+///
+/// They previously did not: the cross-line path ran only the nom `StaticCondition`
+/// grammar, which cannot express a target-relative predicate, so a condition this
+/// ladder lowers fine ("its controller has three or more poison counters") was
+/// dropped there. The override then reached the emitter with `condition: None`
+/// and was published as an UNCONDITIONAL sibling ability — the engine ran the base
+/// effect AND the replacement, every time (CR 614.6). One authority, one
+/// vocabulary, so the two paths cannot drift apart again.
+pub(crate) fn lower_instead_condition(
+    cond_text: &str,
+    ctx: &mut ParseContext,
+) -> Option<AbilityCondition> {
+    try_nom_condition_as_ability_condition(cond_text, ctx)
+        .or_else(|| parse_condition_text(cond_text))
+        .or_else(|| parse_control_count_as_ability_condition(cond_text))
+}
+
 /// Shared assembly: build an `AbilityDefinition` for an instead override.
-/// Tries the three condition parsers in priority order; bails if none match
-/// (so the chunk can fall through to other dispatch paths). Wraps the result
+/// Lowers the condition through `lower_instead_condition`; bails if it does not
+/// lower (so the chunk can fall through to other dispatch paths). Wraps the result
 /// in `ConditionInstead` per CR 608.2c and rewrites cost-paid-object quantity
 /// references when needed.
 fn build_instead_def(
@@ -3911,10 +3960,7 @@ fn build_instead_def(
     // replacement. Everything that lowers today still lowers; only the failure
     // path is split, by `condition_names_an_event`, into "defer" vs "fail
     // honestly".
-    let Some(condition) = try_nom_condition_as_ability_condition(&cond_text, ctx)
-        .or_else(|| parse_condition_text(&cond_text))
-        .or_else(|| parse_control_count_as_ability_condition(&cond_text))
-    else {
+    let Some(condition) = lower_instead_condition(&cond_text, ctx) else {
         return if condition_names_an_event(&cond_text) {
             InsteadLowering::NotOwned
         } else {

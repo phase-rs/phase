@@ -28,7 +28,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
-use super::oracle_nom::condition::{parse_graveyard_keyword_grant_sentence, parse_inner_condition};
+use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
 use super::oracle_nom::primitives::{parse_number as nom_parse_number, scan_contains};
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
@@ -1943,9 +1943,14 @@ use crate::parser::oracle_ir::ast::ActivatedConstraintAst;
 /// 2. "[effect] instead if [condition]" — mid-line "instead", condition AFTER
 /// 3. "[effect] instead" — trailing "instead"
 ///
-/// Any extracted "if [condition]" clause is parsed through the shared condition
-/// grammar (`parse_inner_condition`) and composed with any ability-word condition
-/// at the caller.
+/// Any extracted "if [condition]" clause is lowered through
+/// `conditions::lower_instead_condition` — the SINGLE AUTHORITY shared with the
+/// intra-chain override path (`build_instead_def`) — and composed with any
+/// ability-word condition at the caller. This path previously ran only the nom
+/// `StaticCondition` grammar, a strictly narrower vocabulary that cannot express
+/// a target-relative predicate; conditions the chain path lowers fine ("its
+/// controller has three or more poison counters") were silently dropped here, and
+/// the override was then published as an UNCONDITIONAL sibling ability.
 fn strip_instead_clause(
     text: &str,
     ctx: &mut ParseContext,
@@ -1961,10 +1966,11 @@ fn strip_instead_clause(
         if let Ok((cond_text, ())) =
             value::<_, _, OracleError<'_>, _>((), tag("if ")).parse(before.lower.trim_start())
         {
-            if let Some(condition) = parse_inner_condition(cond_text.trim())
-                .ok()
-                .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition))
-                .and_then(|condition| ability_word_to_ability_condition(&Some(condition), ctx))
+            if let Some(condition) =
+                crate::parser::oracle_effect::conditions::lower_instead_condition(
+                    cond_text.trim(),
+                    ctx,
+                )
             {
                 return (after.original.trim().to_string(), Some(condition), true);
             }
@@ -2008,10 +2014,8 @@ fn strip_instead_clause(
             // allow-noncombinator: structural sentence-boundary split, not parsing dispatch
             return (text.to_string(), None, false);
         }
-        let condition = parse_inner_condition(condition_text)
-            .ok()
-            .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition))
-            .and_then(|condition| ability_word_to_ability_condition(&Some(condition), ctx));
+        let condition =
+            crate::parser::oracle_effect::conditions::lower_instead_condition(condition_text, ctx);
         return (before.original.trim().to_string(), condition, true);
     }
 
@@ -5336,10 +5340,11 @@ pub(crate) fn parse_oracle_ir(
             if has_roll_die_pattern(&lower) {
                 i = attach_die_result_branches_to_chain(&mut def, &lines, i);
             }
-            // CR 608.2c: Cross-line "instead" replacement — when a conditional line
-            // replaces the entire preceding ability, compose them so the engine resolves
-            // the binary choice correctly. The "instead" sub has the condition; the base
-            // ability becomes the fallback when the condition is not met.
+            // CR 608.2c + CR 614.15: Cross-line "instead" self-replacement — a
+            // separate printed line (usually an ability word, per CR 614.15)
+            // replaces the preceding ability's effect. Compose them so the engine
+            // resolves the binary choice: the "instead" sub carries the condition;
+            // the base ability becomes the fallback when it is not met.
             if is_instead || is_instead_replacement_line(&effect_line) {
                 if let Some(condition) = def.condition.take() {
                     if let Some(base_item) = emitter.pop_last_spell() {
@@ -5367,6 +5372,29 @@ pub(crate) fn parse_oracle_ir(
                     }
                     // No previous ability to compose with — restore condition and push standalone.
                     def.condition = Some(condition);
+                } else if emitter.builder.peek_last_spell().is_some() {
+                    // CR 614.6: "If an event is replaced, it never happens."
+                    //
+                    // The line IS a self-replacement override of the preceding
+                    // ability, but no condition lowered for it (from the clause, the
+                    // trailing "instead if <cond>", or an ability word), so there is
+                    // nothing to branch on and the override CANNOT be bound.
+                    //
+                    // Publishing it as an independent ability — which is what used to
+                    // happen — is the one thing we must never do: the engine then
+                    // performs the base effect AND the replacement, unconditionally.
+                    // Anoint with Affliction ("Corrupted — Exile that creature instead
+                    // if its controller has three or more poison counters") published a
+                    // second, condition-less `ChangeZone -> Exile` and exiled the target
+                    // even when the printed "mana value 3 or less" gate had already
+                    // refused to, and even with zero poison counters in play.
+                    //
+                    // Fail honestly instead: the base ability stands as printed and the
+                    // unbindable override is reported as unimplemented. This mirrors the
+                    // intra-chain `InsteadLowering::ConditionUnlowerable` floor.
+                    def.effect = Box::new(Effect::unimplemented("instead_override", &effect_line));
+                    def.sub_ability = None;
+                    def.else_ability = None;
                 }
             }
             emitter.ability_at(item_line, def);
