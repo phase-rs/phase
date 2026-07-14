@@ -653,12 +653,31 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         if let Some((filter, _)) = self_filter {
             return AbilityCost::Sacrifice(SacrificeCost::count(filter, 1));
         }
-        // CR 107.2: "sacrifice any number of [filter]" — player chooses 0..=all
-        // eligible permanents (Rottenmouth Viper, Scapeshift-class additional costs).
-        if let Some(((), rest_after_any)) = nom_on_lower(rest, &rest_lower, |i| {
-            value((), tag("any number of ")).parse(i)
+        // CR 107.2: "sacrifice any number of [filter]" / "sacrifice one or more
+        // [filter]" / "sacrifice at least one [filter]" — player chooses a
+        // ranged count of eligible permanents (Rottenmouth Viper, Scapeshift
+        // class; "one or more" — Plumb the Forbidden class, issue #1108).
+        // `u32::MAX` is the shared ranged-count sentinel: paired with the
+        // `AdditionalCost::Optional` wrapper these costs already carry, "you
+        // may sacrifice one or more" and "you may sacrifice any number of" are
+        // observably identical — declining the optional cost is the only path
+        // to zero, so the ranged floor doesn't need its own representation.
+        // Mirrors the same quantifier vocabulary as
+        // `parse_you_sacrifice_this_way_clause` (oracle_nom/condition.rs) so
+        // the cost parser and its reflexive-trigger condition sibling agree on
+        // what counts as "a ranged sacrifice quantifier".
+        if let Some(((), rest_after_qty)) = nom_on_lower(rest, &rest_lower, |i| {
+            value(
+                (),
+                alt((
+                    tag::<_, _, E<'_>>("any number of "),
+                    tag("one or more "),
+                    tag("at least one "),
+                )),
+            )
+            .parse(i)
         }) {
-            let filter_text = rest_after_any.trim().trim_end_matches('.');
+            let filter_text = rest_after_qty.trim().trim_end_matches('.');
             let target_phrase = format!("target {filter_text}");
             let (filter, remainder) = parse_target(&target_phrase);
             if remainder.trim().is_empty() {

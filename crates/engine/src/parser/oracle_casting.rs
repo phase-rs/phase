@@ -10,9 +10,12 @@ use super::oracle_cost::parse_oracle_cost;
 use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, CastingRestriction, Comparator, ParsedCondition, QuantityExpr,
-    QuantityRef, SpellCastingOption,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
+    CastingRestriction, Comparator, CopyRetargetPermission, Effect, ParsedCondition, QuantityExpr,
+    QuantityRef, SpellCastingOption, TargetFilter, TriggerDefinition,
 };
+use crate::types::triggers::TriggerMode;
+use crate::types::zones::Zone;
 
 /// Split a combined additional-cost line from its trailing self-spell cost
 /// reduction (Rottenmouth Viper class: "...sacrifice N. This spell costs {1}
@@ -28,6 +31,130 @@ pub(crate) fn split_additional_cost_trailing_spell_reduction<'a>(
     };
     let activation_len = line.len() - ". ".len() - reduction_text.len();
     (line[..activation_len].trim(), Some(reduction_text))
+}
+
+/// Split a combined additional-cost line from its trailing reflexive "When you
+/// do, [effect]" trigger sentence (CR 603.2b: a triggered ability generated
+/// during the casting process waits for the cast to finish, then goes on the
+/// stack above the spell — the Casualty/Replicate/Squad shape, CR 702.153a /
+/// CR 702.56a / CR 702.157a, here reproduced by a card with no reminder-text
+/// keyword of its own; Plumb the Forbidden class, issue #1108). Mirrors
+/// `split_additional_cost_trailing_spell_reduction`'s shape exactly.
+pub(crate) fn split_additional_cost_trailing_reflexive_trigger<'a>(
+    line: &'a str,
+    lower: &'a str,
+) -> (&'a str, Option<&'a str>) {
+    let Some(((), trigger_text)) = nom_on_lower(line, lower, |input| {
+        value((), (take_until(". when you do, "), tag(". when you do, "))).parse(input)
+    }) else {
+        return (line, None);
+    };
+    let activation_len = line.len() - ". when you do, ".len() - trigger_text.len();
+    (line[..activation_len].trim(), Some(trigger_text))
+}
+
+/// CR 603.2b + CR 707.10: recognize the narrow "copy this spell for each
+/// `<filter>` [that was/were] sacrificed this way" reflexive-trigger body that
+/// follows an optional ranged-sacrifice additional cost, and synthesize the
+/// same `TriggerMode::SpellCast` shape `database::synthesis::synthesize_replicate`
+/// already proves out for Replicate/Casualty/Squad — here derived directly
+/// from raw Oracle text since the card carries no reminder-text keyword of its
+/// own (Plumb the Forbidden, issue #1108).
+///
+/// Count source: the ranged sacrifice choice stamps its chosen count onto the
+/// resolving ability's `chosen_x` (CR 107.3a, `handle_sacrifice_for_cost`'s
+/// `min_count == 0` arm), which is mirrored onto the cast spell's `GameObject`
+/// as `cost_x_paid` once the cast completes (`casting_costs.rs`). A `SpellCast`
+/// trigger has no `chosen_x` of its own, so `QuantityRef::Variable { name: "X" }`
+/// falls back to the triggering spell's `cost_x_paid` (CR 107.3e + CR 107.3m +
+/// CR 603.7c, `game/quantity.rs`) — the exact number of creatures sacrificed.
+///
+/// Scoped narrowly to the "copy ... for each ... sacrificed this way" shape —
+/// this is NOT a general "When you do, [any effect]" synthesizer. Other
+/// reflexive-trigger bodies are left for the swallow-check to flag honestly
+/// rather than mis-parsed.
+pub(crate) fn build_additional_cost_reflexive_copy_trigger(
+    trigger_raw: &str,
+) -> Option<TriggerDefinition> {
+    let trigger_lower = trigger_raw.to_lowercase();
+    if !is_copy_for_each_sacrificed_this_way_shape(&trigger_lower) {
+        return None;
+    }
+
+    // CR 113.7: gates on the optional ranged-sacrifice additional cost having
+    // been paid at all — mirrors Replicate/Casualty's own `AdditionalCostPaid`
+    // gate (set on the executed `AbilityDefinition`, not the `TriggerDefinition`
+    // — `TriggerDefinition::condition` takes a `TriggerCondition`, a different
+    // type) so a declined cost never copies.
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+            retarget: CopyRetargetPermission::KeepOriginalTargets,
+            copier: None,
+            additional_modifications: Vec::new(),
+            starting_loyalty_from_casualty_sacrifice: false,
+        },
+    )
+    .condition(AbilityCondition::additional_cost_paid_any());
+    // CR 107.3a: "X" resolves to the number of creatures actually chosen for
+    // the ranged sacrifice, not a fixed repeat count.
+    execute.repeat_for = Some(QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    });
+
+    Some(
+        TriggerDefinition::new(TriggerMode::SpellCast)
+            .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Stack])
+            .execute(execute)
+            .description(
+                "CR 603.2b + CR 707.10: reflexive trigger — copy this spell once \
+                 for each creature sacrificed as its optional additional cost \
+                 (issue #1108)."
+                    .to_string(),
+            ),
+    )
+}
+
+/// Shape check for `build_additional_cost_reflexive_copy_trigger`: "copy
+/// (this spell|that spell|it) for each `<filter>` [that was/were] sacrificed
+/// this way[.]". The filter phrase itself is not extracted — the repeat count
+/// comes from the sacrifice's chosen `X`, not a re-derived tracked-set count —
+/// so this only needs to confirm the textual shape, mirroring the suffix
+/// vocabulary `parse_destroyed_or_sacrificed_this_way_filter`
+/// (oracle_quantity.rs) already uses for the sibling "for each ... sacrificed
+/// this way" quantity clause.
+fn is_copy_for_each_sacrificed_this_way_shape(trigger_lower: &str) -> bool {
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("copy ").parse(trigger_lower) else {
+        return false;
+    };
+    let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("this spell "),
+        tag("that spell "),
+        tag("it "),
+    ))
+    .parse(rest) else {
+        return false;
+    };
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("for each ").parse(rest) else {
+        return false;
+    };
+    let rest = rest.trim_end_matches('.').trim();
+    [
+        " that was sacrificed this way",
+        " that were sacrificed this way",
+        " sacrificed this way",
+    ]
+    .iter()
+    .any(|suffix| {
+        matches!(
+            terminated(take_until::<_, _, OracleError<'_>>(*suffix), tag(*suffix)).parse(rest),
+            Ok(("", _))
+        )
+    })
 }
 
 /// Parse "As an additional cost to cast this spell, ..." into an `AdditionalCost`.
@@ -1540,6 +1667,114 @@ Trample";
             trailing,
             "This spell costs {1} less to cast for each permanent sacrificed this way."
         );
+    }
+
+    /// Issue #1108: Plumb the Forbidden — "sacrifice one or more creatures"
+    /// must ranged-parse the same way "sacrifice any number of X" already
+    /// does (a real `Creature` filter, not an empty one; a ranged count, not
+    /// a fixed 1).
+    #[test]
+    fn parse_additional_cost_optional_sacrifice_one_or_more_creatures() {
+        let lower =
+            "as an additional cost to cast this spell, you may sacrifice one or more creatures.";
+        let raw =
+            "As an additional cost to cast this spell, you may sacrifice one or more creatures.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::Sacrifice(ref sac),
+                repeatability: AdditionalCostRepeatability::Once,
+            }) if sac.requirement.fixed_count() == Some(u32::MAX) => match &sac.target {
+                TargetFilter::Typed(t) => {
+                    assert!(
+                        t.type_filters.contains(&TypeFilter::Creature),
+                        "expected a Creature filter, got {:?}",
+                        t.type_filters
+                    );
+                }
+                other => panic!("expected Typed(Creature) filter, got {other:?}"),
+            },
+            other => panic!(
+                "Expected Optional(Sacrifice one or more creatures), got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn parse_additional_cost_optional_sacrifice_at_least_one() {
+        let lower =
+            "as an additional cost to cast this spell, you may sacrifice at least one creature.";
+        let raw =
+            "As an additional cost to cast this spell, you may sacrifice at least one creature.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::Sacrifice(ref sac),
+                repeatability: AdditionalCostRepeatability::Once,
+            }) if sac.requirement.fixed_count() == Some(u32::MAX) => {}
+            other => panic!("Expected Optional(Sacrifice ranged), got {:?}", other),
+        }
+    }
+
+    /// Issue #1108: the reflexive-trigger split must isolate exactly the cost
+    /// sentence from the trailing "When you do, [effect]" sentence, leaving
+    /// the trigger body positioned right after the comma (mirrors
+    /// `split_rottenmouth_additional_cost_trailing_reduction` above).
+    #[test]
+    fn split_plumb_additional_cost_trailing_reflexive_trigger() {
+        let raw = "As an additional cost to cast this spell, you may sacrifice one or more creatures. When you do, copy this spell for each creature sacrificed this way.";
+        let lower = raw.to_lowercase();
+        let (cost_line, trigger) = split_additional_cost_trailing_reflexive_trigger(raw, &lower);
+        let trigger = trigger.expect("trailing reflexive-trigger sentence");
+        assert_eq!(
+            cost_line,
+            "As an additional cost to cast this spell, you may sacrifice one or more creatures"
+        );
+        assert_eq!(
+            trigger,
+            "copy this spell for each creature sacrificed this way."
+        );
+    }
+
+    /// Issue #1108: the synthesized trigger must be a SpellCast trigger gated
+    /// on the additional cost having been paid, whose execute is a CopySpell
+    /// repeated `X` times (the ranged sacrifice's chosen count).
+    #[test]
+    fn build_reflexive_copy_trigger_for_plumb_shape() {
+        let trigger_def = build_additional_cost_reflexive_copy_trigger(
+            "copy this spell for each creature sacrificed this way.",
+        )
+        .expect("must recognize the copy-for-each-sacrificed shape");
+        assert_eq!(trigger_def.mode, TriggerMode::SpellCast);
+        assert_eq!(trigger_def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(trigger_def.trigger_zones, vec![Zone::Stack]);
+        let execute = trigger_def.execute.expect("execute ability must be set");
+        assert_eq!(
+            execute.condition,
+            Some(AbilityCondition::additional_cost_paid_any())
+        );
+        assert!(matches!(*execute.effect, Effect::CopySpell { .. }));
+        assert_eq!(
+            execute.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            })
+        );
+    }
+
+    /// An unrelated "When you do" tail (not the copy-for-each-sacrificed
+    /// shape) must NOT synthesize a trigger — this is a narrow, scoped
+    /// pattern, not a general "When you do, [any effect]" synthesizer.
+    #[test]
+    fn build_reflexive_copy_trigger_rejects_unrelated_shape() {
+        assert!(build_additional_cost_reflexive_copy_trigger("draw a card.").is_none());
+        assert!(build_additional_cost_reflexive_copy_trigger(
+            "up to that many target creatures gain double strike until end of turn."
+        )
+        .is_none());
     }
 
     #[test]

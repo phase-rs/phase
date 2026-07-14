@@ -35,7 +35,9 @@ use super::oracle_nom::primitives::{
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_casting::{
-    parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
+    build_additional_cost_reflexive_copy_trigger, parse_additional_cost_line,
+    parse_casting_restriction_line, parse_spell_casting_option_line,
+    split_additional_cost_trailing_reflexive_trigger,
     split_additional_cost_trailing_spell_reduction,
 };
 use super::oracle_class::parse_class_oracle_text;
@@ -3919,6 +3921,14 @@ pub(crate) fn parse_oracle_ir(
             let (cost_line, trailing_reduction) =
                 split_additional_cost_trailing_spell_reduction(&line, &lower);
             let cost_lower = cost_line.to_lowercase();
+            // CR 603.2b: peel a trailing reflexive "When you do, [effect]"
+            // sentence (Casualty/Replicate/Squad shape reproduced without a
+            // named keyword — Plumb the Forbidden class, issue #1108) BEFORE
+            // the cost line reaches `parse_additional_cost_line`, so the cost
+            // parser never sees the trigger sentence as unconsumed remainder.
+            let (cost_line, reflexive_trigger_text) =
+                split_additional_cost_trailing_reflexive_trigger(cost_line, &cost_lower);
+            let cost_lower = cost_line.to_lowercase();
             result.additional_cost = parse_additional_cost_line(&cost_lower, cost_line);
             if result.additional_cost.is_some() {
                 additional_cost_line.get_or_insert(item_line);
@@ -3934,6 +3944,26 @@ pub(crate) fn parse_oracle_ir(
                         None => StaticCondition::AdditionalCostPaid,
                     });
                     emitter.static_ir_at(item_line, StaticIr::from_definition(reduction_text, def));
+                }
+            }
+            // CR 603.2b: only synthesize the reflexive-copy trigger when the
+            // additional cost is actually the ranged-sacrifice shape this
+            // pattern requires — an unrelated "When you do" tail on a cost
+            // shape we don't otherwise recognize is left for the swallow-check
+            // to flag honestly rather than mis-wired.
+            if let Some(trigger_text) = reflexive_trigger_text {
+                if matches!(
+                    &result.additional_cost,
+                    Some(AdditionalCost::Optional {
+                        cost: AbilityCost::Sacrifice(_),
+                        ..
+                    })
+                ) {
+                    if let Some(trigger) =
+                        build_additional_cost_reflexive_copy_trigger(trigger_text)
+                    {
+                        emitter.trigger_at(item_line, trigger);
+                    }
                 }
             }
             i += 1;
