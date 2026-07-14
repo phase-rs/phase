@@ -38,7 +38,11 @@ pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut 
             .filter(|object| object.back_face.is_some())
             .map(|object| object.transformation_count);
         if let Some(ability) = entry.ability_mut() {
-            ability.set_source_transformation_count_recursive(count);
+            // CR 701.27f: delayed triggered abilities already carry their
+            // creation-time generation and must not be restamped when fired.
+            if ability.context.source_transformation_count.is_none() {
+                ability.set_source_transformation_count_recursive(count);
+            }
         }
     }
     events.push(GameEvent::StackPushed {

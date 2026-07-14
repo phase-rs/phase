@@ -262,4 +262,69 @@ mod tests {
             "only the first resolving activation transforms the Incubator"
         );
     }
+
+    #[test]
+    fn delayed_self_transform_ignores_an_intervening_transform() {
+        use crate::game::stack::push_to_stack;
+        use crate::types::ability::DelayedTriggerCondition;
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        use crate::types::phase::Phase;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = setup_dfc(&mut state);
+        let mut events = Vec::new();
+        let create_delayed = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Transform {
+                        target: TargetFilter::SelfRef,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        crate::game::effects::delayed_trigger::resolve(&mut state, &create_delayed, &mut events)
+            .expect("delayed transform is created");
+
+        transform_permanent(&mut state, source_id, &mut events)
+            .expect("source transforms before the delayed ability fires");
+        let delayed = state.delayed_triggers.remove(0);
+        push_to_stack(
+            &mut state,
+            StackEntry {
+                id: ObjectId(100),
+                source_id,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id,
+                    ability: Box::new(delayed.ability),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: "Front Face".to_string(),
+                    subject_match_count: None,
+                    die_result: None,
+                },
+            },
+            &mut events,
+        );
+        let entry = state.stack.pop_back().expect("delayed transform on stack");
+        resolve(
+            &mut state,
+            entry.ability().expect("triggered ability"),
+            &mut events,
+        )
+        .expect("delayed transform resolves");
+
+        assert!(
+            state.objects[&source_id].transformed,
+            "CR 701.27f: a delayed self-transform must be ignored if its source transformed since the delayed ability was created"
+        );
+        assert_eq!(state.objects[&source_id].transformation_count, 1);
+    }
 }

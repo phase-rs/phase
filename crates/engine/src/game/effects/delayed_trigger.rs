@@ -157,6 +157,16 @@ pub fn resolve(
     // its creation event keeps that creation-time binding for later resolution.
     delayed_ability.scoped_player = ability.scoped_player;
 
+    // CR 701.27f: A delayed triggered ability may transform its source only if
+    // that permanent has not transformed or converted since the delayed
+    // ability was created. Capture the generation here, not when it fires.
+    let source_transformation_count = state
+        .objects
+        .get(&ability.source_id)
+        .filter(|object| object.back_face.is_some())
+        .map(|object| object.transformation_count);
+    delayed_ability.set_source_transformation_count_recursive(source_transformation_count);
+
     // CR 603.7c: Most delayed triggers fire once and are removed.
     // WheneverEvent triggers fire each time and persist until end-of-turn cleanup.
     let one_shot = !matches!(
