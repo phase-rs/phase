@@ -25406,23 +25406,32 @@ pub(crate) fn parse_effect_chain_ir(
                     _ => Vec::new(),
                 };
                 let mut cloned = prev_effect;
+                // Retype every `Typed` target the antecedent exposes (Estrid's
+                // mass `ChangeZoneAll`). Only emit the clone when a substitution
+                // actually happened: an antecedent with no `Typed` target (an
+                // `Unimplemented` head, a bare player effect) must NOT be cloned
+                // verbatim — fall through to a documented strict-failure instead.
+                let mut swapped = false;
                 each_target_filter_mut(&mut cloned, &mut |tf| {
                     if let TargetFilter::Typed(existing) = tf {
                         existing.type_filters = new_type_filters.clone();
+                        swapped = true;
                     }
                 });
-                builder
-                    .clause(
-                        normalized_text,
-                        parsed_clause(cloned),
-                        chunk.boundary_after,
-                        ClauseDisposition::Emit {
-                            followup: None,
-                            intrinsic: None,
-                        },
-                    )
-                    .push();
-                continue;
+                if swapped {
+                    builder
+                        .clause(
+                            normalized_text,
+                            parsed_clause(cloned),
+                            chunk.boundary_after,
+                            ClauseDisposition::Emit {
+                                followup: None,
+                                intrinsic: None,
+                            },
+                        )
+                        .push();
+                    continue;
+                }
             }
         }
 

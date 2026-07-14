@@ -1600,12 +1600,18 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         // table `starts_clause_text_or_conjugated` checks, so — exactly like the
         // villainous-choice guard above — without this the continuation is glued
         // into the prior clause and silently dropped (#4779: Auras never return).
-        // The split-off chunk is consumed by `try_parse_do_the_same_for_type`,
-        // which clones the antecedent effect with the swapped type.
-        if tag::<_, _, OracleError<'_>>("do the same for ")
-            .parse(after_then_lower)
-            .is_ok()
-        {
+        //
+        // Gate the split on the SAME recognizer the chunk loop uses
+        // (`try_parse_do_the_same_for_type`), so ONLY a clean pure-type
+        // substitution is split off. Richer forms this PR does not model —
+        // Gruesome Menagerie's "creature cards with mana value 2 and 3"
+        // (`FilterProp` predicate) and Grim Captain's Call's "Vampire, Dinosaur,
+        // and Merfolk" (type list) — fail the recognizer and stay glued exactly
+        // as before, keeping this change's blast radius to the handled class.
+        // The first-sentence slice bounds the recognizer's whole-consumption
+        // check to this clause (later sentences are chunked separately).
+        let do_the_same_head = trimmed.split('.').next().unwrap_or(trimmed);
+        if try_parse_do_the_same_for_type(do_the_same_head).is_some() {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
         }
         if starts_clause_text_or_conjugated(after_then)
@@ -7548,19 +7554,27 @@ pub(super) fn try_parse_do_the_same_for_type(text: &str) -> Option<TargetFilter>
     let lower = text.to_lowercase();
     let ((), rest) = nom_on_lower(text, &lower, |i| {
         let (i, _) = opt(tag("then ")).parse(i)?;
-        let (i, _) = alt((
-            tag::<_, _, OracleError<'_>>("do the same for "),
-            tag("repeat this process for "),
-        ))
-        .parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>("do the same for ").parse(i)?;
         Ok((i, ()))
     })?;
-    let (filter, remainder) = parse_type_phrase(rest.trim());
+    let (filter, remainder) = parse_type_phrase(rest.trim().trim_end_matches('.').trim());
     if !remainder.trim().trim_end_matches('.').trim().is_empty() {
         return None;
     }
+    // Only a PURE card-type substitution is modeled: the continuation swaps the
+    // antecedent's `type_filters` wholesale (Estrid: non-Aura enchantment → Aura).
+    // Reject any filter that also carries `FilterProp` predicates (Gruesome
+    // Menagerie's "creature cards with mana value 2 and 3") or a `controller`
+    // scope — those need a full replacement-filter/cardinality grammar and must
+    // stay strict-failing until it lands (CR #1: a flagged gap beats a misparse).
+    // The multi-type list form (Grim Captain's Call's "Vampire, Dinosaur, and
+    // Merfolk") is already rejected by the non-empty `remainder` guard above.
     match &filter {
-        TargetFilter::Typed(t) if !t.type_filters.is_empty() => Some(filter),
+        TargetFilter::Typed(t)
+            if !t.type_filters.is_empty() && t.properties.is_empty() && t.controller.is_none() =>
+        {
+            Some(filter)
+        }
         _ => None,
     }
 }
@@ -7753,6 +7767,56 @@ mod tests {
                 try_parse_scoped_does_the_same(phrasing),
                 None,
                 "should reject {phrasing:?}"
+            );
+        }
+    }
+
+    // CR 608.2c: the "do the same for <type>" continuation recognizer accepts
+    // ONLY a clean, whole card-type substitution (Estrid's "Aura cards") — the
+    // chunk loop clones the antecedent effect and swaps just its `type_filters`.
+    #[test]
+    fn do_the_same_for_type_accepts_clean_type_substitution() {
+        match try_parse_do_the_same_for_type("then do the same for Aura cards.") {
+            Some(TargetFilter::Typed(t)) => {
+                assert!(
+                    t.type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Aura")),
+                    "expected an Aura type substitution, got {:?}",
+                    t.type_filters
+                );
+                assert!(
+                    t.properties.is_empty(),
+                    "must carry no FilterProp predicate"
+                );
+                assert!(t.controller.is_none(), "must carry no controller scope");
+            }
+            other => panic!("expected a clean Aura type substitution, got {other:?}"),
+        }
+        assert!(
+            try_parse_do_the_same_for_type("do the same for creature cards").is_some(),
+            "a bare creature-card substitution is also clean"
+        );
+    }
+
+    // Guard: continuations carrying a `FilterProp` predicate, a multi-type list,
+    // or the broader "repeat this process for" family are NOT modeled by the
+    // type-substitution path and must be rejected, so they stay strict-failing
+    // until the full replacement-filter/cardinality grammar lands (Gruesome
+    // Menagerie, Grim Captain's Call, Firemind's Foresight) — CR #1: a flagged
+    // gap beats a silent misparse.
+    #[test]
+    fn do_the_same_for_type_rejects_unmodeled_continuations() {
+        for phrasing in [
+            "do the same for creature cards with mana value 2 and 3",
+            "do the same for Vampire, Dinosaur, and Merfolk",
+            "do the same for creature cards with flying",
+            "repeat this process for instant cards",
+        ] {
+            assert_eq!(
+                try_parse_do_the_same_for_type(phrasing),
+                None,
+                "must reject the unmodeled continuation {phrasing:?}"
             );
         }
     }
