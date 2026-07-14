@@ -17273,41 +17273,50 @@ fn rebind_anaphoric_generic_effect_subject_to_parent(lower: &str, def: &mut Abil
 }
 
 /// CR 115.10a + CR 601.2c: A damage clause whose recipient is a FRESH typed
-/// "creature an opponent controls" / "creature you don't control" target (both
-/// canonicalize to `ControllerRef::Opponent`) declares its own target — it is
-/// not the anaphoric "It" subject that an earlier clause established. Per CR
-/// 601.2c each instance of the word "target" is a separate target, and per CR
-/// 115.10a being affected (the source's power feeding the amount) does not make
-/// that recipient the same object as the boosted creature. Recurses through
+/// target structurally distinct from the anaphoric "It" subject an earlier
+/// clause established — it declares its own recipient, not the boosted/
+/// counter'd object. Two shapes both witness this: (1) "creature an opponent
+/// controls" / "creature you don't control" (canonicalize to
+/// `ControllerRef::Opponent`) — a different player's permanent can never be
+/// the subject's own controller's chosen object; (2) "each other creature" /
+/// "all other creatures" (`FilterProp::Another`) — CR 115.10a: an "other"/
+/// "another" exclusion excludes the referenced object *by definition*, so a
+/// board-sweep recipient (Chandra's Ignition class: "target creature you
+/// control deals damage equal to its power to each other creature") can never
+/// be the same object as "It" either. Per CR 601.2c each instance of the word
+/// "target" is a separate target, and per CR 115.10a being affected (the
+/// source's power feeding the amount) does not make either recipient shape the
+/// same object as the boosted/counter'd creature. Recurses through
 /// `Or`/`And`/`Not` wrappers, mirroring `attach_controller_if_absent` /
-/// `rewrite_filter_controller`. Returns true only for the tight
-/// `Typed { controller: Some(Opponent), .. }` shape; `ParentTarget`/`SelfRef`/
-/// `Any`/`ParentTargetController` etc. are excluded (they are never
-/// Typed-with-Opponent anyway).
-fn target_filter_is_fresh_opponent_typed(filter: &TargetFilter) -> bool {
+/// `rewrite_filter_controller`. `ParentTarget`/`SelfRef`/`Any`/
+/// `ParentTargetController` etc. are excluded (they are never `Typed` anyway).
+fn target_filter_is_distinct_recipient(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(TypedFilter {
-            controller: Some(ControllerRef::Opponent),
-            ..
-        }) => true,
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(target_filter_is_fresh_opponent_typed)
+        TargetFilter::Typed(tf) => {
+            tf.controller == Some(ControllerRef::Opponent)
+                || tf.properties.contains(&FilterProp::Another)
         }
-        TargetFilter::Not { filter } => target_filter_is_fresh_opponent_typed(filter),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_is_distinct_recipient)
+        }
+        TargetFilter::Not { filter } => target_filter_is_distinct_recipient(filter),
         _ => false,
     }
 }
 
 /// Returns true iff `effect` is a `DealDamage`/`DamageAll` whose recipient is a
-/// fresh opponent-controlled typed target (see
-/// `target_filter_is_fresh_opponent_typed`). Used to DECLINE the blanket
-/// anaphoric parent-rewrite for the "one-sided fight" class (Ambuscade, Clear
-/// Shot, Rabid Gnaw, ...): the recipient is parsed correctly upstream and must
-/// be preserved, not clobbered to `ParentTarget`.
-fn damage_clause_has_fresh_opponent_recipient(effect: &Effect) -> bool {
+/// structurally distinct typed target (see `target_filter_is_distinct_recipient`
+/// — either opponent-controlled or an "other"/"another"-excluded board sweep).
+/// Used to DECLINE the blanket anaphoric parent-rewrite for the "one-sided
+/// fight" class (Ambuscade, Clear Shot, Rabid Gnaw, ...) and the "counter-then-
+/// sweep" class (Nova Flame: "Put X +1/+1 counters on target creature you
+/// control. It deals damage equal to its power to each other creature."): the
+/// recipient is parsed correctly upstream and must be preserved, not clobbered
+/// to `ParentTarget`.
+fn damage_clause_has_distinct_recipient(effect: &Effect) -> bool {
     match effect {
         Effect::DealDamage { target, .. } | Effect::DamageAll { target, .. } => {
-            target_filter_is_fresh_opponent_typed(target)
+            target_filter_is_distinct_recipient(target)
         }
         _ => false,
     }
@@ -17444,11 +17453,19 @@ fn restore_this_way_trigger_anaphor(effect: &mut Effect) {
 /// to `Anaphoric` routes it back through the same runtime fallback. Returns true
 /// (= decline the blanket `replace_target_with_parent`) when handled.
 ///
-/// Covers two recipient shapes: (1) the fresh-opponent recipient — attribute
+/// Covers three recipient shapes: (1) the fresh-opponent recipient — attribute
 /// the damage source to the parent target while preserving the recipient and
 /// the anaphoric amount; (2) the self-reference recipient ("to this
 /// creature"/"to ~", `TargetFilter::SelfRef`, the Karplusan Yeti fight-back
-/// class) — preserve the recipient verbatim with NO source/amount rebind.
+/// class) — preserve the recipient verbatim with NO source/amount rebind;
+/// (3) the "other"/"another"-excluded board-sweep recipient ("to each other
+/// creature", `FilterProp::Another` — the Chandra's Ignition / Nova Flame
+/// class, issue #4960) — same handling as (1): attribute the damage source to
+/// the parent target while preserving the sweep recipient and the anaphoric
+/// amount. Without this, `damage_source` stays `None` (the spell itself), so
+/// the runtime one-sided-fight fallback in `game/quantity.rs` (gated on
+/// `damage_source == Some(Target)`) never fires and `Power{Anaphoric}`
+/// resolves to 0 — Nova Flame with any X dealt no damage.
 fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     // CR 201.5 + CR 608.2c: a self-reference recipient ("to this creature"/"to ~")
     // is the source itself and must be preserved verbatim (fight-back class). No
@@ -17457,13 +17474,14 @@ fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     if damage_clause_has_self_ref_recipient(effect) {
         return true;
     }
-    if !damage_clause_has_fresh_opponent_recipient(effect) {
+    if !damage_clause_has_distinct_recipient(effect) {
         return false;
     }
-    // CR 115.10a + CR 601.2c + CR 608.2c + CR 120.1: preserve the fresh-opponent
-    // recipient and attribute damage source to targets[0] (the boosted "It");
-    // leave "its power" as Power{Anaphoric} — the runtime resolves it to that
-    // same source object. Do NOT rebind to Target (that desyncs the export from
+    // CR 115.10a + CR 601.2c + CR 608.2c + CR 120.1: preserve the distinct
+    // recipient (fresh-opponent target OR "other"-excluded board sweep) and
+    // attribute damage source to targets[0] (the boosted/counter'd "It"); leave
+    // "its power" as Power{Anaphoric} — the runtime resolves it to that same
+    // source object. Do NOT rebind to Target (that desyncs the export from
     // the Oracle "its" and reintroduces #699).
     set_damage_clause_source_only(effect, DamageSource::Target);
     // Source → Anaphoric only (the SelfRef-subject "Then it deals..." variant);
