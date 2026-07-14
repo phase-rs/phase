@@ -171,6 +171,22 @@ mod tests {
         }
         assert!(!grants.is_empty());
         assert!(!loses_other);
+        // #5681: the granted ability's "until end of turn" is carried with the
+        // enclosing sentence's comma INSIDE the closing quote ("...until end of
+        // turn,"). That trailing comma must be normalized away before the inner
+        // sub-parse, so the duration survives as a typed `UntilEndOfTurn` rather
+        // than being dropped into prose. Assert on the typed duration, not the
+        // leftover text.
+        let debug = format!("{grants:?}");
+        // The granted duration is nested inside a granted activated ability, so a
+        // Debug-substring check is clearer than walking the full AST.
+        // allow-noncombinator: string assertion in test
+        let has_typed_duration = debug.contains("UntilEndOfTurn");
+        assert!(
+            has_typed_duration,
+            "granted ability lost its UntilEndOfTurn duration to the trailing comma inside \
+             the closing quote: {debug}",
+        );
     }
 
     #[test]
