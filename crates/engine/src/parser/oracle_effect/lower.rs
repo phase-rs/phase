@@ -5271,6 +5271,32 @@ pub(crate) fn parse_multi_target_count_expr(input: &str) -> OracleResult<'_, Qua
     .parse(input)
 }
 
+/// CR 115.1d: Strip a leading "any number of "/"up to N " quantifier from
+/// text that immediately follows a `MULTI_TARGET_VERBS` verb. Pure slice
+/// arithmetic — the returned remainder is a true subslice of `after_verb`,
+/// never a freshly-allocated string — so callers that must hand a remainder
+/// back through an external input lifetime (e.g. `try_parse_verb_and_target`'s
+/// `Option<(_, &'a str)>` return shape) can use it directly. Shared core for
+/// `strip_any_number_quantifier` below, which additionally re-attaches the
+/// verb prefix into a single owned string for its own (different) callers.
+pub(super) fn strip_leading_quantifier(after_verb: &str) -> (&str, Option<MultiTargetSpec>) {
+    let lower = after_verb.to_ascii_lowercase();
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("any number of ").parse(lower.as_str()) {
+        let consumed = lower.len() - rest.len();
+        return (&after_verb[consumed..], Some(MultiTargetSpec::unlimited(0)));
+    }
+    if let Ok((after_up_to, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(lower.as_str()) {
+        if let Ok((remainder, max)) = parse_multi_target_count_expr(after_up_to) {
+            let consumed = lower.len() - remainder.len();
+            return (
+                after_verb[consumed..].trim_start(),
+                Some(MultiTargetSpec::up_to(max)),
+            );
+        }
+    }
+    (after_verb, None)
+}
+
 /// CR 115.1d: Strip "any number of" or "up to N" quantifier from imperative text.
 /// Only applies to verbs where the quantifier modifies target selection.
 pub(super) fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTargetSpec>) {
@@ -5284,28 +5310,11 @@ pub(super) fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTa
     let verb_end = lower.find(' ').map(|i| i + 1).unwrap_or(0);
     let (verb_tp, after_verb_tp) = tp.split_at(verb_end);
 
-    if let Some((_, rest_orig)) = nom_on_lower(after_verb_tp.original, after_verb_tp.lower, |i| {
-        value((), tag("any number of ")).parse(i)
-    }) {
-        let rebuilt = format!("{}{}", verb_tp.original, rest_orig);
-        return (rebuilt, Some(MultiTargetSpec::unlimited(0)));
+    let (rest, spec) = strip_leading_quantifier(after_verb_tp.original);
+    match spec {
+        Some(spec) => (format!("{}{}", verb_tp.original, rest), Some(spec)),
+        None => (text.to_string(), None),
     }
-    if let Some((_, after_up_to_orig)) =
-        nom_on_lower(after_verb_tp.original, after_verb_tp.lower, |i| {
-            value((), tag("up to ")).parse(i)
-        })
-    {
-        let after_up_to_lower =
-            &after_verb_tp.lower[after_verb_tp.lower.len() - after_up_to_orig.len()..];
-        let after_up_to = TextPair::new(after_up_to_orig, after_up_to_lower);
-        if let Ok((remainder, max)) = parse_multi_target_count_expr(after_up_to.lower) {
-            let consumed_len = after_up_to.lower.len() - remainder.len();
-            let (_, rest) = after_up_to.split_at(consumed_len);
-            let rebuilt = format!("{}{}", verb_tp.original, rest.original.trim_start());
-            return (rebuilt, Some(MultiTargetSpec::up_to(max)));
-        }
-    }
-    (text.to_string(), None)
 }
 
 /// Strip "to the battlefield [under X's control]" and similar destination phrases.

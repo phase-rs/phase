@@ -49,11 +49,12 @@ use lower::{
     strip_any_number_quantifier, strip_each_player_subject, strip_each_scope_who_cant_subject,
     strip_each_scope_who_does_subject, strip_each_scope_who_doesnt_subject,
     strip_for_each_opponent_who_doesnt, strip_for_each_prefix, strip_for_each_repeat_suffix,
-    strip_leading_duration, strip_leading_return_destination_ext, strip_leading_sequence_connector,
-    strip_optional_effect_prefix, strip_player_scope_subject, strip_repeat_count_suffix,
-    strip_return_destination_ext, strip_return_destination_ext_with_remainder,
-    strip_temporal_prefix, strip_temporal_suffix, trim_dangling_target_word, try_parse_damage,
-    try_parse_damage_with_remainder, try_parse_distribute_counters, try_parse_distribute_damage,
+    strip_leading_duration, strip_leading_quantifier, strip_leading_return_destination_ext,
+    strip_leading_sequence_connector, strip_optional_effect_prefix, strip_player_scope_subject,
+    strip_repeat_count_suffix, strip_return_destination_ext,
+    strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
+    trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
+    try_parse_distribute_counters, try_parse_distribute_damage,
 };
 
 pub(crate) use self::token::parse_token_description;
@@ -14267,6 +14268,30 @@ fn try_parse_verb_and_target<'a>(
 
     // Return: determine destination separately, use parse_target remainder for compound detection
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("return ")).parse(i)) {
+        // CR 115.1d + CR 601.2c: Strip a bare, BOUNDED "up to N" quantifier
+        // immediately after the verb before any destination or target parsing
+        // runs below. Left in place, the quantifier's own embedded "to"
+        // collides with the trailing "to <hand>" destination scan
+        // (`strip_return_destination_ext_with_remainder` just below) and
+        // derails BOTH destination recognition and the count together —
+        // Ill-Gotten Gains's "returns up to three cards from their graveyard
+        // to their hand" otherwise silently returns the ENTIRE graveyard
+        // instead of up to three cards. `strip_leading_quantifier` is pure
+        // slice arithmetic (unlike `strip_any_number_quantifier`, it never
+        // allocates), so the remainder stays tied to `rest`'s own input
+        // lifetime — required here since this function returns a borrowed
+        // remainder. It also recognizes the unrelated unbounded "any number
+        // of" quantifier (`max: None`); only act on the genuinely bounded
+        // `max: Some(_)` result — this dispatcher has no existing "any number
+        // of" handling to preserve, but filtering keeps the two dispatchers'
+        // behavior consistent.
+        let (stripped_rest, return_multi_target) = strip_leading_quantifier(rest);
+        let return_multi_target = return_multi_target.filter(|spec| spec.max.is_some());
+        let rest = if return_multi_target.is_some() {
+            stripped_rest
+        } else {
+            rest
+        };
         let rest_lower = &lower[lower.len() - rest.len()..];
         let (trailing_target_text, trailing_dest, trailing_dest_remainder) =
             strip_return_destination_ext_with_remainder(rest);
@@ -14357,11 +14382,19 @@ fn try_parse_verb_and_target<'a>(
                             origin,
                             destination: Zone::Hand,
                             up_to: false,
+                            multi_target: return_multi_target,
                         },
                         rem,
                     ))
                 } else {
-                    Some((TargetedImperativeAst::Return { target, selection }, rem))
+                    Some((
+                        TargetedImperativeAst::Return {
+                            target,
+                            selection,
+                            multi_target: return_multi_target,
+                        },
+                        rem,
+                    ))
                 }
             }
             Some(d) => {
@@ -14384,12 +14417,20 @@ fn try_parse_verb_and_target<'a>(
                             origin,
                             destination: d.zone,
                             up_to: false,
+                            multi_target: return_multi_target,
                         },
                         rem,
                     ))
                 }
             }
-            None => Some((TargetedImperativeAst::Return { target, selection }, rem)),
+            None => Some((
+                TargetedImperativeAst::Return {
+                    target,
+                    selection,
+                    multi_target: return_multi_target,
+                },
+                rem,
+            )),
         };
     }
 

@@ -21245,3 +21245,86 @@ fn keyword_line_with_reminder_text_is_still_routed() {
         r.extracted_keywords
     );
 }
+
+/// CR 400.6 + CR 115.1d + CR 601.2c: Ill-Gotten Gains — "Exile ~. Each player
+/// discards their hand, then returns up to three cards from their graveyard
+/// to their hand." The final clause (no "target" keyword, an explicit
+/// graveyard origin) lowers to `Effect::ChangeZone` via `ReturnToZone` — the
+/// origin-bearing sibling of the plain `Return`/`Bounce` arm — whose "up to
+/// three" quantifier previously had no field to ride: the clause parsed to a
+/// valid (non-Unimplemented) `ChangeZone` with NO count restriction at all,
+/// silently returning a player's *entire* graveyard to hand instead of up to
+/// three cards — the defining number was dropped, not merely unsupported.
+/// Must now carry `multi_target: up_to(Fixed(3))` on that clause so the
+/// existing `EffectZoneChoice` multi-target picker (already exercised by
+/// `targeted_up_to_two_graveyard_bounce_moves_chosen_creature` in
+/// `game::effects::bounce`, and by the Exile/Forage precedent for
+/// `ChangeZone` specifically) bounds the choice correctly. No runtime/
+/// game-logic change was needed — only the parser dropped the quantifier
+/// before it ever reached that machinery.
+#[test]
+fn ill_gotten_gains_return_clause_binds_bounded_multi_target() {
+    let parsed = parse_oracle_text(
+        "Exile Ill-Gotten Gains. Each player discards their hand, then returns up to three cards from their graveyard to their hand.",
+        "Ill-Gotten Gains",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "got {:?}", parsed.abilities);
+    let exile = &parsed.abilities[0];
+    assert!(
+        matches!(
+            exile.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "expected self-exile head, got {:?}",
+        exile.effect
+    );
+    let discard = exile
+        .sub_ability
+        .as_ref()
+        .expect("expected the 'each player discards' sub-ability");
+    assert!(
+        matches!(discard.effect.as_ref(), Effect::Discard { .. }),
+        "expected Discard, got {:?}",
+        discard.effect
+    );
+    let return_clause = discard
+        .sub_ability
+        .as_ref()
+        .expect("expected the 'then returns up to three cards' sub-ability");
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Hand,
+        target,
+        ..
+    } = return_clause.effect.as_ref()
+    else {
+        panic!(
+            "expected a graveyard-to-hand ChangeZone, got {:?}",
+            return_clause.effect
+        );
+    };
+    let TargetFilter::Typed(tf) = target else {
+        panic!("expected a Typed graveyard-card filter, got {target:?}");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }),
+        "target must be constrained to the graveyard, got {target:?}"
+    );
+    assert_eq!(
+        return_clause.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 })),
+        "the 'up to three' count must ride the sub-ability's MultiTargetSpec \
+         (was silently dropped on main, resolving as an unbounded return of \
+         the entire graveyard), got {:?}",
+        return_clause.multi_target
+    );
+}
