@@ -281,8 +281,14 @@ pub(crate) fn strip_leading_general_conditional(
             .is_ok()
             .then(|| parse_previous_effect_player_damage_condition(cond_text))
             .flatten();
+        let effect_discard_drain = tag::<_, _, OracleError<'_>>("each opponent loses ")
+            .parse(body_lower.as_str())
+            .is_ok()
+            .then(|| parse_effect_discard_instant_or_sorcery_condition(cond_text))
+            .flatten();
 
         if let Some(condition) = player_damage_scry
+            .or(effect_discard_drain)
             .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
             .or_else(|| parse_condition_text(cond_text))
             .or_else(|| parse_control_count_as_ability_condition(cond_text))
@@ -6357,6 +6363,24 @@ fn parse_previous_effect_player_damage_condition(lower: &str) -> Option<AbilityC
                 }),
             },
         ],
+    })
+}
+
+/// CR 701.8a + CR 608.2c: Vohar's drain checks the card discarded by the
+/// preceding effect, not an object paid as an additional cost. The discard
+/// publishes its hand-to-graveyard move in the resolution-local zone-change
+/// ledger, which preserves the discarded card's types for this rider.
+fn parse_effect_discard_instant_or_sorcery_condition(lower: &str) -> Option<AbilityCondition> {
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "you discarded an instant or sorcery card this way",
+    ))
+    .parse(lower)
+    .ok()?;
+    Some(AbilityCondition::ZoneChangedThisWay {
+        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
+            TypeFilter::Instant,
+            TypeFilter::Sorcery,
+        ]))),
     })
 }
 

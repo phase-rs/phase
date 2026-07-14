@@ -1008,6 +1008,7 @@ mod valakut_fireboar_switch_pt_on_attack;
 mod vanille_meld_optional_cost;
 mod vannifar_cloak_from_hand;
 mod veteran_bodyguard_tap_redirect;
+mod vohar_discard_drain;
 mod weeping_angel_combat_prevention;
 mod where_x_coverage_runtime;
 mod where_x_quantity_channel_binds;
