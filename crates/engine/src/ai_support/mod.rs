@@ -142,7 +142,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::Priority { .. }, GameAction::PlayLand { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::UnlockRoomDoor { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::Transform { object_id })
-        | (WaitingFor::Priority { .. }, GameAction::TurnFaceUp { object_id })
+        | (WaitingFor::Priority { .. }, GameAction::TurnFaceUp { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::PlayFaceDown { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::TapLandForMana { object_id })
         | (WaitingFor::Priority { .. }, GameAction::UntapLandForMana { object_id })

@@ -659,6 +659,7 @@ mod skullwinder_chosen_opponent;
 mod slaughter_the_strong_total_power_4380;
 mod sliver_static_grants;
 mod sothera_supervoid_edict_reanimate;
+mod special_action_x_runtime;
 mod specialize_runtime;
 mod spellstutter_sprite_counter_with_x;
 mod sphinx_of_uthuun_etb_pile_separation;

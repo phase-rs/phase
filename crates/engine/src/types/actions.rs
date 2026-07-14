@@ -306,8 +306,26 @@ pub enum GameAction {
         object_id: ObjectId,
         card_id: CardId,
     },
+    /// CR 116.2b: turning a face-down permanent face up is a SPECIAL ACTION — it uses
+    /// no stack and gets no priority window of its own.
+    ///
+    /// CR 107.3d: "If a cost associated with a special action, such as a suspend cost or a
+    /// morph cost, has an {X} or an X in it, the value of X is chosen by the player taking
+    /// the special action **immediately before they pay that cost**." Because the rules put
+    /// that choice inside the action itself — with no pause between choosing and paying —
+    /// X rides on the action rather than on a `WaitingFor` round-trip (which would model a
+    /// window the rules do not have).
+    ///
+    /// `x` is ignored when the turn-face-up cost has no `{X}` (it must then be 0). For a cost
+    /// that does have one, `x` is the announced value bound by CR 702.37f (morph) /
+    /// CR 702.168e (disguise): "other abilities of that permanent may also refer to X."
+    ///
+    /// `#[serde(default)]`: a client that omits the field announces **X = 0**, which is a legal
+    /// choice under CR 107.3d — never an error.
     TurnFaceUp {
         object_id: ObjectId,
+        #[serde(default)]
+        x: u32,
     },
     SubmitSideboard {
         main: Vec<DeckCardCount>,
@@ -1438,7 +1456,7 @@ impl GameAction {
             GameAction::UnlockRoomDoor { object_id, .. } => Some(*object_id),
             GameAction::ChooseRoomDoor { object_id, .. } => Some(*object_id),
             GameAction::PlayFaceDown { object_id, .. } => Some(*object_id),
-            GameAction::TurnFaceUp { object_id } => Some(*object_id),
+            GameAction::TurnFaceUp { object_id, .. } => Some(*object_id),
             GameAction::ChooseRingBearer { target } => Some(*target),
             GameAction::ChoosePair { partner } => *partner,
             GameAction::ChooseDamageSource { source } => Some(*source),
@@ -1733,7 +1751,13 @@ mod tests {
                 },
                 Some(oid),
             ),
-            (GameAction::TurnFaceUp { object_id: oid }, Some(oid)),
+            (
+                GameAction::TurnFaceUp {
+                    object_id: oid,
+                    x: 0,
+                },
+                Some(oid),
+            ),
             (
                 GameAction::TapForConvoke {
                     object_id: oid,
