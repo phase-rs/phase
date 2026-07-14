@@ -696,6 +696,14 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
 
 /// Parse a single ward cost component (not compound).
 fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
+    // CR 702.21a + CR 608.2g: Phyrexian Fleshgorger reads its power when ward resolves.
+    if matches!(
+        lower,
+        "pay life equal to this creature's power" | "pay life equal to ~'s power"
+    ) {
+        return Some(WardCost::PayLifeEqualToPower);
+    }
+
     // "pay N life"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("pay ").parse(lower) {
         if let Some(life_str) = rest.strip_suffix(" life") {
@@ -3206,6 +3214,18 @@ mod tests {
         let Keyword::Cycling(CyclingCost::Mana(_)) = kw else {
             panic!("expected Cycling Mana variant, got {kw:?}");
         };
+    }
+
+    #[test]
+    fn parse_granted_keyword_fragment_ward_pay_life_equal_to_power() {
+        assert_eq!(
+            parse_granted_keyword_fragment("ward—pay life equal to this creature's power"),
+            Some(Keyword::Ward(WardCost::PayLifeEqualToPower))
+        );
+        assert_eq!(
+            parse_granted_keyword_fragment("ward—pay life equal to ~'s power"),
+            Some(Keyword::Ward(WardCost::PayLifeEqualToPower))
+        );
     }
 
     #[test]
