@@ -228,7 +228,18 @@ pub fn handle_activate_loyalty(
     }
 
     // Build a ResolvedAbility for the stack from the typed definition
-    let resolved = build_pw_resolved(&ability_def, pw_id, player);
+    let mut resolved = build_pw_resolved(&ability_def, pw_id, player);
+
+    // CR 606.1 + CR 602.2b: a loyalty ability IS an activated ability, so activating it
+    // follows rules 601.2b-i exactly as casting a spell does — including CR 601.2b's
+    // announcement of X. This mana-free fast path is an optimization of that same
+    // announcement (it bypasses `casting::handle_activate_ability`, which publishes for
+    // every other activated ability), so a text-defined, announce-locked X ("where X is
+    // <count> as you activate this ability" — Lukka, Bound to Ruin's [-4]) must be
+    // published HERE too, or it is never announced at all and every `Variable("X")` on the
+    // ability resolves to 0. Same single computation authority, same position: at
+    // announcement, before targets are chosen (CR 601.2c, immediately below).
+    super::ability_utils::publish_announced_x(state, &mut resolved, player, pw_id);
 
     // CR 602.2b + CR 601.2c: Targets are announced before costs are paid.
     // If this ability requires targets, prompt for selection first.
