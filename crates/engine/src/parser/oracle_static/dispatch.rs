@@ -1353,6 +1353,16 @@ pub(crate) fn parse_static_line_inner(
 
     // --- "All creatures get/have ..." ---
     if let Some(rest) = nom_tag_tp(&tp, "all creatures ") {
+        // CR 105.2 + CR 613.1f: "All creatures are [color] and <keyword|pump>"
+        // (Onakke Catacomb: "... are black and have deathtouch") is a color-
+        // defining static composed with modifications — route it to the color
+        // path first, which peels the color and composes the trailing keyword/
+        // pump. `parse_continuous_gets_has` would match only the "have <keyword>"
+        // tail and silently drop the color. A bare gets/has line (no leading
+        // color) leaves the color path declining, so it still resolves below.
+        if let Some(def) = parse_all_subject_are_color(&tp, &text) {
+            return Some(def);
+        }
         if let Some(def) = parse_continuous_gets_has(
             rest.original,
             TargetFilter::Typed(TypedFilter::creature()),

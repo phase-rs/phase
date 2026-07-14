@@ -2022,18 +2022,72 @@ pub(crate) fn parse_all_subject_are_color(
     // predicate must fully parse as a color expression or follow-on clauses
     // route elsewhere.
     let predicate = after_verb.trim().trim_end_matches('.');
-    let colors = parse_color_predicate(predicate)?;
+    let (colors, extra_mods) = parse_color_and_trailing_modifications(predicate)?;
 
     let affected = match type_filter {
         TypeFilter::Subtype(s) => TargetFilter::Typed(typed_filter_for_subtype(&s)),
         other => TargetFilter::Typed(TypedFilter::new(other)),
     };
+    let mut modifications = vec![ContinuousModification::SetColor { colors }];
+    modifications.extend(extra_mods);
     Some(
         StaticDefinition::continuous()
             .affected(affected)
-            .modifications(vec![ContinuousModification::SetColor { colors }])
+            .modifications(modifications)
             .description(description.to_string()),
     )
+}
+
+/// CR 105.2 + CR 613.1e (Layer 5) + CR 613.1f: a color-defining static predicate
+/// may compose a color expression with trailing keyword/pump modifications — "All
+/// creatures are black and have deathtouch" (Onakke Catacomb), "... are white and
+/// get +1/+1". The whole-predicate color case ("... are black") returns the colors
+/// with no trailing modifications; the compound case peels the leading color
+/// expression (itself possibly a multi-color "black and green" list) and parses
+/// the "and <keyword|pump>" tail via [`parse_continuous_modifications`], so the
+/// color is composed with — never shadowed by — the other modifications. Returns
+/// `None` when the predicate is neither a pure color nor a genuine
+/// "<color> and <modification>" compound, so non-color predicates route elsewhere.
+fn parse_color_and_trailing_modifications(
+    predicate: &str,
+) -> Option<(Vec<ManaColor>, Vec<ContinuousModification>)> {
+    if let Some(colors) = parse_color_predicate(predicate) {
+        return Some((colors, Vec::new()));
+    }
+    let (color_part, _, mod_part) =
+        nom_primitives::scan_preceded(predicate, and_modification_boundary)?;
+    let colors = parse_color_predicate(color_part.trim())?;
+    let mods = parse_continuous_modifications(mod_part.trim());
+    if mods.is_empty() {
+        return None;
+    }
+    Some((colors, mods))
+}
+
+/// The single `" and <modification>"` boundary that separates a color expression
+/// from a trailing keyword/pump modification. Gated on a modification verb
+/// (`have`/`get`/`gain`/`can't`) so a multi-color `"black and green"` list is
+/// never split mid-color. Consumes only `"and "` (the verb is peeked) so the
+/// remainder handed to [`parse_continuous_modifications`] keeps its leading verb.
+fn and_modification_boundary(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag::<_, _, OracleError<'_>>("and "),
+            nom::combinator::peek(alt((
+                tag("have "),
+                tag("has "),
+                tag("gets "),
+                tag("get "),
+                tag("gains "),
+                tag("gain "),
+                tag("can't "),
+                tag("cant "),
+                tag("cannot "),
+            ))),
+        ),
+    )
+    .parse(input)
 }
 
 /// CR 613.1e (Layer 5) + CR 105.2 / CR 105.3: Parse a color-defining static of
@@ -2114,12 +2168,16 @@ pub(crate) fn parse_subject_is_color(
         );
     }
 
-    // Fixed colors / "all colors" / "colorless" (CR 105.1 / CR 105.2 / CR 105.2c).
-    let colors = parse_color_predicate(&predicate_lower)?;
+    // Fixed colors / "all colors" / "colorless" (CR 105.1 / CR 105.2 / CR 105.2c),
+    // optionally composed with a trailing keyword/pump modification
+    // ("... are black and have deathtouch" — Onakke Catacomb).
+    let (colors, extra_mods) = parse_color_and_trailing_modifications(&predicate_lower)?;
+    let mut modifications = vec![ContinuousModification::SetColor { colors }];
+    modifications.extend(extra_mods);
     Some(
         StaticDefinition::continuous()
             .affected(affected)
-            .modifications(vec![ContinuousModification::SetColor { colors }])
+            .modifications(modifications)
             .description(description.to_string()),
     )
 }

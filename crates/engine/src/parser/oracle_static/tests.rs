@@ -20015,6 +20015,90 @@ fn static_all_creatures_are_black() {
     );
 }
 
+/// CR 105.2 + CR 613.1e (Layer 5) + CR 613.1f: a color-defining static composes
+/// its color with a trailing keyword/pump modification instead of dropping it —
+/// "All creatures are black and have deathtouch" (Onakke Catacomb) must SET the
+/// color AND grant the keyword. Before the fix, the "all creatures get/have" fast
+/// path claimed the line on the "have deathtouch" tail and silently dropped the
+/// "are black" color.
+#[test]
+fn static_all_creatures_are_color_composes_trailing_modifications() {
+    // Onakke Catacomb: color + keyword.
+    let def = parse_static_line("All creatures are black and have deathtouch.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::SetColor {
+                colors: vec![ManaColor::Black]
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Deathtouch
+            },
+        ]
+    );
+
+    // Color + pump.
+    let def = parse_static_line("All creatures are white and get +1/+1.").unwrap();
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::SetColor {
+                colors: vec![ManaColor::White]
+            },
+            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddToughness { value: 1 },
+        ]
+    );
+
+    // Color + two keywords (the whole tail composes).
+    let def = parse_static_line("All creatures are green and have trample and haste.").unwrap();
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::SetColor {
+                colors: vec![ManaColor::Green]
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            },
+        ]
+    );
+
+    // Regression: a bare keyword grant (no leading color) still resolves to the
+    // keyword only — the color path declines, so nothing spurious is added.
+    let def = parse_static_line("All creatures have flying.").unwrap();
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying
+        }]
+    );
+
+    // Regression: a solo color static is unchanged (single SetColor, no tail).
+    let def = parse_static_line("All creatures are black.").unwrap();
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetColor {
+            colors: vec![ManaColor::Black]
+        }]
+    );
+
+    // "red dragons" is not a color predicate — the color path must decline so the
+    // line is never mis-claimed as a color static.
+    let def = parse_static_line("All creatures are red dragons.");
+    assert!(
+        def.as_ref().is_none_or(|d| !d
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetColor { .. }))),
+        "'are red dragons' must not parse as a color static, got {def:?}"
+    );
+}
+
 /// CR 205.4b + CR 613.1d (Layer 4): "[subject] is/are [no longer] [supertype]"
 /// supertype-defining statics — the supertype sibling of the color path. Adds a
 /// supertype (Leyline of Singularity, Sixth Stage of Magic Design) or removes one
