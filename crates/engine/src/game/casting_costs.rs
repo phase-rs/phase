@@ -3463,6 +3463,16 @@ fn push_ability_entry(
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
 
+    // CR 107.3a + CR 602.2b: this is the single authority where an activated ability
+    // reaches the stack, so it is where its announced X is published. CR 107.3i then
+    // lets a triggered ability of the SAME object that this activation causes read the
+    // same X — the `Cycled` event emitted a few lines below (Shark Typhoon: "When you
+    // cycle this card, create an X/X blue Shark") is collected into triggers while this
+    // publication is live, and `triggers::build_triggered_ability` stamps it onto the
+    // trigger's `chosen_x`. An activation with no announced X publishes `None`, which
+    // also clears any stale value.
+    state.activated_ability_x = resolved.chosen_x.map(|x| (source_id, x));
+
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
     resolved.ability_index = Some(ability_index);
     stack::push_to_stack(

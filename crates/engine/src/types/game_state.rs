@@ -8543,6 +8543,33 @@ pub struct GameState {
     /// `current_trigger_event`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolving_stack_entry: Option<StackEntry>,
+    /// CR 107.3a + CR 107.3i: the announced X of an **activated ability**, keyed by
+    /// the object that ability is on. CR 107.3a: "While an activated ability is on
+    /// the stack, any X in its activation cost equals the announced value." CR
+    /// 107.3i: "Normally, all instances of X on an object have the same value at any
+    /// given time" — so a triggered ability of that SAME object which fires because
+    /// of that activation (Hydra Broodmaster's "when this becomes monstrous, create X
+    /// X/X tokens"; Shark Typhoon's "when you cycle this card, create an X/X Shark")
+    /// reads the same X. `triggers::build_triggered_ability` consumes this and stamps
+    /// it onto the triggered ability's `chosen_x`.
+    ///
+    /// This MUST be a channel of its own and must NOT reuse `GameObject::cost_x_paid`:
+    /// that field is the CR 107.3m *cast*-X channel (`QuantityRef::CostXPaid`), and CR
+    /// 107.3k makes an activated ability's X "independent of any other values of X
+    /// chosen for that object". Writing an activation X there would read the wrong X
+    /// by rule, not merely a missing one.
+    ///
+    /// Published at exactly the two moments an activated ability can produce a trigger
+    /// event — announcement (`casting_costs::push_ability_entry`, which emits `Cycled`
+    /// / `KeywordAbilityActivated`) and its own resolution (`stack::resolve_top`, which
+    /// covers `EffectResolved` emitters such as Monstrosity). Set to `None` for every
+    /// other stack-entry kind and cleared at the start of each `resolve_top` alongside
+    /// `resolving_stack_entry`, so a resolving SPELL never publishes: that is what keeps
+    /// a permanent put onto the battlefield by an unrelated X-spell at X=0 (CR 107.3m:
+    /// "the value of X for that permanent is 0") instead of inheriting the spell's X.
+    /// Transient decision context, serialized so a mid-activation pause round-trips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activated_ability_x: Option<(ObjectId, u32)>,
     /// CR 400.7j (+ CR 400.7g/h cast hop): a resolution-scoped record of a source
     /// object that the currently-resolving ability moved as part of its own
     /// resolution (Siege "exile it, then you may cast it"). It lets
@@ -9910,6 +9937,7 @@ impl GameState {
             pending_team_draw_step: Vec::new(),
             pending_untap_declines: Vec::new(),
             current_trigger_event: None,
+            activated_ability_x: None,
             current_trigger_match_count: None,
             resolving_stack_entry: None,
             resolution_source_relatch: None,
@@ -10917,6 +10945,10 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_untap_declines: _,
         current_trigger_event: _,
         current_trigger_match_count: _,
+        // CR 107.3a announce-scoped carrier, cleared at each `resolve_top`; a decision
+        // context, not durable board state — like `current_trigger_event`, it is not a
+        // per-cycle accumulator and PartialEq does not compare it.
+        activated_ability_x: _,
         resolving_stack_entry: _,
         current_trigger_events: _,
         stack_trigger_event_batches: _,

@@ -18,8 +18,11 @@
 //! VERBATIM Oracle text (pool export, `cargo export-cards`) via the `*_from_oracle` builders,
 //! and the control below exists precisely to catch a regression back into that vacuum.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::AbilityTag;
+use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -237,15 +240,12 @@ fn gated_etb_multi_target_sibling_field() {
 /// This is the SAME defect as Shark Typhoon's cycling trigger on a different trigger mode,
 /// which is what makes it a CLASS rather than a Shark Typhoon special case.
 ///
-/// IGNORED — and it is IGNORED BECAUSE IT FAILS, not because it is unimportant. The engine
-/// carrier for an activated ability's announced X does not exist yet (task #96, commit 2). The
-/// assertion below is the CORRECT expectation and is deliberately left in place, red, as the
-/// ready-made red-first witness: whoever lands the carrier deletes this `#[ignore]` and watches
-/// it go 0 -> 2 tokens. Do NOT "fix" it by weakening the assertion to 0 — that would pin the
-/// fabrication as expected behaviour, which is exactly the defect class this work exists to kill.
+/// t96 left this `#[ignore]`d as a verified-red witness. t97 built the carrier
+/// (`GameState::activated_ability_x`, published by `casting_costs::push_ability_entry` and
+/// `stack::resolve_top`, consumed by `triggers::build_triggered_ability`) and the `#[ignore]`
+/// is removed here: MEASURED 0 -> 2 tokens. Monstrosity emits its `EffectResolved` during
+/// RESOLUTION of the activated ability, so this exercises the resolution-scoped publication.
 #[test]
-#[ignore = "t96 commit 2: the activated-ability X carrier (CR 107.3k) is not built yet — this \
-            witness is the red-first artifact for it, not a bug in the test"]
 fn ungated_monstrosity_trigger_reads_the_activated_ability_x() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -281,5 +281,334 @@ fn ungated_monstrosity_trigger_reads_the_activated_ability_x() {
     assert!(
         tokens.iter().all(|(_, p, t)| (*p, *t) == (2, 2)),
         "CR 107.3k: each Hydra token is X/X = 2/2. MEASURED: {tokens:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UNGATED, CYCLED CHANNEL — the other half of the class. `Cycled` is emitted at
+// ACTIVATION (`push_ability_entry`), not at resolution, so these exercise the
+// announce-scoped publication rather than the resolution-scoped one.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SHARK_TYPHOON: &str = "Whenever you cast a noncreature spell, create an X/X blue Shark \
+                             creature token with flying, where X is that spell's mana value.\n\
+                             Cycling {X}{1}{U} ({X}{1}{U}, Discard this card: Draw a card.)\n\
+                             When you cycle this card, create an X/X blue Shark creature token \
+                             with flying.";
+
+fn cycling_index(state: &engine::types::game_state::GameState, card: ObjectId) -> usize {
+    state.objects[&card]
+        .abilities
+        .iter()
+        .position(|ability| ability.ability_tag == Some(AbilityTag::Cycling))
+        .expect("synthesized cycling ability")
+}
+
+/// CR 107.3a + CR 107.3i — Shark Typhoon, `Cycling {X}{1}{U}`:
+/// "When you cycle this card, create an X/X blue Shark creature token with flying."
+///
+/// The X of the cycling ACTIVATION cost (CR 107.3a) is the X the trigger reads (CR 107.3i).
+/// It cannot ride `cost_x_paid`: that is the CR 107.3m *cast* channel, and Shark Typhoon was
+/// never cast — it was discarded as a cycling cost. Before the carrier this created a 0/0.
+#[test]
+fn cycling_trigger_reads_the_activated_ability_x() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_card_to_library_top(P0, "Cycled Draw");
+    let typhoon = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shark Typhoon", false, SHARK_TYPHOON)
+        .id();
+    let mut runner = scenario.build();
+    add_mana(&mut runner, ManaType::Blue, 8);
+
+    let idx = cycling_index(runner.state(), typhoon);
+    runner.activate(typhoon, idx).x(3).resolve();
+
+    let sharks = named_on_battlefield(&runner, "Shark");
+    assert_eq!(
+        sharks.len(),
+        1,
+        "cycling Shark Typhoon must create exactly one Shark token. MEASURED: {sharks:?}"
+    );
+    assert_eq!(
+        (sharks[0].1, sharks[0].2),
+        (3, 3),
+        "CR 107.3a + CR 107.3i: cycled for X=3, the Shark is X/X = 3/3. A 0/0 here means the \
+         cycling ability's announced X was DROPPED. MEASURED: {sharks:?}"
+    );
+}
+
+/// Drive a cycling activation for a given X by hand. The `AbilityActivation` builder cannot be
+/// used for these: a `Cycled` trigger that needs targets raises `TriggerTargetSelection` during
+/// the ANNOUNCEMENT loop (before the post-announcement Priority window the builder waits for),
+/// and the builder panics on that state. This is a harness limit, not engine behaviour.
+fn cycle_for_x(runner: &mut engine::game::scenario::GameRunner, card: ObjectId, x: u32) {
+    cycle_announce(runner, card, x);
+    runner.advance_until_stack_empty();
+}
+
+/// Announce + pay a cycling activation for `x` and stop at the Priority window — the point
+/// where the `Cycled` triggered ability is ON THE STACK but has not resolved, so its bound
+/// `chosen_x` can be observed directly.
+fn cycle_announce(runner: &mut engine::game::scenario::GameRunner, card: ObjectId, x: u32) {
+    let idx = cycling_index(runner.state(), card);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: card,
+            ability_index: idx,
+        })
+        .expect("activate cycling");
+
+    // CR 601.2c: each target slot takes a DISTINCT object, so the picks must be tracked —
+    // `choose_first_legal_target` would re-offer the object already chosen for slot 0 and
+    // the engine rejects it.
+    let mut chosen: Vec<engine::types::ability::TargetRef> = Vec::new();
+    for _ in 0..32 {
+        match &runner.state().waiting_for {
+            // CR 107.3a + CR 601.2f (via CR 602.2b): announce X for the activation cost.
+            WaitingFor::ChooseXValue { .. } => {
+                runner
+                    .act(GameAction::ChooseX { value: x })
+                    .expect("announce X for the cycling cost");
+            }
+            // CR 602.2b + CR 601.2h: finalize mana payment.
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("finalize the cycling mana payment");
+            }
+            // CR 603.3d: the Cycled trigger picks its targets as it goes on the stack.
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                let slot = &target_slots[selection.current_slot];
+                let pick = slot
+                    .legal_targets
+                    .iter()
+                    .find(|t| !chosen.contains(t))
+                    .cloned();
+                if let Some(target) = pick.clone() {
+                    chosen.push(target);
+                }
+                runner
+                    .act(GameAction::ChooseTarget { target: pick })
+                    .expect("choose a legal target for the cycle trigger");
+            }
+            _ => break,
+        }
+    }
+}
+
+/// NEGATIVE CONTROL, from the card's own official ruling (read from the pool export, never from
+/// memory): "You can choose 0 as the value of X in Shark Typhoon's cycling cost. The last
+/// ability will trigger, and you'll create a 0/0 blue Shark creature token with flying."
+///
+/// So for X=0 a 0/0 Shark is CORRECT. Zero is the one value where the correct board and the
+/// FABRICATED board coincide — an unbound X also resolves to 0 — so the board alone cannot
+/// discriminate here, and the 0/0 token dies to SBA (CR 704.5f) and is purged (CR 111.7) before
+/// it can even be read. The discriminating observation is therefore taken while the trigger is
+/// ON THE STACK: it must carry `chosen_x == Some(0)` — an announcement of zero — and NOT `None`.
+/// That is what pins `Option<u32>` as the right carrier type: a carrier that treated 0 as
+/// "nothing announced" would leave `None` here and pass a board-only test by luck.
+/// The board is then checked too: a survivor would mean some non-zero X was fabricated.
+#[test]
+fn cycling_trigger_x_zero_announces_a_real_zero_and_the_shark_dies() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_card_to_library_top(P0, "Cycled Draw");
+    let typhoon = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shark Typhoon", false, SHARK_TYPHOON)
+        .id();
+    let mut runner = scenario.build();
+    add_mana(&mut runner, ManaType::Blue, 4);
+
+    cycle_announce(&mut runner, typhoon, 0);
+
+    let bound_x = runner
+        .state()
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                source_id, ability, ..
+            } if *source_id == typhoon => Some(ability.chosen_x),
+            _ => None,
+        })
+        .expect("the Cycled trigger must be on the stack (if it is not, nothing below is a test)");
+    assert_eq!(
+        bound_x,
+        Some(0),
+        "WotC ruling: X=0 is a legal cycling announcement and creates a 0/0 Shark. The trigger \
+         must carry an ANNOUNCED zero, not `None` — `None` means the carrier collapsed 0 into \
+         'no X announced' and the correct board here would be a coincidence. MEASURED: {bound_x:?}"
+    );
+
+    runner.advance_until_stack_empty();
+    let surviving = named_on_battlefield(&runner, "Shark");
+    assert!(
+        surviving.is_empty(),
+        "cycled for X=0 the Shark is 0/0 and must die to SBA. A survivor means a NON-ZERO X was \
+         fabricated — a value the player never announced. MEASURED: {surviving:?}"
+    );
+}
+
+/// The stamp must land at trigger INSTANTIATION, not at trigger resolution: Rampaging War
+/// Mammoth's "destroy up to X target artifacts" spends X in `multi_target.max`, which is
+/// consumed during TARGET SELECTION — before the triggered ability ever resolves. With X
+/// unbound the trigger offers "up to 0" targets and destroys nothing, which is exactly the
+/// silent zero this campaign exists to kill. Cycled for X=2, both artifacts must die.
+#[test]
+fn cycling_trigger_x_reaches_the_target_count_slot() {
+    const MAMMOTH: &str = "Trample\nCycling {X}{2}{R} ({X}{2}{R}, Discard this card: Draw a \
+                           card.)\nWhen you cycle this card, destroy up to X target artifacts.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_card_to_library_top(P0, "Cycled Draw");
+    let relic_a = scenario
+        .add_creature(P1, "Relic A", 0, 0)
+        .as_artifact()
+        .id();
+    let relic_b = scenario
+        .add_creature(P1, "Relic B", 0, 0)
+        .as_artifact()
+        .id();
+    let mammoth = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rampaging War Mammoth", false, MAMMOTH)
+        .id();
+    let mut runner = scenario.build();
+    add_mana(&mut runner, ManaType::Red, 8);
+
+    cycle_for_x(&mut runner, mammoth, 2);
+
+    let survivors: Vec<_> = [relic_a, relic_b]
+        .into_iter()
+        .filter(|id| {
+            runner
+                .state()
+                .objects
+                .get(id)
+                .is_some_and(|o| o.zone == Zone::Battlefield)
+        })
+        .collect();
+    assert!(
+        survivors.is_empty(),
+        "cycled for X=2, 'destroy up to X target artifacts' must destroy BOTH. A survivor means \
+         `multi_target.max` never saw the announced X, so the trigger offered 'up to 0' targets. \
+         MEASURED survivors: {survivors:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GREEN CONTROLS — the carrier MUST NOT reach these.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// THE HAZARD CONTROL (CR 107.3m + CR 107.3k). A resolving SPELL must never publish an
+/// activation X. Two things depend on this and both are load-bearing:
+///
+///  1. A permanent PUT onto the battlefield by an unrelated resolving X-spell (the
+///     Sneak-Attack-for-X shape) must have X = 0 — CR 107.3m: "the value of X for that
+///     permanent is 0". If a spell published its X, that permanent's ETB would inherit it.
+///  2. `QuantityRef::CostXPaid` — the cast channel that commit 1 rewrites gated-ETB sibling
+///     slots to — falls back to `chosen_x` when the object has no `cost_x_paid`. A published
+///     spell-X would leak into that fallback and poison exactly the slots commit 1 fixed.
+///
+/// `stack::resolve_top` publishes for `StackEntryKind::ActivatedAbility` ONLY, so the carrier
+/// is provably `None` for the whole of a spell's resolution. This asserts that directly, and
+/// asserts the cast-X path still works (Krasis gains half X), so it cannot pass vacuously by
+/// the carrier being dead everywhere.
+#[test]
+fn a_resolving_spell_never_publishes_an_activation_x() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = {
+        let mut b = scenario.add_creature_to_hand_from_oracle(
+            P0,
+            "Hydroid Krasis",
+            0,
+            0,
+            "When you cast this spell, you gain half X life and draw half X cards. Round down \
+             each time.\nFlying, trample",
+        );
+        b.with_mana_cost(cost(
+            vec![ManaCostShard::X, ManaCostShard::Green, ManaCostShard::Blue],
+            0,
+        ));
+        b.id()
+    };
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[0].life;
+    add_mana(&mut runner, ManaType::Green, 4);
+    add_mana(&mut runner, ManaType::Blue, 4);
+
+    runner.cast(spell).x(4).resolve();
+
+    assert_eq!(
+        runner.state().players[0].life - life_before,
+        2,
+        "non-vacuity: the cast-X channel (cost_x_paid) must still bind — Krasis cast for X=4 \
+         gains half X = 2 life. If this is 0 the assertion below proves nothing."
+    );
+    assert_eq!(
+        runner.state().activated_ability_x,
+        None,
+        "CR 107.3m + CR 107.3k: a resolving SPELL must never publish an activation X. A \
+         published value here would (a) let a permanent this spell puts onto the battlefield \
+         inherit X instead of 0, and (b) leak into the CostXPaid -> chosen_x fallback and \
+         poison the gated-ETB sibling slots. MEASURED: {:?}",
+        runner.state().activated_ability_x
+    );
+}
+
+/// RULING CONDITION 2 — save/wire compatibility, CHECKED rather than asserted.
+///
+/// `activated_ability_x` is NEW PERSISTED `GameState` (it is serialized so a mid-activation
+/// pause — e.g. an interactive cost payment between announcement and the trigger going on the
+/// stack — round-trips). It is therefore a save-format change and must be shown compatible:
+///
+///  1. A save written by an OLDER binary has no `activated_ability_x` key at all. `#[serde(default)]`
+///     must make that load as `None` rather than fail. Because `skip_serializing_if` omits the key
+///     whenever it is `None`, a fresh serialization of a state with no live activation IS
+///     byte-identical to an old save on this axis — so serializing a `None` state and reloading it
+///     exercises exactly the old-save path.
+///  2. A live value must survive a round-trip.
+///
+/// (`GameState` does not use `deny_unknown_fields`, so the reverse direction — an OLD binary
+/// reading a NEW save that carries the key — ignores it rather than erroring.)
+#[test]
+fn activated_ability_x_is_save_compatible() {
+    let scenario = GameScenario::new();
+    let runner = scenario.build();
+    let mut state = runner.state().clone();
+
+    // (1) OLD-SAVE SHAPE: `None` omits the key entirely.
+    state.activated_ability_x = None;
+    let old_shape = serde_json::to_value(&state).expect("serialize");
+    assert!(
+        old_shape.get("activated_ability_x").is_none(),
+        "a `None` carrier must omit the key, so pre-field saves are byte-identical on this axis"
+    );
+    let reloaded: engine::types::game_state::GameState =
+        serde_json::from_value(old_shape).expect("an old save (no key) must load, not fail");
+    assert_eq!(
+        reloaded.activated_ability_x, None,
+        "a save with no `activated_ability_x` key must default to None"
+    );
+
+    // (2) LIVE VALUE: round-trips intact.
+    state.activated_ability_x = Some((ObjectId(4242), 7));
+    let new_shape = serde_json::to_value(&state).expect("serialize");
+    assert!(
+        new_shape.get("activated_ability_x").is_some(),
+        "a live announced X must be persisted (it must survive a mid-activation pause)"
+    );
+    let reloaded: engine::types::game_state::GameState =
+        serde_json::from_value(new_shape).expect("deserialize");
+    assert_eq!(
+        reloaded.activated_ability_x,
+        Some((ObjectId(4242), 7)),
+        "the announced X and its source must round-trip through a save"
     );
 }

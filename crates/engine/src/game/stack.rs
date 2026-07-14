@@ -192,6 +192,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
     // `resolving_stack_entry` so it never leaks into the next resolution.
     state.resolution_source_relatch = None;
+    // CR 107.3a: the announced activation-X carrier is scoped to the activation that
+    // published it. Clear it here so it never leaks into an unrelated resolution; it is
+    // republished below for an `ActivatedAbility` entry (and only for that kind).
+    state.activated_ability_x = None;
 
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
     let entry = match state.stack.pop_back() {
@@ -463,6 +467,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // optional copy decision is pending. Cleared at the start of the next
     // `resolve_top`.
     state.resolving_stack_entry = Some(entry.clone());
+    // CR 107.3a + CR 107.3i: republish the resolving activated ability's announced X for
+    // the duration of its own resolution, so a triggered ability of the SAME object that
+    // this resolution causes (Hydra Broodmaster / Polukranos: "when this becomes
+    // monstrous, …X…", fired off the `EffectResolved{Monstrosity}` emitted below) reads
+    // that X. Deliberately restricted to `ActivatedAbility`: a resolving SPELL must NOT
+    // publish, because a permanent it puts onto the battlefield has X = 0 (CR 107.3m) and
+    // its ETB trigger reads the spell's X through `GameObject::cost_x_paid` instead.
+    if let StackEntryKind::ActivatedAbility {
+        source_id,
+        ability: activated,
+    } = &entry.kind
+    {
+        state.activated_ability_x = activated.chosen_x.map(|x| (*source_id, x));
+    }
     let resolution_start_phase = state.phase;
 
     // Only run targeting validation and effect execution when an ability exists.

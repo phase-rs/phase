@@ -8108,6 +8108,34 @@ pub(super) fn build_triggered_ability(
                 }
             }
         }
+        // CR 107.3i + CR 107.3a: bind this trigger's X to the announced X of an
+        // activated ability OF THIS SAME OBJECT that is currently publishing events —
+        // the activation that caused this trigger to fire. CR 107.3i: "Normally, all
+        // instances of X on an object have the same value at any given time", and CR
+        // 107.3a fixes that value at announcement. This is the read path for the whole
+        // activated-ability-X class: Hydra Broodmaster / Polukranos / Death Kiss /
+        // Vitality Hunter ("when this becomes monstrous, …X…") and Shark Typhoon /
+        // Webstrike Elite / Rampaging War Mammoth / Valor's Flagship ("when you cycle
+        // this card, …X…").
+        //
+        // The stamp lands HERE, at trigger instantiation, rather than at resolution,
+        // because several faces in the class carry X in a target-count or filter slot
+        // (Rampaging War Mammoth's "up to X target artifacts"; Webstrike Elite's "mana
+        // value X") which is consumed during target selection — before the trigger ever
+        // resolves.
+        //
+        // SCOPED BY SOURCE, and this scoping is load-bearing: `activated_ability_x` is
+        // published only by an activated ability (never by a resolving spell — see
+        // `stack::resolve_top`), so a permanent put onto the battlefield by an unrelated
+        // X-spell keeps X = 0 (CR 107.3m) rather than inheriting that spell's X. It also
+        // keeps `QuantityRef::CostXPaid` — the CR 107.3m *cast* channel, which falls back
+        // to `chosen_x` — reading the cast X, never an activation X (CR 107.3k: the two
+        // are independent).
+        if let Some((activating_source, announced_x)) = state.activated_ability_x {
+            if activating_source == source_id {
+                resolved.set_chosen_x_recursive(announced_x);
+            }
+        }
         // CR 118.12: Carry unless_pay modifier from trigger definition.
         if trig_def.unless_pay.is_some() {
             resolved.unless_pay = trig_def.unless_pay.clone();
