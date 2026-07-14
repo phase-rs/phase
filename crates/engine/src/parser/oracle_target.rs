@@ -10027,6 +10027,22 @@ mod tests {
         assert_eq!(rest.trim(), "");
     }
 
+    // Necromancy building block (#640): "target creature card from a graveyard"
+    // must parse to a creature+card `Typed` filter, zone Graveyard, with NO owner
+    // constraint ("a graveyard", not "your graveyard"). This is the target the
+    // reanimator-Aura GRANT-shape ETB chain feeds into its root ChangeZone.
+    #[test]
+    fn target_creature_card_from_a_graveyard() {
+        let (f, rest) = parse_target("target creature card from a graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }]))
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
     #[test]
     fn target_card_from_exile() {
         let (f, rest) = parse_target("target card from exile");

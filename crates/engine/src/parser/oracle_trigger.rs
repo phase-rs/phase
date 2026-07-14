@@ -11,6 +11,7 @@ use super::oracle_effect::{
     condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
     try_parse_each_player_copy_chosen, try_parse_exile_top_each_library_with_collection_counter,
     try_parse_grant_graveyard_keyword_to_target, try_parse_reanimator_aura_etb_effect,
+    try_parse_reanimator_aura_grant_etb_effect,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
@@ -1464,7 +1465,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
             })
             .or_else(|| {
-                // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.17a: whole-body
+                // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: whole-body
                 // reanimator-Aura ETB effect (Animate Dead / Dance of the Dead) —
                 // "it loses ... and gains ...", return/put the enchanted creature
                 // card to the battlefield under your control, attach the Aura to
@@ -1472,6 +1473,18 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 // declines unless the entire body matches, so a deviating card
                 // stays an honest Unimplemented rather than misparsing.
                 try_parse_reanimator_aura_etb_effect(&effect_for_parse, AbilityKind::Spell)
+                    .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
+            })
+            .or_else(|| {
+                // CR 603.3d + CR 608.2c + CR 613.1d + CR 613.1f + CR 701.3a + CR 701.21a:
+                // whole-body reanimator-Aura GRANT-shape ETB effect (Necromancy) — a plain
+                // (non-Aura) enchantment whose ETB ability becomes an Aura AND targets the
+                // graveyard creature to reanimate itself (unlike the swap shape above,
+                // which targets at CAST time via its printed Enchant restriction and
+                // refers back to `TargetFilter::AttachedTo` here). Fail-closed: declines
+                // unless the entire body matches, so a deviating card stays an honest
+                // Unimplemented rather than misparsing.
+                try_parse_reanimator_aura_grant_etb_effect(&effect_for_parse, AbilityKind::Spell)
                     .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
             })
             .or_else(|| {

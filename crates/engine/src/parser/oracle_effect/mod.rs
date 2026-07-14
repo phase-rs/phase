@@ -11765,11 +11765,11 @@ pub(crate) fn try_parse_grant_graveyard_keyword_to_target(
     Some(AbilityDefinition::new(kind, effect))
 }
 
-/// CR 608.2c + CR 613.1f + CR 701.3a + CR 701.17a: Whole-body, fail-closed recognizer
+/// CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: Whole-body, fail-closed recognizer
 /// for the reanimator-Aura ETB effect shared by Animate Dead and Dance of the Dead.
 /// The chain it builds implements a reanimation instruction (CR 608.2c), a layer-6
 /// keyword swap (CR 613.1f), an attach (CR 701.3a), and a delayed sacrifice
-/// (CR 701.17a). Note: CR 303.4f does NOT apply — the Aura is not entering the
+/// (CR 701.21a). Note: CR 303.4f does NOT apply — the Aura is not entering the
 /// battlefield "by a means other than resolving as an Aura spell"; it resolved
 /// normally and this triggered ability then specifies the object to enchant.
 ///
@@ -11794,7 +11794,7 @@ pub(crate) fn try_parse_grant_graveyard_keyword_to_target(
 /// per-clause chunker. Declines (returns `None`) unless the ENTIRE body matches,
 /// so any card whose text deviates stays an honest `Effect::Unimplemented`.
 ///
-/// See `build_reanimator_aura_etb_chain` for why each node uses the anaphor it
+/// See `build_aura_attach_chain` for why each node uses the anaphor it
 /// does (source-rebind interplay with `ChangeZone { forward_result: true }`).
 pub(crate) fn try_parse_reanimator_aura_etb_effect(
     text: &str,
@@ -11804,7 +11804,15 @@ pub(crate) fn try_parse_reanimator_aura_etb_effect(
     let lower = stripped.to_lowercase();
     let tap_state =
         super::oracle_nom::bridge::nom_parse_lower(&lower, parse_reanimator_aura_etb_body)?;
-    Some(build_reanimator_aura_etb_chain(kind, tap_state))
+    // CR 613.1f: Animate Dead / Dance of the Dead are printed as Auras, so the
+    // ETB swaps the printed Enchant restriction (Swap) and refers back to the
+    // already-established attachment via `TargetFilter::AttachedTo`.
+    Some(build_aura_attach_chain(
+        kind,
+        tap_state,
+        EnchantGrantShape::Swap,
+        TargetFilter::AttachedTo,
+    ))
 }
 
 /// Shape-check one `"enchant <...>"` quoted keyword-grant span, discarding its
@@ -11847,7 +11855,125 @@ fn parse_reanimator_aura_etb_body(i: &str) -> OracleResult<'_, crate::types::zon
     Ok((i, tap))
 }
 
-/// Build the reanimator-Aura ETB effect chain (see `try_parse_reanimator_aura_etb_effect`).
+/// CR 603.3d + CR 608.2c + CR 613.1d + CR 613.1f + CR 701.3a + CR 701.21a:
+/// Whole-body, fail-closed recognizer for the reanimator-Aura GRANT-shape ETB
+/// effect (Necromancy). Unlike `try_parse_reanimator_aura_etb_effect` (shared
+/// by Animate Dead / Dance of the Dead, which target at CAST time via their
+/// printed Enchant restriction and refer back to `TargetFilter::AttachedTo`
+/// here), this object is a plain (non-Aura) Enchantment before its own ETB
+/// fires — the ETB ability itself becomes an Aura AND targets the graveyard
+/// creature to reanimate (CR 603.3d: a triggered ability's targets are chosen
+/// when it's put on the stack).
+///
+/// By the time this runs, the trigger condition ("When ~ enters") and the
+/// intervening-if ("if it's on the battlefield, ") have already been peeled by
+/// `oracle_trigger`, and every "this enchantment"/"this Aura" self-reference
+/// has been normalized to `~`. The remaining effect body (character-for-
+/// character, lowercased) is:
+///
+/// ```text
+/// it becomes an aura with "enchant <...>." <verb> target creature card from a
+/// graveyard <destination> under your control and attach ~ to it. when ~
+/// leaves the battlefield, that creature's controller sacrifices it
+/// ```
+///
+/// where `<verb>` is `return `/`put ` and `<destination>` is ` to the
+/// battlefield`/` onto the battlefield` optionally followed by ` tapped` — verb,
+/// preposition, and tap state are three independent `alt`/`opt` combinators,
+/// not enumerated permutations. The quoted enchant clause is shape-checked
+/// only via the shared `parse_quoted_enchant_clause` (never semantically
+/// parsed), matching the swap shape.
+///
+/// Returns the fully-constructed 4-node chain via `build_aura_attach_chain`
+/// with `EnchantGrantShape::GrantOnly` and the genuinely-parsed target.
+/// Declines (returns `None`) unless the ENTIRE body matches, so any card whose
+/// text deviates stays an honest `Effect::Unimplemented`.
+pub(crate) fn try_parse_reanimator_aura_grant_etb_effect(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let stripped = super::oracle_util::strip_reminder_text(text);
+    let lower = stripped.to_lowercase();
+    let (target, tap_state) =
+        super::oracle_nom::bridge::nom_parse_lower(&lower, parse_reanimator_aura_grant_etb_shape)?;
+    Some(build_aura_attach_chain(
+        kind,
+        tap_state,
+        EnchantGrantShape::GrantOnly,
+        target,
+    ))
+}
+
+/// Consume the whole reanimator-Aura GRANT-shape body, returning the
+/// genuinely-parsed target filter (CR 603.3d) and the entry tap state derived
+/// from the destination phrase. `eof` at the end makes it fail-closed: a
+/// partial match yields no chain.
+fn parse_reanimator_aura_grant_etb_shape(
+    i: &str,
+) -> OracleResult<'_, (TargetFilter, crate::types::zones::EtbTapState)> {
+    use crate::types::zones::EtbTapState;
+    let (i, _) = tag("it becomes an aura with ").parse(i)?;
+    let (i, _) = parse_quoted_enchant_clause(i)?;
+    let (i, _) = space1.parse(i)?;
+    // CR 608.2c: verb axis — "return"/"put" both move the targeted creature card.
+    let (i, _) = alt((tag("return "), tag("put "))).parse(i)?;
+    // CR 603.3d: the creature to reanimate is THIS triggered ability's own
+    // target, chosen when it is put on the stack — unlike the swap shape,
+    // there is no prior attachment to refer back to (`TargetFilter::AttachedTo`),
+    // because this object has no Enchant keyword (and no target) until this
+    // ETB fires. `parse_target` stops cleanly at the zone-suffix boundary
+    // ("...graveyard"), returning everything after as remainder. IMPORTANT:
+    // do not truncate or pre-slice this input before calling parse_target —
+    // hand it the full remainder.
+    let (target, i) = parse_target(i);
+    // CR 614.1 / CR 110.5b: destination axis — preposition and tap state are
+    // independent combinators, not enumerated permutations.
+    let (i, _) = alt((tag(" to the battlefield"), tag(" onto the battlefield"))).parse(i)?;
+    let (i, tapped) = opt(tag(" tapped")).parse(i)?;
+    let tap = if tapped.is_some() {
+        EtbTapState::Tapped
+    } else {
+        EtbTapState::Unspecified
+    };
+    let (i, _) = tag(
+        " under your control and attach ~ to it. when ~ leaves the battlefield, \
+         that creature's controller sacrifices it",
+    )
+    .parse(i)?;
+    let (i, _) = multispace0.parse(i)?;
+    let (i, _) = eof.parse(i)?;
+    Ok((i, (target, tap)))
+}
+
+/// Which keyword/subtype continuous modifications the reanimator-Aura ETB
+/// chain's `GenericEffect` node installs. Parser-internal only — never stored
+/// in an `AbilityDefinition`/`Effect`, discarded once `build_aura_attach_chain`
+/// emits plain `ContinuousModification`s. Not an engine-wide enum; not subject
+/// to the `/add-engine-variant` exhaustive-match-surface gate (precedent:
+/// `EqualizeVerb` in this same file is an identical parser-internal-only
+/// 2-arm selector).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnchantGrantShape {
+    /// Animate Dead / Dance of the Dead: already printed as an Aura, so the
+    /// ETB swaps its printed Enchant restriction for the post-reanimation one
+    /// (RemoveKeyword + AddKeyword). CR 613.1f only.
+    Swap,
+    /// Necromancy (and templated siblings): a plain Enchantment before this
+    /// ETB fires — grants the Aura subtype for the first time (CR 613.1d,
+    /// Layer 4) AND the Enchant keyword for the first time (CR 613.1f, Layer
+    /// 6). AddSubtype + AddKeyword, no RemoveKeyword (nothing to remove).
+    GrantOnly,
+}
+
+/// Build the reanimator-Aura attach chain shared by the two ETB shapes:
+/// `try_parse_reanimator_aura_etb_effect` (swap; Animate Dead / Dance of the
+/// Dead) and `try_parse_reanimator_aura_grant_etb_effect` (grant; Necromancy).
+/// Two documented parameters vary across call sites: the producer target of the
+/// root `ChangeZone` (`root_target` — `AttachedTo` for the swap shape, whose
+/// creature was chosen at cast time via the printed Enchant restriction; a
+/// genuinely-parsed graveyard-creature `Typed` filter for the grant shape, per
+/// CR 603.3d) and the layer-4/6 `shape` of the `GenericEffect`'s modifications
+/// (see `EnchantGrantShape`).
 ///
 /// Structure — ChangeZone at the ROOT, with the other three nodes nested
 /// progressively deeper — is a deliberate source-rebind choice:
@@ -11856,9 +11982,11 @@ fn parse_reanimator_aura_etb_body(i: &str) -> OracleResult<'_, crate::types::zon
 ///   rebinds the sub-chain's `source_id` to that creature, so trailing anaphora
 ///   bind to it. It is the ONLY forwarding node in the chain.
 /// * `GenericEffect` is ChangeZone's direct sub, so its `source_id` IS rebound to
-///   the creature. Its keyword-swap static must therefore reference the Aura via
+///   the creature. Its keyword modifications must therefore reference the Aura via
 ///   `TargetFilter::OriginalSource` (concretized to the pre-rebind source in
-///   `effects/mod.rs`'s forward_result block), NOT `SelfRef`.
+///   `effects/mod.rs`'s forward_result block), NOT `SelfRef`. The swap shape
+///   emits RemoveKeyword+AddKeyword (CR 613.1f); the grant shape emits
+///   AddSubtype (CR 613.1d, Layer 4)+AddKeyword (CR 613.1f, Layer 6).
 /// * `Attach` is `GenericEffect`'s sub, not `ChangeZone`'s. Because `GenericEffect`
 ///   itself never sets `forward_result`, this hop forwards no objects, so Attach's
 ///   `source_id` is never rebound — `attachment: SelfRef` correctly stays the Aura.
@@ -11866,13 +11994,15 @@ fn parse_reanimator_aura_etb_body(i: &str) -> OracleResult<'_, crate::types::zon
 ///   (CR 701.3a: the Aura attaches to the reanimated creature — the #4767 bug).
 /// * `CreateDelayedTrigger` likewise keeps `SelfRef` (never rebound) so the
 ///   leaves-battlefield condition watches the Aura, and its `Sacrifice { ParentTarget }`
-///   snapshots the creature at delayed-trigger creation time (CR 701.17a /
+///   snapshots the creature at delayed-trigger creation time (CR 701.21a /
 ///   CR 603.7c: "that creature's controller sacrifices it").
-fn build_reanimator_aura_etb_chain(
+fn build_aura_attach_chain(
     kind: AbilityKind,
     tap_state: crate::types::zones::EtbTapState,
+    shape: EnchantGrantShape,
+    root_target: TargetFilter,
 ) -> AbilityDefinition {
-    // CR 701.17a + CR 603.7c: "When ~ leaves the battlefield, that creature's
+    // CR 701.21a + CR 603.7c: "When ~ leaves the battlefield, that creature's
     // controller sacrifices it." — delayed leaves-battlefield sacrifice of the
     // reanimated creature (ParentTarget, snapshotted at creation).
     let sacrifice = AbilityDefinition::new(
@@ -11903,25 +12033,35 @@ fn build_reanimator_aura_etb_chain(
         },
     )
     .sub_ability(delayed);
-    // CR 613.1f + CR 611.2a: the Aura's own keyword swap ("it loses ... and
-    // gains ...") is a layer-6 ability-removing/adding continuous effect (CR
-    // 613.1f) with no stated duration, so it lasts until end of game (CR 611.2a).
+    // CR 613.1d + CR 613.1f + CR 611.2a: the Aura's own layer-4/6 continuous
+    // grant with no stated duration lasts until end of game (CR 611.2a).
     // `OriginalSource` references the Aura even though this node's
     // source_id is rebound to the creature by the parent ChangeZone's
     // forward_result. `duration: None` — an unstated-duration continuous grant.
+    //
+    // Swap shape (Animate Dead / Dance of the Dead, already printed as Auras):
+    // remove the printed Enchant restriction and add the post-reanimation one
+    // (CR 613.1f, Layer 6). Grant shape (Necromancy, a plain Enchantment before
+    // this ETB): grant the Aura subtype for the first time (CR 613.1d, Layer 4)
+    // — there is no printed Enchant restriction to remove — then add the Enchant
+    // keyword (CR 613.1f, Layer 6).
+    let mut modifications = match shape {
+        EnchantGrantShape::Swap => vec![ContinuousModification::RemoveKeyword {
+            keyword: Keyword::Enchant(TargetFilter::Any),
+        }],
+        EnchantGrantShape::GrantOnly => vec![ContinuousModification::AddSubtype {
+            subtype: "Aura".to_string(),
+        }],
+    };
+    modifications.push(ContinuousModification::AddKeyword {
+        keyword: Keyword::Enchant(TargetFilter::ParentTarget),
+    });
     let generic = AbilityDefinition::new(
         kind,
         Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(TargetFilter::OriginalSource)
-                .modifications(vec![
-                    ContinuousModification::RemoveKeyword {
-                        keyword: Keyword::Enchant(TargetFilter::Any),
-                    },
-                    ContinuousModification::AddKeyword {
-                        keyword: Keyword::Enchant(TargetFilter::ParentTarget),
-                    },
-                ])],
+                .modifications(modifications)],
             duration: None,
             target: None,
         },
@@ -11937,7 +12077,7 @@ fn build_reanimator_aura_etb_chain(
         Effect::ChangeZone {
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
-            target: TargetFilter::AttachedTo,
+            target: root_target,
             owner_library: false,
             enter_transformed: false,
             enters_under: Some(ControllerRef::You),
@@ -28058,7 +28198,7 @@ fn try_fold_token_repeat_into_count(effect: &mut Effect, qty: &QuantityExpr) -> 
 /// [`ThisWayCause`] the tracked-set consumer should bind to (`caused_by`):
 ///
 ///   - "exiled this way" → `Some(Exiled)` (CR 701.13a — exile).
-///   - "sacrificed this way" → `Some(Sacrificed)` (CR 701.17a).
+///   - "sacrificed this way" → `Some(Sacrificed)` (CR 701.21a).
 ///   - "destroyed this way" → `Some(Destroyed)` (CR 701.8a).
 ///   - "milled this way" → `Some(Milled)` (CR 701.17a).
 ///   - "discarded this way" → `Some(Discarded)` (CR 701.9a).
