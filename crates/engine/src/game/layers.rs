@@ -15,6 +15,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::DisplaySource;
 use crate::game::printed_cards::{
     apply_copiable_values, ensure_keyword_triggers_for_copiable_values, intrinsic_copiable_values,
+    is_runtime_target_die_exile_replacement,
 };
 use crate::game::quantity::{
     continuous_modification_dynamic_quantity, filter_uses_recipient, quantity_expr_uses_recipient,
@@ -702,13 +703,15 @@ pub(crate) fn prune_controller_controls_source_on_leave(
                         if source == departed_id
                 )
         };
-        // Only `ControllerControlsSource` defs are eligible to be dropped — the
-        // `host_left` arm must not wipe unrelated riders, so gate on the variant.
+        // Only a lapsed `ControllerControlsSource` def or a turn-bound die-exile
+        // rider on the departing host is eligible to be dropped. The host-left
+        // arm must not wipe printed replacements or unrelated runtime riders.
         let drop = |def: &crate::types::ability::ReplacementDefinition| {
-            matches!(
+            (matches!(
                 def.condition,
                 Some(ReplacementCondition::ControllerControlsSource { .. })
-            ) && is_lapsed(def)
+            ) && is_lapsed(def))
+                || (host_left && is_runtime_target_die_exile_replacement(def))
         };
         let before_live = obj.replacement_definitions.len();
         obj.replacement_definitions.retain(|d| !drop(d));

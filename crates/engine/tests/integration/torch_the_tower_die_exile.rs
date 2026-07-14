@@ -2,8 +2,10 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::zones::move_to_zone;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::Effect;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -169,5 +171,109 @@ fn torch_the_tower_replacement_expires_from_the_layer_baseline_at_cleanup() {
             .base_replacement_definitions
             .is_empty(),
         "the turn-bound replacement must not survive cleanup"
+    );
+}
+
+#[test]
+fn torch_the_tower_replacement_is_not_inherited_by_a_copy() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, ManaColor::Red);
+    let target = scenario.add_creature(P0, "Surviving Target", 2, 4).id();
+    let torch = scenario
+        .add_spell_to_hand(P0, "Torch the Tower", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .from_oracle_text_with_keywords(&["bargain"], TORCH)
+        .id();
+    let copy = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic Copier",
+            true,
+            "Create a token that's a copy of target creature you control.",
+        )
+        .id();
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Synthetic Destroy", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+
+    runner
+        .cast(torch)
+        .target_object(target)
+        .decline_optional()
+        .resolve();
+    runner.cast(copy).target_object(target).resolve();
+    let copy_id = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| {
+            runner.state().objects[id].is_token
+                && runner.state().objects[id].name == "Surviving Target"
+        })
+        .expect("the copy spell must create a copy of the damaged target");
+
+    let outcome = runner.cast(destroy).target_object(copy_id).resolve();
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, to: Zone::Graveyard, .. } if *object_id == copy_id
+        )),
+        "CR 707.2: a copy of the damaged creature was never dealt damage by Torch and must die normally"
+    );
+}
+
+#[test]
+fn torch_the_tower_replacement_does_not_follow_a_bounced_creature_back_onto_the_battlefield() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, ManaColor::Red);
+    let target = scenario.add_creature(P0, "Surviving Target", 2, 4).id();
+    let torch = scenario
+        .add_spell_to_hand(P0, "Torch the Tower", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .from_oracle_text_with_keywords(&["bargain"], TORCH)
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic Bounce",
+            true,
+            "Return target creature to its owner's hand.",
+        )
+        .id();
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Synthetic Destroy", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+
+    runner
+        .cast(torch)
+        .target_object(target)
+        .decline_optional()
+        .resolve();
+    runner.cast(bounce).target_object(target).resolve();
+    assert_eq!(runner.state().objects[&target].zone, Zone::Hand);
+    move_to_zone(
+        runner.state_mut(),
+        target,
+        Zone::Battlefield,
+        &mut Vec::new(),
+    );
+    assert_eq!(runner.state().objects[&target].zone, Zone::Battlefield);
+
+    runner.cast(destroy).target_object(target).resolve();
+    assert_eq!(
+        runner.state().objects[&target].zone,
+        Zone::Graveyard,
+        "CR 400.7: the re-entered creature is a new object and was never dealt damage by Torch"
     );
 }

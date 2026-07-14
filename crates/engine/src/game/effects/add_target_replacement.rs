@@ -231,19 +231,10 @@ pub fn resolve(
                     // base+live replacement defs, CR 708.2a) would end the lock
                     // early — an under-prune, strictly safer than a revival; rare
                     // corner, out of scope.
-                    let durable_die_exile = replacement.event == ReplacementEvent::Moved
-                        && matches!(replacement.expiry, Some(RestrictionExpiry::EndOfTurn))
-                        && replacement.destination_zone
-                            == Some(crate::types::zones::Zone::Graveyard)
-                        && replacement.execute.as_deref().is_some_and(|execute| {
-                            matches!(
-                                *execute.effect,
-                                Effect::ChangeZone {
-                                    destination: crate::types::zones::Zone::Exile,
-                                    ..
-                                }
-                            )
-                        });
+                    let durable_die_exile =
+                        crate::game::printed_cards::is_runtime_target_die_exile_replacement(
+                            &replacement,
+                        );
                     let install_to_base = durable_die_exile
                         || matches!(
                             replacement.condition,
