@@ -802,6 +802,58 @@ fn effective_controller(
     obj.controller
 }
 
+/// CR 608.2h + CR 704.5m/n: Is `candidate` attached to `referent`, as of the moment the
+/// question is asked?
+///
+/// SINGLE AUTHORITY for the attachment back-reference. Both `FilterProp::AttachedToSource`
+/// and `FilterProp::AttachedToRecipient` ask this same question and differ only in which
+/// object is the referent, so both route here rather than each re-deriving the lookup.
+///
+/// Attachment is a BATTLEFIELD-ONLY relationship, and the state-based actions tear it down
+/// the instant the host leaves: an Aura attached to an illegal object is put into its owner's
+/// graveyard (CR 704.5m) and an Equipment attached to an illegal permanent becomes unattached
+/// (CR 704.5n). So once the referent is off the battlefield, every candidate's live
+/// `attached_to` back-reference has ALREADY been cleared, and the live board cannot answer
+/// this question at all — it can only answer "no".
+///
+/// CR 608.2h routes exactly that case to last known information: "If the effect requires
+/// information from a specific object, INCLUDING THE SOURCE OF THE ABILITY ITSELF, the effect
+/// uses the current information of that object if it's in the public zone it was expected to
+/// be in; if it's no longer in that zone ... the effect uses the object's LAST KNOWN
+/// INFORMATION." The referent's expected zone is the battlefield, so:
+///
+/// * referent ON the battlefield — live: the candidate's own `attached_to` back-reference.
+/// * referent anywhere else — the exit-time attachment set captured into `state.lki_cache`
+///   by `capture_attachment_snapshot` (zones.rs) on battlefield exit.
+///
+/// The off-battlefield leg covers a merely-dead referent (nontoken, now in the graveyard) and
+/// a purged one (a token, which ceased to exist under CR 111.7 and is absent from
+/// `state.objects` entirely) with one predicate: SBA unattaches on ANY battlefield exit, so
+/// the zone — not the object's continued existence — is what decides.
+///
+/// The snapshot's `object_id` is compared for IDENTITY only and is never dereferenced, so an
+/// attachment that has itself ceased to exist since the snapshot cannot break the look-back.
+fn attached_to_referent(
+    state: &GameState,
+    referent: ObjectId,
+    candidate: &GameObject,
+    candidate_id: ObjectId,
+) -> bool {
+    let referent_on_battlefield = state
+        .objects
+        .get(&referent)
+        .is_some_and(|r| r.zone == Zone::Battlefield);
+
+    if referent_on_battlefield {
+        return candidate.attached_to.and_then(|t| t.as_object()) == Some(referent);
+    }
+
+    state
+        .lki_cache
+        .get(&referent)
+        .is_some_and(|lki| lki.attachments.iter().any(|a| a.object_id == candidate_id))
+}
+
 pub(crate) fn controller_ref_player(
     state: &GameState,
     source_id: ObjectId,
@@ -3957,12 +4009,10 @@ fn matches_filter_prop(
             }
         }
         // CR 301.5 + CR 303.4: Inverse of `EnchantedBy`/`EquippedBy` — matches
-        // when THIS object is attached TO the source (`obj.attached_to ==
-        // Some(source.id)`). Used for "Aura and Equipment attached to ~"
-        // quantity clauses on the source object (Kellan, the Fae-Blooded).
-        FilterProp::AttachedToSource => {
-            obj.attached_to.and_then(|t| t.as_object()) == Some(source.id)
-        }
+        // when THIS object is attached TO the source. Used for "Aura and
+        // Equipment attached to ~" quantity clauses on the source object
+        // (Kellan, the Fae-Blooded; Whiplash, Vengeful Engineer).
+        FilterProp::AttachedToSource => attached_to_referent(state, source.id, obj, object_id),
         // CR 301.5 + CR 303.4 + CR 613.4c + CR 109.3: Anaphoric "it" referent
         // in "for each X attached to it". Two contextual referents share the
         // same parser-emitted prop:
@@ -3984,7 +4034,7 @@ fn matches_filter_prop(
         // surrounding effect.
         FilterProp::AttachedToRecipient => {
             let referent = source.recipient_id.unwrap_or(source.id);
-            obj.attached_to.and_then(|t| t.as_object()) == Some(referent)
+            attached_to_referent(state, referent, obj, object_id)
         }
         // CR 303.4 + CR 301.5: Attachment predicate. Matches objects that have
         // at least one attachment of the given kind whose controller satisfies
