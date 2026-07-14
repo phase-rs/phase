@@ -431,6 +431,7 @@ pub(crate) fn finish_delivery_tail(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChangeZone,
         source_id,
+        subject: None,
     });
     set_priority(state, player);
     if let Some(after_scope) = after_scope {

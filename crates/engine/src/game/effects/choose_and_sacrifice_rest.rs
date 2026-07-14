@@ -442,6 +442,7 @@ pub(crate) fn step_exact_count(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseAndSacrificeRest,
             source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -491,6 +492,7 @@ pub(crate) fn step_exact_count(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseAndSacrificeRest,
         source_id,
+        subject: None,
     });
     Ok(())
 }

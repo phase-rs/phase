@@ -3133,6 +3133,7 @@ mod tests {
                 GameEvent::EffectResolved {
                     kind: EffectKind::Sacrifice,
                     source_id,
+                    subject: None,
                 } if *source_id == ObjectId(9_999)
             )),
             "the empty queue still has to publish its terminal sacrifice result"
