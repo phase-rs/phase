@@ -359,10 +359,21 @@ Apply the relevant lenses from `review-impl.md`, especially:
 - **regression blast-radius** — every caller of any shared/hot path the change touches
 - **performance** — hot-path cost (legal-actions, priority, layer recompute, AI search); guard additions with a cheap early-out
 - parser combinator correctness
+- **migrated-area conformance** — consult `.agents/pr-review/campaign-hotspots.toml` (when present): does the diff use a superseded mechanism in a migrated area? Known instances: permissive keyword helpers (`parse_granted_keyword_fragment` / `extract_granted_keyword_list`) called from a router context (embedded grant contexts remain legitimate); hand-built `Effect::Unimplemented { .. }` literals instead of the gated `Effect::unimplemented()` authority; verbatim Oracle-text string matching for parsing dispatch. These are gate-enforced (`scripts/check-parser-combinators.sh`, the literal gate), so the review's job is the REDIRECT — name the current authority and the skill section documenting it — not an extra rejection layer. If CI did not red a listed prohibition, that is a gate gap: file it against the gate, don't burden the contributor with it.
 - engine/frontend boundary purity
 - CR annotation correctness
 - hidden-information filtering and adapter round trips
 - AI classifier completeness, when relevant
+
+## Coverage-Delta Semantics and Contributor Friction
+
+**An honest coverage decrease is acceptable — never ask a contributor to "restore" it.** A parser change that converts a silently-swallowed clause into an explicit `Effect::Unimplemented` moves cards from lying-green to honest-red; that is an improvement, and the campaign's coverage-honesty policy explicitly permits the count to drop. The CI coverage-regression gate is **bucket-based, not count-based**: the only fatal bucket is `engine_regress` — a card LOSING a handler the baseline marked supported. Any number of honest supported→unsupported flips with new marker names passes. One trap to check when a PR introduces new `Effect::unimplemented(name, …)` markers: the name must not case-insensitively collide with a baseline-supported handler name (the current baseline set is seven generic names, e.g. `Effect:choose`, `Effect:have`) — a collision trips a false-fatal `engine_regress` in the merge queue.
+
+**Direct changes to the appropriate location; don't convert campaign churn into contributor burden.**
+- When a PR does something the "old way" in a since-migrated area, the comment names the new authority and where it is documented, framed as routing ("this now goes through X — see skill Y"), not fault. Prefer changes-requested-with-a-precise-pointer, or a maintainer fixup when it is fixup-sized, over a bare block.
+- Diff content outside the contributor's control is the maintainer's to clean, silently: generated-registry dirt (`known-tokens.toml` appears after any local `gen-card-data` run; `oracle-subtypes.json` rewrites after `cargo export-cards` — both are side effects, not author intent), ~20 faces of nondeterministic export noise in coverage/ledger diffs, and stale-base deltas caused by maintainer-side merges (maintainer-caused staleness: we rebase/port).
+- Enforcement of migrated-area rules belongs in gates, not review vigilance. A prohibited pattern that reaches review with green CI means the gate has a hole — record the finding, apply the redirect, and file the gate gap as its own task.
+- **Maintainer-caused redness: if our push turned their CI red, we help.** When a PR was authored before — or concurrently with, or just after — a maintainer-side change that its author could not have known about (a new gate, a migrated mechanism, a renamed authority), and that change is what reds its CI, the fix is maintainer work, not a contributor round-trip. Compare the PR's `createdAt` / base against the landing time of the change that introduced the failure (`campaign-hotspots.toml` records landing dates for migrations). Fixup-sized ports (rewire onto the new authority, thread a rename, adapt to a new gate) are done directly on the author's branch via the maintainer-fixup path; larger ports get a comment that names the migration, states plainly that the red is not the author's fault, and either performs the port or schedules it — the contributor is never asked to chase a target that moved after they aimed.
 
 ## Inline Fix vs Full Engine Cycle
 
@@ -485,12 +496,12 @@ Then **verify the PR head actually moved** via `gh pr view <PR> --json headRefOi
 Apply exactly one **type label** to every PR you handle (`gh pr edit <PR> --add-label <label>`), judged from the diff:
 
 - **bug** — already implemented but not working correctly (a fix to existing engine/parser logic).
-- **enhancement** — engine work was required to implement something that did not previously exist (new keyword, effect, static, target filter, etc.).
-- **feature** — a larger-scoped feature (a whole mechanic family / multiple subsystems).
+- **enhancement** — the default for an ordinary additive capability in an existing seam: a new engine, parser, or tooling primitive; keyword, effect, static, target filter; or newly supported card class. Keep this label even when the implementation touches several files.
+- **feature** — a genuinely broad mechanic or product change spanning distinct subsystems or a whole mechanic family (for example, a combo workflow that jointly changes engine rules, priority handling, UI, and AI). Do not select it merely because the title says `feat`, the PR changes many files, or it adds one engine/parser capability.
 - **test** — test-cases only, no production behavior change.
 - **refactor** — restructuring with no behavioral change.
 
-Label every PR you process, including ones you hold or block — the label is independent of merge-readiness. Create a missing convention label with `gh label create` before applying. Verify applied labels via the GraphQL API, not gh CLI stdout (unreliable under the rtk filter).
+Classify from the behavior in the diff, not the author or PR title. Label every PR you process, including ones you hold or block — the label is independent of merge-readiness. Create a missing convention label with `gh label create` before applying. Verify applied labels via the GraphQL API, not gh CLI stdout (unreliable under the rtk filter).
 
 Apply the policy-configured **`quality` label** in addition to the type label when the PR is additive and genuinely well executed: it adds real engine/parser/frontend capability or coverage, has almost no review churn, lands at the right seam, uses the house idioms, has discriminating tests/proof, and required no maintainer redesign beyond tiny local fixups. Do not apply `quality` to merely acceptable PRs, bugfixes with heavy correction, broad churn, PRs that needed substantial maintainer rescue, or anything still carrying unresolved deferrals. Record matching praise signals (`right-seam`, `scope-discipline`, `discriminating-runtime-test`, `parameterized-not-proliferated`, `evidence-backed-pushback` when applicable) in the local event.
 
