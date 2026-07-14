@@ -416,7 +416,7 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `0` | Semicolon-separated keyword line ("Defender; reach"); colon guard excludes activated abilities | per-part keyword extraction | `oracle.rs` |
 | `1` | Modal block: "Choose one —" header + mode lines, or Spree + `+` lines (consumes multiple lines) | `parse_oracle_block()` + `lower_oracle_block()` | `oracle_modal.rs` |
 | — | "Equip {cost}" / "Equip — {cost}" (not "Equipped …"); "Crew N" with trailing cadence sentence | `try_parse_equip()`, `parse_crew_keyword()` | `oracle.rs` |
-| `1b` | Keyword-only line (guard: "{kw} abilities you activate cost {N} less" is a static, not a keyword line) | `extract_keyword_line()` | `oracle_keyword.rs` |
+| `1b` | Keyword-only line (guard: "{kw} abilities you activate cost {N} less" is a static, not a keyword line) | `extract_granted_keyword_list()` (permissive — see §3a) | `oracle_keyword.rs` |
 | `2` | "Enchant {filter}" | skip (handled externally) | — |
 | — | Commander-permission / deck-construction copy-limit sentences (skip); named equip "<Name> — Equip {cost}" | `try_parse_equip()` | `oracle.rs` |
 | `11` | Planeswalker loyalty `+N:` / `−N:` / `0:` / `[+N]:` (runs here despite the label) | `try_parse_loyalty_line()` | `oracle.rs` |
@@ -445,10 +445,10 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `8c-strive` | Strive lines — skip (cost extracted by the pre-loop scan) | skip | `oracle.rs` |
 | — | Casting restrictions ("Cast this spell only …"), spell casting options, die-roll tables (`try_parse_die_roll_table`, consumes header + table lines), Suspend/Specialize/Harmonize/Mayhem keyword-cost extraction | various | `oracle_casting.rs`, `oracle_special.rs`, `oracle_keyword.rs` |
 | `8f` | Kicker / Multikicker / Replicate cost lines — before the spell catch-all so they don't become Unimplemented | keyword extraction | `oracle.rs` |
-| `9` | Card is Instant/Sorcery → imperative spell body | `parse_effect_chain()` | `oracle_effect/` |
+| `9` | Card is Instant/Sorcery → strict keyword-cost line first (consume-on-success, §3a), else imperative spell body | `parse_router_keyword_line()` (strict) → `parse_effect_chain()` | `oracle_keyword.rs` + `oracle_effect/` |
 | — | Flashback-equal-to-mana-cost, Commander ninjutsu, Escape em-dash, Cumulative upkeep keyword extraction | keyword extraction | `oracle.rs` / `oracle_keyword.rs` |
 | `12` | Roman numeral chapters (saga) | skip (pre-parsed) | — |
-| `13` | Keyword cost lines (`is_keyword_cost_line`) — extract parameterized keyword (e.g. "Morph {2}{B}") then skip | `parse_keyword_from_oracle()` | `oracle_keyword.rs` |
+| `13` | Keyword cost lines (`is_keyword_cost_line`) — extract parameterized keyword (e.g. "Morph {2}{B}") then skip. Consume-on-success: only an all-consuming strict parse advances the line (see §3a) | `parse_router_keyword_line()` (strict) | `oracle_keyword.rs` |
 | `13b` | Kicker/Multikicker leftovers | skip (handled by keywords) | — |
 | `13c` | Vehicle tier lines "N+ \| keyword(s)" | skip | `oracle_classifier.rs` |
 | `13d` | "Activate only…" constraint line | skip | — |
@@ -456,6 +456,45 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `14` | Ability word prefix ("Landfall —") — strip, map known words to typed conditions, re-classify the body | `strip_ability_word_with_name()` + `ability_word_to_condition()` | `oracle.rs` |
 | `14a` | Nom fallback dispatch — try effect, trigger, static, and replacement sub-parsers | `dispatch_line_nom()` | `oracle_dispatch.rs` |
 | `15` | Final fallback | `Effect::Unimplemented` with diagnostic trace | — |
+
+### 3a. Keyword Lines — Strict Router vs Permissive Grant (`oracle_keyword.rs`)
+
+There are **two** keyword-parsing surfaces. They are not interchangeable, and using
+the wrong one at a router boundary is the silent-swallow bug class.
+
+| Surface | Contract | Where it may be used |
+|---|---|---|
+| `parse_keyword_line_core()` | Remainder-**preserving** core: `Option<(Keyword, &str /* unconsumed */)>`. The single authority both wrappers are built on. | Internal — call a wrapper, not this. |
+| `parse_router_keyword_line()` | **STRICT / all-consuming.** Candidate recognizer → reminder strip → core → `all_consuming` permitted tail (P/R/M modifiers). Returns a typed `RoutedKeywordLine` only when the line parses *completely*. | The **only** surface that may license a router to CONSUME a whole line. |
+| `parse_granted_keyword_fragment()` / `extract_granted_keyword_list()` | **PERMISSIVE.** Takes the leading keyword and **discards the remainder** — by design. | **Embedded grant contexts only**: static/token/vote/class-level/effect-payload payloads ("…gains vanishing 3 if …"), where a trailing clause belongs to the *enclosing* sentence. |
+
+**Consume-on-success (the rule).** A candidate recognizer (`is_keyword_cost_line`)
+is a *filter, not evidence*. A router may advance past a line only after
+`parse_router_keyword_line` returns a typed keyword all-consumingly, or after it
+explicitly emits `Effect::unimplemented`. Advancing on a permissive parse drops the
+discarded remainder's semantics with **no keyword and no diagnostic** — the card then
+renders as fully supported while its text was never modelled. `Cycling {2} if you
+control an artifact` must fall through to an honest, exact-unit `Effect::Unimplemented`,
+not vanish.
+
+**Registry.** `ROUTER_KEYWORD_CASES` (`oracle_keyword.rs`, `#[cfg(test)]`) is the typed
+family registry. A set-equality test pins it against `is_keyword_cost_line`'s candidate
+prefix set: every prefix has exactly one case, with a valid fixture, a semantic-suffix
+rejection, and a declared production reach. Adding a prefix to the recognizer without a
+strict parser fails the build. `KNOWN_NOUN_PARAM_LEAKS` is a **ratchet** listing the
+families whose noun/filter parameter still absorbs a trailing clause — entries are
+deleted as each is fixed, never added to.
+
+**Migration status (accurate as of Plan 02 step 5).** The strict router is wired at
+priority `9` (spell) and priority `13` (permanent). The remaining keyword-cost router
+entries — priority `0`, `1b`, `8f`, the flashback/suspend/buyback/escalate/commander-ninjutsu
+intercepts, and the two line classifiers — **still call the permissive surface** and are
+therefore still capable of swallowing a semantic tail. That surviving set is enumerated
+and frozen by **Gate G** in `scripts/check-parser-combinators.sh`: it counts the permissive
+calls inside `parse_oracle_ir`, `is_semicolon_keyword_line`, and
+`is_spell_resolution_instruction_line` and fails if the count rises (a new permissive
+router call) *or* falls without lowering the gate's expected floor. Gate G is a ratchet,
+not a blessing — when every count reaches 0, the boundary is fully enforced.
 
 ### `is_static_pattern()` — `oracle_classifier.rs`
 Gates Priority `7`. Returns false for `target`-leading lines, then matches

@@ -59,6 +59,118 @@ if [ -n "${GIT_INDEX_FILE:-}" ] || [ "$BASE" = "$(git rev-parse HEAD 2>/dev/null
 fi
 
 # ---------------------------------------------------------------------------
+# (G) ROUTER/GRANT ARCHITECTURE GATE  — Plan 02 step 5 item 13 / step 7.
+#
+# WHOLE-FILE, not diff-based: this is an architecture invariant, so it is
+# checked on every invocation regardless of what the diff touches.
+#
+# THE BOUNDARY. There are two keyword-parsing surfaces and they are NOT
+# interchangeable:
+#
+#   parse_router_keyword_line()      STRICT. All-consuming: it returns a typed
+#                                    keyword only when the candidate line parses
+#                                    completely (keyword + permitted P/R/M tail
+#                                    to eof). This is the ONLY surface that may
+#                                    license a router to CONSUME a whole line.
+#
+#   parse_granted_keyword_fragment() PERMISSIVE. By design it takes the leading
+#   extract_granted_keyword_list()   keyword and DISCARDS the remainder — correct
+#                                    for an EMBEDDED grant ("...gains vanishing 3
+#                                    if ..." inside a static/token/vote payload),
+#                                    and invalid at a whole-line router boundary,
+#                                    where the discarded remainder is dropped
+#                                    SEMANTICS with no Unimplemented raised.
+#
+# A router that advances a line on a permissive parse is a SILENT SWALLOW: no
+# keyword recorded, no diagnostic, and the card renders as fully supported.
+#
+# THIS GATE IS A RATCHET, NOT A BLESSING. Plan 02 step 5 wired the strict router
+# into priorities 9 and 13 but left the remaining router entries on the
+# permissive surface. Those survivors are enumerated below as an EXACT expected
+# count per router context. The gate fails if the count goes UP (a new permissive
+# router call — the regression this exists to stop) and equally if it goes DOWN
+# without updating this number (so the count can never quietly drift out of
+# truth). Definition of done: every expected count reaches 0, at which point this
+# becomes the plain "no permissive symbol in a router context" gate step 7 asks
+# for. Same instrument as KNOWN_NOUN_PARAM_LEAKS in oracle_keyword.rs.
+#
+# SPAN EXTRACTION: from the `fn NAME(` signature at column 0 to the next `}` at
+# column 0. Brace COUNTING would be wrong here — oracle.rs is saturated with mana
+# symbols ("{T}", "{2}{B}") inside string literals, and a naive counter reads
+# those as scope. rustfmt guarantees a top-level fn closes with `}` at column 0,
+# so the anchor is exact. Full-line comments are excluded so that prose NAMING a
+# permissive symbol (there are several) is not miscounted as a call.
+# ---------------------------------------------------------------------------
+ORACLE_RS='crates/engine/src/parser/oracle.rs'
+PERMISSIVE_SYMS='parse_granted_keyword_fragment|extract_granted_keyword_list'
+# Pre-rename spellings. These must not come back under any name, in any context.
+LEGACY_SYMS='parse_keyword_from_oracle|extract_keyword_line'
+
+# NOT listed above: `parse_crew_keyword`. Plan 02 step 5 item 11 groups it with the
+# remainder-discarding helpers, but that describes the PRE-step-5 code. As it stands
+# it is strict: its cadence tail is `all_consuming(tag("activate only once each
+# turn"))`, so "Crew 2 if you control an artifact" returns None rather than eating
+# the suffix, and its call site advances only inside `if let Some`. The line then
+# falls through to priority 1b — and it is 1b's `extract_granted_keyword_list` that
+# would swallow the tail, which is exactly the call this gate is counting. Listing
+# parse_crew_keyword here would encode a false claim about the code.
+
+# Expected surviving permissive calls per router context (see ratchet note above).
+EXPECTED_parse_oracle_ir=13
+EXPECTED_is_semicolon_keyword_line=2
+EXPECTED_is_spell_resolution_instruction_line=1
+
+arch_fail=0
+
+router_span() {
+    # $1 = fn name. Emits that fn's body with full-line comments stripped.
+    awk -v fn="$1" '
+        $0 ~ "^([a-z(),: ]*)?fn " fn "\\(" { inside = 1 }
+        inside && /^\}$/                   { exit }
+        inside && $0 !~ /^[[:space:]]*\/\// { print }
+    ' "$ORACLE_RS"
+}
+
+for ctx in parse_oracle_ir is_semicolon_keyword_line is_spell_resolution_instruction_line; do
+    span="$(router_span "$ctx")"
+    if [ -z "$span" ]; then
+        echo "✗ (G) router context '$ctx' not found in $ORACLE_RS — the gate is blind; fix the span anchor." >&2
+        arch_fail=1
+        continue
+    fi
+    actual="$(printf '%s\n' "$span" | grep -cE "$PERMISSIVE_SYMS" || true)"
+    eval "expected=\$EXPECTED_$ctx"
+    if [ "$actual" -gt "$expected" ]; then
+        echo "✗ (G) $ctx: $actual permissive keyword-parser calls, expected $expected." >&2
+        echo "      A NEW permissive call entered a router context. Routers must consume a" >&2
+        echo "      line only via all-consuming parse_router_keyword_line(); the permissive" >&2
+        echo "      surface discards the remainder and silently swallows semantics." >&2
+        arch_fail=1
+    elif [ "$actual" -lt "$expected" ]; then
+        echo "✗ (G) $ctx: $actual permissive calls, expected $expected — a router entry was" >&2
+        echo "      migrated to the strict parser. That is the goal: lower EXPECTED_$ctx to" >&2
+        echo "      $actual in this script so the ratchet holds the new floor." >&2
+        arch_fail=1
+    fi
+done
+
+legacy_hits="$(grep -nE "$LEGACY_SYMS" "$ORACLE_RS" | grep -vE '^[0-9]+:[[:space:]]*//' || true)"
+if [ -n "$legacy_hits" ]; then
+    echo "✗ (G) legacy permissive symbol reintroduced in $ORACLE_RS:" >&2
+    printf '%s\n' "$legacy_hits" >&2
+    echo "      parse_keyword_from_oracle/extract_keyword_line were RENAMED to the" >&2
+    echo "      grant-context names to make this boundary nameable. Do not resurrect them." >&2
+    arch_fail=1
+fi
+
+if [ "$arch_fail" -ne 0 ]; then
+    echo "" >&2
+    echo "Gate G FAIL (router/grant architecture)." >&2
+    exit 1
+fi
+printf 'Gate G PASS (router/grant architecture: strict router vs permissive grant boundary intact)\n'
+
+# ---------------------------------------------------------------------------
 # DO NOT "harden" families (A), (B), (E), (F) by filtering them through the
 # census lexer (scripts/zone_authority_census.py `strip_noncode`). It looks like
 # the obvious single-authority move. It would BLIND this gate. (#76)
