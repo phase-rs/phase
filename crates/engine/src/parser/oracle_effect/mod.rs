@@ -25390,6 +25390,40 @@ pub(crate) fn parse_effect_chain_ir(
                     .push();
                 continue;
             }
+
+            // CR 608.2c: "[then] do the same for <type> cards/permanents." —
+            // Estrid, the Masked: "Return all non-Aura enchantment cards … to
+            // the battlefield, then do the same for Aura cards." Clone the
+            // antecedent sibling effect and swap its type filter for the stated
+            // type (the same clone mechanic as the scoped fan-out above), so the
+            // repeated action lands on the sibling type without a new disposition
+            // or engine variant. Placed after the scoped/before the targeted
+            // forms; the three subjects are disjoint ("each …" / "for <type>" /
+            // "target opponent …").
+            if let Some(new_filter) = sequence::try_parse_do_the_same_for_type(normalized_text) {
+                let new_type_filters = match new_filter {
+                    TargetFilter::Typed(t) => t.type_filters,
+                    _ => Vec::new(),
+                };
+                let mut cloned = prev_effect;
+                each_target_filter_mut(&mut cloned, &mut |tf| {
+                    if let TargetFilter::Typed(existing) = tf {
+                        existing.type_filters = new_type_filters.clone();
+                    }
+                });
+                builder
+                    .clause(
+                        normalized_text,
+                        parsed_clause(cloned),
+                        chunk.boundary_after,
+                        ClauseDisposition::Emit {
+                            followup: None,
+                            intrinsic: None,
+                        },
+                    )
+                    .push();
+                continue;
+            }
         }
 
         // CR 608.2c + CR 601.2c: "[then] target opponent does the same / does
