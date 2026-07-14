@@ -9096,6 +9096,97 @@ fn tolarian_terror_self_cost_reduction_applies_from_hand() {
     }
 }
 
+/// CR 601.2f + CR 715.2: Hearth Elemental's discount counts instant cards,
+/// sorcery cards, and permanent cards that have an Adventure exactly once.
+#[test]
+fn hearth_elemental_self_cost_reduction_counts_adventures() {
+    let mut state = setup_game_at_main_phase();
+    let hearth = create_object(
+        &mut state,
+        CardId(991),
+        PlayerId(0),
+        "Hearth Elemental".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&hearth).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 6,
+        };
+        obj.static_definitions.push(
+            parse_static_line(
+                "This spell costs {X} less to cast, where X is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.",
+            )
+            .expect("Hearth Elemental cost reduction should parse"),
+        );
+    }
+
+    for (i, ty) in [CoreType::Instant, CoreType::Sorcery, CoreType::Creature]
+        .into_iter()
+        .enumerate()
+    {
+        let id = create_object(
+            &mut state,
+            CardId(920 + i as u64),
+            PlayerId(0),
+            format!("GY{i}"),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(ty);
+        if i == 2 {
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: "Adventure".to_string(),
+                power: None,
+                toughness: None,
+                loyalty: None,
+                defense: None,
+                card_types: Default::default(),
+                mana_cost: ManaCost::generic(1),
+                keywords: vec![],
+                abilities: vec![],
+                trigger_definitions: Default::default(),
+                replacement_definitions: Default::default(),
+                static_definitions: Default::default(),
+                color: vec![],
+                printed_ref: None,
+                modal: None,
+                additional_cost: None,
+                strive_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
+                layout_kind: Some(crate::types::card::LayoutKind::Adventure),
+            });
+        }
+    }
+
+    let ordinary = create_object(
+        &mut state,
+        CardId(924),
+        PlayerId(0),
+        "Ordinary creature".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&ordinary)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+
+    let mut mana_cost = state.objects.get(&hearth).unwrap().mana_cost.clone();
+    super::super::casting::apply_self_spell_cost_modifiers(
+        &state,
+        PlayerId(0),
+        hearth,
+        &mut mana_cost,
+    );
+    assert!(matches!(mana_cost, ManaCost::Cost { generic: 3, .. }));
+}
+
 /// Apply an Alchemy "perpetually gains \"This spell costs {N} less/more to
 /// cast\"" grant to `spell_id` through the REAL resolution path
 /// (`parse_effect_chain` → `build_resolved_from_def` → `resolve_ability_chain`),
