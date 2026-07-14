@@ -490,6 +490,7 @@ mod issue_564_wishclaw_talisman_control;
 mod issue_5657_zurs_weirding;
 mod issue_565_birthing_ritual_end_step_trigger;
 mod issue_566_ragavan_dash_cast;
+mod issue_5760_us_agent_equipment_attach;
 mod issue_580_solitude_evoke_prompt;
 mod issue_581_mystic_remora_cumulative_upkeep;
 mod issue_583_vivi_ornitier_mana_source;

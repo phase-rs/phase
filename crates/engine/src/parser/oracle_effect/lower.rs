@@ -2291,13 +2291,15 @@ fn parse_trailing_where_x_quantity(tail: &str) -> Option<QuantityExpr> {
 ///    `state.last_created_token_ids` into the delayed ability's targets.
 pub(super) fn resolve_populated_token_anaphors(defs: &mut [AbilityDefinition]) {
     for i in 0..defs.len() {
-        if !defs[..i]
+        let Some(nearest_creator) = defs[..i]
             .iter()
-            .any(|d| is_token_creating_effect(&d.effect))
-        {
+            .rev()
+            .find(|d| is_token_creating_effect(&d.effect))
+        else {
             continue;
-        }
-        rewrite_populated_anaphor_in_def(&mut defs[i]);
+        };
+        let token_is_attachable = token_creator_is_attachable(&nearest_creator.effect);
+        rewrite_populated_anaphor_in_def(&mut defs[i], token_is_attachable);
     }
 }
 
@@ -2305,6 +2307,21 @@ pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::Populate | Effect::Token { .. } | Effect::CopyTokenOf { .. }
+    )
+}
+
+/// CR 301.5 + CR 303.4: True when the nearest preceding token creator makes
+/// an Equipment or Aura token — a permanent that can only ever be the
+/// *attachment* in an `Attach` effect, never the host. Used to route the
+/// post-token anaphor rewrite (`rewrite_parent_target_to_last_created`) at the
+/// correct slot: an ambiguous "it" following an Equipment/Aura token creator
+/// (U.S.Agent, John Walker: "create ... Equipment ... token ... Attach it to
+/// ~") names the just-created token as the *attachment*, not the target.
+fn token_creator_is_attachable(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Token { types, .. }
+            if types.iter().any(|t| t.eq_ignore_ascii_case("Equipment") || t.eq_ignore_ascii_case("Aura"))
     )
 }
 
@@ -2339,7 +2356,7 @@ fn rebind_self_ref_grant_to_last_created(effect: &mut Effect) {
 /// Walk an ability definition, rewriting the populated-token anaphor at
 /// whichever level it appears. Recurses into `CreateDelayedTrigger.effect` so
 /// the "sacrifice it" pattern inside a delayed trigger also rewrites.
-fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition) {
+fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition, token_is_attachable: bool) {
     if let Some(new_effect) =
         rewrite_token_created_this_way_unimplemented(&def.effect, def.duration.clone())
     {
@@ -2348,11 +2365,11 @@ fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition) {
         return;
     }
 
-    rewrite_populated_anaphor_in_effect(&mut def.effect);
+    rewrite_populated_anaphor_in_effect(&mut def.effect, token_is_attachable);
     // CR 608.2c + CR 701.36a: recurse into sub_ability chains so anaphoric
     // rewrites apply to sibling followups (Fractal Harness PutCounter/Attach).
     if let Some(sub) = def.sub_ability.as_mut() {
-        rewrite_populated_anaphor_in_def(sub);
+        rewrite_populated_anaphor_in_def(sub, token_is_attachable);
     }
 }
 
@@ -2450,7 +2467,7 @@ pub(super) fn fold_token_it_has_grants_into_token_statics(def: &mut AbilityDefin
 /// Walk an effect, rewriting the populated-token anaphor at whichever level
 /// it appears. Recurses into `CreateDelayedTrigger.effect` so the "sacrifice
 /// it" pattern inside a delayed trigger also rewrites.
-fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
+fn rewrite_populated_anaphor_in_effect(effect: &mut Effect, token_is_attachable: bool) {
     // Case 1: bare Unimplemented anaphor at the top level (e.g., "the token
     // created this way gains haste").
     if let Some(new_effect) = rewrite_token_created_this_way_unimplemented(effect, None) {
@@ -2462,7 +2479,7 @@ fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
     // via ParentTarget. Rewrite to LastCreated and recurse into the inner
     // effect for any nested anaphors.
     if let Effect::CreateDelayedTrigger { effect: inner, .. } = effect {
-        rewrite_parent_target_to_last_created(&mut inner.effect);
+        rewrite_parent_target_to_last_created(&mut inner.effect, token_is_attachable);
         // CR 603.7c + CR 608.2c (issue #4601): a PHASE-triggered token-copier
         // (Mishra, Eminent One — "At the beginning of combat on your turn,
         // create a token …, Sacrifice it at the beginning of the next end step")
@@ -2470,7 +2487,7 @@ fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
         // `SelfRef` (the source) rather than `ParentTarget`/`TriggeringSource`.
         // In this gated post-token scope the antecedent is the created token.
         rewrite_delayed_cleanup_self_ref_to_last_created(&mut inner.effect);
-        rewrite_populated_anaphor_in_effect(&mut inner.effect);
+        rewrite_populated_anaphor_in_effect(&mut inner.effect, token_is_attachable);
     }
 
     // Case 3: a bare "it gains/gets X" grant that parsed to a `GenericEffect`
@@ -2482,8 +2499,10 @@ fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
 
     // Case 4 (CR 301.5b + CR 122.6a): imperative followups like Fractal Harness's
     // "attach this Equipment to it" parse "it" as ParentTarget (Self-ETB trigger
-    // subject). After a token creator in the same chain, rewrite to LastCreated.
-    rewrite_parent_target_to_last_created(effect);
+    // subject). After a token creator in the same chain, rewrite to LastCreated —
+    // on the `attachment` slot when the created token is itself an Equipment/Aura
+    // (U.S.Agent, John Walker: "Attach it to ~"), or the `target` slot otherwise.
+    rewrite_parent_target_to_last_created(effect, token_is_attachable);
 }
 
 /// If `effect` is `Unimplemented { description: "<anaphor> <verb-phrase>" }`,
@@ -2710,7 +2729,10 @@ pub(super) fn thread_chosen_damage_source_into_oneshot_effects(defs: &mut [Abili
     }
 }
 
-pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
+pub(super) fn rewrite_parent_target_to_last_created(
+    effect: &mut Effect,
+    token_is_attachable: bool,
+) {
     match effect {
         Effect::GenericEffect {
             static_abilities,
@@ -2757,14 +2779,32 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
                 *duration = Some(Duration::Permanent);
             }
         }
-        Effect::Attach { target, .. } => {
-            // CR 608.2c + CR 301.5b: after a token creator, "attach this
-            // Equipment to it" may have resolved the host pronoun through the
-            // source-default `SelfRef` path before this gated post-token pass.
-            if matches!(
+        Effect::Attach {
+            attachment,
+            target,
+        } => {
+            if token_is_attachable {
+                // CR 301.5 + CR 303.4: the just-created token is itself an
+                // Equipment/Aura, so it can only be the *attachment* — an
+                // Equipment/Aura can never be an attachment's host. A bare
+                // "it" here (U.S.Agent, John Walker: "Attach it to ~") parses
+                // through the attachment-anaphor fallback as `ParentTarget`;
+                // rebind it to the created token and leave `target`'s
+                // explicit self-reference alone.
+                if matches!(
+                    attachment,
+                    TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+                ) {
+                    *attachment = TargetFilter::LastCreated;
+                }
+            } else if matches!(
                 target,
                 TargetFilter::SelfRef | TargetFilter::ParentTarget | TargetFilter::TriggeringSource
             ) {
+                // CR 608.2c + CR 301.5b: after a token creator, "attach this
+                // Equipment to it" may have resolved the host pronoun through
+                // the source-default `SelfRef` path before this gated
+                // post-token pass.
                 *target = TargetFilter::LastCreated;
             }
         }
@@ -2917,7 +2957,7 @@ pub(super) fn nest_whenever_this_turn_token_cleanup_delayed_trigger(def: &mut Ab
         ..
     } = &mut *cleanup_sub.effect
     {
-        rewrite_parent_target_to_last_created(&mut cleanup_effect.effect);
+        rewrite_parent_target_to_last_created(&mut cleanup_effect.effect, false);
     }
 
     let mut cursor = inner.as_mut();
@@ -11101,7 +11141,7 @@ mod token_anaphor_rewrite_tests {
             target: Some(TargetFilter::ParentTarget),
         };
 
-        rewrite_parent_target_to_last_created(&mut effect);
+        rewrite_parent_target_to_last_created(&mut effect, false);
 
         match effect {
             Effect::GenericEffect {

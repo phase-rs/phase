@@ -45939,3 +45939,49 @@ fn threshold_land_balance_rejects_nonbasic_search_variant() {
     );
     assert!(matches!(def.effect.as_ref(), Effect::Unimplemented { .. }));
 }
+
+/// Issue #5760: U.S.Agent, John Walker creates an Equipment token, then
+/// "Attach it to ~" in a following sentence. "It" is the just-created
+/// Equipment (`LastCreated`); "~" is U.S.Agent itself (`SelfRef`). Before the
+/// fix, the post-token anaphor rewrite unconditionally treated the `Attach`'s
+/// `target` slot as the ambiguous anaphor (correct for Fractal Harness-style
+/// "attach this Equipment to it", where the *source* is the Equipment being
+/// attached and the created token is the host) — which swapped the roles
+/// here, since U.S.Agent's created token IS the Equipment (CR 301.5: an
+/// Equipment can only ever be an `attachment`, never a host).
+#[test]
+fn us_agent_attaches_created_equipment_token_to_self() {
+    let parsed = parse_oracle_text(
+        "When U.S.Agent enters, create a colorless Equipment artifact token named Sturdy Shield with \"Equipped creature gets +1/+2\" and equip {2}. Attach it to U.S.Agent.",
+        "U.S.Agent, John Walker",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Human".to_string(), "Soldier".to_string(), "Hero".to_string()],
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("ETB trigger must have an execute chain");
+    assert!(
+        matches!(*execute.effect, Effect::Token { .. }),
+        "expected the ETB root to create the Equipment token, got {:?}",
+        execute.effect
+    );
+    let attach = execute
+        .sub_ability
+        .as_ref()
+        .expect("Attach must follow the token creation");
+    let Effect::Attach { attachment, target } = attach.effect.as_ref() else {
+        panic!("expected Attach sub-ability, got {:?}", attach.effect);
+    };
+    assert_eq!(
+        *attachment,
+        TargetFilter::LastCreated,
+        "the created Equipment token must be the attachment, not U.S.Agent"
+    );
+    assert_eq!(
+        *target,
+        TargetFilter::SelfRef,
+        "U.S.Agent must remain the attachment's host"
+    );
+}
