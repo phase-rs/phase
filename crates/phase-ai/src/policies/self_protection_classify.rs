@@ -18,6 +18,7 @@ use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 
 use engine::game::combat::get_valid_block_targets_for_player;
+use engine::game::combat_damage::participates_in_pending_combat_damage_substep;
 use engine::game::effects::effect::generic_effect_application_filter;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::functioning_abilities::active_static_definitions;
@@ -751,6 +752,14 @@ fn grant_answers_targeted_effect(
     recipient_id: ObjectId,
     source: Option<&engine::game::game_object::GameObject>,
 ) -> Option<bool> {
+    if matches!(
+        effect,
+        Effect::Fight { .. }
+            | Effect::EachDealsDamageEqualToPower { .. }
+            | Effect::EachSourceDealsDamage { .. }
+    ) {
+        return None;
+    }
     if !matches!(effect_polarity(effect), EffectPolarity::Harmful) {
         return Some(false);
     }
@@ -998,7 +1007,12 @@ fn combat_payoff_for_opportunity(
                             return Some(true);
                         }
                     }
-                    DefensiveGrant::Indestructible => saw_indestructible_pair = true,
+                    DefensiveGrant::Indestructible => {
+                        saw_indestructible_pair |= paired_ids.iter().any(|paired_id| {
+                            damage_becomes_marked(state, state.objects.get(paired_id))
+                                != Some(false)
+                        });
+                    }
                     DefensiveGrant::CantBeTargeted
                     | DefensiveGrant::HexproofFrom(_)
                     | DefensiveGrant::PreventDamage => {}
@@ -1019,7 +1033,12 @@ fn combat_payoff_for_opportunity(
                 if grant_already_effective(state, *recipient_id, &opportunity.grant) {
                     continue;
                 }
-                let paired_ids = combat_pair_ids(combat, *recipient_id);
+                let paired_ids: Vec<_> = combat_pair_ids(combat, *recipient_id)
+                    .into_iter()
+                    .filter(|paired_id| {
+                        participates_in_pending_combat_damage_substep(state, *paired_id)
+                    })
+                    .collect();
                 if paired_ids.is_empty() {
                     continue;
                 }
@@ -1573,6 +1592,28 @@ mod tests {
     }
 
     #[test]
+    fn fight_damage_is_ambiguous_for_indestructible_payoff() {
+        let mut state = GameState::new_two_player(42);
+        let recipient = create_test_creature(&mut state, PlayerId(0));
+        let source = create_test_creature(&mut state, PlayerId(1));
+        let effect = Effect::Fight {
+            target: TargetFilter::Any,
+            subject: TargetFilter::SelfRef,
+        };
+
+        assert_eq!(
+            grant_answers_targeted_effect(
+                &state,
+                &DefensiveGrant::Indestructible,
+                &effect,
+                recipient,
+                state.objects.get(&source),
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn protection_evasion_requires_an_untapped_legal_blocker() {
         use engine::game::combat::{AttackerInfo, CombatState};
         use engine::types::mana::ManaColor;
@@ -1621,6 +1662,35 @@ mod tests {
             blockers_declared_by: vec![opp],
             ..Default::default()
         });
+        let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible);
+
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, attacker, &effect),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn self_indestructible_has_no_payoff_against_infect_blocker() {
+        use engine::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let opp = PlayerId(1);
+        let attacker = create_test_creature(&mut state, ai);
+        let blocker = create_test_creature(&mut state, opp);
+        let blocker_object = state.objects.get_mut(&blocker).unwrap();
+        blocker_object.power = Some(3);
+        blocker_object.keywords.push(Keyword::Infect);
+        state.phase = Phase::DeclareBlockers;
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, opp)],
+            blockers_declared_by: vec![opp],
+            ..Default::default()
+        };
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        state.combat = Some(combat);
         let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible);
 
         assert_eq!(
@@ -1703,6 +1773,45 @@ mod tests {
         assert_eq!(
             self_protection_effect_payoff(&state, ai, attacker, &effect),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn regular_substep_excludes_first_strike_only_but_includes_double_strike() {
+        use engine::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let opp = PlayerId(1);
+        let attacker = create_test_creature(&mut state, ai);
+        let blocker = create_test_creature(&mut state, opp);
+        let blocker_object = state.objects.get_mut(&blocker).unwrap();
+        blocker_object.power = Some(3);
+        blocker_object.keywords.push(Keyword::FirstStrike);
+        state.phase = Phase::CombatDamage;
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, opp)],
+            first_strike_done: true,
+            ..Default::default()
+        };
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        state.combat = Some(combat);
+        let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible);
+
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, attacker, &effect),
+            Some(false),
+            "first-strike-only blocker has no pending regular damage"
+        );
+
+        let blocker_object = state.objects.get_mut(&blocker).unwrap();
+        blocker_object.keywords.clear();
+        blocker_object.keywords.push(Keyword::DoubleStrike);
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, attacker, &effect),
+            None,
+            "double strike blocker still participates in regular damage"
         );
     }
 }

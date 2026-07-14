@@ -92,11 +92,16 @@ impl TacticalPolicy for ReactiveSelfProtectionPolicy {
         let Some(cast_facts) = ctx.cast_facts() else {
             return PolicyVerdict::neutral(PolicyReason::new("reactive_self_protection_na"));
         };
-        let is_protection_spell = cast_facts
+        let spell_effects: Vec<_> = cast_facts
             .primary_effects
             .iter()
             .flat_map(|ability| collect_definition_effects(ability))
-            .any(is_self_protection_effect);
+            .collect();
+        // A mixed chain or modal spell may have a valuable non-protection line.
+        // Reject the cast only when every reachable spell effect is itself a
+        // self-protection effect; otherwise preserve the existing fail-open.
+        let is_protection_spell =
+            !spell_effects.is_empty() && spell_effects.into_iter().all(is_self_protection_effect);
         if !is_protection_spell {
             return PolicyVerdict::neutral(PolicyReason::new("reactive_self_protection_na"));
         }
@@ -324,6 +329,64 @@ mod tests {
         assert!(matches!(
             cast_verdict(&state, id),
             PolicyVerdict::Reject { .. }
+        ));
+    }
+
+    #[test]
+    fn casting_mixed_protection_chain_is_not_rejected() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(22),
+            AI,
+            "Mixed Protection Spell".to_string(),
+            Zone::Hand,
+        );
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        );
+        ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )));
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(ability);
+
+        assert!(matches!(
+            cast_verdict(&state, id),
+            PolicyVerdict::Score { .. }
+        ));
+    }
+
+    #[test]
+    fn casting_modal_spell_with_nonprotection_mode_is_not_rejected() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(23),
+            AI,
+            "Modal Protection Spell".to_string(),
+            Zone::Hand,
+        );
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        );
+        ability.mode_abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(ability);
+
+        assert!(matches!(
+            cast_verdict(&state, id),
+            PolicyVerdict::Score { .. }
         ));
     }
 
