@@ -5124,6 +5124,123 @@ mod tests {
         (state, copy_ench, aura, hosts)
     }
 
+    /// Build an "Enchant player" Aura source plus Copy Enchantment entering
+    /// through the real `BecomeCopy` replacement. Both players are legal hosts,
+    /// so picking the Aura as the copy source must pause on
+    /// `ReturnAsAuraTarget` with `TargetRef::Player` choices.
+    fn drive_copy_enchantment_of_player_aura() -> (GameState, ObjectId, ObjectId) {
+        use crate::types::ability::Effect;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(42);
+
+        let enchant_player = Keyword::Enchant(TargetFilter::Player);
+
+        let aura = create_object(
+            &mut state,
+            CardId(302),
+            PlayerId(0),
+            "Psychic Venom".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            obj.base_card_types.subtypes = vec!["Aura".to_string()];
+            obj.card_types.subtypes = vec!["Aura".to_string()];
+            obj.base_keywords = vec![enchant_player.clone()];
+            obj.keywords = vec![enchant_player];
+        }
+
+        let copy_ench = create_object(
+            &mut state,
+            CardId(303),
+            PlayerId(0),
+            "Copy Enchantment".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&copy_ench).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+        }
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "You may have this enchantment enter as a copy of any enchantment on the battlefield.",
+            "Copy Enchantment",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let copy_filter = parsed
+            .replacements
+            .iter()
+            .find_map(|r| match r.execute.as_deref()?.effect.as_ref() {
+                Effect::BecomeCopy { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("Copy Enchantment must parse a BecomeCopy clone replacement");
+
+        state
+            .objects
+            .get_mut(&copy_ench)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::BecomeCopy {
+                            recipient: TargetFilter::SelfRef,
+                            target: copy_filter,
+                            duration: None,
+                            mana_value_limit: None,
+                            additional_modifications: Vec::new(),
+                        },
+                    )),
+            );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::ZoneChange {
+            object_id: copy_ench,
+            from: Zone::Stack,
+            to: Zone::Battlefield,
+            cause: None,
+            attach_to: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            applied: std::collections::HashSet::new(),
+            face_down_profile: None,
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice for Copy Enchantment's optional copy, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept Copy Enchantment's enter-as-a-copy");
+
+        let WaitingFor::CopyTargetChoice { valid_targets, .. } = state.waiting_for.clone() else {
+            panic!(
+                "expected CopyTargetChoice after accepting the copy, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert!(
+            valid_targets.contains(&aura),
+            "the enchant-player Aura must be a legal copy source"
+        );
+
+        (state, copy_ench, aura)
+    }
+
     /// CR 303.4f + CR 704.5m: Copy Enchantment entering as a copy of an Aura
     /// ("Level Up") with exactly one legal host must AUTO-ATTACH to that host as
     /// the copy is realized, then SURVIVE the unattached-Aura state-based action.
@@ -5262,6 +5379,66 @@ mod tests {
         assert!(
             state.battlefield.contains(&copy_ench),
             "the attached copy must survive the unattached-Aura SBA"
+        );
+    }
+
+    /// CR 303.4f: With multiple legal player hosts, an entering copied
+    /// "Enchant player" Aura must offer player hosts and attach to the chosen
+    /// player. This guards the shared `ReturnAsAuraTarget` resume path for
+    /// `TargetRef::Player`, not only object hosts.
+    #[test]
+    fn copy_enchantment_becomes_enchant_player_aura_prompts_then_attaches_to_player() {
+        use crate::game::game_object::AttachTarget;
+
+        let (mut state, copy_ench, aura) = drive_copy_enchantment_of_player_aura();
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(aura)),
+            },
+        )
+        .expect("pick the enchant-player Aura as the copy source");
+
+        let WaitingFor::ReturnAsAuraTarget {
+            returned_id,
+            legal_targets,
+            ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected ReturnAsAuraTarget for the multi-player attach choice, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(
+            returned_id, copy_ench,
+            "the entering copy is the Aura to attach"
+        );
+        assert!(
+            legal_targets.contains(&TargetRef::Player(PlayerId(0)))
+                && legal_targets.contains(&TargetRef::Player(PlayerId(1))),
+            "both players must be offered as legal Aura hosts"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+        )
+        .expect("choose the Aura's player host");
+
+        assert_eq!(
+            state.objects[&copy_ench].attached_to,
+            Some(AttachTarget::Player(PlayerId(1))),
+            "the copied Aura must attach to the chosen player"
+        );
+        let mut events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+        assert!(
+            state.battlefield.contains(&copy_ench),
+            "the attached player-enchanting copy must survive the unattached-Aura SBA"
         );
     }
 
