@@ -2977,6 +2977,11 @@ export interface EngineAdapter {
    * action payload or the UI state.
    */
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  /**
+   * Read-only preview of the exact automatic `CastSpell` action currently
+   * offered by the engine. Unsupported transports omit this capability.
+   */
+  previewManaPayment?(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
   /**

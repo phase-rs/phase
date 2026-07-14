@@ -7703,28 +7703,37 @@ fn option_allowed_for_context(
 fn find_least_flexible_source(
     available: &[ManaSourceOption],
     used: &HashSet<ObjectId>,
+    generic_reservations: &HashSet<ObjectId>,
     acceptable: &[ManaType],
     requires_two_or_more_color_source: bool,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> Option<ManaSourceOption> {
-    available
-        .iter()
-        .filter(|opt| {
-            !used.contains(&opt.object_id)
-                && option_satisfies(
-                    opt,
-                    acceptable,
-                    requires_two_or_more_color_source,
-                    payment_context,
-                )
-        })
-        .min_by_key(|opt| {
-            available
-                .iter()
-                .filter(|o| o.object_id == opt.object_id)
-                .count()
-        })
-        .cloned()
+    for exclude_reserved in [true, false] {
+        let least_flexible = available
+            .iter()
+            .filter(|opt| {
+                !used.contains(&opt.object_id)
+                    && (!exclude_reserved || !generic_reservations.contains(&opt.object_id))
+                    && option_satisfies(
+                        opt,
+                        acceptable,
+                        requires_two_or_more_color_source,
+                        payment_context,
+                    )
+            })
+            .min_by_key(|opt| {
+                available
+                    .iter()
+                    .filter(|other| other.object_id == opt.object_id)
+                    .count()
+            })
+            .cloned();
+        if least_flexible.is_some() {
+            return least_flexible;
+        }
+    }
+
+    None
 }
 
 /// Auto-tap mana sources controlled by `player` to produce enough mana for `cost`.
@@ -7881,7 +7890,7 @@ fn collect_sorted_auto_tap_source_options(
     deprioritize_source: Option<ObjectId>,
     excluded_sources: &HashSet<ObjectId>,
 ) -> Vec<ManaSourceOption> {
-    use crate::types::card_type::CoreType;
+    use crate::types::card_type::{CoreType, Supertype};
 
     // Loop-invariant hoist: the TapsForMana trigger-source list is identical for
     // every land in this board-global sweep, so compute it once instead of
@@ -7939,7 +7948,7 @@ fn collect_sorted_auto_tap_source_options(
     // The entire penalty axis is consulted only via `ManaSourcePenalty`
     // methods, so a future variant (e.g. `DiscardsOnActivation`) updates
     // the ordering at one place, not seven.
-    available.sort_by_key(|option| {
+    let source_sort_key = |option: &ManaSourceOption| {
         let obj = state.objects.get(&option.object_id);
         let is_land = obj.is_some_and(|o| o.card_types.core_types.contains(&CoreType::Land));
         let is_creature =
@@ -7968,12 +7977,33 @@ fn collect_sorted_auto_tap_source_options(
             // non-land non-creature mana source (rock / Signet)
             2
         };
+        // Within otherwise-identical colored land rows, keep atomic multi-mana
+        // combinations together, then prefer basic lands to nonbasic singles.
+        // This is a total lexicographic key rather than a pairwise exception,
+        // so combo rows retain their existing behavior and ordering remains
+        // transitive.
+        let colored_land_row_priority =
+            if is_land && !is_creature && option.mana_type != ManaType::Colorless {
+                match option.atomic_combination {
+                    Some(_) => 0,
+                    None if obj
+                        .is_some_and(|o| o.card_types.supertypes.contains(&Supertype::Basic)) =>
+                    {
+                        1
+                    }
+                    None => 2,
+                }
+            } else {
+                0
+            };
         (
             option.penalty.tier_byte() as u32,
             card_tier,
             option.penalty.priority_amount(),
+            colored_land_row_priority,
         )
-    });
+    };
+    available.sort_by_key(source_sort_key);
 
     available
 }
@@ -8156,6 +8186,34 @@ fn auto_tap_mana_sources_inner(
         effective_ctx,
     );
 
+    // Preserve a free, colorless source for each generic slot when another
+    // source can cover the colored shard. This keeps a painland's `{C}` mode
+    // available for generic payment instead of paying life for both mana.
+    // Only reserve options that need no mana sub-cost: those sources can still
+    // supply the generic slot without creating a recursive payment dependency.
+    let mut generic_reservations = HashSet::new();
+    let reservable_count = generic as usize + deferred_generic;
+    for option in available {
+        if generic_reservations.len() == reservable_count {
+            break;
+        }
+        let has_no_mana_sub_cost = option.ability_index.is_none_or(|ability_index| {
+            state
+                .objects
+                .get(&option.object_id)
+                .and_then(|obj| obj.abilities.get(ability_index))
+                .is_some_and(|ability| mana_sub_cost_of(&ability.cost).is_none())
+        });
+        if option.atomic_combination.is_none()
+            && option.mana_type == ManaType::Colorless
+            && option_allowed_for_context(option, effective_ctx)
+            && option.penalty == mana_sources::ManaSourcePenalty::None
+            && has_no_mana_sub_cost
+        {
+            generic_reservations.insert(option.object_id);
+        }
+    }
+
     // Phase 1: Assign remaining single-color sources to shards using MCV/LCV.
     // The naive greedy approach (tap first matching source per shard) fails when
     // a flexible source (dual land, multi-color dork) gets consumed for a color
@@ -8197,6 +8255,7 @@ fn auto_tap_mana_sources_inner(
         if let Some(option) = find_least_flexible_source(
             available,
             &used_sources,
+            &generic_reservations,
             acceptable,
             *requires_two_or_more_color_source,
             effective_ctx,
@@ -8217,9 +8276,14 @@ fn auto_tap_mana_sources_inner(
     //   class 0 — color-locked sources (every unit colorless): usable ONLY for
     //             generic, so spend them first and keep flexible colored
     //             sources open. This is why a colorless rock (Sol Ring, Mind
-    //             Stone) fills generic before a colored land is tapped.
-    //   class 1 — flexible single-mana sources (one colored mana each).
-    //   class 2 — flexible (colored) combination sources: last resort. Burning
+    //             Stone) fills generic before a colored land is tapped. A
+    //             colorless row of a multicolor nonbasic land is excluded: it
+    //             stays flexible at the object level and must not leapfrog a
+    //             basic land.
+    //   class 1 — basic lands.
+    //   class 2 — other flexible single-mana sources, including colorless rows
+    //             of multicolor nonbasic lands.
+    //   class 3 — flexible (colored) combination sources: last resort. Burning
     //             a 2-mana colored combo on generic wastes half its output when
     //             a cheaper line exists, so a filter land's `{T}: Add {C}`
     //             (class 0) is preferred over its colored combo for pure
@@ -8235,15 +8299,37 @@ fn auto_tap_mana_sources_inner(
             Some(combo) => combo.iter().all(|m| *m == ManaType::Colorless),
             None => option.mana_type == ManaType::Colorless,
         };
-        if color_locked {
+        let object = state.objects.get(&option.object_id);
+        let is_basic_land = object.is_some_and(|obj| {
+            obj.card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+                && obj
+                    .card_types
+                    .supertypes
+                    .contains(&crate::types::card_type::Supertype::Basic)
+        });
+        let is_multicolor_nonbasic_land = object.is_some_and(|obj| {
+            obj.card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+                && !obj
+                    .card_types
+                    .supertypes
+                    .contains(&crate::types::card_type::Supertype::Basic)
+                && option.source_could_produce_two_or_more_colors
+        });
+        if color_locked && !is_multicolor_nonbasic_land {
             0
-        } else if option.atomic_combination.is_none() {
+        } else if is_basic_land {
             1
-        } else {
+        } else if option.atomic_combination.is_none() {
             2
+        } else {
+            3
         }
     };
-    for class in 0u8..=2 {
+    for class in 0u8..=3 {
         if remaining_generic == 0 {
             break;
         }

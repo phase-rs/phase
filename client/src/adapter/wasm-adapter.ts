@@ -7,6 +7,7 @@ import type {
   GameState,
   LegalActionsResult,
   MatchConfig,
+  ObjectId,
   PersistedGameState,
   PlayerId,
   SubmitResult,
@@ -249,6 +250,16 @@ export class WasmAdapter implements EngineAdapter {
     try {
       if (this.engine) return await this.engine.submitAction(actor, action);
       return await this.fallback!.submitAction(action, actor);
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  async previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]> {
+    this.assertInitialized();
+    try {
+      if (this.engine) return await this.engine.previewManaPayment(actor, action);
+      return await this.fallback!.previewManaPayment(action, actor);
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -673,6 +684,7 @@ export class WasmAdapter implements EngineAdapter {
 interface MainThreadFallback {
   ensureCardDatabase(): Promise<number>;
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
   getState(): Promise<GameState>;
   getFilteredState(viewerId: number): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
@@ -723,6 +735,13 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         const r = wasm.submit_action(actor, action);
         if (typeof r === "string") throw new Error(r);
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
+      }),
+
+    previewManaPayment: (action: GameAction, actor: PlayerId) =>
+      enqueue(() => {
+        const sources = wasm.preview_mana_payment_js(actor, action);
+        if (typeof sources === "string") throw new Error(sources);
+        return sources as ObjectId[];
       }),
 
     // null from any of these three getters means WASM `GAME_STATE` is None

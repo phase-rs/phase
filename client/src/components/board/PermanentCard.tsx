@@ -202,6 +202,9 @@ export const PermanentCard = memo(function PermanentCard({
       s.gameState?.derived?.battlefield_keyword_badges?.[String(objectId)]
       ?? EMPTY_KEYWORD_BADGES,
   );
+  const isManaPaymentPreviewSource = useGameStore((s) =>
+    s.manaPaymentPreviewSourceIds.includes(objectId),
+  );
   const isRingBearer = useGameStore((s) => {
     const object = s.gameState?.objects[objectId];
     return object ? s.gameState?.ring_bearer?.[String(object.controller)] === objectId : false;
@@ -658,6 +661,12 @@ export const PermanentCard = memo(function PermanentCard({
       onMouseLeave={handleMouseLeave}
       {...longPressHandlers}
     >
+      {isManaPaymentPreviewSource && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 z-[70] rounded-lg outline outline-2 outline-orange-400 shadow-[0_0_12px_3px_rgba(251,146,60,0.55)]"
+        />
+      )}
       {/* Attachments stagger out to the right of the host with their right
           edge peeking past the host's right edge. The recursive PermanentCard
           render gives each attachment full click/hover/target handling for

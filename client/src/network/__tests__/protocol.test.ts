@@ -29,6 +29,8 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     { type: "reconnect", playerToken: "token-123" },
     { type: "reconnect_rejected", reason: "Unknown token" },
     { type: "action_rejected", reason: "Player kicked" },
+    { type: "mana_payment_preview", requestId: 4, sourceIds: [12] },
+    { type: "mana_payment_preview_rejected", requestId: 4, reason: "Not your turn" },
     {
       type: "action",
       senderPlayerId: 0,
@@ -38,6 +40,11 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       type: "action",
       senderPlayerId: 0,
       action: { type: "TapForConvoke", data: { object_id: 42, mana_type: "Green" } },
+    },
+    {
+      type: "preview_mana_payment",
+      requestId: 4,
+      action: { type: "PassPriority" },
     },
     {
       type: "game_setup",

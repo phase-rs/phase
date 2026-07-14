@@ -107,6 +107,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   const setGroupSelectedCards = useUiStore((s) => s.setGroupSelectedCards);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameObjects = useGameStore((s) => s.gameState?.objects);
+  const manaPaymentPreviewSourceIds = useGameStore((s) => s.manaPaymentPreviewSourceIds);
   const {
     boardChoiceObjectIds,
     committedAttackerIds,
@@ -317,7 +318,9 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
           className="absolute top-0"
           style={{
             left: `${i * staggerPx}px`,
-            zIndex: i,
+            // A preview source must rise above unselected cards in this local
+            // stacking context; its own outline cannot escape this wrapper.
+            zIndex: manaPaymentPreviewSourceIds.includes(id) ? group.count + i : i,
           }}
         >
           <PermanentCard objectId={id} />
