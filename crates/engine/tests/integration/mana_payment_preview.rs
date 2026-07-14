@@ -73,7 +73,7 @@ fn auto_payment_preview_assumes_zero_for_an_unannounced_x_cost() {
     assert_eq!(
         preview_auto_payment_sources(runner.state(), P0, &action).unwrap(),
         forests,
-        "drag preview must use the automatic {3}{G} payment for Broodlord at X=0",
+        "drag preview must use the automatic {{3}}{{G}} payment for Broodlord at X=0",
     );
     assert!(forests.iter().all(|id| !runner.state().objects[id].tapped));
     assert_eq!(runner.state().objects[&broodlord].zone, Zone::Hand);
