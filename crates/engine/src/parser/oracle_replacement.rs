@@ -409,9 +409,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // the gain-life widening below.
     // CR 121.2 + CR 121.2a: the antecedent's grammatical number IS the draw scope,
     // so capture which alternative matched instead of discarding it. A singular
-    // "would draw a card" hooks one individual draw; a count-form "would draw one
-    // or more cards" hooks the instruction, which CR 121.2a modifies "before
-    // considering any of the individual card draws".
+    // "would draw a card" hooks one individual draw; a count-form "would draw
+    // <N> or more cards" hooks the instruction, which CR 121.2a modifies "before
+    // considering any of the individual card draws". The threshold N is an
+    // open-ended axis ("one or more" — Quantum Riddler; "two or more" — Alms
+    // Collector), so parse it with `parse_number` rather than enumerating each
+    // cardinal as its own `tag`; every count-form card in the class classifies
+    // as InstructionCount regardless of the printed threshold.
     let draw_scope = nom_primitives::scan_at_word_boundaries(&lower, |i| {
         alt((
             value(
@@ -420,7 +424,11 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             ),
             value(
                 DrawReplacementScope::InstructionCount,
-                tag("would draw one or more cards"),
+                (
+                    tag("would draw "),
+                    nom_primitives::parse_number,
+                    tag(" or more cards"),
+                ),
             ),
         ))
         .parse(i)
@@ -16873,6 +16881,60 @@ mod tests {
                 }
             ) && *offset == 1
         ));
+    }
+
+    /// #5678 + CR 121.2a: the count-form antecedent "would draw <N> or more
+    /// cards" is an open-ended threshold axis, not a fixed pair of `tag`s. Alms
+    /// Collector ("if an opponent would draw two or more cards, instead you and
+    /// that player each draw a card") must lower to a `Draw` replacement scoped
+    /// `InstructionCount` — it modifies the draw instruction before any
+    /// individual card draw, exactly like Quantum Riddler's "one or more".
+    /// Before the fix the branch only matched "a card" / "one or more cards", so
+    /// the two-or-more line produced no replacement at all (parse → `None`), the
+    /// load-bearing discriminator this regression fails on if the threshold is
+    /// de-parameterized back to a fixed tag.
+    #[test]
+    fn count_form_draw_replacement_parameterizes_threshold() {
+        // Alms Collector: opponent-scoped "two or more" count-form.
+        let alms = parse_replacement_line(
+            "If an opponent would draw two or more cards, instead you and that player each draw a card.",
+            "Alms Collector",
+        )
+        .expect("'would draw two or more cards' must lower to a Draw replacement");
+        assert_eq!(alms.event, ReplacementEvent::Draw);
+        // CR 121.2a: a count-form antecedent hooks the instruction, not one draw.
+        assert_eq!(
+            alms.draw_scope,
+            Some(DrawReplacementScope::InstructionCount)
+        );
+        assert_eq!(alms.mode, ReplacementMode::Mandatory);
+        // CR 614.1a: "an opponent would draw" scopes the shield to opponents.
+        assert_eq!(alms.valid_player, Some(ReplacementPlayerScope::Opponent));
+
+        // Class generality — the threshold is a parameter, so an unprinted "three
+        // or more" resolves the same InstructionCount scope rather than needing
+        // its own hand-written arm.
+        let three = parse_replacement_line(
+            "If you would draw three or more cards, instead you draw a card.",
+            "Hypothetical Three-Draw Ward",
+        )
+        .expect("'would draw three or more cards' must lower to a Draw replacement");
+        assert_eq!(
+            three.draw_scope,
+            Some(DrawReplacementScope::InstructionCount)
+        );
+
+        // Guard the boundary: a singular "would draw a card" stays IndividualDraw
+        // and must not be swept up by the count-form arm.
+        let singular = parse_replacement_line(
+            "If you would draw a card, instead you gain 1 life.",
+            "Hypothetical Singular Ward",
+        )
+        .expect("singular antecedent must still parse");
+        assert_eq!(
+            singular.draw_scope,
+            Some(DrawReplacementScope::IndividualDraw)
+        );
     }
 
     #[test]

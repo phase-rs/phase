@@ -271,6 +271,16 @@ def reads_event_context_amount(count: object) -> bool:
 # the execute-shape rule below would silently call it IndividualDraw -- wrong.
 KNOWN_QUANTITY_MODIFICATIONS = {"Prevent"}
 
+# CR 121.2a: a count-form antecedent ("would draw <N> or more cards") replaces
+# the draw INSTRUCTION, so it is InstructionCount regardless of what the
+# substitute draws -- "one or more" (Quantum Riddler, whose substitute also
+# reads EventContextAmount) and "two or more" (Alms Collector, whose substitute
+# is a fixed "each draw a card") are both instruction-count. The threshold is an
+# open axis, so match any cardinal word or digit rather than enumerate them. A
+# singular "would draw a card" antecedent lacks the "or more cards" tail and so
+# does not match -- it stays IndividualDraw.
+COUNT_FORM_ANTECEDENT = re.compile(r"would draw (?:\d+|[a-z]+) or more cards")
+
 
 class ClassificationError(Exception):
     """The classifier met a shape it was never taught. Refuse to guess."""
@@ -307,6 +317,17 @@ def classify_scope(card: str, repl: dict) -> str:
             f"Decide the scope for this row deliberately, teach it to classify_scope() "
             f"(and to KNOWN_QUANTITY_MODIFICATIONS), then re-freeze."
         )
+
+    # CR 121.2a: the antecedent's grammatical number is the authoritative scope
+    # signal -- it is derived here from the description independently of the
+    # producer's `draw_scope`, exactly as the parser derives it from the same
+    # antecedent, so a producer that mis-scopes a count-form (or scopes a
+    # singular "would draw a card" as InstructionCount) still trips the
+    # cross-check. Precedes the execute-shape rule because a count-form's
+    # substitute need not read EventContextAmount (Alms Collector draws a fixed
+    # card each), which that rule would otherwise misread as IndividualDraw.
+    if COUNT_FORM_ANTECEDENT.search((repl.get("description") or "").lower()):
+        return "InstructionCount"
 
     effect = ((repl.get("execute") or {}).get("effect")) or {}
     if effect.get("type") == "Draw" and reads_event_context_amount(effect.get("count")):
