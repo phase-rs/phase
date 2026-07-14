@@ -1076,9 +1076,19 @@ fn try_split_and_cant_become_untapped(
         return None;
     }
 
-    let cut_end = before
+    // `before` is a slice of the lowercased copy, so its byte length can
+    // diverge from the equivalent prefix of `text` (e.g. Turkish dotted
+    // İ lowercases to a two-codepoint "i̇"). Re-anchor via char count on
+    // `text` directly rather than reusing the lowercased byte offset, so
+    // this never slices `text` on a non-char boundary.
+    let cut_char_count = before
         .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
-        .len();
+        .chars()
+        .count();
+    let cut_end = text
+        .char_indices()
+        .nth(cut_char_count)
+        .map_or(text.len(), |(idx, _)| idx);
     let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
     let mut defs = parse_static_line_with_graveyard_keyword_continuation(&line_a, None, None);
     if defs.is_empty() {
