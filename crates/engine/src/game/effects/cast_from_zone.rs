@@ -21,7 +21,32 @@ fn open_private_zone_cast_selection(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    let Some(player) = state.players.iter().find(|p| p.id == ability.controller) else {
+    // CR 400.1/400.2 + CR 109.4: A hand-scoped cast filter's own `controller`
+    // axis names WHOSE hand is the candidate pool. Buster-Sword-class filters
+    // ("cast a spell from your hand") carry no controller (or `You`) and keep
+    // scanning the caster's own hand. Silent-Blade Oni's "cast a spell from
+    // among those cards" (bound to the damaged player's hand via
+    // `ControllerRef::TriggeringPlayer`, issue #5240) needs a DIFFERENT
+    // player's hand as the pool — `ability.controller` alone can't express
+    // that, so resolve the filter's own controller axis through the single
+    // `ControllerRef` authority instead of hardcoding the caster.
+    let hand_owner = match target_filter {
+        TargetFilter::Typed(tf) => tf
+            .controller
+            .as_ref()
+            .and_then(|cref| {
+                crate::game::filter::controller_ref_player(
+                    state,
+                    ability.source_id,
+                    Some(ability.controller),
+                    Some(ability),
+                    cref,
+                )
+            })
+            .unwrap_or(ability.controller),
+        _ => ability.controller,
+    };
+    let Some(player) = state.players.iter().find(|p| p.id == hand_owner) else {
         return Err(EffectError::PlayerNotFound);
     };
     let cards_iter = match source_zone {
