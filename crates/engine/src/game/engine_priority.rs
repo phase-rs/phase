@@ -183,8 +183,11 @@ pub(crate) fn run_post_action_pipeline_from(
     // returned by Fiend Hunter's leaves-the-battlefield trigger draws a card,
     // issue #3673). `check_exile_returns` appends those enter events but,
     // unlike the SBA loop above, does not scan them; scan here so the ETB
-    // reaches the stack. Any state-based actions the return implicates
-    // (CR 704.3) are checked on the next pipeline pass once the ETB resolves.
+    // reaches the stack. Combine normal ETBs with delayed triggers matching
+    // the same return event before ordering, so simultaneous triggers controlled
+    // by the same player share one CR 603.3b ordering prompt. Any state-based
+    // actions the return implicates (CR 704.3) are checked on the next pipeline
+    // pass once the ETB resolves.
     //
     // Gate on Priority so a return that paused on an as-enters
     // replacement/aura choice (`BatchMoveResult::NeedsChoice`) is not
@@ -193,8 +196,13 @@ pub(crate) fn run_post_action_pipeline_from(
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
     {
         let return_events: Vec<_> = events[events_before_returns..].to_vec();
-        triggers::process_triggers(state, &return_events);
-        if let Some(waiting_for) = begin_pending_trigger_target_selection(state)? {
+        let outcome = triggers::process_triggers_with_delayed_events(
+            state,
+            &return_events,
+            &return_events,
+            events,
+        );
+        if let Some(waiting_for) = outcome.prompt {
             state.waiting_for = waiting_for.clone();
             state.consumed_before_priority_trigger_events.clear();
             return Ok(waiting_for);

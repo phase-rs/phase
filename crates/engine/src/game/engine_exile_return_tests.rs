@@ -1140,3 +1140,158 @@ fn exile_return_fires_returned_creatures_etb_trigger() {
         "resolving the returned creature's ETB must draw a card"
     );
 }
+
+/// CR 603.2 + CR 603.3b + CR 603.7: If an exile-return event creates ordinary
+/// ETB triggers and also satisfies a delayed trigger, all of those simultaneous
+/// triggers are ordered as one batch. Regression for PR 5773 review: the return
+/// path used to process normal ETBs and delayed triggers in separate batches,
+/// so the same-controller ordering prompt could omit one side of the batch.
+#[test]
+fn exile_return_combines_normal_and_delayed_triggers_in_one_ordering_prompt() {
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, QuantityExpr,
+        ResolvedAbility, TargetFilter, TriggerDefinition,
+    };
+    use crate::types::game_state::DelayedTrigger;
+
+    fn gain_life_definition(description: &str) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .description(description.to_string())
+    }
+
+    fn etb_observer_trigger(description: &str) -> TriggerDefinition {
+        TriggerDefinition::new(crate::types::TriggerMode::ChangesZone)
+            .destination(Zone::Battlefield)
+            .valid_card(TargetFilter::Any)
+            .execute(gain_life_definition(description))
+            .description(description.to_string())
+    }
+
+    let mut state = GameState::new_two_player(42);
+    state.turn_number = 2;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+
+    let host_id = create_object(
+        &mut state,
+        CardId(10),
+        PlayerId(0),
+        "Fiend Hunter".to_string(),
+        Zone::Battlefield,
+    );
+    let returned_id = create_object(
+        &mut state,
+        CardId(11),
+        PlayerId(0),
+        "Returned Bear".to_string(),
+        Zone::Exile,
+    );
+    let observer_a = create_object(
+        &mut state,
+        CardId(12),
+        PlayerId(0),
+        "First ETB Observer".to_string(),
+        Zone::Battlefield,
+    );
+    let observer_b = create_object(
+        &mut state,
+        CardId(13),
+        PlayerId(0),
+        "Second ETB Observer".to_string(),
+        Zone::Battlefield,
+    );
+    let delayed_source = create_object(
+        &mut state,
+        CardId(14),
+        PlayerId(0),
+        "Delayed Return Watcher".to_string(),
+        Zone::Battlefield,
+    );
+
+    state
+        .objects
+        .get_mut(&observer_a)
+        .unwrap()
+        .trigger_definitions
+        .push(etb_observer_trigger("First observer gains 1 life"));
+    state
+        .objects
+        .get_mut(&observer_b)
+        .unwrap()
+        .trigger_definitions
+        .push(etb_observer_trigger("Second observer gains 1 life"));
+
+    state.delayed_triggers.push(DelayedTrigger {
+        condition: DelayedTriggerCondition::WhenEntersBattlefield {
+            filter: TargetFilter::Any,
+        },
+        ability: ResolvedAbility::new(
+            *gain_life_definition("Delayed watcher gains 1 life").effect,
+            vec![],
+            delayed_source,
+            PlayerId(0),
+        ),
+        controller: PlayerId(0),
+        source_id: delayed_source,
+        one_shot: true,
+    });
+    state.exile_links.push(ExileLink {
+        exiled_id: returned_id,
+        source_id: host_id,
+        kind: ExileLinkKind::UntilSourceLeaves {
+            return_zone: Zone::Battlefield,
+        },
+    });
+
+    let mut events = Vec::new();
+    crate::game::zones::move_to_zone(&mut state, host_id, Zone::Graveyard, &mut events);
+    let default_wf = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    let waiting_for = crate::game::engine_priority::run_post_action_pipeline(
+        &mut state,
+        &mut events,
+        &default_wf,
+        true,
+        false,
+    )
+    .unwrap();
+
+    assert!(
+        state.battlefield.contains(&returned_id),
+        "returned card must be back on the battlefield"
+    );
+    assert!(
+        state.delayed_triggers.is_empty(),
+        "matching one-shot delayed trigger must be consumed"
+    );
+
+    let WaitingFor::OrderTriggers { player, triggers } = waiting_for else {
+        panic!("expected combined OrderTriggers prompt, got {waiting_for:?}");
+    };
+    assert_eq!(player, PlayerId(0));
+    assert_eq!(
+        triggers.len(),
+        3,
+        "normal ETBs plus delayed return trigger must share one ordering prompt: {triggers:?}"
+    );
+    assert!(triggers
+        .iter()
+        .any(|summary| summary.source_id == observer_a));
+    assert!(triggers
+        .iter()
+        .any(|summary| summary.source_id == observer_b));
+    assert!(triggers
+        .iter()
+        .any(|summary| summary.source_id == delayed_source));
+}
