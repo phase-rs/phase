@@ -6785,6 +6785,13 @@ pub struct PendingLiminalEntryResume {
     pub event: ProposedEvent,
 }
 
+/// serde skip predicate for [`GameState::draw_consult_scope`] — the transient
+/// consult scope is only ever `Instruction` mid-consult, which never spans a
+/// serialization boundary, so the `Individual` default is elided.
+fn draw_consult_scope_is_individual(scope: &crate::types::ability::DrawConsultScope) -> bool {
+    matches!(scope, crate::types::ability::DrawConsultScope::Individual)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub turn_number: u32,
@@ -6966,6 +6973,14 @@ pub struct GameState {
     /// outer frame and its remaining units were silently lost.
     #[serde(default, skip_serializing_if = "DrawSequenceStack::is_empty")]
     pub draw_sequences: DrawSequenceStack,
+
+    /// CR 121.2a: which draw-replacement scope the in-progress replacement
+    /// consult is eligible to match. See [`DrawConsultScope`]. Transient — set to
+    /// `Instruction` only for the duration of the pre-split whole-instruction
+    /// consult in `game::replacement::replace_draw_instruction`, and restored to
+    /// the `Individual` default (skipped by serde) immediately afterward.
+    #[serde(default, skip_serializing_if = "draw_consult_scope_is_individual")]
+    pub draw_consult_scope: crate::types::ability::DrawConsultScope,
 
     /// Legacy save shape for the single in-flight multi-card draw, superseded by
     /// [`Self::draw_sequences`]. JSON only; migrated into the stack by
@@ -9736,6 +9751,7 @@ impl GameState {
             post_replacement_token_substitution_count: None,
             pending_connive_reentry: None,
             draw_sequences: DrawSequenceStack::default(),
+            draw_consult_scope: crate::types::ability::DrawConsultScope::Individual,
             legacy_pending_multi_draw: None,
             pending_life_total_assignment: None,
             pending_spell_resolution: None,
@@ -10737,6 +10753,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_connive_reentry: _,
         legacy_pending_multi_draw: _,
         draw_sequences: _,
+        draw_consult_scope: _,
         pending_life_total_assignment: _,
         pending_spell_resolution: _,
         pending_mutate_merge: _,

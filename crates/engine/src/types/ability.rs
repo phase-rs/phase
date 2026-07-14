@@ -18783,6 +18783,30 @@ pub enum DrawReplacementScope {
     IndividualDraw,
 }
 
+/// CR 121.2a + CR 121.6b: which [`DrawReplacementScope`] the in-progress draw
+/// replacement consult is eligible to match. A draw instruction resolves in two
+/// seams — the whole-instruction consult that runs *before* the instruction
+/// splits into individual card draws, and the per-card consult that runs for
+/// each individual draw — and a shield is scoped to exactly one of them.
+///
+/// The default, [`Individual`](Self::Individual), is the per-card seam: an
+/// `IndividualDraw` shield hooks each card, and a count-form
+/// `InstructionCount` shield hooks a non-split whole-count draw (the turn-based
+/// draw step, connive, gift) at or above its printed threshold.
+/// [`Instruction`](Self::Instruction) is set only by
+/// `game::replacement::replace_draw_instruction` for the pre-split consult, so
+/// only `InstructionCount` shields see the whole instruction there — an
+/// `IndividualDraw` shield must wait for its individual card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DrawConsultScope {
+    /// The per-card / non-split draw seam. See the type-level docs.
+    #[default]
+    Individual,
+    /// The pre-split whole-instruction seam (CR 121.2a). Only `InstructionCount`
+    /// count-form shields are eligible.
+    Instruction,
+}
+
 /// CR 614.1a: Which player(s) a replacement effect applies to, scoped relative
 /// to the replacement source player. For permanents/spells this is the source's
 /// controller; for cards outside the battlefield/stack, CR 109.4 + CR 108.4a

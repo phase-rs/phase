@@ -187,6 +187,17 @@ fn start_draw_sequence_with_replacement_applied(
     applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
+    // CR 121.2a: A count-form draw replacement ("If [a player] would draw N or
+    // more cards, ...") modifies the draw INSTRUCTION "before considering any of
+    // the individual card draws". Consult those instruction-scoped shields here,
+    // against the whole `count`, before the instruction splits into individual
+    // draws below — the per-unit seam only ever sees `count == 1`, so it can
+    // never enforce a threshold of two or more.
+    let (count, applied) =
+        match replacement::replace_draw_instruction(state, player, count, applied, events) {
+            replacement::DrawInstructionOutcome::Proceed { count, applied } => (count, applied),
+            replacement::DrawInstructionOutcome::Replaced(result) => return result,
+        };
     let frame_id = state
         .draw_sequences
         .push_with_replacement_applied(player, count, applied);

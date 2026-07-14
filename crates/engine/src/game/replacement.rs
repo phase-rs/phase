@@ -5117,19 +5117,35 @@ fn object_replacement_candidate_applies(
             return false;
         }
     }
-    if let (
-        Some(DrawReplacementScope::InstructionCount { min }),
-        ProposedEvent::Draw { count, .. },
-    ) = (&repl_def.draw_scope, event)
-    {
-        // CR 121.2a: a count-form antecedent ("would draw N or more cards")
-        // modifies the draw *instruction*, and only when that instruction draws
-        // at least N cards. A sub-threshold instruction (e.g. a single-card draw
-        // against Alms Collector's "two or more") is untouched, so the shield
-        // must not match it. This is the seam that consumes the parsed threshold
-        // — sibling to `combat_scope` / `damage_target_filter` above.
-        if count < min {
-            return false;
+    if let (Some(draw_scope), ProposedEvent::Draw { count, .. }) = (&repl_def.draw_scope, event) {
+        // CR 121.2a + CR 121.6b: a draw resolves in two seams and each shield is
+        // scoped to exactly one of them (`state.draw_consult_scope`). This is the
+        // seam that consumes the parsed threshold — sibling to `combat_scope` /
+        // `damage_target_filter` above.
+        match state.draw_consult_scope {
+            // Pre-split whole-instruction consult: ONLY a count-form
+            // ("would draw N or more cards") shield hooks the instruction, and
+            // only when it draws at least its printed threshold N. An
+            // IndividualDraw shield (Dredge, Notion Thief) must wait for its
+            // individual card below.
+            crate::types::ability::DrawConsultScope::Instruction => match draw_scope {
+                DrawReplacementScope::InstructionCount { min } if count >= min => {}
+                _ => return false,
+            },
+            // Per-card / non-split consult: an IndividualDraw shield hooks each
+            // card; a count-form shield hooks a non-split whole-count draw (the
+            // turn-based draw step, connive, gift) at/above threshold. On the
+            // split path the count-form shield already fired at the instruction
+            // seam and is guarded here by the `applied` set (CR 614.5).
+            crate::types::ability::DrawConsultScope::Individual => {
+                if let DrawReplacementScope::InstructionCount { min } = draw_scope {
+                    // CR 121.2a: a sub-threshold instruction (e.g. a single-card
+                    // draw against Alms Collector's "two or more") is untouched.
+                    if count < min {
+                        return false;
+                    }
+                }
+            }
         }
     }
     if let ProposedEvent::AddCounter { placement, .. } = event {
@@ -7230,6 +7246,142 @@ pub fn replace_event(
     let result = pipeline_loop(state, proposed, 0, registry, events);
     clear_replacement_index_pipeline(state);
     result
+}
+
+/// Result of consulting count-form replacements against a whole draw
+/// instruction (CR 121.2a). See [`replace_draw_instruction`].
+pub(crate) enum DrawInstructionOutcome {
+    /// No instruction-scoped shield fired (or one only modified the count). The
+    /// instruction proceeds to its individual card draws with this surviving
+    /// count and applied set.
+    Proceed {
+        count: u32,
+        applied: HashSet<AppliedReplacementKey>,
+    },
+    /// A count-form shield fully substituted or prevented the instruction (its
+    /// substitute, if any, has already been drained in this resolution step).
+    /// No individual draws follow; the carried result is the caller's return.
+    Replaced(ReplacementResult),
+}
+
+/// True when any functioning permanent carries a count-form
+/// (`InstructionCount`) draw replacement. A cheap early-out so ordinary draws —
+/// the overwhelming majority, with no Alms-Collector-class shield anywhere —
+/// keep their exact prior per-card path with zero extra pipeline work.
+///
+/// Enumerates through the same `functioning_abilities::active_replacements`
+/// iterator the authoritative matcher uses, so the gate respects functioning
+/// status (CR 614.1) and can neither under-count (a false negative would silently
+/// skip a live shield) nor spuriously fire on a non-functioning definition.
+fn any_instruction_count_draw_shield(state: &GameState) -> bool {
+    super::functioning_abilities::active_replacements(state).any(|(_, _, def)| {
+        matches!(def.event, ReplacementEvent::Draw)
+            && matches!(
+                def.draw_scope,
+                Some(DrawReplacementScope::InstructionCount { .. })
+            )
+    })
+}
+
+/// CR 121.2a: Consult count-form ("If [a player] would draw N or more cards,
+/// ...") draw replacements against a whole draw instruction BEFORE it splits
+/// into individual card draws. A count-form antecedent modifies the instruction
+/// "before considering any of the individual card draws", so the per-card seam
+/// (which only ever sees `count == 1`) can never enforce a threshold of two or
+/// more — this is the only seam that can.
+///
+/// Only `InstructionCount`-scoped shields are eligible here (via
+/// `state.draw_consult_scope`); an `IndividualDraw` shield still hooks each card
+/// downstream. A single mandatory count-form shield resolves synchronously (no
+/// CR 616 ordering choice, no optional yes/no); anything else — two competing
+/// count-form shields on one instruction, or an optional one — has no printed
+/// exemplar and is deferred to the per-card seam rather than mis-order a pause
+/// whose resume this seam does not model.
+pub(crate) fn replace_draw_instruction(
+    state: &mut GameState,
+    player: PlayerId,
+    count: u32,
+    applied: HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+) -> DrawInstructionOutcome {
+    use crate::types::ability::DrawConsultScope;
+
+    // Fast path: no count-form shield exists, so the instruction seam is inert.
+    if count == 0 || !any_instruction_count_draw_shield(state) {
+        return DrawInstructionOutcome::Proceed { count, applied };
+    }
+
+    let registry = replacement_registry();
+    let instruction = ProposedEvent::Draw {
+        player_id: player,
+        count,
+        applied: applied.clone(),
+    };
+
+    // Enter the pre-split seam so only count-form shields match (CR 121.2a).
+    let prev_scope = state.draw_consult_scope;
+    state.draw_consult_scope = DrawConsultScope::Instruction;
+
+    let candidates = find_applicable_replacements(state, &instruction, registry);
+    // CR 616.1 + CR 614.13: a single mandatory shield is the only synchronous
+    // shape. Look the definition up mirroring `apply_single_replacement`'s source
+    // resolution (object or liminal entry).
+    let single_mandatory = candidates.len() == 1 && {
+        let rid = candidates[0];
+        state
+            .objects
+            .get(&rid.source)
+            .or_else(|| state.liminal_entries.get(&rid.source).map(|e| &e.object))
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .is_some_and(|def| matches!(def.mode, ReplacementMode::Mandatory))
+    };
+
+    if !single_mandatory {
+        // strict-failure: CR 121.2a competing/optional instruction-count draw
+        // replacements need a player-ordering or yes/no choice at the pre-split
+        // seam — no printed card exercises it. Proceed unreplaced; a `count == 0`
+        // candidate scan that matched nothing lands here too.
+        state.draw_consult_scope = prev_scope;
+        return DrawInstructionOutcome::Proceed { count, applied };
+    }
+
+    let result = replace_event(state, instruction, events);
+    // CR 614.6 + CR 121.6: a full substitution (Alms Collector: "instead you and
+    // that player each draw a card") is pre-zeroed by `apply_single_replacement`
+    // and its substitute stashed as a post-replacement continuation. Drain it in
+    // the same resolution step, mirroring `draw_through_replacement`'s Execute
+    // arm, so the substitute runs before the (now zero-count) instruction below.
+    if !matches!(result, ReplacementResult::NeedsChoice(_)) && state.has_post_replacement_drain() {
+        let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+            state, None, None, None, events,
+        );
+    }
+    state.draw_consult_scope = prev_scope;
+
+    match result {
+        // CR 614.11a: a count modifier (Alhammarret's Archive-class instruction
+        // shield) leaves a nonzero survivor — proceed with the modified count,
+        // carrying the fired shield in `applied` so the per-card seam does not
+        // re-offer it (CR 614.5).
+        ReplacementResult::Execute(ProposedEvent::Draw {
+            count: surviving,
+            applied: surviving_applied,
+            ..
+        }) => DrawInstructionOutcome::Proceed {
+            count: surviving,
+            applied: surviving_applied,
+        },
+        ReplacementResult::Execute(other) => {
+            debug_assert!(
+                false,
+                "draw instruction consult produced a non-Draw survivor: {other:?}"
+            );
+            DrawInstructionOutcome::Proceed { count, applied }
+        }
+        result @ (ReplacementResult::Prevented | ReplacementResult::NeedsChoice(_)) => {
+            DrawInstructionOutcome::Replaced(result)
+        }
+    }
 }
 
 /// CR 510.2 + CR 615.7 + CR 615.13: Run the replacement pipeline over a whole
@@ -10338,6 +10490,125 @@ mod tests {
             find_applicable_replacements(&state, &controller_draws_two, &registry).is_empty(),
             "CR 614.1a: Alms Collector's opponent-scoped shield must not apply to its \
              controller's own draw"
+        );
+    }
+
+    /// An Alms-Collector-class count-form shield whose substitute is a clean
+    /// full replacement (here a life gain) so the observable outcome is
+    /// deterministic: when it fires, the original draw is pre-zeroed (CR 614.6)
+    /// and the substitute runs instead. Opponent-scoped, threshold N=2.
+    fn alms_class_full_substitution_shield() -> ReplacementDefinition {
+        let substitute = AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(DrawReplacementScope::InstructionCount { min: 2 });
+        repl.valid_player = Some(crate::types::ability::ReplacementPlayerScope::Opponent);
+        repl.execute = Some(Box::new(substitute));
+        repl
+    }
+
+    fn seed_library(state: &mut GameState, player_index: usize, size: usize) {
+        let base = 200 + (player_index as u64) * 100;
+        let owner = state.players[player_index].id;
+        let lib = &mut state.players[player_index].library;
+        lib.clear();
+        let mut ids = Vec::new();
+        for i in 0..size as u64 {
+            let object_id = ObjectId(base + i);
+            lib.push_back(object_id);
+            ids.push((object_id, i));
+        }
+        for (object_id, i) in ids {
+            state.objects.insert(
+                object_id,
+                GameObject::new(
+                    object_id,
+                    CardId(base + i),
+                    owner,
+                    format!("Library Card {i}"),
+                    Zone::Library,
+                ),
+            );
+        }
+    }
+
+    /// CR 121.2a end-to-end: the count-form threshold is enforced at the
+    /// pre-split draw-instruction seam, driving the real production path
+    /// (`start_draw_sequence` → `replace_draw_instruction`). A one-card opponent
+    /// draw is below the "two or more" threshold and resolves normally; a
+    /// two-card opponent draw meets it and is fully replaced (opponent draws
+    /// nothing, the substitute runs) — the split into per-unit `count == 1`
+    /// draws can never see the threshold, so this proves the seam, not just the
+    /// isolated matcher.
+    #[test]
+    fn alms_class_replaces_instruction_at_pre_split_seam() {
+        use crate::game::effects::draw::start_draw_sequence;
+
+        // --- Control: opponent draws ONE card → below threshold, not replaced.
+        let mut state = test_state_with_object(
+            ObjectId(20),
+            Zone::Battlefield,
+            vec![alms_class_full_substitution_shield()],
+        );
+        state.objects.get_mut(&ObjectId(20)).unwrap().controller = PlayerId(0);
+        seed_library(&mut state, 1, 4);
+        let controller_life_before = state.players[0].life;
+        let opponent_hand_before = state.players[1].hand.len();
+        let mut events = Vec::new();
+
+        let result = start_draw_sequence(&mut state, PlayerId(1), 1, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::Execute(_)),
+            "a one-card draw resolves without pausing, got {result:?}"
+        );
+        assert_eq!(
+            state.players[1].hand.len(),
+            opponent_hand_before + 1,
+            "CR 121.2a: a one-card opponent draw is below the N=2 threshold and must draw normally"
+        );
+        assert_eq!(
+            state.players[0].life, controller_life_before,
+            "the sub-threshold draw must not fire the shield's substitute"
+        );
+
+        // --- Fire: opponent draws TWO cards → meets threshold, replaced whole.
+        let mut state = test_state_with_object(
+            ObjectId(20),
+            Zone::Battlefield,
+            vec![alms_class_full_substitution_shield()],
+        );
+        state.objects.get_mut(&ObjectId(20)).unwrap().controller = PlayerId(0);
+        seed_library(&mut state, 1, 4);
+        let controller_life_before = state.players[0].life;
+        let opponent_hand_before = state.players[1].hand.len();
+        let mut events = Vec::new();
+
+        let result = start_draw_sequence(&mut state, PlayerId(1), 2, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::Execute(_)),
+            "the mandatory instruction-scoped shield resolves synchronously, got {result:?}"
+        );
+        assert_eq!(
+            state.players[1].hand.len(),
+            opponent_hand_before,
+            "CR 121.2a + CR 614.6: the two-card draw is fully replaced — the opponent draws \
+             nothing (the original instruction is pre-zeroed)"
+        );
+        assert_eq!(
+            state.players[0].life,
+            controller_life_before + 3,
+            "the substitute (a life gain, standing in for Alms Collector's 'you and that player \
+             each draw a card') runs in place of the replaced instruction"
+        );
+        assert!(
+            state.draw_sequences.is_empty(),
+            "the replaced instruction leaves no draw frame parked, got {:?}",
+            state.draw_sequences
         );
     }
 
