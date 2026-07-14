@@ -15,8 +15,9 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, ControllerRef, CostObjectCount, Effect, EffectScope, FilterProp,
-    QuantityExpr, SacrificeRequirement, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, ActivationRestriction, AdditionalCost, ControllerRef, CostObjectCount, Effect,
+    EffectScope, FilterProp, QuantityExpr, SacrificeRequirement, TapStateChange, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, EmbalmCost,
@@ -1641,14 +1642,38 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
             Err(_) => (Cow::Borrowed(rest), ""),
         }
     } else {
-        // Strip "from" preposition (used by protection keywords). `FromStr` again
-        // receives the whole parameter, so nothing is left unconsumed.
-        (
-            tag::<_, _, OracleError<'_>>("from ")
-                .parse(rest)
-                .map_or(Cow::Borrowed(rest), |(rem, _)| Cow::Borrowed(rem)),
-            "",
-        )
+        // Strip "from" preposition (used by protection keywords).
+        let param = tag::<_, _, OracleError<'_>>("from ")
+            .parse(rest)
+            .map_or(rest, |(rem, _)| rem);
+
+        // `FromStr` is NOT a reliable consumption oracle for mana-cost-bearing
+        // keywords. "cycling:{2} if you control an artifact" does not yield
+        // `Unknown` — it parses the symbols it recognizes, silently DROPS the
+        // rest, and hands back a degenerate empty cost (`Cycling({})`). So a
+        // successful `FromStr` proves nothing about how much of the parameter it
+        // actually consumed.
+        //
+        // Recover the honest remainder with the same nom combinator the rest of
+        // the parser uses. A parameter that isn't a mana cost at all (protection
+        // "red", splice "onto arcane") fails `parse_mana_cost` outright, and for
+        // those `FromStr` really does take the whole parameter — hence "".
+        //
+        // The cascade runs on LOWERCASED text but `parse_mana_cost` expects
+        // canonical `{U}`, so it must be fed uppercase or it stops at the first
+        // colored pip and reports a bogus `{u}` remainder — a partial parse
+        // masquerading as progress, which is the very failure class this commit
+        // exists to remove. `to_ascii_uppercase` is length-preserving, so the
+        // remainder's byte length maps straight back onto the original slice.
+        //
+        // `param` itself is unchanged, so the permissive wrapper's output stays
+        // byte-identical; only the remainder we REPORT is now truthful.
+        let upper = param.to_ascii_uppercase();
+        let unconsumed_len =
+            nom_primitives::parse_mana_cost(&upper).map_or(0, |(remainder, _cost)| remainder.len());
+        let unconsumed = &param[param.len() - unconsumed_len..];
+
+        (Cow::Borrowed(param), unconsumed)
     };
 
     let colon_form = format!("{name}:{param}");
@@ -1673,6 +1698,158 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
 /// enforced by `scripts/check-parser-combinators.sh`.
 pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     parse_keyword_line_core(text).map(|(keyword, _discarded_remainder)| keyword)
+}
+
+/// CR 602.5b: the only modeled modifier sentence a routed keyword line may carry
+/// after its declaration. Adding a variant here is the ONLY way to widen the
+/// permitted tail — arbitrary prose is never accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum KeywordLineModifier {
+    /// CR 602.5b: "Activate only once each turn." (Crew's cadence sentence.)
+    ActivateOnlyOnceEachTurn,
+}
+
+/// Exactly what the strict router tolerated after the keyword's semantic text.
+/// This is evidence, not decoration: it records that the router SAW the tail and
+/// classified it, rather than having quietly dropped it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PermittedKeywordRemainder {
+    None,
+    TerminalPunctuation,
+    ReminderText,
+    TerminalPunctuationAndReminderText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeywordLineTail {
+    pub(crate) modifiers: Vec<KeywordLineModifier>,
+    pub(crate) permitted_remainder: PermittedKeywordRemainder,
+}
+
+/// A whole Oracle line that strictly and completely parsed as a keyword
+/// declaration. A router may advance its source index ONLY on this value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoutedKeywordLine {
+    pub(crate) keyword: Keyword,
+    pub(crate) tail: KeywordLineTail,
+}
+
+/// CR 602.5b: the modeled modifier sentence, as a combinator.
+fn parse_keyword_line_modifier(
+    input: &str,
+) -> nom::IResult<&str, KeywordLineModifier, OracleError<'_>> {
+    value(
+        KeywordLineModifier::ActivateOnlyOnceEachTurn,
+        tag("activate only once each turn"),
+    )
+    .parse(input)
+}
+
+/// All-consuming permitted tail: whitespace, terminal punctuation, and modeled
+/// modifier sentences — and nothing else. Any other text (a conditional, an
+/// effect clause, a second sentence) makes the whole routed parse fail, which is
+/// the entire point: the caller must then leave the line for ordinary parsing so
+/// it becomes an honest `Effect::Unimplemented` instead of a silent swallow.
+///
+/// Returns the modifiers found and whether terminal punctuation was present.
+fn parse_permitted_keyword_tail(input: &str) -> Option<(Vec<KeywordLineModifier>, bool)> {
+    let mut modifiers = Vec::new();
+    let mut had_terminal_punctuation = false;
+    let mut rest = input.trim();
+
+    while !rest.is_empty() {
+        // Terminal punctuation is structural, not dispatch.
+        if let Ok((after, _)) = tag::<_, _, OracleError<'_>>(".").parse(rest) {
+            had_terminal_punctuation = true;
+            rest = after.trim_start();
+            continue;
+        }
+        if let Ok((after, modifier)) = parse_keyword_line_modifier(rest) {
+            modifiers.push(modifier);
+            rest = after.trim_start();
+            continue;
+        }
+        // Arbitrary semantic prose — reject the whole line.
+        return None;
+    }
+
+    Some((modifiers, had_terminal_punctuation))
+}
+
+/// Apply every modeled modifier to the typed keyword. A modifier we recognize but
+/// cannot attach to THIS keyword is not a permitted tail — decline the routed
+/// parse rather than drop it on the floor, which is exactly the class of silent
+/// loss this unit exists to remove.
+fn apply_keyword_line_modifiers(
+    keyword: Keyword,
+    modifiers: &[KeywordLineModifier],
+) -> Option<Keyword> {
+    let mut keyword = keyword;
+    for modifier in modifiers {
+        keyword = match (keyword, modifier) {
+            // CR 702.122 + CR 602.5b: Crew's cadence sentence is modeled.
+            (Keyword::Crew { power, .. }, KeywordLineModifier::ActivateOnlyOnceEachTurn) => {
+                Keyword::Crew {
+                    power,
+                    once_per_turn: Some(Box::new(ActivationRestriction::OnlyOnceEachTurn)),
+                }
+            }
+            (_, KeywordLineModifier::ActivateOnlyOnceEachTurn) => return None,
+        };
+    }
+    Some(keyword)
+}
+
+/// The SINGLE router-facing keyword-line parser. Returns `Some` only when the
+/// ENTIRE line is a keyword declaration plus a permitted tail (`P/R/M`).
+///
+/// This is the strict counterpart to `parse_granted_keyword_fragment`. The
+/// difference is not stylistic — a router that commits on the permissive parser
+/// consumes the line and throws away everything the keyword did not explain:
+///
+///   "crew 2 if it's an artifact"  -> permissive: Some(Crew(2)), suffix EATEN
+///                                 -> strict:     None, line survives for fallback
+///
+/// A candidate prefix (`is_keyword_cost_line`) is necessary but NEVER sufficient;
+/// neither is an MTGJSON keyword name. Only a complete typed extraction with an
+/// exhaustively applied structured tail permits a router to advance.
+pub(crate) fn parse_router_keyword_line(line: &str) -> Option<RoutedKeywordLine> {
+    let trimmed = line.trim();
+
+    // 1. Candidate recognition — a cheap reject, not evidence of support.
+    if !is_keyword_cost_line(&trimmed.to_lowercase()) {
+        return None;
+    }
+
+    // 2. Balanced reminder-text removal is the ONLY permitted normalization.
+    let without_reminder = strip_reminder_text(trimmed);
+    let semantic = without_reminder.trim();
+    let had_reminder = semantic.len() != trimmed.len();
+    let lower = semantic.to_lowercase();
+
+    // 3. Remainder-preserving core — it never erases a suffix.
+    let (keyword, unconsumed) = parse_keyword_line_core(&lower)?;
+
+    // 4. The unconsumed tail must be entirely `P`/`M`, or we decline.
+    let (modifiers, had_terminal_punctuation) = parse_permitted_keyword_tail(unconsumed)?;
+
+    // 5. Modeled modifiers are applied exhaustively before the keyword escapes.
+    let keyword = apply_keyword_line_modifiers(keyword, &modifiers)?;
+
+    let permitted_remainder = match (had_terminal_punctuation, had_reminder) {
+        (false, false) => PermittedKeywordRemainder::None,
+        (true, false) => PermittedKeywordRemainder::TerminalPunctuation,
+        (false, true) => PermittedKeywordRemainder::ReminderText,
+        (true, true) => PermittedKeywordRemainder::TerminalPunctuationAndReminderText,
+    };
+
+    Some(RoutedKeywordLine {
+        keyword,
+        tail: KeywordLineTail {
+            modifiers,
+            permitted_remainder,
+        },
+    })
 }
 
 /// Bare-integer-count keywords whose `FromStr` arm does `p.parse().unwrap_or(N)`
@@ -2142,107 +2319,122 @@ fn type_filter_subject_name(tf: &TypeFilter) -> String {
     }
 }
 
+/// The complete fixed-prefix set the keyword-cost candidate recognizer accepts.
+///
+/// This is the SINGLE authority for the candidate prefix set. `ROUTER_KEYWORD_CASES`
+/// (in tests) is asserted set-equal to it, so a prefix added here without a strict
+/// parser, a valid fixture, a semantic-suffix rejection, and a declared production
+/// reach fails the build. That gate is the whole point: a prefix in this list is a
+/// promise that the router can strictly parse the line, and an unbacked promise is
+/// exactly how a candidate recognizer starts silently swallowing card text.
+///
+/// CR 702.29e adds the one NON-fixed rule (typecycling), handled separately below.
+pub(crate) const KEYWORD_COST_PREFIXES: [&str; 95] = [
+    "cycling",
+    "basic landcycling",
+    "flashback",
+    "crew",
+    "ward",
+    "equip", // already handled earlier but as safety
+    "bestow",
+    "embalm",
+    "eternalize",
+    "unearth",
+    "commander ninjutsu",
+    "ninjutsu",
+    "prowl",
+    "morph",
+    "megamorph",
+    "madness",
+    "dash",
+    "emerge",
+    "escape",
+    "evoke",
+    "foretell",
+    "mutate",
+    "disturb",
+    "disguise",
+    "blitz",
+    "overload",
+    "spectacle",
+    "freerunning",
+    "surge",
+    "encore",
+    "buyback",
+    "echo",
+    "outlast",
+    "scavenge",
+    "fortify",
+    "prototype",
+    "plot",
+    "craft",
+    "offspring",
+    "impending",
+    "reconfigure",
+    "suspend",
+    "level up",
+    "transfigure",
+    "transmute",
+    "forecast",
+    "recover",
+    "escalate",
+    "awaken",
+    "reinforce",
+    "retrace",
+    "adapt",
+    "monstrosity",
+    "affinity",
+    "convoke",
+    "waterbend",
+    "delve",
+    "improvise",
+    "miracle",
+    "splice",
+    "entwine",
+    "toxic",
+    "saddle",
+    "teamwork",
+    "soulshift",
+    "backup",
+    "squad",
+    "warp",
+    "sneak",
+    "web-slinging",
+    "mobilize",
+    "hideaway",
+    "gift",
+    "discover",
+    "harmonize",
+    "collect evidence",
+    "mayhem",
+    "more than meets the eye",
+    "living weapon",
+    "champion",
+    "amplify",
+    "bloodthirst",
+    "tribute",
+    "persist",
+    "undying",
+    "fabricate",
+    "modular",
+    "partner",
+    "spree",
+    "casualty",
+    "bargain",
+    "demonstrate",
+    "strive",
+    "exploit",
+    "devoid",
+];
+
 /// Check if a line is a keyword with a cost (e.g., "Cycling {2}", "Flashback {3}{R}", "Crew 3").
-/// These are handled by MTGJSON keywords and should be skipped by the Oracle parser.
+///
+/// CANDIDATE RECOGNITION ONLY. A `true` here is NOT evidence that the line can be
+/// parsed, and a router must never advance its source index on it alone — that is
+/// precisely the bug this unit removes. Only `parse_router_keyword_line` returning
+/// `Some` licenses a router to consume the line.
 pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
-    let keyword_costs = [
-        "cycling",
-        "basic landcycling",
-        "flashback",
-        "crew",
-        "ward",
-        "equip", // already handled earlier but as safety
-        "bestow",
-        "embalm",
-        "eternalize",
-        "unearth",
-        "commander ninjutsu",
-        "ninjutsu",
-        "prowl",
-        "morph",
-        "megamorph",
-        "madness",
-        "dash",
-        "emerge",
-        "escape",
-        "evoke",
-        "foretell",
-        "mutate",
-        "disturb",
-        "disguise",
-        "blitz",
-        "overload",
-        "spectacle",
-        "freerunning",
-        "surge",
-        "encore",
-        "buyback",
-        "echo",
-        "outlast",
-        "scavenge",
-        "fortify",
-        "prototype",
-        "plot",
-        "craft",
-        "offspring",
-        "impending",
-        "reconfigure",
-        "suspend",
-        "level up",
-        "transfigure",
-        "transmute",
-        "forecast",
-        "recover",
-        "escalate",
-        "awaken",
-        "reinforce",
-        "retrace",
-        "adapt",
-        "monstrosity",
-        "affinity",
-        "convoke",
-        "waterbend",
-        "delve",
-        "improvise",
-        "miracle",
-        "splice",
-        "entwine",
-        "toxic",
-        "saddle",
-        "teamwork",
-        "soulshift",
-        "backup",
-        "squad",
-        "warp",
-        "sneak",
-        "web-slinging",
-        "mobilize",
-        "hideaway",
-        "gift",
-        "discover",
-        "harmonize",
-        "collect evidence",
-        "mayhem",
-        "more than meets the eye",
-        "living weapon",
-        "champion",
-        "amplify",
-        "bloodthirst",
-        "tribute",
-        "persist",
-        "undying",
-        "fabricate",
-        "modular",
-        "partner",
-        "spree",
-        "casualty",
-        "bargain",
-        "demonstrate",
-        "strive",
-        "exploit",
-        "devoid",
-    ];
-    keyword_costs.iter().any(|kw| {
+    KEYWORD_COST_PREFIXES.iter().any(|kw| {
         tag::<_, _, OracleError<'_>>(*kw)
             .parse(lower)
             .is_ok_and(|(rest, _)| {
@@ -2254,7 +2446,7 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
                         .is_ok()
             })
     })
-        // CR 702.29: Typecycling — first word ends in "cycling" but isn't "cycling" itself
+        // CR 702.29e: Typecycling — first word ends in "cycling" but isn't "cycling" itself
         || lower
             .split_whitespace()
             .next()

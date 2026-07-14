@@ -21084,3 +21084,164 @@ fn gilanra_mana_value_spend_trigger_survives_the_retype() {
         "Gilanra must not regress to Unimplemented"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Plan 02 step 5 — consume-on-success for keyword-cost lines.
+//
+// A router may advance past a line ONLY on a complete strict parse. These pin
+// both halves of that contract, because either half alone is a trap:
+//
+//   * the REJECTION tests prove a keyword-cost candidate carrying unmodelled
+//     semantic text is no longer silently swallowed;
+//   * the REACH tests prove the rejection is not an upstream short-circuit that
+//     also broke the valid form. A strict parser that rejects everything would
+//     pass the rejection tests alone.
+// ---------------------------------------------------------------------------
+
+/// Every ability/keyword-bearing channel a swallowed line could have hidden in.
+/// Reading `abilities` alone fabricates swallows — triggers and statics live in
+/// their own arrays.
+fn has_unimplemented_mentioning(r: &ParsedAbilities, needle: &str) -> bool {
+    let hay = format!("{:?}", r);
+    hay.contains("Unimplemented") && hay.contains(needle)
+}
+
+#[test]
+fn crew_with_semantic_suffix_is_not_swallowed_at_priority_13() {
+    // Permanent (Vehicle) harness -> priority 13. `is_keyword_cost_line` accepts
+    // "crew ...", and the permissive parser would return Some(Crew(2)) having
+    // EATEN " if it's an artifact". Priority 13 then advanced unconditionally,
+    // so the clause vanished with no keyword AND no Unimplemented.
+    let r = parse_oracle_text(
+        "Crew 2 if it's an artifact",
+        "Hostile Vehicle",
+        &[],
+        &["Artifact".to_string()],
+        &["Vehicle".to_string()],
+    );
+    assert!(
+        !r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Crew { .. })),
+        "no Crew keyword may be synthesized from a line the router cannot fully parse; got {:?}",
+        r.extracted_keywords
+    );
+    assert!(
+        has_unimplemented_mentioning(&r, "Crew 2 if it's an artifact"),
+        "the exact source line must survive as an Unimplemented, not vanish; got {r:?}"
+    );
+}
+
+#[test]
+fn crew_valid_whole_line_still_reaches_the_keyword_route() {
+    // Reach guard: proves the rejection above is a TAIL rejection, not an
+    // upstream short-circuit that also killed the valid form.
+    let r = parse_oracle_text(
+        "Crew 2",
+        "Plain Vehicle",
+        &[],
+        &["Artifact".to_string()],
+        &["Vehicle".to_string()],
+    );
+    assert!(
+        r.extracted_keywords.iter().any(|k| matches!(
+            k,
+            Keyword::Crew {
+                power: 2,
+                once_per_turn: None
+            }
+        )),
+        "valid whole-line Crew 2 must still parse; got {:?}",
+        r.extracted_keywords
+    );
+    assert!(
+        !format!("{r:?}").contains("Unimplemented"),
+        "valid Crew 2 must not go red; got {r:?}"
+    );
+}
+
+#[test]
+fn crew_cadence_modifier_is_applied_not_dropped() {
+    // CR 702.122 + CR 602.5b: the cadence sentence is a MODELED tail (`M`), so
+    // the strict router accepts it and must APPLY it to the typed keyword.
+    let r = parse_oracle_text(
+        "Crew 2. Activate only once each turn.",
+        "Cadenced Vehicle",
+        &[],
+        &["Artifact".to_string()],
+        &["Vehicle".to_string()],
+    );
+    assert!(
+        r.extracted_keywords.iter().any(|k| matches!(
+            k,
+            Keyword::Crew {
+                power: 2,
+                once_per_turn: Some(_)
+            }
+        )),
+        "the modeled cadence modifier must be applied to the keyword, not dropped; got {:?}",
+        r.extracted_keywords
+    );
+}
+
+#[test]
+fn cycling_with_semantic_suffix_is_not_swallowed_at_priority_9() {
+    // Spell harness -> priority 9. Same class-B defect on the spell side: the
+    // permissive parser returned Some(Cycling) and ate the conditional.
+    let r = parse_oracle_text(
+        "Cycling {2} if you control an artifact",
+        "Hostile Cantrip",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert!(
+        !r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Cycling(_))),
+        "no Cycling keyword may be synthesized from an unparsable line; got {:?}",
+        r.extracted_keywords
+    );
+    assert!(
+        has_unimplemented_mentioning(&r, "Cycling {2} if you control an artifact"),
+        "the exact source line must survive as an Unimplemented; got {r:?}"
+    );
+}
+
+#[test]
+fn cycling_valid_whole_line_still_reaches_the_keyword_route() {
+    let r = parse_oracle_text(
+        "Cycling {2}",
+        "Plain Cantrip",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert!(
+        r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Cycling(_))),
+        "valid whole-line Cycling {{2}} must still parse; got {:?}",
+        r.extracted_keywords
+    );
+}
+
+#[test]
+fn keyword_line_with_reminder_text_is_still_routed() {
+    // `R` tail: balanced reminder-text removal is the ONLY permitted
+    // normalization, and it must not cause a rejection.
+    let r = parse_oracle_text(
+        "Cycling {2} ({2}, Discard this card: Draw a card.)",
+        "Reminder Cantrip",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert!(
+        r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Cycling(_))),
+        "a reminder-text tail is permitted and must still route; got {:?}",
+        r.extracted_keywords
+    );
+}

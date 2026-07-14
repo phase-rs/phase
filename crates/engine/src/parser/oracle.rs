@@ -69,7 +69,7 @@ use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     extract_granted_keyword_list, is_keyword_cost_line, parse_granted_keyword_fragment,
-    parse_kicker_additional_cost_line,
+    parse_kicker_additional_cost_line, parse_router_keyword_line,
 };
 use super::oracle_level::parse_level_blocks;
 use super::oracle_modal::{
@@ -5201,12 +5201,16 @@ pub(crate) fn parse_oracle_ir(
             // for `synthesize_cycling`. Continuation-line protection already
             // lives in `is_spell_resolution_instruction_line`; this covers the
             // case where the keyword-cost line is its own main-loop iteration.
-            if is_keyword_cost_line(&lower) {
-                if let Some(kw) = parse_granted_keyword_fragment(&lower) {
-                    emitter.keyword_at(item_line, kw);
-                    i += 1;
-                    continue;
-                }
+            // Consume-on-success: the candidate recognizer is a filter, not
+            // evidence. Only a complete strict parse (keyword + permitted P/R/M
+            // tail) licenses advancing past the line. A candidate we cannot
+            // strictly parse — "Cycling {2} if you control an artifact" — falls
+            // through to spell-effect parsing and becomes an honest, exact-unit
+            // `Effect::Unimplemented` rather than vanishing.
+            if let Some(routed) = parse_router_keyword_line(&line) {
+                emitter.keyword_at(item_line, routed.keyword);
+                i += 1;
+                continue;
             }
 
             // B7: Strip ability-word prefix and attach condition for spell effects.
@@ -5557,10 +5561,14 @@ pub(crate) fn parse_oracle_ir(
                 continue;
             }
         }
-        if is_keyword_cost_line(&lower) {
-            if let Some(kw) = parse_granted_keyword_fragment(&lower) {
-                emitter.keyword_at(item_line, kw);
-            }
+        // Consume-on-success. The previous form advanced `i` OUTSIDE the
+        // `if let Some(kw)`, so a permanent line the candidate recognizer
+        // accepted but the parser could not parse was skipped with NO keyword
+        // and NO `Unimplemented` — a silent swallow that rendered as full
+        // support. A strict parse is now the only licence to advance; anything
+        // else falls through to priority 14a/15 and stays honestly red.
+        if let Some(routed) = parse_router_keyword_line(&line) {
+            emitter.keyword_at(item_line, routed.keyword);
             i += 1;
             continue;
         }
