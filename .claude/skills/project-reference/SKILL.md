@@ -143,6 +143,21 @@ cargo run --bin oracle-gen -- data --filter "card name"             # single car
 cargo run --bin oracle-gen -- data --filter "name1|name2|name3"     # multiple cards (pipe-separated, substring match)
 ```
 
+#### Measurement hazards — read before you export, diff, or commit
+
+The export **writes to tracked files** and is **not fully deterministic**. Three consequences,
+all of which have burned real measurement campaigns:
+
+| Hazard | What you'll see | What to do |
+|---|---|---|
+| **`cargo export-cards` rewrites `crates/engine/data/oracle-subtypes.json`** — a tracked *parser input*, and the rewrite is non-idempotent (it can drop subtypes) | An unexplained diff in a file you never edited | **Never commit it as a side effect.** `git checkout -- crates/engine/data/oracle-subtypes.json` after the export unless changing the vocabulary is your actual intent. It is a parser input: a lossy rewrite silently changes how *every* card parses |
+| **`gen-card-data.sh` dirties `crates/engine/data/known-tokens.toml`** (also tracked) | Same — a diff you didn't author | Same: leave it out of the commit. Commit by explicit pathspec, never `git add -A` |
+| **The export is nondeterministic on ~20 faces** | Two exports of the same tree differ | **That is the noise floor of any whole-pool ledger.** A delta of ≲20 faces between two full-pool runs is not signal. Re-run, or diff against a snapshot taken from the *same* binary — never claim a sub-noise-floor coverage win |
+
+Corollary for coverage work: **snapshot `card-data.json` BEFORE you touch the parser**, and
+diff generated-vs-generated. Diffing a fresh export against a stale committed artifact
+attributes the artifact's own drift to your change.
+
 ### Card Data Lookup
 ```bash
 jq '.["lightning bolt"]' client/public/card-data.json                    # Full card data
