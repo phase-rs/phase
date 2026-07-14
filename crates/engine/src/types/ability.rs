@@ -18767,10 +18767,17 @@ pub enum DrawReplacementScope {
     /// Modifies the draw *instruction* before any individual draw happens
     /// (CR 121.2a). Selected by a count-form antecedent ("would draw <N> or more
     /// cards"): Quantum Riddler — "if you would draw one or more cards, you draw
-    /// that many cards plus one instead" — and Alms Collector — "if an opponent
-    /// would draw two or more cards, instead you and that player each draw a
-    /// card".
-    InstructionCount,
+    /// that many cards plus one instead" (`min: 1`) — and Alms Collector — "if an
+    /// opponent would draw two or more cards, instead you and that player each
+    /// draw a card" (`min: 2`).
+    ///
+    /// `min` is the antecedent's printed threshold N. CR 121.2a scopes the
+    /// modification to the *instruction*, so it only fires when that instruction
+    /// draws at least N cards — a one-card draw slips past Alms Collector's
+    /// "two or more". The draw matcher/applicability seam
+    /// (`game::replacement`) enforces `event.count >= min`; discarding N there
+    /// would over-apply the shield to sub-threshold draws.
+    InstructionCount { min: u32 },
     /// Replaces or prevents a single individual card draw (CR 121.6b). Dredge,
     /// Notion Thief, Hullbreacher, and the runtime "you can't draw" shields.
     IndividualDraw,

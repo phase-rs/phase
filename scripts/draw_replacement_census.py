@@ -366,6 +366,14 @@ def corpus_rows(export: dict) -> list[tuple[str, ...]]:
             # whole reason the scope is declared rather than inferred at match time.
             required = classify_scope(card, repl)
             emitted = repl.get("draw_scope")
+            # CR 121.2a: `InstructionCount { min }` is a struct variant, so serde
+            # serializes it as `{"InstructionCount": {"min": N}}` while the unit
+            # `IndividualDraw` stays a bare string. The scope-name is the variant
+            # tag either way; the threshold N is enforced at the runtime matcher,
+            # not cross-checked here. Fold the struct form back to its tag so the
+            # comparison stays name-vs-name.
+            if isinstance(emitted, dict) and len(emitted) == 1:
+                emitted = next(iter(emitted))
             if emitted is None:
                 raise ClassificationError(
                     f"{card}: Draw replacement has no `draw_scope` (CR 121.2 requires "

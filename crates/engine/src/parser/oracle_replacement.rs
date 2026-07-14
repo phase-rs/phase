@@ -4,7 +4,7 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::{char, multispace0, multispace1};
-use nom::combinator::{all_consuming, eof, map_opt, opt, peek, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, opt, peek, rest, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -422,13 +422,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
                 DrawReplacementScope::IndividualDraw,
                 tag::<_, _, OracleError<'_>>("would draw a card"),
             ),
-            value(
-                DrawReplacementScope::InstructionCount,
+            map(
                 (
                     tag("would draw "),
                     nom_primitives::parse_number,
                     tag(" or more cards"),
                 ),
+                |(_, min, _)| DrawReplacementScope::InstructionCount { min },
             ),
         ))
         .parse(i)
@@ -7324,7 +7324,8 @@ fn parse_conditional_draw_replacement(text: &str, lower: &str) -> Option<Replace
             // CR 121.2a: this branch is the count-form antecedent ("if you would draw
             // one or more cards, you draw that many cards plus one instead" — Quantum
             // Riddler). It modifies the INSTRUCTION before any individual draw happens.
-            .draw_scope(DrawReplacementScope::InstructionCount)
+            // "one or more" ⇒ threshold `min: 1`.
+            .draw_scope(DrawReplacementScope::InstructionCount { min: 1 })
             .condition(ReplacementCondition::OnlyIfQuantity {
                 lhs,
                 comparator,
@@ -16903,9 +16904,10 @@ mod tests {
         .expect("'would draw two or more cards' must lower to a Draw replacement");
         assert_eq!(alms.event, ReplacementEvent::Draw);
         // CR 121.2a: a count-form antecedent hooks the instruction, not one draw.
+        // "two or more" carries the printed threshold N=2 into the scope.
         assert_eq!(
             alms.draw_scope,
-            Some(DrawReplacementScope::InstructionCount)
+            Some(DrawReplacementScope::InstructionCount { min: 2 })
         );
         assert_eq!(alms.mode, ReplacementMode::Mandatory);
         // CR 614.1a: "an opponent would draw" scopes the shield to opponents.
@@ -16921,7 +16923,7 @@ mod tests {
         .expect("'would draw three or more cards' must lower to a Draw replacement");
         assert_eq!(
             three.draw_scope,
-            Some(DrawReplacementScope::InstructionCount)
+            Some(DrawReplacementScope::InstructionCount { min: 3 })
         );
 
         // Guard the boundary: a singular "would draw a card" stays IndividualDraw

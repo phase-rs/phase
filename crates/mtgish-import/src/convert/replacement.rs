@@ -606,9 +606,11 @@ pub fn convert_replace_would_draw(
             // antecedent ("would draw a card", the draw step, a cycling draw) is one
             // individual draw. Same rule the Oracle parser applies.
             draw_scope: Some(match event {
-                ReplacableEventWouldDraw::APlayerWouldDrawOneOrMoreCards(_)
-                | ReplacableEventWouldDraw::APlayerWouldDrawTwoOrMoreCards(_) => {
-                    DrawReplacementScope::InstructionCount
+                ReplacableEventWouldDraw::APlayerWouldDrawOneOrMoreCards(_) => {
+                    DrawReplacementScope::InstructionCount { min: 1 }
+                }
+                ReplacableEventWouldDraw::APlayerWouldDrawTwoOrMoreCards(_) => {
+                    DrawReplacementScope::InstructionCount { min: 2 }
                 }
                 _ => DrawReplacementScope::IndividualDraw,
             }),

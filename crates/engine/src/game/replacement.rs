@@ -4,10 +4,10 @@ use std::sync::LazyLock;
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
-    DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectScope, PostReplacementContinuation,
-    PreventionAmount, QuantityExpr, QuantityModification, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, ResolvedAbility, ShieldKind, TapStateChange,
-    TargetFilter, TargetRef,
+    DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope, Effect, EffectScope,
+    PostReplacementContinuation, PreventionAmount, QuantityExpr, QuantityModification,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, ResolvedAbility, ShieldKind,
+    TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -5114,6 +5114,21 @@ fn object_replacement_candidate_applies(
             None => *player_id == replacement_player,
         };
         if !player_ok {
+            return false;
+        }
+    }
+    if let (
+        Some(DrawReplacementScope::InstructionCount { min }),
+        ProposedEvent::Draw { count, .. },
+    ) = (&repl_def.draw_scope, event)
+    {
+        // CR 121.2a: a count-form antecedent ("would draw N or more cards")
+        // modifies the draw *instruction*, and only when that instruction draws
+        // at least N cards. A sub-threshold instruction (e.g. a single-card draw
+        // against Alms Collector's "two or more") is untouched, so the shield
+        // must not match it. This is the seam that consumes the parsed threshold
+        // — sibling to `combat_scope` / `damage_target_filter` above.
+        if count < min {
             return false;
         }
     }
@@ -10246,6 +10261,83 @@ mod tests {
         assert!(
             find_applicable_replacements(&state, &stale_controller_draw, &registry).is_empty(),
             "dredge must not follow the card's stale battlefield controller"
+        );
+    }
+
+    /// Alms Collector — "If an opponent would draw two or more cards, instead you
+    /// and that player each draw a card." A count-form antecedent with threshold
+    /// N=2 (`DrawReplacementScope::InstructionCount { min: 2 }`).
+    fn alms_collector_draw_replacement_def() -> ReplacementDefinition {
+        // CR 614.6 + CR 121.2a: the substitute draws a fixed card each — its
+        // shape is irrelevant to applicability, which turns on scope + threshold.
+        let substitute = AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(DrawReplacementScope::InstructionCount { min: 2 });
+        // CR 614.1a: "an opponent would draw" scopes the shield to opponents of
+        // Alms Collector's controller (PlayerId(0)).
+        repl.valid_player = Some(crate::types::ability::ReplacementPlayerScope::Opponent);
+        repl.execute = Some(Box::new(substitute));
+        repl
+    }
+
+    /// CR 121.2a: a count-form "two or more" antecedent modifies the draw
+    /// *instruction*, and only when it draws at least N=2 cards. The parsed
+    /// threshold must reach the matcher: a single-card opponent draw slips past
+    /// the shield, a two-card opponent draw is caught. This is the runtime proof
+    /// the reviewer required — the parser retaining `min` is inert unless the
+    /// applicability seam consumes it.
+    #[test]
+    fn alms_collector_threshold_gates_draw_replacement_by_count() {
+        let mut state = test_state_with_object(
+            ObjectId(20),
+            Zone::Battlefield,
+            vec![alms_collector_draw_replacement_def()],
+        );
+        // Alms Collector is controlled by PlayerId(0); PlayerId(1) is the opponent.
+        state.objects.get_mut(&ObjectId(20)).unwrap().controller = PlayerId(0);
+        let registry = build_replacement_registry();
+
+        // Opponent draws ONE card: below the "two or more" threshold — untouched.
+        let opponent_draws_one = ProposedEvent::Draw {
+            player_id: PlayerId(1),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &opponent_draws_one, &registry).is_empty(),
+            "CR 121.2a: a one-card opponent draw is below Alms Collector's N=2 threshold \
+             and must NOT be replaced"
+        );
+
+        // Opponent draws TWO cards: meets the threshold — the shield applies.
+        let opponent_draws_two = ProposedEvent::Draw {
+            player_id: PlayerId(1),
+            count: 2,
+            applied: HashSet::new(),
+        };
+        assert_eq!(
+            find_applicable_replacements(&state, &opponent_draws_two, &registry).len(),
+            1,
+            "CR 121.2a: a two-card opponent draw meets the N=2 threshold and must be replaced"
+        );
+
+        // CR 614.1a: even a threshold-meeting draw by the controller is out of
+        // scope — the antecedent is opponent-only.
+        let controller_draws_two = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 2,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &controller_draws_two, &registry).is_empty(),
+            "CR 614.1a: Alms Collector's opponent-scoped shield must not apply to its \
+             controller's own draw"
         );
     }
 
