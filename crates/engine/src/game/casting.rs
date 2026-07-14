@@ -1838,6 +1838,12 @@ pub(super) fn build_spell_meta(
         // through spell payment, so they never build a `PaymentContext::Spell`. Guarded by
         // `build_spell_meta_for_foretold_card_is_not_face_down` (casting_tests.rs).
         is_face_down: obj.face_down && obj.back_face.is_some(),
+        // CR 601.2g / CR 118.3: Hogaak-style "you can't spend mana to cast this
+        // spell" — the mana-payment eligibility layer makes real pool mana
+        // ineligible when set, so only convoke/delve stand-ins can pay.
+        cant_spend_mana: obj
+            .casting_restrictions
+            .contains(&crate::types::ability::CastingRestriction::CantSpendMana),
     })
 }
 
