@@ -20038,6 +20038,22 @@ fn static_all_creatures_are_color_composes_trailing_modifications() {
         ]
     );
 
+    // The sibling general-subject path must compose the same color and keyword
+    // rather than limiting the fix to the `all creatures` dispatch fast path.
+    let def = parse_static_line("Each nonland permanent you control is all colors and has flying.")
+        .unwrap();
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::SetColor {
+                colors: ManaColor::ALL.to_vec()
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            },
+        ]
+    );
+
     // Color + pump.
     let def = parse_static_line("All creatures are white and get +1/+1.").unwrap();
     assert_eq!(
