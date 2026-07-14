@@ -13223,7 +13223,7 @@ pub(super) fn can_feasibly_pay_mana_cost(
     can_feasibly_pay_mana_cost_with_probe(state, player, source_id, cost, None)
 }
 
-pub(super) fn has_manual_mana_ability_for_spell_payment(
+pub(crate) fn has_manual_mana_ability_for_spell_payment(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
