@@ -945,6 +945,7 @@ mod roiling_vortex_upkeep_damage_2891;
 mod room_door_lock_unlock;
 mod s01_current_phase_condition;
 mod s01_excess_damage_followup;
+mod play_with_fire_damage_scry;
 mod s01_object_property_conditions;
 mod s07_b3_target_identity;
 mod s07_coiling_rebirth_full_cast;
