@@ -1125,11 +1125,25 @@ pub(crate) fn classify_cant_be_targeted(predicate_lower: &str) -> Option<CantBeT
     (bare || unqualified_scope).then_some(CantBeTargetedScope::AnyPlayer)
 }
 
+/// Remainder-preserving keyword core — the SINGLE authority for keyword-line
+/// parsing. Returns the typed keyword plus the input it did **not** consume.
+///
+/// Two wrappers sit on top and they differ only in what they do with that
+/// remainder:
+///   * `parse_granted_keyword_fragment` DISCARDS it (permissive; correct for an
+///     embedded grant, where a trailing conditional belongs to the host ability);
+///   * `parse_router_keyword_line` REQUIRES it to be an empty/punctuation/
+///     reminder/modeled-modifier tail (strict; the only form valid at a
+///     whole-line router boundary).
+///
+/// Returning `""` is a claim of full consumption. A branch must return the real
+/// remainder whenever it stops early, or the strict router will silently accept
+/// a line it never actually parsed.
 ///
 /// Oracle text uses space-separated format: "protection from red", "ward {2}",
 /// "flashback {2}{U}". Converts to the colon format that `FromStr` expects,
 /// handling the "from" preposition used by protection keywords.
-pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
+pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     use crate::types::keywords::PartnerType;
 
     // CR 702.124: Partner variant keywords — must come BEFORE generic "partner" match.
@@ -1159,7 +1173,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     ))
     .parse(text)
     {
-        return result;
+        return result.map(|kw| (kw, ""));
     }
 
     // CR 702.24: Cumulative upkeep granted via a quoted ability ("[enchanted
@@ -1168,21 +1182,21 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     // parser directly, so delegate to it here too (Mana Chains, Dreams of the
     // Dead, Decomposition).
     if let Some(kw) = super::oracle_special::parse_cumulative_upkeep_keyword(text) {
-        return Some(kw);
+        return Some((kw, ""));
     }
 
     if let Some(kw) = parse_bloodthirst_keyword_line(text) {
-        return Some(kw);
+        return Some((kw, ""));
     }
 
     if let Some(kw) = parse_firebending_keyword_line(text) {
-        return Some(kw);
+        return Some((kw, ""));
     }
 
     // CR 702.48a: "<Subtype> offering" — the Oracle line carries the quality the
     // bare "Offering" keyword name lacks.
     if let Some(kw) = parse_offering_keyword_line(text) {
-        return Some(kw);
+        return Some((kw, ""));
     }
 
     // CR 702.112a: Renown N — parameterized keyword from Oracle text.
@@ -1194,7 +1208,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     ))
     .parse(text)
     {
-        return Some(Keyword::Renown(n));
+        return Some((Keyword::Renown(n), ""));
     }
 
     // CR 702.68a: Frenzy N — parameterized keyword from Oracle/reminder/grant text.
@@ -1206,13 +1220,13 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     ))
     .parse(text)
     {
-        return Some(Keyword::Frenzy(n));
+        return Some((Keyword::Frenzy(n), ""));
     }
 
     // CR 702.167a/b: Craft with [materials] [cost] — the Oracle line carries the
     // materials class and activation cost that the bare "Craft" keyword lacks.
     if let Some(kw) = parse_craft_keyword_line(text) {
-        return Some(kw);
+        return Some((kw, ""));
     }
     if tag::<_, _, OracleError<'_>>("craft with ")
         .parse(text)
@@ -1224,7 +1238,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     // First try direct parse (handles simple keywords like "flying")
     let direct: Keyword = text.parse().unwrap();
     if !matches!(direct, Keyword::Unknown(_)) {
-        return Some(direct);
+        return Some((direct, ""));
     }
 
     // CR 702.29e: "basic landcycling {cost}" — multi-word typecycling variant.
@@ -1235,7 +1249,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
             let colon_form = format!("typecycling:Basic Land:{cost_str}");
             let parsed: Keyword = colon_form.parse().unwrap();
             if !matches!(parsed, Keyword::Unknown(_)) {
-                return Some(parsed);
+                return Some((parsed, ""));
             }
         }
     }
@@ -1248,7 +1262,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     // guard never has to consider em-dash forms.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cycling\u{2014}").parse(text) {
         if let Some(cyc_cost) = parse_cycling_cost(rest) {
-            return Some(Keyword::Cycling(cyc_cost));
+            return Some((Keyword::Cycling(cyc_cost), ""));
         }
     }
 
@@ -1261,7 +1275,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
                 let colon_form = format!("typecycling:{subtype}:{cost_str}");
                 let parsed: Keyword = colon_form.parse().unwrap();
                 if !matches!(parsed, Keyword::Unknown(_)) {
-                    return Some(parsed);
+                    return Some((parsed, ""));
                 }
             }
         }
@@ -1270,7 +1284,9 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     // CR 702.21a: Ward with non-mana costs uses em-dash separator (U+2014).
     // "ward—pay N life", "ward—discard a card", "ward—sacrifice a permanent"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("ward\u{2014}").parse(text) {
-        return parse_ward_cost(rest);
+        // `parse_ward_cost` consumes the whole `rest` (or rejects it), so nothing
+        // is left over on success.
+        return parse_ward_cost(rest).map(|kw| (kw, ""));
     }
 
     // CR 702.34a: Flashback with em-dash cost — covers single non-mana costs
@@ -1282,7 +1298,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     // mana-payment flow and residual sub-costs through `pay_additional_cost`.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("flashback\u{2014}").parse(text) {
         if let Some(fb_cost) = parse_flashback_cost(rest) {
-            return Some(Keyword::Flashback(fb_cost));
+            return Some((Keyword::Flashback(fb_cost), ""));
         }
     }
 
@@ -1296,7 +1312,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     // `pay_additional_cost`.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("bestow\u{2014}").parse(text) {
         if let Some(bestow_cost) = parse_bestow_cost(rest) {
-            return Some(Keyword::Bestow(bestow_cost));
+            return Some((Keyword::Bestow(bestow_cost), ""));
         }
     }
 
@@ -1305,7 +1321,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     // ("Buyback {3}") is handled by the direct `FromStr` path above.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("buyback\u{2014}").parse(text) {
         if let Some(bb_cost) = parse_buyback_cost(rest) {
-            return Some(Keyword::Buyback(bb_cost));
+            return Some((Keyword::Buyback(bb_cost), ""));
         }
     }
 
@@ -1317,7 +1333,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     // array and is handled by the `FromStr` path above.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("evoke\u{2014}").parse(text) {
         if let Some(ev_cost) = parse_evoke_cost(rest) {
-            return Some(Keyword::Evoke(ev_cost));
+            return Some((Keyword::Evoke(ev_cost), ""));
         }
     }
 
@@ -1327,7 +1343,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     // generic space-split mangles "echo—discard a card".
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("echo\u{2014}").parse(text) {
         if let Some(echo_cost) = parse_echo_cost(rest) {
-            return Some(Keyword::Echo(echo_cost));
+            return Some((Keyword::Echo(echo_cost), ""));
         }
     }
 
@@ -1339,7 +1355,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     // mandatory self-exile sub-cost.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("embalm\u{2014}").parse(text) {
         if let Some(embalm_cost) = parse_embalm_cost(rest) {
-            return Some(Keyword::Embalm(embalm_cost));
+            return Some((Keyword::Embalm(embalm_cost), ""));
         }
     }
 
@@ -1348,7 +1364,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     // Pure-mana eternalize arrives via the FromStr path above.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("eternalize\u{2014}").parse(text) {
         if let Some(eternalize_cost) = parse_eternalize_cost(rest) {
-            return Some(Keyword::Eternalize(eternalize_cost));
+            return Some((Keyword::Eternalize(eternalize_cost), ""));
         }
     }
 
@@ -1357,7 +1373,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("escalate\u{2014}").parse(text) {
         let cost = normalize_escalate_cost(parse_oracle_cost(rest));
         if !matches!(cost, AbilityCost::Unimplemented { .. }) {
-            return Some(Keyword::Escalate(cost));
+            return Some((Keyword::Escalate(cost), ""));
         }
     }
 
@@ -1379,7 +1395,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
         .is_ok()
     {
         if let Some(kw) = super::oracle_special::parse_escape_keyword(text) {
-            return Some(kw);
+            return Some((kw, ""));
         }
     }
 
@@ -1388,7 +1404,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("hideaway ").parse(text) {
         if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest.trim()) {
             if rem.is_empty() {
-                return Some(Keyword::Hideaway(n));
+                return Some((Keyword::Hideaway(n), ""));
             }
         }
     }
@@ -1398,7 +1414,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-            return Some(Keyword::Specialize(cost));
+            return Some((Keyword::Specialize(cost), ""));
         }
     }
 
@@ -1407,7 +1423,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-            return Some(Keyword::LevelUp(cost));
+            return Some((Keyword::LevelUp(cost), ""));
         }
     }
 
@@ -1417,7 +1433,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-            return Some(Keyword::MoreThanMeetsTheEye(cost));
+            return Some((Keyword::MoreThanMeetsTheEye(cost), ""));
         }
     }
 
@@ -1426,7 +1442,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("discover ").parse(text) {
         if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest.trim()) {
             if rem.is_empty() {
-                return Some(Keyword::Discover(n));
+                return Some((Keyword::Discover(n), ""));
             }
         }
     }
@@ -1441,7 +1457,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
             "tapped fish" => GiftKind::TappedFish,
             _ => return None,
         };
-        return Some(Keyword::Gift(kind));
+        return Some((Keyword::Gift(kind), ""));
     }
 
     // CR 702.49d: Commander ninjutsu — multi-word keyword name (like "level up").
@@ -1449,7 +1465,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-            return Some(Keyword::CommanderNinjutsu(cost));
+            return Some((Keyword::CommanderNinjutsu(cost), ""));
         }
     }
 
@@ -1467,7 +1483,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
                 .trim();
             if !cost_str.is_empty() {
                 let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-                return Some(Keyword::Suspend { count, cost });
+                return Some((Keyword::Suspend { count, cost }, ""));
             }
         }
     }
@@ -1483,7 +1499,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
                 .trim();
             if !cost_str.is_empty() {
                 let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-                return Some(Keyword::Awaken { count, cost });
+                return Some((Keyword::Awaken { count, cost }, ""));
             }
         }
     }
@@ -1501,7 +1517,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
                 .trim();
             if !cost_str.is_empty() {
                 let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-                return Some(Keyword::Reinforce { count, cost });
+                return Some((Keyword::Reinforce { count, cost }, ""));
             }
         }
     }
@@ -1519,11 +1535,14 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
             if let Ok((after_power, power)) = nom_primitives::parse_number.parse(pt_str.trim()) {
                 if let Ok((tough_str, _)) = tag::<_, _, OracleError<'_>>("/").parse(after_power) {
                     if let Ok((_, toughness)) = nom_primitives::parse_number.parse(tough_str) {
-                        return Some(Keyword::Prototype {
-                            cost,
-                            power: Some(power as i32),
-                            toughness: Some(toughness as i32),
-                        });
+                        return Some((
+                            Keyword::Prototype {
+                                cost,
+                                power: Some(power as i32),
+                                toughness: Some(toughness as i32),
+                            },
+                            "",
+                        ));
                     }
                 }
             }
@@ -1540,7 +1559,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     ))
     .parse(text)
     {
-        return Some(Keyword::Ripple(n));
+        return Some((Keyword::Ripple(n), ""));
     }
 
     // CR 702.89a/b: "umbra armor" — and the obsolete "totem armor" the Oracle text
@@ -1554,13 +1573,13 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     .parse(text)
     .is_ok()
     {
-        return Some(Keyword::TotemArmor);
+        return Some((Keyword::TotemArmor, ""));
     }
 
     if let Ok((quality, _)) = tag::<_, _, OracleError<'_>>("bands with other ").parse(text) {
         let normalized = normalize_bands_with_other_quality(quality);
         if !normalized.is_empty() {
-            return Some(Keyword::BandsWithOther(normalized));
+            return Some((Keyword::BandsWithOther(normalized), ""));
         }
     }
 
@@ -1585,7 +1604,14 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     // CR 702.63b: Vanishing without a number has no count, so `parse_number`
     // fails and we fall through to the generic path, preserving today's
     // Vanishing(0) routing.
-    let param: Cow<'_, str> = if is_numeric_count_keyword(name) {
+    // `unconsumed` is the input the KEYWORD does not account for. In the
+    // colon-form path below, `FromStr` is handed the ENTIRE `param`, so a
+    // successful (non-`Unknown`) parse consumed all of it and the remainder is
+    // empty. The ONE exception is the numeric-count branch, which deliberately
+    // feeds `FromStr` only the leading integer and drops the rest — that dropped
+    // tail is precisely what the strict router must see in order to reject
+    // "<kw> N <semantic clause>" (e.g. "crew 2 if it's an artifact").
+    let (param, unconsumed): (Cow<'_, str>, &str) = if is_numeric_count_keyword(name) {
         // CR 702.82c: "Devour [quality] N" is a variant where the count follows a
         // leading type qualifier — Famished Worldsire's "Devour land 3" enters
         // with three +1/+1 counters per sacrificed LAND, so the numeric token
@@ -1604,14 +1630,25 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
                 .map_or(rest, |(after_qualifier, _)| after_qualifier)
         };
         match nom_primitives::parse_number.parse(count_src) {
-            Ok((remainder, _)) => Cow::Borrowed(&count_src[..count_src.len() - remainder.len()]),
-            Err(_) => Cow::Borrowed(rest),
+            // `remainder` is the clause the permissive contract drops on the
+            // floor. Surface it; the strict router turns it into a rejection.
+            Ok((remainder, _)) => (
+                Cow::Borrowed(&count_src[..count_src.len() - remainder.len()]),
+                remainder,
+            ),
+            // No leading integer: the whole `rest` goes to `FromStr`, so whatever
+            // it makes of it, it saw all of it.
+            Err(_) => (Cow::Borrowed(rest), ""),
         }
     } else {
-        // Strip "from" preposition (used by protection keywords).
-        tag::<_, _, OracleError<'_>>("from ")
-            .parse(rest)
-            .map_or(Cow::Borrowed(rest), |(rem, _)| Cow::Borrowed(rem))
+        // Strip "from" preposition (used by protection keywords). `FromStr` again
+        // receives the whole parameter, so nothing is left unconsumed.
+        (
+            tag::<_, _, OracleError<'_>>("from ")
+                .parse(rest)
+                .map_or(Cow::Borrowed(rest), |(rem, _)| Cow::Borrowed(rem)),
+            "",
+        )
     };
 
     let colon_form = format!("{name}:{param}");
@@ -1619,7 +1656,23 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     if matches!(parsed, Keyword::Unknown(_)) {
         return None;
     }
-    Some(parsed)
+    Some((parsed, unconsumed))
+}
+
+/// Permissive, grant-context keyword parser. Returns the typed leading keyword
+/// and **deliberately discards** whatever the core did not consume.
+///
+/// This is the documented contract, not an oversight: inside a granted or quoted
+/// ability ("enchanted creature has \"Vanishing 3\"", "... gains vanishing 3 if
+/// that creature doesn't have vanishing"), a trailing conditional belongs to the
+/// HOST ability, not to the keyword. Dropping it is correct there.
+///
+/// It is invalid at a whole-line router boundary for exactly the same reason —
+/// there, the trailing clause is unparsed card text and dropping it is a silent
+/// swallow. Routers must use `parse_router_keyword_line`, which is mechanically
+/// enforced by `scripts/check-parser-combinators.sh`.
+pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
+    parse_keyword_line_core(text).map(|(keyword, _discarded_remainder)| keyword)
 }
 
 /// Bare-integer-count keywords whose `FromStr` arm does `p.parse().unwrap_or(N)`
