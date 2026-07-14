@@ -9,7 +9,8 @@ use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::{
-    cast_facts_for_action, effect_profile_for_action, CastFacts, EffectProfile,
+    cast_facts_for_action, effect_profile_for_action, effective_activated_ability, CastFacts,
+    EffectProfile,
 };
 use crate::config::{AiConfig, PolicyPenalties};
 use crate::eval::{strategic_intent, StrategicIntent};
@@ -183,6 +184,12 @@ impl<'a> PolicyContext<'a> {
                 }
                 _ => None,
             })
+    }
+
+    /// Exact activated ability represented by this candidate, including
+    /// runtime-granted abilities in the engine's production index space.
+    pub fn effective_activated_ability(&self) -> Option<AbilityDefinition> {
+        effective_activated_ability(self.state, &self.candidate.action)
     }
 
     /// Effect-level profile for both spells and activated abilities.

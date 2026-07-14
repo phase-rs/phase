@@ -17,7 +17,6 @@
 //! CR 117.1a: Holding the ability until a threat appears is strictly better than
 //! pre-emptive activation.
 
-use engine::types::ability::AbilityDefinition;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
@@ -65,15 +64,15 @@ impl TacticalPolicy for SacrificeLandProtectionPolicy {
             }
         };
 
-        if !is_land_sacrifice_self_protection_activation(ability) {
+        if !is_land_sacrifice_self_protection_activation(&ability) {
             return PolicyVerdict::neutral(PolicyReason::new("sacrifice_land_protection_na"));
         }
 
         let exact_payoff =
-            self_protection_activation_payoff(ctx.state, ctx.ai_player, source_id, ability);
+            self_protection_activation_payoff(ctx.state, ctx.ai_player, source_id, &ability);
         if exact_payoff == Some(true)
             || (exact_payoff.is_none()
-                && any_land_sacrifice_protection_payoff(ctx.state, ctx.ai_player, ability))
+                && any_land_sacrifice_protection_payoff(ctx.state, ctx.ai_player, &ability))
         {
             return PolicyVerdict::neutral(PolicyReason::new(
                 "sacrifice_land_protection_answerable_threat",
@@ -94,20 +93,20 @@ impl TacticalPolicy for SacrificeLandProtectionPolicy {
     }
 }
 
-fn activation_ability<'a>(
-    ctx: &'a PolicyContext<'a>,
-) -> Option<(engine::types::identifiers::ObjectId, &'a AbilityDefinition)> {
+fn activation_ability(
+    ctx: &PolicyContext<'_>,
+) -> Option<(
+    engine::types::identifiers::ObjectId,
+    engine::types::ability::AbilityDefinition,
+)> {
     let GameAction::ActivateAbility {
         source_id,
-        ability_index,
+        ability_index: _,
     } = &ctx.candidate.action
     else {
         return None;
     };
-    ctx.state
-        .objects
-        .get(source_id)
-        .and_then(|object| object.abilities.get(*ability_index))
+    ctx.effective_activated_ability()
         .map(|ability| (*source_id, ability))
 }
 

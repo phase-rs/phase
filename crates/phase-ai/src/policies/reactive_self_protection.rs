@@ -28,6 +28,7 @@ use super::self_protection_classify::{
     any_immediate_threat, combat_step_allows_protection, is_self_protection_effect,
     self_protection_activation_payoff,
 };
+use crate::cast_facts::collect_definition_effects;
 use crate::features::DeckFeatures;
 
 pub struct ReactiveSelfProtectionPolicy;
@@ -52,32 +53,25 @@ impl TacticalPolicy for ReactiveSelfProtectionPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        let effects = ctx.effects();
-        if !effects
-            .iter()
-            .any(|e: &&engine::types::ability::Effect| is_self_protection_effect(e))
-        {
-            return PolicyVerdict::neutral(PolicyReason::new("reactive_self_protection_na"));
-        }
-
         if let GameAction::ActivateAbility {
             source_id,
-            ability_index,
+            ability_index: _,
         } = &ctx.candidate.action
         {
-            let Some(ability) = ctx
-                .state
-                .objects
-                .get(source_id)
-                .and_then(|object| object.abilities.get(*ability_index))
-            else {
+            let Some(ability) = ctx.effective_activated_ability() else {
                 return PolicyVerdict::neutral(PolicyReason::new("reactive_self_protection_na"));
             };
+            if !collect_definition_effects(&ability)
+                .into_iter()
+                .any(is_self_protection_effect)
+            {
+                return PolicyVerdict::neutral(PolicyReason::new("reactive_self_protection_na"));
+            }
             return match self_protection_activation_payoff(
                 ctx.state,
                 ctx.ai_player,
                 *source_id,
-                ability,
+                &ability,
             ) {
                 Some(true) => PolicyVerdict::neutral(PolicyReason::new(
                     "reactive_self_protection_exact_payoff",
@@ -92,6 +86,18 @@ impl TacticalPolicy for ReactiveSelfProtectionPolicy {
         }
 
         if !matches!(ctx.candidate.action, GameAction::CastSpell { .. }) {
+            return PolicyVerdict::neutral(PolicyReason::new("reactive_self_protection_na"));
+        }
+
+        let Some(cast_facts) = ctx.cast_facts() else {
+            return PolicyVerdict::neutral(PolicyReason::new("reactive_self_protection_na"));
+        };
+        let is_protection_spell = cast_facts
+            .primary_effects
+            .iter()
+            .flat_map(|ability| collect_definition_effects(ability))
+            .any(is_self_protection_effect);
+        if !is_protection_spell {
             return PolicyVerdict::neutral(PolicyReason::new("reactive_self_protection_na"));
         }
 
@@ -206,6 +212,39 @@ mod tests {
         ReactiveSelfProtectionPolicy.verdict(&ctx)
     }
 
+    fn cast_verdict(state: &GameState, object_id: ObjectId) -> PolicyVerdict {
+        let object = state.objects.get(&object_id).expect("cast object exists");
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id,
+                card_id: object.card_id,
+                targets: Vec::new(),
+                payment_mode: Default::default(),
+            },
+            metadata: ActionMetadata {
+                actor: Some(AI),
+                tactical_class: TacticalClass::Spell,
+            },
+        };
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority { player: AI },
+            candidates: Vec::new(),
+        };
+        let config = AiConfig::default();
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        ReactiveSelfProtectionPolicy.verdict(&ctx)
+    }
+
     fn indestructible_grant_to_self() -> Effect {
         Effect::GenericEffect {
             static_abilities: vec![StaticDefinition {
@@ -235,6 +274,57 @@ mod tests {
     #[test]
     fn classifier_recognises_self_indestructible_grant() {
         assert!(is_self_protection_effect(&indestructible_grant_to_self()));
+    }
+
+    #[test]
+    fn casting_permanent_with_activated_protection_is_not_rejected() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(20),
+            AI,
+            "Arco-Flagellant".to_string(),
+            Zone::Hand,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        ));
+
+        match cast_verdict(&state, id) {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(delta, 0.0);
+                assert_eq!(reason.kind, "reactive_self_protection_na");
+            }
+            PolicyVerdict::Reject { .. } => {
+                panic!("an activated ability is not the permanent spell's effect")
+            }
+        }
+    }
+
+    #[test]
+    fn casting_protection_spell_without_threat_is_rejected() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(21),
+            AI,
+            "Protection Instant".to_string(),
+            Zone::Hand,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Instant);
+        Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        ));
+
+        assert!(matches!(
+            cast_verdict(&state, id),
+            PolicyVerdict::Reject { .. }
+        ));
     }
 
     #[test]

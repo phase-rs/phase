@@ -178,6 +178,27 @@ pub fn cast_facts_for_action<'a>(
     cast_object_for_action(state, action, player).map(cast_facts_for_object)
 }
 
+/// Resolve the exact activated-ability definition represented by an action.
+///
+/// Production appends runtime-granted abilities after printed abilities, so
+/// indexing `GameObject::abilities` directly is not authoritative for an
+/// `ActivateAbility` candidate. Reuse the engine's enumerated index space.
+pub fn effective_activated_ability(
+    state: &GameState,
+    action: &GameAction,
+) -> Option<AbilityDefinition> {
+    let GameAction::ActivateAbility {
+        source_id,
+        ability_index,
+    } = action
+    else {
+        return None;
+    };
+    engine::game::casting::activated_ability_definitions(state, *source_id)
+        .into_iter()
+        .find_map(|(index, ability)| (index == *ability_index).then_some(ability))
+}
+
 /// Build an EffectProfile for any action — spells, activated abilities, or target
 /// selection contexts. For spells, this delegates to CastFacts (which includes ETB
 /// triggers and replacements). For activated abilities, it scans the specific
@@ -191,13 +212,9 @@ pub fn effect_profile_for_action(
         GameAction::CastSpell { .. } => {
             cast_facts_for_action(state, action, player).map(|facts| facts.profile)
         }
-        GameAction::ActivateAbility {
-            source_id,
-            ability_index,
-        } => {
-            let object = state.objects.get(source_id)?;
-            let ability = object.abilities.get(*ability_index)?;
-            let effects: Vec<_> = collect_definition_effects(ability);
+        GameAction::ActivateAbility { .. } => {
+            let ability = effective_activated_ability(state, action)?;
+            let effects: Vec<_> = collect_definition_effects(&ability);
             Some(EffectProfile::from_effects(&effects))
         }
         _ => None,
@@ -443,8 +460,12 @@ mod tests {
 
     use super::*;
     use engine::game::game_object::GameObject;
+    use engine::game::zones::create_object;
     use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::GameState;
     use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::keywords::Keyword;
     use engine::types::mana::ManaCost;
 
     fn make_object() -> GameObject {
@@ -461,6 +482,33 @@ mod tests {
             generic: 4,
         };
         object
+    }
+
+    #[test]
+    fn effective_activation_uses_runtime_granted_index_space() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Granted Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .keywords
+            .push(Keyword::Equip(ManaCost::generic(2)));
+        let action = GameAction::ActivateAbility {
+            source_id,
+            ability_index: 0,
+        };
+
+        let ability = effective_activated_ability(&state, &action)
+            .expect("runtime-granted equip ability must use index zero");
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert!(matches!(ability.effect.as_ref(), Effect::Attach { .. }));
     }
 
     #[test]

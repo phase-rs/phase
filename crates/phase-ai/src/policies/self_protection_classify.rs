@@ -21,11 +21,11 @@ use engine::game::combat::get_valid_block_targets_for_player;
 use engine::game::effects::effect::generic_effect_application_filter;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::functioning_abilities::active_static_definitions;
-use engine::game::keywords::source_matches_protection_target;
+use engine::game::keywords::{object_has_effective_keyword_kind, source_matches_protection_target};
 use engine::game::targeting::find_legal_targets;
 use engine::types::ability::TargetRef;
 use engine::types::card_type::CoreType;
-use engine::types::keywords::{HexproofFilter, ProtectionTarget};
+use engine::types::keywords::{HexproofFilter, KeywordKind, ProtectionTarget};
 
 use crate::ability_chain::collect_chain_effects;
 use crate::eval::threat_level;
@@ -762,22 +762,60 @@ fn grant_answers_targeted_effect(
                 && source
                     .is_some_and(|source| hexproof_from_blocks_source(filter, protected, source)),
         ),
-        DefensiveGrant::Protection(protection) => Some(
-            harmful_effect_uses_object_targeting(effect)
+        DefensiveGrant::Protection(protection) => {
+            let targeting_answer = harmful_effect_uses_object_targeting(effect)
                 && source.is_some_and(|source| {
                     source_matches_protection_target(protection, protected, source)
-                }),
-        ),
+                });
+            if targeting_answer {
+                Some(true)
+            } else if matches!(
+                effect,
+                Effect::DealDamage {
+                    damage_source: Some(_),
+                    ..
+                }
+            ) {
+                None
+            } else {
+                Some(false)
+            }
+        }
         DefensiveGrant::Indestructible => match effect {
             Effect::Destroy { .. } => Some(true),
-            Effect::DealDamage { .. } => match lethal_to_creature(state, recipient_id, &[effect]) {
-                Some(true) => Some(true),
-                Some(false) | None => None,
-            },
+            Effect::DealDamage {
+                damage_source: Some(_),
+                ..
+            } => None,
+            Effect::DealDamage { .. } => {
+                if damage_becomes_marked(state, source) == Some(false) {
+                    return Some(false);
+                }
+                match lethal_to_creature(state, recipient_id, &[effect]) {
+                    Some(true) if damage_becomes_marked(state, source) == Some(true) => Some(true),
+                    Some(true) | Some(false) | None => None,
+                }
+            }
             _ => Some(false),
         },
         DefensiveGrant::PreventDamage => None,
     }
+}
+
+/// Whether damage from this source uses ordinary marked-damage semantics.
+///
+/// CR 120.3d-e: wither/infect damage to creatures becomes -1/-1 counters;
+/// other creature damage is marked. CR 702.12b does not let indestructible
+/// prevent a creature from dying for having toughness 0 or less.
+fn damage_becomes_marked(
+    state: &GameState,
+    source: Option<&engine::game::game_object::GameObject>,
+) -> Option<bool> {
+    let source = source?;
+    Some(
+        !object_has_effective_keyword_kind(state, source.id, KeywordKind::Wither)
+            && !object_has_effective_keyword_kind(state, source.id, KeywordKind::Infect),
+    )
 }
 
 fn harmful_mass_filter(effect: &Effect) -> Option<&TargetFilter> {
@@ -805,12 +843,29 @@ fn grant_answers_mass_effect(
     let protected = state.objects.get(&recipient_id)?;
     match (grant, effect) {
         (DefensiveGrant::Indestructible, Effect::DestroyAll { .. }) => Some(true),
+        (
+            DefensiveGrant::Indestructible,
+            Effect::DamageAll {
+                damage_source: Some(_),
+                ..
+            },
+        ) => None,
         (DefensiveGrant::Indestructible, Effect::DamageAll { .. }) => {
+            if damage_becomes_marked(state, source) == Some(false) {
+                return Some(false);
+            }
             match lethal_to_creature(state, recipient_id, &[effect]) {
-                Some(true) => Some(true),
-                Some(false) | None => None,
+                Some(true) if damage_becomes_marked(state, source) == Some(true) => Some(true),
+                Some(true) | Some(false) | None => None,
             }
         }
+        (
+            DefensiveGrant::Protection(_),
+            Effect::DamageAll {
+                damage_source: Some(_),
+                ..
+            },
+        ) => None,
         (DefensiveGrant::Protection(protection), Effect::DamageAll { .. }) => {
             source.map(|source| source_matches_protection_target(protection, protected, source))
         }
@@ -834,15 +889,45 @@ fn grant_already_effective(
                 || active_static_definitions(state, object)
                     .any(|def| matches!(&def.mode, StaticMode::CantBeTargeted))
         }
-        DefensiveGrant::HexproofFrom(filter) => object
-            .keywords
-            .contains(&Keyword::HexproofFrom(filter.clone())),
-        DefensiveGrant::Protection(protection) => object
-            .keywords
-            .contains(&Keyword::Protection(protection.clone())),
+        DefensiveGrant::HexproofFrom(filter) => {
+            object.has_keyword(&Keyword::Shroud)
+                || object.has_keyword(&Keyword::Hexproof)
+                || object
+                    .keywords
+                    .contains(&Keyword::HexproofFrom(filter.clone()))
+                || active_static_definitions(state, object)
+                    .any(|def| matches!(&def.mode, StaticMode::CantBeTargeted))
+        }
+        DefensiveGrant::Protection(protection) => object.keywords.iter().any(|keyword| {
+            matches!(
+                keyword,
+                Keyword::Protection(existing)
+                    if existing == protection || *existing == ProtectionTarget::Everything
+            )
+        }),
         DefensiveGrant::Indestructible => object.has_keyword(&Keyword::Indestructible),
         DefensiveGrant::PreventDamage => false,
     }
+}
+
+fn combat_pair_ids(
+    combat: &engine::game::combat::CombatState,
+    recipient_id: ObjectId,
+) -> Vec<ObjectId> {
+    combat
+        .blocker_assignments
+        .get(&recipient_id)
+        .into_iter()
+        .flatten()
+        .chain(
+            combat
+                .blocker_to_attacker
+                .get(&recipient_id)
+                .into_iter()
+                .flatten(),
+        )
+        .copied()
+        .collect()
 }
 
 fn combat_payoff_for_opportunity(
@@ -896,20 +981,7 @@ fn combat_payoff_for_opportunity(
                 if grant_already_effective(state, *recipient_id, &opportunity.grant) {
                     continue;
                 }
-                let paired_ids: Vec<ObjectId> = combat
-                    .blocker_assignments
-                    .get(recipient_id)
-                    .into_iter()
-                    .flatten()
-                    .chain(
-                        combat
-                            .blocker_to_attacker
-                            .get(recipient_id)
-                            .into_iter()
-                            .flatten(),
-                    )
-                    .copied()
-                    .collect();
+                let paired_ids = combat_pair_ids(combat, *recipient_id);
                 if paired_ids.is_empty() {
                     continue;
                 }
@@ -939,9 +1011,47 @@ fn combat_payoff_for_opportunity(
             }
         }
         // CR 510.4: before regular damage completes, first/double-strike
-        // participation is source-specific. The engine has no public query for
-        // that distinction, so fail open rather than duplicate the rule here.
-        Phase::CombatDamage if !combat.regular_damage_done => None,
+        // participation is source-specific. Fail open only for a protected
+        // combatant whose grant could matter against an actual paired source.
+        Phase::CombatDamage if !combat.regular_damage_done => {
+            let mut ambiguous = false;
+            for recipient_id in &opportunity.recipients {
+                if grant_already_effective(state, *recipient_id, &opportunity.grant) {
+                    continue;
+                }
+                let paired_ids = combat_pair_ids(combat, *recipient_id);
+                if paired_ids.is_empty() {
+                    continue;
+                }
+                match &opportunity.grant {
+                    DefensiveGrant::Protection(protection) => {
+                        let Some(protected) = state.objects.get(recipient_id) else {
+                            continue;
+                        };
+                        if paired_ids.iter().any(|paired_id| {
+                            state.objects.get(paired_id).is_some_and(|paired| {
+                                source_matches_protection_target(protection, protected, paired)
+                            })
+                        }) {
+                            return Some(true);
+                        }
+                    }
+                    DefensiveGrant::Indestructible => {
+                        ambiguous |= paired_ids.iter().any(|paired_id| {
+                            damage_becomes_marked(state, state.objects.get(paired_id))
+                                != Some(false)
+                        });
+                    }
+                    DefensiveGrant::PreventDamage => ambiguous = true,
+                    DefensiveGrant::CantBeTargeted | DefensiveGrant::HexproofFrom(_) => {}
+                }
+            }
+            if ambiguous {
+                None
+            } else {
+                Some(false)
+            }
+        }
         Phase::CombatDamage => Some(false),
         _ => Some(false),
     }
@@ -1352,6 +1462,116 @@ mod tests {
         id
     }
 
+    fn push_opponent_damage(
+        state: &mut GameState,
+        recipient: engine::types::identifiers::ObjectId,
+        source_keyword: Keyword,
+        mass: bool,
+    ) {
+        use engine::types::ability::{QuantityExpr, ResolvedAbility, TargetRef};
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+        use engine::types::identifiers::CardId;
+        use engine::types::zones::Zone;
+
+        let opponent = PlayerId(1);
+        let source_id = engine::game::zones::create_object(
+            state,
+            CardId(99),
+            opponent,
+            "Counter Damage".to_string(),
+            Zone::Stack,
+        );
+        let source = state.objects.get_mut(&source_id).unwrap();
+        source.base_keywords.push(source_keyword.clone());
+        source.keywords.push(source_keyword);
+        let effect = if mass {
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                ),
+                player_filter: None,
+                damage_source: None,
+            }
+        } else {
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            }
+        };
+        let targets = (!mass)
+            .then_some(vec![TargetRef::Object(recipient)])
+            .unwrap_or_default();
+        let ability = ResolvedAbility::new(effect, targets, source_id, opponent);
+        state.stack.push_back(StackEntry {
+            id: source_id,
+            source_id,
+            controller: opponent,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+    }
+
+    #[test]
+    fn indestructible_does_not_answer_targeted_infect_damage() {
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let recipient = create_test_creature(&mut state, ai);
+        state.objects.get_mut(&recipient).unwrap().toughness = Some(3);
+        push_opponent_damage(&mut state, recipient, Keyword::Infect, false);
+        let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible);
+
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, recipient, &effect),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn indestructible_does_not_answer_mass_wither_damage() {
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let recipient = create_test_creature(&mut state, ai);
+        state.objects.get_mut(&recipient).unwrap().toughness = Some(3);
+        push_opponent_damage(&mut state, recipient, Keyword::Wither, true);
+        let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible);
+
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, recipient, &effect),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn stronger_targeting_and_protection_grants_are_redundant() {
+        use engine::types::mana::ManaColor;
+
+        let mut state = GameState::new_two_player(42);
+        let recipient = create_test_creature(&mut state, PlayerId(0));
+        let object = state.objects.get_mut(&recipient).unwrap();
+        object.keywords.push(Keyword::Hexproof);
+        object
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Everything));
+
+        assert!(grant_already_effective(
+            &state,
+            recipient,
+            &DefensiveGrant::HexproofFrom(HexproofFilter::Color(ManaColor::Red))
+        ));
+        assert!(grant_already_effective(
+            &state,
+            recipient,
+            &DefensiveGrant::Protection(ProtectionTarget::Color(ManaColor::Red))
+        ));
+    }
+
     #[test]
     fn protection_evasion_requires_an_untapped_legal_blocker() {
         use engine::game::combat::{AttackerInfo, CombatState};
@@ -1428,6 +1648,57 @@ mod tests {
         combat.blocker_to_attacker.insert(blocker, vec![attacker]);
         state.combat = Some(combat);
         let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible);
+
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, attacker, &effect),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn pending_combat_damage_is_not_a_payoff_for_sidelined_recipient() {
+        use engine::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let opp = PlayerId(1);
+        let recipient = create_test_creature(&mut state, ai);
+        let attacker = create_test_creature(&mut state, ai);
+        let blocker = create_test_creature(&mut state, opp);
+        state.phase = Phase::CombatDamage;
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, opp)],
+            ..Default::default()
+        };
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        state.combat = Some(combat);
+        let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible);
+
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, recipient, &effect),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn pending_combat_damage_is_not_a_payoff_for_shroud() {
+        use engine::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let opp = PlayerId(1);
+        let attacker = create_test_creature(&mut state, ai);
+        let blocker = create_test_creature(&mut state, opp);
+        state.phase = Phase::CombatDamage;
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, opp)],
+            ..Default::default()
+        };
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        state.combat = Some(combat);
+        let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Shroud);
 
         assert_eq!(
             self_protection_effect_payoff(&state, ai, attacker, &effect),

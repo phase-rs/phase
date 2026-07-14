@@ -48,18 +48,13 @@ impl TacticalPolicy for SelfCostValuePolicy {
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
         let GameAction::ActivateAbility {
             source_id,
-            ability_index,
+            ability_index: _,
         } = &ctx.candidate.action
         else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
         };
 
-        let Some(ability) = ctx
-            .state
-            .objects
-            .get(source_id)
-            .and_then(|object| object.abilities.get(*ability_index))
-        else {
+        let Some(ability) = ctx.effective_activated_ability() else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
         };
 
@@ -79,13 +74,13 @@ impl TacticalPolicy for SelfCostValuePolicy {
             .cloned()
             .unwrap_or_default();
 
-        if synergy_justifies_self_cost(&features, ctx.state, ctx.ai_player, ability) {
+        if synergy_justifies_self_cost(&features, ctx.state, ctx.ai_player, &ability) {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_synergy_justified"));
         }
 
         let cost_value =
             real_self_cost(ctx.state, ctx.ai_player, *source_id, cost, ctx.penalties());
-        let trivial = benefit_is_trivial(ctx.state, ctx.ai_player, *source_id, ability);
+        let trivial = benefit_is_trivial(ctx.state, ctx.ai_player, *source_id, &ability);
 
         let cost_milli = (cost_value * 1000.0) as i64;
 
