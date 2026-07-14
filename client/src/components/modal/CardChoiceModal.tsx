@@ -3156,14 +3156,15 @@ function ManaAnyCombinationChoiceModal({
 }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
+  const colorOptions = useMemo(() => Array.from(new Set(options)), [options]);
   const [quantities, setQuantities] = useState<Record<ManaType, number>>(() =>
-    Object.fromEntries(options.map((color) => [color, 0])) as Record<
+    Object.fromEntries(colorOptions.map((color) => [color, 0])) as Record<
       ManaType,
       number
     >,
   );
-  const selectedCount = options.reduce(
-    (total, color) => total + (quantities[color] ?? 0),
+  const selectedCount = Object.values(quantities).reduce(
+    (total, quantity) => total + quantity,
     0,
   );
 
@@ -3171,8 +3172,8 @@ function ManaAnyCombinationChoiceModal({
     (color: ManaType, delta: 1 | -1) => {
       setQuantities((current) => {
         const currentCount = current[color] ?? 0;
-        const total = options.reduce(
-          (sum, option) => sum + (current[option] ?? 0),
+        const total = Object.values(current).reduce(
+          (sum, quantity) => sum + quantity,
           0,
         );
         if (
@@ -3184,7 +3185,7 @@ function ManaAnyCombinationChoiceModal({
         return { ...current, [color]: currentCount + delta };
       });
     },
-    [count, options],
+    [count],
   );
 
   const handleConfirm = useCallback(() => {
@@ -3194,7 +3195,7 @@ function ManaAnyCombinationChoiceModal({
         data: {
           choice: {
             type: "Combination",
-            data: options.flatMap((color) =>
+            data: colorOptions.flatMap((color) =>
               Array.from(
                 { length: quantities[color] ?? 0 },
                 () => color,
@@ -3204,7 +3205,7 @@ function ManaAnyCombinationChoiceModal({
         },
       });
     }
-  }, [count, dispatch, options, quantities, selectedCount]);
+  }, [colorOptions, count, dispatch, quantities, selectedCount]);
 
   return (
     <ChoiceOverlay
@@ -3229,7 +3230,7 @@ function ManaAnyCombinationChoiceModal({
           </span>
         </div>
         <div className="flex flex-col gap-2">
-          {options.map((color, index) => {
+          {colorOptions.map((color, index) => {
             const quantity = quantities[color] ?? 0;
             return (
               <motion.div

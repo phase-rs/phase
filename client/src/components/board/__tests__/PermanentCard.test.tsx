@@ -297,6 +297,25 @@ describe("PermanentCard attachments", () => {
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
   });
 
+  it("opens the attachment fan from the single-attachment button without selecting the host", () => {
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, inspectedObjectId: null });
+    });
+
+    renderPermanent();
+
+    const button = screen.getByRole("button", {
+      name: "View Test Creature's attached card",
+    });
+
+    fireEvent.pointerDown(button);
+    fireEvent.click(button);
+
+    expect(useUiStore.getState().attachmentFanHostId).toBe(1);
+    expect(useUiStore.getState().selectedObjectId).toBeNull();
+    expect(useUiStore.getState().inspectedObjectId).toBeNull();
+  });
+
   it("refreshes the attachment fan when the engine clears host attachments", () => {
     const gameState = makeState();
     const host = gameState.objects[1];

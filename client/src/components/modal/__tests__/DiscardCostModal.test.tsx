@@ -342,6 +342,40 @@ describe("Discard cost modal", () => {
     });
   });
 
+  it("does not duplicate a mana color when the prompt contains it more than once", () => {
+    setWaitingFor({
+      type: "ChooseManaColor",
+      data: {
+        player: 0,
+        choice: {
+          type: "AnyCombination",
+          data: { count: 2, options: ["White", "White", "Blue"] },
+        },
+        context: { type: "ManaAbility", data: {} },
+      },
+    });
+
+    render(<CardChoiceModal />);
+
+    expect(screen.getAllByRole("button", { name: "Add White mana" })).toHaveLength(1);
+    const confirm = screen.getByRole("button", { name: "Confirm" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add White mana" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add White mana" }));
+
+    expect(screen.getByText("2 / 2 mana selected")).toBeInTheDocument();
+    expect(confirm).toBeEnabled();
+
+    fireEvent.click(confirm);
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "ChooseManaColor",
+      data: {
+        choice: { type: "Combination", data: ["White", "White"] },
+      },
+    });
+  });
+
   it("suppresses battlefield return choices for board-native selection", () => {
     setWaitingFor(
       buildEffectZoneChoiceWaitingFor({

@@ -352,6 +352,12 @@ export const PermanentCard = memo(function PermanentCard({
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
 
+  const openAttachmentFan = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    dismissPreview();
+    setAttachmentFanHost(objectId);
+  }, [dismissPreview, objectId, setAttachmentFanHost]);
+
   if (!obj) return null;
 
   const isLand = obj.card_types.core_types.includes("Land");
@@ -513,7 +519,7 @@ export const PermanentCard = memo(function PermanentCard({
     // (CR 301.5 / 303.4: an attachment is its own legal object). We deliberately
     // do NOT hijack an ambiguous click into the AttachmentFan here: direct
     // targeting must always work. When the peek is an awkward click target the
-    // player can open the fan explicitly via the "⧉" badge instead of being
+    // player can open the fan explicitly via the attachment badge instead of being
     // forced through it.
     // A PayCost TapCreatures prompt is mid-cost resolution — check before combat
     // mode so clicks land even when DeclareAttackers combat mode is active.
@@ -687,11 +693,7 @@ export const PermanentCard = memo(function PermanentCard({
           title={t("permanent.hiddenAttachmentsAria", { count: hiddenAttachmentCount })}
           aria-label={t("permanent.hiddenAttachmentsAria", { count: hiddenAttachmentCount })}
           onPointerDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            dismissPreview();
-            setAttachmentFanHost(objectId);
-          }}
+          onClick={openAttachmentFan}
         >
           +{hiddenAttachmentCount}
         </button>
@@ -939,6 +941,19 @@ export const PermanentCard = memo(function PermanentCard({
           aria-hidden
           className="pointer-events-none absolute inset-[-4px] z-40 rounded-xl ring-4 ring-fuchsia-400 shadow-[0_0_22px_6px_rgba(232,121,249,0.7),inset_0_0_18px_4px_rgba(232,121,249,0.45)] animate-pulse"
         />
+      )}
+
+      {obj.attachments.length === 1 && (
+        <button
+          type="button"
+          className="absolute -left-3 -top-3 z-40 flex h-11 w-11 items-center justify-center rounded-full bg-black/90 text-[18px] leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          title={t("permanent.viewAttachmentsFor", { count: 1, name: obj.name })}
+          aria-label={t("permanent.viewAttachmentsFor", { count: 1, name: obj.name })}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={openAttachmentFan}
+        >
+          <span aria-hidden>⧉</span>
+        </button>
       )}
 
     </motion.div>

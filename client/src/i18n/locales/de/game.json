@@ -251,6 +251,8 @@
     "fanConfirm": "Bestätigen ({{count}})",
     "viewAttachments_one": "Angelegte Karte ansehen",
     "viewAttachments_other": "{{count}} angelegte Karten ansehen",
+    "viewAttachmentsFor_one": "Angelegte Karte von {{name}} ansehen",
+    "viewAttachmentsFor_other": "{{count}} angelegte Karten von {{name}} ansehen",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {

@@ -251,6 +251,8 @@
     "fanConfirm": "Confirmar ({{count}})",
     "viewAttachments_one": "Ver carta anexada",
     "viewAttachments_other": "Ver {{count}} cartas anexadas",
+    "viewAttachmentsFor_one": "Ver carta anexada de {{name}}",
+    "viewAttachmentsFor_other": "Ver {{count}} cartas anexadas de {{name}}",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
