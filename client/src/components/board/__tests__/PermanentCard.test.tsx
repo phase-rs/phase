@@ -45,6 +45,12 @@ vi.mock("../../card/CardImage.tsx", () => ({
   ),
 }));
 
+vi.mock("../KeywordStrip.tsx", () => ({
+  KeywordStrip: ({ keywords }: { keywords: unknown }) => (
+    <output data-testid="keyword-strip">{JSON.stringify(keywords)}</output>
+  ),
+}));
+
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
   return buildGameObject({
     id: 1,
@@ -132,7 +138,7 @@ function renderPermanent(
   );
 }
 
-describe("PermanentCard attachments", () => {
+describe("PermanentCard", () => {
   beforeEach(() => {
     window.matchMedia = ((query: string) => ({
       matches: query === "(hover: hover)" || query === "(any-hover: hover)",
@@ -173,6 +179,22 @@ describe("PermanentCard attachments", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("renders only the engine-classified battlefield keyword badges", () => {
+    const gameState = makeState();
+    gameState.objects[1].keywords = ["Flying", "Ravenous", "Evoke"];
+    gameState.derived = {
+      battlefield_keyword_badges: { 1: ["Flying"] },
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    usePreferencesStore.setState({ showKeywordStrip: true });
+
+    renderPermanent();
+
+    expect(screen.getByTestId("keyword-strip")).toHaveTextContent("Flying");
+    expect(screen.getByTestId("keyword-strip")).not.toHaveTextContent("Ravenous");
+    expect(screen.getByTestId("keyword-strip")).not.toHaveTextContent("Evoke");
   });
 
   it("lifts the permanent tree above siblings while keeping attachments behind the host", () => {

@@ -2348,6 +2348,12 @@ export interface TurnOrderSlotView {
  * `engine::game::derived_views::DerivedViews`.
  */
 export interface DerivedViews {
+  /**
+   * Engine-classified live keyword badges for battlefield permanents. The
+   * strip renders this map directly rather than deciding which keyword timing
+   * matters on the battlefield. Keyed by ObjectId-as-string.
+   */
+  battlefield_keyword_badges?: Record<string, Keyword[]>;
   /** Keyed by attacking commander's current controller (PlayerId as string). */
   commander_damage_by_attacker?: Record<string, CommanderDamageView[]>;
   /**

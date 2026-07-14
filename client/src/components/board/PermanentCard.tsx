@@ -3,7 +3,7 @@ import type React from "react";
 import { memo, useCallback, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { GameAction, GameObject } from "../../adapter/types.ts";
+import type { GameAction, GameObject, Keyword } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -73,6 +73,7 @@ const ATTACHMENT_PEEK_PX = 22;
 const ATTACHMENT_STACK_STEP_PX = 22;
 const HOVERED_CARD_Z_INDEX = 60;
 const HOVERED_ATTACHMENT_HOST_Z_INDEX = 80;
+const EMPTY_KEYWORD_BADGES: Keyword[] = [];
 
 // Subtype glyphs sit in the top-right of the peek (where the mana pips
 // would normally be) so the player can identify the attachment's role
@@ -196,6 +197,11 @@ export const PermanentCard = memo(function PermanentCard({
   const playerId = usePlayerId();
   const gameObjects = useGameStore((s) => s.gameState?.objects);
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
+  const battlefieldKeywordBadges = useGameStore(
+    (s) =>
+      s.gameState?.derived?.battlefield_keyword_badges?.[String(objectId)]
+      ?? EMPTY_KEYWORD_BADGES,
+  );
   const isRingBearer = useGameStore((s) => {
     const object = s.gameState?.objects[objectId];
     return object ? s.gameState?.ring_bearer?.[String(object.controller)] === objectId : false;
@@ -848,9 +854,9 @@ export const PermanentCard = memo(function PermanentCard({
           modes, and — being at the overflow-visible level, outside the rounded
           overflow-hidden art wrapper — the half-off-card portion isn't clipped.
           Badge size scales off the active card width var. */}
-      {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
+      {showKeywordStrip && battlefieldKeywordBadges.length > 0 && !obj.face_down && (
         <KeywordStrip
-          keywords={obj.keywords}
+          keywords={battlefieldKeywordBadges}
           baseKeywords={obj.base_keywords}
           sourceByKeyword={keywordSourceMap}
           badgeSize={
