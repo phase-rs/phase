@@ -114,6 +114,7 @@ mod tests {
                 attack_target: AttackTarget::Player(PlayerId(1)),
                 blocked: true,
                 band_id: None,
+                required_to_attack: false,
             }],
             ..Default::default()
         };
@@ -180,6 +181,7 @@ mod tests {
                 attack_target: AttackTarget::Player(PlayerId(0)),
                 blocked: false,
                 band_id: None,
+                required_to_attack: false,
             }],
             ..Default::default()
         };
@@ -240,6 +242,7 @@ mod tests {
                 attack_target: AttackTarget::Player(PlayerId(1)),
                 blocked: false,
                 band_id: None,
+                required_to_attack: false,
             }],
             ..Default::default()
         });
@@ -286,6 +289,7 @@ mod tests {
                 attack_target: AttackTarget::Player(PlayerId(0)),
                 blocked: false,
                 band_id: None,
+                required_to_attack: false,
             }],
             ..Default::default()
         };
@@ -330,6 +334,7 @@ mod tests {
                 attack_target: AttackTarget::Player(PlayerId(1)),
                 blocked: false,
                 band_id: None,
+                required_to_attack: false,
             }],
             ..Default::default()
         });
@@ -379,6 +384,7 @@ mod tests {
                 attack_target: AttackTarget::Player(PlayerId(1)),
                 blocked: false,
                 band_id: None,
+                required_to_attack: false,
             }],
             ..Default::default()
         });

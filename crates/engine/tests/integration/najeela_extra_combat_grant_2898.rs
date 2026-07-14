@@ -160,6 +160,7 @@ fn setup() -> (
                 attack_target: AttackTarget::Player(PlayerId(1)),
                 blocked: false,
                 band_id: None,
+                required_to_attack: false,
             },
             AttackerInfo {
                 object_id: attacker_b,
@@ -167,6 +168,7 @@ fn setup() -> (
                 attack_target: AttackTarget::Player(PlayerId(1)),
                 blocked: false,
                 band_id: None,
+                required_to_attack: false,
             },
         ],
         ..Default::default()

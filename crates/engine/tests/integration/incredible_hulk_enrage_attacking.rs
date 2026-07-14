@@ -113,6 +113,7 @@ fn run_enrage(attacking: bool) -> EnrageOutcome {
                 attack_target: AttackTarget::Player(P1),
                 blocked: false,
                 band_id: None,
+                required_to_attack: false,
             }],
             ..Default::default()
         });

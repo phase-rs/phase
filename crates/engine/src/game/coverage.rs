@@ -687,6 +687,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::CombatRelation { .. } => parts.push("combat related".into()),
             FilterProp::Unblocked => parts.push("unblocked".into()),
             FilterProp::AttackingAlone => parts.push("attacking alone".into()),
+            FilterProp::RequiredToAttack => parts.push("required to attack".into()),
             FilterProp::BlockingAlone => parts.push("blocking alone".into()),
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::IsSaddled => parts.push("saddled".into()),

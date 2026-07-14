@@ -3668,6 +3668,18 @@ pub enum FilterProp {
     /// reads combat; look-back evaluation reads
     /// `ZoneChangeCombatStatus::attacking_alone`.
     AttackingAlone,
+    /// CR 508.1a + CR 508.1d + CR 701.15b: Matches a creature that was under a
+    /// must-attack requirement (a `StaticMode::MustAttack`/`MustAttackPlayer`
+    /// static, or goad) when attackers were declared THIS combat, and
+    /// therefore "had to attack" — i.e. was not attacking purely by its
+    /// controller's choice. Reads the `AttackerInfo.required_to_attack`
+    /// declaration-time snapshot (`game::combat::declare_attackers_with_bands`),
+    /// not a live re-check of `creature_must_attack`: by the time this filter
+    /// is typically consulted (e.g. an "if that creature had to attack this
+    /// combat" combat-damage intervening-if), the attacker is usually tapped,
+    /// which would make a live recheck spuriously false. Firkraag, Cunning
+    /// Instigator: "if that creature had to attack this combat, ...".
+    RequiredToAttack,
     /// CR 506.5: Matches a creature that is (or was) the sole blocker —
     /// "blocking alone". Look-back evaluation reads
     /// `ZoneChangeCombatStatus::blocking_alone`.

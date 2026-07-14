@@ -76,6 +76,7 @@ fn end_combat_phase_exiles_stack_clears_combat_and_enters_postcombat_main() {
             attack_target: AttackTarget::Player(PlayerId(1)),
             blocked: false,
             band_id: None,
+            required_to_attack: false,
         }],
         ..Default::default()
     });

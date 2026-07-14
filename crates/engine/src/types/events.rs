@@ -622,6 +622,7 @@ impl EventObjectSnapshot {
             | FilterProp::Unblocked
             | FilterProp::AttackingAlone
             | FilterProp::BlockingAlone
+            | FilterProp::RequiredToAttack
             | FilterProp::CombatRelation { .. } => Supported,
 
             // ---- embedded exact source relations ----

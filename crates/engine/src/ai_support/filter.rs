@@ -774,6 +774,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::Unblocked
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
+        | FilterProp::RequiredToAttack
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn

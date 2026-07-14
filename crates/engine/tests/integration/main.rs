@@ -484,6 +484,7 @@ mod issue_4560_winter_soldier;
 mod issue_4564_captain_america_team_leader;
 mod issue_4566_jocasta;
 mod issue_4663_chosen_x_ptcomparison_targets;
+mod issue_4732_firkraag_cunning_instigator;
 mod issue_4752_blood_artist_each_player_sacrifice;
 mod issue_4759_chandras_ignition_single_target;
 mod issue_4772_too_evil_to_stay_dead;

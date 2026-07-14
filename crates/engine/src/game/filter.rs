@@ -182,6 +182,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::Unblocked
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
+        | FilterProp::RequiredToAttack
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
@@ -429,6 +430,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::Unblocked
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
+        | FilterProp::RequiredToAttack
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
@@ -3612,6 +3614,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Unblocked
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
+        | FilterProp::RequiredToAttack
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
@@ -4179,6 +4182,17 @@ fn matches_filter_prop(
                         defender.as_ref(),
                     )
             })
+        }),
+        // CR 508.1a + CR 508.1d + CR 701.15b: "had to attack this combat" —
+        // read the declaration-time snapshot taken when attackers were
+        // declared this combat, not a live `creature_must_attack` recheck
+        // (the attacker is typically tapped by the time this is consulted,
+        // which would make a live recheck spuriously false).
+        FilterProp::RequiredToAttack => state.combat.as_ref().is_some_and(|combat| {
+            combat
+                .attackers
+                .iter()
+                .any(|a| a.object_id == object_id && a.required_to_attack)
         }),
         // CR 509.1a: A creature is blocking if it was declared as a blocker.
         FilterProp::Blocking => state
@@ -5275,6 +5289,16 @@ fn zone_change_record_matches_property(
         // zone change, captured by `capture_combat_status` before combat removal.
         FilterProp::AttackingAlone => record.combat_status.attacking_alone,
         FilterProp::BlockingAlone => record.combat_status.blocking_alone,
+        // Group 5 (not-yet-supported): `ZoneChangeCombatStatus` /
+        // `capture_combat_status` do not currently snapshot a required-to-attack
+        // bit the way they do for `attacking_alone`/`blocking_alone` — Firkraag,
+        // Cunning Instigator's own "had to attack this combat" check runs via
+        // `EventDamageSourceMatchesFilter` over the live `DamageRecord` source
+        // (still in `state.combat` during the combat-damage step), not this
+        // zone-change look-back path, so no card currently exercises this arm.
+        // Conservative gap: fail closed rather than guess at a snapshot value
+        // that was never captured.
+        FilterProp::RequiredToAttack => false,
         FilterProp::HasAttachment {
             kind,
             controller,

@@ -263,6 +263,18 @@ pub struct AttackerInfo {
     /// `None` = not in a band (attacks and assigns damage individually).
     #[serde(default)]
     pub band_id: Option<u32>,
+    /// CR 508.1a + CR 508.1d + CR 701.15b: True if this creature was under a
+    /// must-attack requirement (`StaticMode::MustAttack`/`MustAttackPlayer`,
+    /// or goad) at the moment attackers were declared this combat — i.e. it
+    /// "had to attack" rather than attacking by its controller's free choice.
+    /// Snapshotted in `declare_attackers_with_bands` BEFORE attackers are
+    /// tapped, because the requirement predicate
+    /// (`creature_must_attack_with_attackable_players_gated`) exempts tapped
+    /// creatures — re-deriving this live after declaration (e.g. at the combat
+    /// damage step) would spuriously read `false` for every non-vigilance
+    /// attacker. Backs `FilterProp::RequiredToAttack`.
+    #[serde(default)]
+    pub required_to_attack: bool,
 }
 
 impl AttackerInfo {
@@ -277,6 +289,7 @@ impl AttackerInfo {
             attack_target,
             blocked: false,
             band_id: None,
+            required_to_attack: false,
         }
     }
 
@@ -3969,6 +3982,34 @@ pub(super) fn commit_attack_declaration(
     events: &mut Vec<GameEvent>,
 ) {
     let attacker_ids: Vec<ObjectId> = attacks.iter().map(|(id, _)| *id).collect();
+
+    // CR 508.1a + CR 508.1d + CR 701.15b: Snapshot which attackers were under a
+    // must-attack requirement (goad or a MustAttack/MustAttackPlayer static) at
+    // the moment of declaration, BEFORE tapping. `creature_must_attack_with_
+    // attackable_players_gated` exempts tapped creatures (CR 508.1a: chosen
+    // attackers must already be untapped), so evaluating it after the tap loop
+    // below would spuriously read `false` for every non-vigilance attacker —
+    // this must run first. Backs `FilterProp::RequiredToAttack` (e.g. Firkraag,
+    // Cunning Instigator: "if that creature had to attack this combat"). Actual
+    // must-attack ENFORCEMENT (rejecting an illegal declaration) now lives in
+    // `validate_attack_declaration`'s `AttackRequirement` solver, which the
+    // caller (`declare_attackers_with_bands`) already ran before this function —
+    // this is a read-only snapshot for the info bit, not a duplicate check.
+    let attackable_players = attackable_player_targets(state);
+    let gates = CombatStaticGates::compute(state);
+    let required_to_attack_ids: std::collections::HashSet<ObjectId> = attacker_ids
+        .iter()
+        .copied()
+        .filter(|&id| {
+            creature_must_attack_with_attackable_players_gated(
+                state,
+                id,
+                &attackable_players,
+                &gates,
+            )
+        })
+        .collect();
+
     // CR 508.1f: Tap attackers. CR 508.1k: Creatures become attacking creatures.
     for &id in &attacker_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
@@ -4003,7 +4044,9 @@ pub(super) fn commit_attack_declaration(
             // CR 508.5 + CR 310.8d: Defending player for a battle = its protector,
             // not its controller. For planeswalkers, defending player = controller.
             let defending_player = defending_player_for_target(state, *target);
-            AttackerInfo::new(*object_id, *target, defending_player)
+            let mut info = AttackerInfo::new(*object_id, *target, defending_player);
+            info.required_to_attack = required_to_attack_ids.contains(object_id);
+            info
         })
         .collect();
     apply_attack_band_ids(&mut attackers, bands);

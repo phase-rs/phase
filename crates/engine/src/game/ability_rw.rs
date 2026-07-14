@@ -2335,6 +2335,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::Unblocked
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
+        | FilterProp::RequiredToAttack
         | FilterProp::Tapped
         | FilterProp::Untapped
         | FilterProp::IsSaddled
@@ -2603,6 +2604,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::Unblocked
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
+        | FilterProp::RequiredToAttack
         | FilterProp::Tapped
         | FilterProp::Untapped
         | FilterProp::IsSaddled

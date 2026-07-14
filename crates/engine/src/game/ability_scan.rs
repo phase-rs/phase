@@ -3625,6 +3625,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::Unblocked
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
+        | FilterProp::RequiredToAttack
         | FilterProp::Tapped
         | FilterProp::Untapped
         | FilterProp::IsSaddled
