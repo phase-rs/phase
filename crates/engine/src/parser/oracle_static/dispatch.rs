@@ -3005,7 +3005,11 @@ pub(crate) fn parse_static_line_inner(
                     amount,
                     minimum_mana,
                     dynamic_count,
-                    exemption: ActivationExemption::None,
+                    exemption: if tp.lower.contains("unless they're mana abilities") {
+                        ActivationExemption::ManaAbilities
+                    } else {
+                        ActivationExemption::None
+                    },
                     // Source-scoped ("Activated/Loyalty abilities of <filter>"):
                     // scope is the `affected` filter below; no activator gate.
                     activator: None,
