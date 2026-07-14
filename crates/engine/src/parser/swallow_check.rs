@@ -2646,6 +2646,63 @@ fn dig_if_you_do_is_only_if_marker(stripped: &str) -> bool {
     !(has_if_marker && !has_as_if_marker && !has_even_if_marker)
 }
 
+/// CR 603.7a + CR 608.2c: the Feather, the Redeemed class carries a
+/// `then_return` rider on `Effect::ExileResolvingSpellInsteadOfGraveyard`
+/// representing "If you do, return it to your hand at the beginning of the next
+/// end step". `then_return: Some(_)` means the return clause is modelled (the
+/// riderless Rod of Absorption form is `None` and has no "if you do" text to
+/// account for).
+fn any_ability_has_exile_resolving_return_rider(parsed: &ParsedAbilities) -> bool {
+    parsed.triggers.iter().any(|t| {
+        t.execute
+            .as_deref()
+            .is_some_and(def_tree_has_exile_resolving_return_rider)
+    }) || parsed
+        .abilities
+        .iter()
+        .any(def_tree_has_exile_resolving_return_rider)
+}
+
+fn def_tree_has_exile_resolving_return_rider(def: &AbilityDefinition) -> bool {
+    if matches!(
+        &*def.effect,
+        Effect::ExileResolvingSpellInsteadOfGraveyard {
+            then_return: Some(_)
+        }
+    ) {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_exile_resolving_return_rider(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_exile_resolving_return_rider(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_exile_resolving_return_rider)
+}
+
+/// CR 608.2c: the "if you do" linking Feather's return to its exile is a
+/// back-reference, not an independent game-state condition — represented by the
+/// `then_return` rider. Suppress only when "if you do" is the sole bare "if"
+/// marker left in the classified text (mirrors `dig_if_you_do_is_only_if_marker`).
+fn exile_resolving_return_if_you_do_is_only_if_marker(stripped: &str) -> bool {
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if !stripped.contains("if you do") {
+        return false;
+    }
+    let without_link = stripped.replace("if you do", "");
+    let has_if_marker = without_link.contains(" if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_as_if_marker = without_link.contains(" as if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_even_if_marker = without_link.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !(has_if_marker && !has_as_if_marker && !has_even_if_marker)
+}
+
 /// CR 614.12: "[you may] put a creature card from your hand onto the
 /// battlefield. If that card is an enchantment card, it enters tapped and
 /// attacking." (Summoner's Grimoire). The leading moved-object type condition
@@ -3044,6 +3101,19 @@ fn detect_condition_if(
     // same `Dig`; the "if you do" linkage IS represented by the optional `Dig`
     // (declining the look stops the whole chain), not swallowed.
     if any_optional_ability_has_dig(parsed) && dig_if_you_do_is_only_if_marker(&stripped) {
+        return;
+    }
+    // CR 603.7a + CR 608.2c: "exile that card instead of putting it into your
+    // graveyard as it resolves. If you do, return it to your hand at the
+    // beginning of the next end step" (Feather, the Redeemed). The "if you do"
+    // is the CR 608.2c back-reference linking the return to the exile actually
+    // being applied — represented by the typed `then_return` rider on
+    // `Effect::ExileResolvingSpellInsteadOfGraveyard` (the one-shot return
+    // trigger is armed only when the replacement applies). Not a swallowed
+    // game-state condition.
+    if any_ability_has_exile_resolving_return_rider(parsed)
+        && exile_resolving_return_if_you_do_is_only_if_marker(&stripped)
+    {
         return;
     }
     // CR 614.12: "[you may] put a creature card ... If that card is an
@@ -4534,6 +4604,28 @@ mod tests {
         assert_eq!(
             items[0], items[1],
             "both findings came from ONE unit, so they carry ONE evidence set",
+        );
+    }
+
+    /// CR 603.7a + CR 608.2c: Feather, the Redeemed's "If you do, return it to
+    /// your hand at the beginning of the next end step" is represented by the
+    /// `then_return` rider on `Effect::ExileResolvingSpellInsteadOfGraveyard`,
+    /// so Detector G must NOT flag it as a swallowed `Condition_If`. Reverting
+    /// the `any_ability_has_exile_resolving_return_rider` exemption re-fires the
+    /// swallow (the coverage-honesty regression this guards against).
+    #[test]
+    fn feather_return_rider_is_not_a_swallowed_condition_if() {
+        let parsed = parse_named(
+            "Flying\nWhenever you cast an instant or sorcery spell that targets a creature you \
+             control, exile that card instead of putting it into your graveyard as it resolves. \
+             If you do, return it to your hand at the beginning of the next end step.",
+            "Feather, the Redeemed",
+            &["Legendary", "Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "Feather's folded return rider must not surface as a swallowed Condition_If: {:?}",
+            parsed.parse_warnings
         );
     }
 
