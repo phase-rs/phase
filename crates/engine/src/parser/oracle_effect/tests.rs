@@ -4841,6 +4841,75 @@ fn radiance_fanout_declines_variable_x_amount() {
     );
 }
 
+/// Building block: "put a +1/+1 counter on each <filter>, then untap those
+/// <permanents>" lowers to a `PutCounterAll` primary with the follow-up untap
+/// as a sub-ability that targets the anaphoric TRACKED SET — i.e. "those
+/// creatures" resolves to exactly the permanents that just received counters,
+/// not a fresh re-scan of the "each creature you control" filter. Pinning the
+/// `PutCounterAll -> SetTapState(Untap)` tracked-set linkage guards the anaphor
+/// against regressing to a filter re-evaluation (which would untap creatures
+/// that entered after the counters were placed). Virtue of Loyalty class.
+#[test]
+fn put_counter_on_each_then_untap_those_targets_the_tracked_set() {
+    let parsed = parse_oracle_text(
+        "At the beginning of your end step, put a +1/+1 counter on each creature you control, then untap those creatures.",
+        "Virtue of Loyalty",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("end-step trigger must parse");
+    let execute = trigger.execute.as_ref().expect("trigger body");
+
+    // Primary: +1/+1 counter on each creature you control.
+    let Effect::PutCounterAll {
+        counter_type,
+        count,
+        target: TargetFilter::Typed(tf),
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected PutCounterAll primary, got {:?}", execute.effect);
+    };
+    assert_eq!(*counter_type, CounterType::Plus1Plus1);
+    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+    assert!(
+        tf.type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Creature)),
+        "counters go on creatures, got {:?}",
+        tf.type_filters
+    );
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+
+    // Sub-ability: "untap those creatures" targets the tracked set populated by
+    // the PutCounterAll above, not a re-scan of the filter.
+    let sub = execute
+        .sub_ability
+        .as_ref()
+        .expect("counter-then-untap must attach an untap sub-ability");
+    let Effect::SetTapState {
+        target,
+        scope,
+        state,
+    } = sub.effect.as_ref()
+    else {
+        panic!(
+            "expected SetTapState untap sub-effect, got {:?}",
+            sub.effect
+        );
+    };
+    assert!(
+        matches!(target, TargetFilter::TrackedSet { .. }),
+        "the anaphoric \"those creatures\" must target the tracked set, got {:?}",
+        target
+    );
+    assert_eq!(*scope, EffectScope::Single);
+    assert_eq!(*state, TapStateChange::Untap);
+}
+
 /// Issue #495 — Rite of Consumption. The explicit participle-possessive
 /// "the sacrificed creature's power" must resolve to the cost-paid object
 /// (CR 608.2k), NOT the source. The subject-injection rewrite for a `~`
