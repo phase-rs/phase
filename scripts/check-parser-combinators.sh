@@ -85,14 +85,49 @@ fi
 # keyword recorded, no diagnostic, and the card renders as fully supported.
 #
 # THIS GATE IS A RATCHET, NOT A BLESSING. Plan 02 step 5 wired the strict router
-# into priorities 9 and 13 but left the remaining router entries on the
-# permissive surface. Those survivors are enumerated below as an EXACT expected
-# count per router context. The gate fails if the count goes UP (a new permissive
-# router call — the regression this exists to stop) and equally if it goes DOWN
-# without updating this number (so the count can never quietly drift out of
-# truth). Definition of done: every expected count reaches 0, at which point this
-# becomes the plain "no permissive symbol in a router context" gate step 7 asks
-# for. Same instrument as KNOWN_NOUN_PARAM_LEAKS in oracle_keyword.rs.
+# into priorities 9 and 13 but left the remaining router entries on the permissive
+# surface. Those survivors are enumerated below as an EXACT expected count per
+# router context. The gate fails if the count goes UP (a new permissive router call
+# — the regression this exists to stop) and equally if it goes DOWN without updating
+# the number (so it can never quietly drift out of truth).
+#
+# DEFINITION OF DONE: entries are DELETED from this allowlist as each router entry
+# converts to parse_router_keyword_line. When every EXPECTED_* reaches 0, this
+# becomes the plain "no permissive symbol in a router context" gate that Plan 02
+# step 7 actually asks for, and the migration-status paragraph in SKILL.md §3a goes
+# with it. Same instrument as KNOWN_NOUN_PARAM_LEAKS in oracle_keyword.rs.
+#
+# OWNER OF THE RESIDUAL: task #123 (P02-U5 router wiring). Every surviving call
+# below is that task's work-list. Do not "fix" one in isolation without lowering the
+# corresponding floor here in the same commit.
+#
+# THE ALLOWLIST — 16 permissive calls, each with why it is still here (task #123):
+#
+#   parse_oracle_ir (13):
+#     :3720,:3725  priority 0, semicolon keyword line   — commits on Some(vec![]),
+#                  which extract_granted_keyword_list returns on MTGJSON metadata
+#                  alone, with the parameterized Oracle line never parsed.
+#     :3789        priority 1b, keyword-only line       — same Some(vec![]) leak; this
+#                  is also where a "Crew N <semantic tail>" loses its tail after the
+#                  strict Crew intercept correctly declines it.
+#     :4673,:4682  flashback em-dash / cost-reduction split — non-atomic: advances
+#                  even when only one half of the split parsed.
+#     :5092,:5102  suspend / specialize                 — advance-on-partial.
+#     :5154        priority 8f kicker/multikicker/replicate/mayhem — HIGHEST SEVERITY.
+#                  Class-A: `i += 1; continue;` sits OUTSIDE both `if let Some` blocks,
+#                  so a line neither parser can handle is consumed with NO keyword and
+#                  NO Unimplemented. Also dispatches on a bare alt(( tag("kicker"), … ))
+#                  with no word-boundary guard, unlike is_keyword_cost_line.
+#     :5170,:5186  buyback em-dash / escalate           — advance-on-partial.
+#     :5521        commander ninjutsu                   — advance-on-partial.
+#     :5554        priority 13 residual                 — advance-on-partial.
+#     :5646        d20 table / ability-word retry       — advance-on-partial.
+#
+#   is_semicolon_keyword_line (2)        :2161,:2167
+#   is_spell_resolution_instruction_line (1) :2205
+#     Classifiers, not routers, but they gate routing decisions on a permissive parse.
+#     Step 5 item 11: a classifier MAY probe with the strict parser; it may NOT call a
+#     helper that discards the remainder.
 #
 # SPAN EXTRACTION: from the `fn NAME(` signature at column 0 to the next `}` at
 # column 0. Brace COUNTING would be wrong here — oracle.rs is saturated with mana
@@ -144,12 +179,14 @@ for ctx in parse_oracle_ir is_semicolon_keyword_line is_spell_resolution_instruc
         echo "✗ (G) $ctx: $actual permissive keyword-parser calls, expected $expected." >&2
         echo "      A NEW permissive call entered a router context. Routers must consume a" >&2
         echo "      line only via all-consuming parse_router_keyword_line(); the permissive" >&2
-        echo "      surface discards the remainder and silently swallows semantics." >&2
+        echo "      surface discards the remainder and silently swallows semantics — no" >&2
+        echo "      keyword, no diagnostic, and the card renders as fully supported." >&2
         arch_fail=1
     elif [ "$actual" -lt "$expected" ]; then
         echo "✗ (G) $ctx: $actual permissive calls, expected $expected — a router entry was" >&2
-        echo "      migrated to the strict parser. That is the goal: lower EXPECTED_$ctx to" >&2
-        echo "      $actual in this script so the ratchet holds the new floor." >&2
+        echo "      migrated to the strict parser. That is the GOAL (task #123): lower" >&2
+        echo "      EXPECTED_$ctx to $actual here, in the same commit, and delete that" >&2
+        echo "      entry from the allowlist comment above. The floor must never drift." >&2
         arch_fail=1
     fi
 done
