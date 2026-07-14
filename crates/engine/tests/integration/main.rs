@@ -842,6 +842,7 @@ mod end_combat_phase;
 mod enters_tapped_this_turn;
 mod escape_to_wilds_2879;
 mod esper_terra_saga_token_lore;
+mod etching_of_kumano_die_exile;
 mod everything_comes_to_dust_convoke_exile;
 mod exhaust_keyword_once_per_permanent;
 mod expensive_taste_look_and_play;
