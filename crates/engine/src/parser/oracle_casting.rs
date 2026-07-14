@@ -34,7 +34,7 @@ pub(crate) fn split_additional_cost_trailing_spell_reduction<'a>(
 }
 
 /// Split a combined additional-cost line from its trailing reflexive "When you
-/// do, [effect]" trigger sentence (CR 603.2b: a triggered ability generated
+/// do, [effect]" trigger sentence (CR 603.12: a triggered ability generated
 /// during the casting process waits for the cast to finish, then goes on the
 /// stack above the spell — the Casualty/Replicate/Squad shape, CR 702.153a /
 /// CR 702.56a / CR 702.157a, here reproduced by a card with no reminder-text
@@ -53,7 +53,7 @@ pub(crate) fn split_additional_cost_trailing_reflexive_trigger<'a>(
     (line[..activation_len].trim(), Some(trigger_text))
 }
 
-/// CR 603.2b + CR 707.10: recognize the narrow "copy this spell for each
+/// CR 603.12 + CR 707.10: recognize the narrow "copy this spell for each
 /// `<filter>` [that was/were] sacrificed this way" reflexive-trigger body that
 /// follows an optional ranged-sacrifice additional cost, and synthesize the
 /// same `TriggerMode::SpellCast` shape `database::synthesis::synthesize_replicate`
@@ -81,7 +81,7 @@ pub(crate) fn build_additional_cost_reflexive_copy_trigger(
         return None;
     }
 
-    // CR 113.7: gates on the optional ranged-sacrifice additional cost having
+    // CR 118.12: gates on the optional ranged-sacrifice additional cost having
     // been paid at all — mirrors Replicate/Casualty's own `AdditionalCostPaid`
     // gate (set on the executed `AbilityDefinition`, not the `TriggerDefinition`
     // — `TriggerDefinition::condition` takes a `TriggerCondition`, a different
@@ -111,7 +111,7 @@ pub(crate) fn build_additional_cost_reflexive_copy_trigger(
             .trigger_zones(vec![Zone::Stack])
             .execute(execute)
             .description(
-                "CR 603.2b + CR 707.10: reflexive trigger — copy this spell once \
+                "CR 603.12 + CR 707.10: reflexive trigger — copy this spell once \
                  for each creature sacrificed as its optional additional cost \
                  (issue #1108)."
                     .to_string(),

@@ -13,7 +13,7 @@
 //!      through to a numeral-fallback path that mis-parsed the cost as a
 //!      fixed, filter-less "sacrifice exactly 1" cost.
 //!   2. The "As an additional cost..., you may X. When you do, [effect]"
-//!      reflexive-trigger shape (CR 603.2b — the unnamed-keyword sibling of
+//!      reflexive-trigger shape (CR 603.12 — the unnamed-keyword sibling of
 //!      Casualty/Replicate/Squad) was never wired into a `SpellCast` trigger
 //!      at all; the whole "When you do, copy this spell for each creature
 //!      sacrificed this way" sentence was silently dropped.
@@ -106,7 +106,7 @@ fn cast_and_resolve(
     }
 }
 
-/// CR 603.2b + CR 707.10: sacrificing 2 creatures as the additional cost must
+/// CR 603.12 + CR 707.10: sacrificing 2 creatures as the additional cost must
 /// copy the spell twice — 1 original resolution + 2 copies = 3 total draws
 /// and 3 total life losses, and both sacrificed creatures leave the
 /// battlefield.
@@ -169,7 +169,7 @@ fn plumb_the_forbidden_copies_once_per_creature_sacrificed() {
     );
 }
 
-/// CR 603.2b: declining the optional additional cost must leave the spell
+/// CR 603.12: declining the optional additional cost must leave the spell
 /// resolving exactly once — no reflexive trigger, no copies.
 #[test]
 fn plumb_the_forbidden_declined_cost_resolves_once() {

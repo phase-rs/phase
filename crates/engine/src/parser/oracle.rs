@@ -3921,7 +3921,7 @@ pub(crate) fn parse_oracle_ir(
             let (cost_line, trailing_reduction) =
                 split_additional_cost_trailing_spell_reduction(&line, &lower);
             let cost_lower = cost_line.to_lowercase();
-            // CR 603.2b: peel a trailing reflexive "When you do, [effect]"
+            // CR 603.12: peel a trailing reflexive "When you do, [effect]"
             // sentence (Casualty/Replicate/Squad shape reproduced without a
             // named keyword — Plumb the Forbidden class, issue #1108) BEFORE
             // the cost line reaches `parse_additional_cost_line`, so the cost
@@ -3946,7 +3946,7 @@ pub(crate) fn parse_oracle_ir(
                     emitter.static_ir_at(item_line, StaticIr::from_definition(reduction_text, def));
                 }
             }
-            // CR 603.2b: only synthesize the reflexive-copy trigger when the
+            // CR 603.12: only synthesize the reflexive-copy trigger when the
             // additional cost is actually the ranged-sacrifice shape this
             // pattern requires — an unrelated "When you do" tail on a cost
             // shape we don't otherwise recognize is left for the swallow-check
