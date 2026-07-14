@@ -154,6 +154,11 @@ pub struct CombatState {
     pub creature_attacked_defenders_this_combat: HashMap<ObjectId, HashSet<PlayerId>>,
     pub damage_assignments: HashMap<ObjectId, Vec<DamageAssignment>>,
     pub first_strike_done: bool,
+    /// CR 510.4: Combatants that had first strike or double strike as the first
+    /// combat-damage step began. `None` means the step has not been snapshotted;
+    /// `Some(empty)` means combat has only a regular damage step.
+    #[serde(default)]
+    pub first_strike_participants: Option<HashSet<ObjectId>>,
     /// Index into attacker list for resumable damage assignment iteration.
     pub damage_step_index: Option<usize>,
     /// CR 510.2: Collected assignments awaiting simultaneous application.
@@ -173,6 +178,7 @@ impl PartialEq for CombatState {
             && self.creature_attacked_defenders_this_combat
                 == other.creature_attacked_defenders_this_combat
             && self.first_strike_done == other.first_strike_done
+            && self.first_strike_participants == other.first_strike_participants
     }
 }
 

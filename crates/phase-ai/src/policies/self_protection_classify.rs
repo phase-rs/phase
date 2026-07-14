@@ -760,10 +760,34 @@ fn grant_answers_targeted_effect(
     ) {
         return None;
     }
-    if !matches!(effect_polarity(effect), EffectPolarity::Harmful) {
-        return Some(false);
-    }
     let protected = state.objects.get(&recipient_id)?;
+    match effect_polarity(effect) {
+        EffectPolarity::Beneficial => return Some(false),
+        EffectPolarity::Contextual => {
+            let source = source?;
+            // CR 303.4a + CR 702.18a: an Aura spell targets, so shroud (and
+            // matching hexproof/protection) can make its announced target illegal.
+            if !source
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Aura")
+            {
+                return None;
+            }
+            return match grant {
+                DefensiveGrant::CantBeTargeted => Some(true),
+                DefensiveGrant::HexproofFrom(filter) => {
+                    Some(hexproof_from_blocks_source(filter, protected, source))
+                }
+                DefensiveGrant::Protection(protection) => Some(source_matches_protection_target(
+                    protection, protected, source,
+                )),
+                DefensiveGrant::Indestructible | DefensiveGrant::PreventDamage => None,
+            };
+        }
+        EffectPolarity::Harmful => {}
+    }
     match grant {
         DefensiveGrant::CantBeTargeted => Some(harmful_effect_uses_object_targeting(effect)),
         DefensiveGrant::HexproofFrom(filter) => Some(
@@ -798,7 +822,11 @@ fn grant_answers_targeted_effect(
             } => None,
             Effect::DealDamage { .. } => {
                 if damage_becomes_marked(state, source) == Some(false) {
-                    return Some(false);
+                    return if source_has_effective_deathtouch(state, source) {
+                        None
+                    } else {
+                        Some(false)
+                    };
                 }
                 match lethal_to_creature(state, recipient_id, &[effect]) {
                     Some(true) if damage_becomes_marked(state, source) == Some(true) => Some(true),
@@ -809,6 +837,25 @@ fn grant_answers_targeted_effect(
         },
         DefensiveGrant::PreventDamage => None,
     }
+}
+
+/// CR 702.2b + CR 704.5h: damage from a deathtouch source destroys a
+/// positive-toughness creature as an SBA, which indestructible can prevent.
+fn source_has_effective_deathtouch(
+    state: &GameState,
+    source: Option<&engine::game::game_object::GameObject>,
+) -> bool {
+    source.is_some_and(|source| {
+        object_has_effective_keyword_kind(state, source.id, KeywordKind::Deathtouch)
+    })
+}
+
+fn damage_may_make_indestructible_relevant(
+    state: &GameState,
+    source: Option<&engine::game::game_object::GameObject>,
+) -> bool {
+    damage_becomes_marked(state, source) != Some(false)
+        || source_has_effective_deathtouch(state, source)
 }
 
 /// Whether damage from this source uses ordinary marked-damage semantics.
@@ -861,7 +908,11 @@ fn grant_answers_mass_effect(
         ) => None,
         (DefensiveGrant::Indestructible, Effect::DamageAll { .. }) => {
             if damage_becomes_marked(state, source) == Some(false) {
-                return Some(false);
+                return if source_has_effective_deathtouch(state, source) {
+                    None
+                } else {
+                    Some(false)
+                };
             }
             match lethal_to_creature(state, recipient_id, &[effect]) {
                 Some(true) if damage_becomes_marked(state, source) == Some(true) => Some(true),
@@ -1009,8 +1060,10 @@ fn combat_payoff_for_opportunity(
                     }
                     DefensiveGrant::Indestructible => {
                         saw_indestructible_pair |= paired_ids.iter().any(|paired_id| {
-                            damage_becomes_marked(state, state.objects.get(paired_id))
-                                != Some(false)
+                            damage_may_make_indestructible_relevant(
+                                state,
+                                state.objects.get(paired_id),
+                            )
                         });
                     }
                     DefensiveGrant::CantBeTargeted
@@ -1057,8 +1110,10 @@ fn combat_payoff_for_opportunity(
                     }
                     DefensiveGrant::Indestructible => {
                         ambiguous |= paired_ids.iter().any(|paired_id| {
-                            damage_becomes_marked(state, state.objects.get(paired_id))
-                                != Some(false)
+                            damage_may_make_indestructible_relevant(
+                                state,
+                                state.objects.get(paired_id),
+                            )
                         });
                     }
                     DefensiveGrant::PreventDamage => ambiguous = true,
@@ -1484,8 +1539,9 @@ mod tests {
     fn push_opponent_damage(
         state: &mut GameState,
         recipient: engine::types::identifiers::ObjectId,
-        source_keyword: Keyword,
+        source_keywords: &[Keyword],
         mass: bool,
+        amount: i32,
     ) {
         use engine::types::ability::{QuantityExpr, ResolvedAbility, TargetRef};
         use engine::types::game_state::{StackEntry, StackEntryKind};
@@ -1501,11 +1557,11 @@ mod tests {
             Zone::Stack,
         );
         let source = state.objects.get_mut(&source_id).unwrap();
-        source.base_keywords.push(source_keyword.clone());
-        source.keywords.push(source_keyword);
+        source.base_keywords.extend(source_keywords.iter().cloned());
+        source.keywords.extend(source_keywords.iter().cloned());
         let effect = if mass {
             Effect::DamageAll {
-                amount: QuantityExpr::Fixed { value: 3 },
+                amount: QuantityExpr::Fixed { value: amount },
                 target: TargetFilter::Typed(
                     TypedFilter::creature().controller(ControllerRef::Opponent),
                 ),
@@ -1514,7 +1570,7 @@ mod tests {
             }
         } else {
             Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 3 },
+                amount: QuantityExpr::Fixed { value: amount },
                 target: TargetFilter::Any,
                 damage_source: None,
                 excess: None,
@@ -1543,7 +1599,7 @@ mod tests {
         let ai = PlayerId(0);
         let recipient = create_test_creature(&mut state, ai);
         state.objects.get_mut(&recipient).unwrap().toughness = Some(3);
-        push_opponent_damage(&mut state, recipient, Keyword::Infect, false);
+        push_opponent_damage(&mut state, recipient, &[Keyword::Infect], false, 3);
         let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible);
 
         assert_eq!(
@@ -1558,12 +1614,56 @@ mod tests {
         let ai = PlayerId(0);
         let recipient = create_test_creature(&mut state, ai);
         state.objects.get_mut(&recipient).unwrap().toughness = Some(3);
-        push_opponent_damage(&mut state, recipient, Keyword::Wither, true);
+        push_opponent_damage(&mut state, recipient, &[Keyword::Wither], true, 3);
         let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible);
 
         assert_eq!(
             self_protection_effect_payoff(&state, ai, recipient, &effect),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn indestructible_may_answer_targeted_infect_deathtouch_damage() {
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let recipient = create_test_creature(&mut state, ai);
+        state.objects.get_mut(&recipient).unwrap().toughness = Some(3);
+        push_opponent_damage(
+            &mut state,
+            recipient,
+            &[Keyword::Infect, Keyword::Deathtouch],
+            false,
+            1,
+        );
+        let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible);
+
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, recipient, &effect),
+            None,
+            "deathtouch destruction can be stopped even when infect uses counters"
+        );
+    }
+
+    #[test]
+    fn indestructible_may_answer_mass_wither_deathtouch_damage() {
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let recipient = create_test_creature(&mut state, ai);
+        state.objects.get_mut(&recipient).unwrap().toughness = Some(3);
+        push_opponent_damage(
+            &mut state,
+            recipient,
+            &[Keyword::Wither, Keyword::Deathtouch],
+            true,
+            1,
+        );
+        let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible);
+
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, recipient, &effect),
+            None,
+            "deathtouch destruction can be stopped even when wither uses counters"
         );
     }
 
@@ -1610,6 +1710,52 @@ mod tests {
                 state.objects.get(&source),
             ),
             None
+        );
+    }
+
+    #[test]
+    fn shroud_answers_opposing_aura_targeting_protected_creature() {
+        use engine::types::ability::{ResolvedAbility, TargetRef};
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+        use engine::types::identifiers::CardId;
+        use engine::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let ai = PlayerId(0);
+        let opponent = PlayerId(1);
+        let recipient = create_test_creature(&mut state, ai);
+        let aura_id = engine::game::zones::create_object(
+            &mut state,
+            CardId(88),
+            opponent,
+            "Opposing Aura".to_string(),
+            Zone::Stack,
+        );
+        let aura = state.objects.get_mut(&aura_id).unwrap();
+        aura.card_types.core_types.push(CoreType::Enchantment);
+        aura.card_types.subtypes.push("Aura".to_string());
+        let ability = ResolvedAbility::new(
+            Effect::unimplemented("aura spell", "Enchant creature"),
+            vec![TargetRef::Object(recipient)],
+            aura_id,
+            opponent,
+        );
+        state.stack.push_back(StackEntry {
+            id: aura_id,
+            source_id: aura_id,
+            controller: opponent,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(88),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+        let effect = grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Shroud);
+
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, recipient, &effect),
+            Some(true)
         );
     }
 
@@ -1678,9 +1824,10 @@ mod tests {
         let ai = PlayerId(0);
         let opp = PlayerId(1);
         let attacker = create_test_creature(&mut state, ai);
+        state.objects.get_mut(&attacker).unwrap().toughness = Some(3);
         let blocker = create_test_creature(&mut state, opp);
         let blocker_object = state.objects.get_mut(&blocker).unwrap();
-        blocker_object.power = Some(3);
+        blocker_object.power = Some(1);
         blocker_object.keywords.push(Keyword::Infect);
         state.phase = Phase::DeclareBlockers;
         let mut combat = CombatState {
@@ -1696,6 +1843,18 @@ mod tests {
         assert_eq!(
             self_protection_effect_payoff(&state, ai, attacker, &effect),
             Some(false)
+        );
+
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Deathtouch);
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, attacker, &effect),
+            None,
+            "deathtouch destruction remains preventable by indestructible"
         );
     }
 
@@ -1792,6 +1951,7 @@ mod tests {
         let mut combat = CombatState {
             attackers: vec![AttackerInfo::attacking_player(attacker, opp)],
             first_strike_done: true,
+            first_strike_participants: Some(std::collections::HashSet::from([blocker])),
             ..Default::default()
         };
         combat.blocker_assignments.insert(attacker, vec![blocker]);
@@ -1805,6 +1965,30 @@ mod tests {
             "first-strike-only blocker has no pending regular damage"
         );
 
+        let blocker_object = state.objects.get_mut(&blocker).unwrap();
+        blocker_object.keywords.clear();
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, attacker, &effect),
+            Some(false),
+            "losing first strike does not add the source to regular damage"
+        );
+
+        state.combat.as_mut().unwrap().first_strike_participants =
+            Some(std::collections::HashSet::from([attacker]));
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .keywords
+            .push(Keyword::FirstStrike);
+        assert_eq!(
+            self_protection_effect_payoff(&state, ai, attacker, &effect),
+            None,
+            "gaining first strike does not remove a normal source from regular damage"
+        );
+
+        state.combat.as_mut().unwrap().first_strike_participants =
+            Some(std::collections::HashSet::from([blocker]));
         let blocker_object = state.objects.get_mut(&blocker).unwrap();
         blocker_object.keywords.clear();
         blocker_object.keywords.push(Keyword::DoubleStrike);
