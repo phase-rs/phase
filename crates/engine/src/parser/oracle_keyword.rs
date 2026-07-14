@@ -1482,12 +1482,17 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     // Delegates to nom combinator for number parsing.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("discover ").parse(text) {
         if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest.trim()) {
-            // Report the tail instead of DEMANDING it be empty. The real printed
-            // line is "Discover 4." — requiring an empty remainder rejected the
-            // terminal period and lost the keyword outright. Terminal punctuation
-            // is a permitted `P` tail; the strict router classifies it, and a
-            // semantic clause here still fails the tail parser.
-            return Some((Keyword::Discover(n), rem));
+            // The empty-remainder guard is LOAD-BEARING, not an oversight, and it
+            // must stay. CR 701.57: Discover is a keyword ACTION — the printed line
+            // "Discover 4." is a spell INSTRUCTION, not a keyword declaration, and it
+            // belongs to the effect parser. Accepting the terminal period here makes
+            // the strict router consume the line as a keyword and DELETES the
+            // discover effect. (Learned the hard way: relaxing this reds
+            // discover_accept_hit_mv_equals_n_casts_to_stack and
+            // discover_decline_sends_hit_to_hand.)
+            if rem.is_empty() {
+                return Some((Keyword::Discover(n), ""));
+            }
         }
     }
 
@@ -5011,7 +5016,10 @@ mod router_registry_tests {
         RouterKeywordCase {
             prefix: "discover",
             valid_line: "Discover 4.",
-            reach: ProductionReach::KeywordCostLine,
+            // CR 701.57: a keyword ACTION. The printed line is a spell INSTRUCTION
+            // that belongs to the effect parser, not a keyword declaration — the
+            // generic router must decline it or the discover effect is deleted.
+            reach: ProductionReach::SpecializedTypedRoute,
         },
         RouterKeywordCase {
             prefix: "collect evidence",
