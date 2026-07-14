@@ -932,6 +932,17 @@ pub(crate) enum TargetedImperativeAst {
     /// CR 701.3: Return to hand (bounce).
     Return {
         target: TargetFilter,
+        /// CR 115.1d + CR 601.2c: Variable object count for a non-targeted
+        /// "return up to N cards from your graveyard to your hand" (Ill-Gotten
+        /// Gains) or "return that many cards from your graveyard to your hand"
+        /// (dynamic count) — mirrors [`TargetedImperativeAst::Tap`]. `None` for
+        /// the common single-object "return a card from your graveyard to your
+        /// hand". Carried onto `ParsedEffectClause.multi_target` at lowering;
+        /// the runtime's `EffectZoneChoice` picker already resolves bounded
+        /// at-resolution bounce counts generically (Wrenn and Six precedent),
+        /// so no game-logic change is needed — only the parser previously
+        /// dropped the quantifier before it ever reached that machinery.
+        multi_target: Option<MultiTargetSpec>,
         /// CR 115.1 + Whitemane Lion ruling: Captured at parse time from the
         /// `TargetSyntax` discriminator. `Descriptor` Oracle text without
         /// "target" (e.g. "return a creature you control to its owner's hand")
@@ -982,6 +993,17 @@ pub(crate) enum TargetedImperativeAst {
         /// CR 107.1c: "return any number of [filter] cards" — zero-or-more
         /// resolution-time zone selection (Grave Sifter class).
         up_to: bool,
+        /// CR 115.1d + CR 601.2c: Variable object count for a non-targeted
+        /// "return up to N cards from your graveyard to your hand"
+        /// (Ill-Gotten Gains) or "return that many cards …" (dynamic count).
+        /// `None` for the common single-object "return a card from your
+        /// graveyard to your hand" and for the unrelated unbounded `up_to`
+        /// shape above (Grave Sifter class), which keeps using its own flag.
+        /// Carried onto `ParsedEffectClause.multi_target` at lowering,
+        /// mirroring `ZoneCounterImperativeAst::Exile`'s `multi_target` (#5649
+        /// / Forage precedent) — `Effect::ChangeZone` has no count slot of its
+        /// own, so the quantity rides the clause's `MultiTargetSpec` instead.
+        multi_target: Option<MultiTargetSpec>,
     },
     /// CR 400.7 + CR 608.2c: Mass return to a non-default zone. Lowers to
     /// `ChangeZoneAll` so the resolver scans every matching object instead of

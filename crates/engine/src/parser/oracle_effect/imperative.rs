@@ -13,7 +13,7 @@ use super::counter::{
 };
 use super::lower::{
     parse_for_each_multiplier_prefix, parse_multi_target_count_expr,
-    parse_where_x_quantity_expression, strip_trailing_where_x,
+    parse_where_x_quantity_expression, strip_leading_quantifier, strip_trailing_where_x,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
@@ -1832,6 +1832,29 @@ pub(super) fn parse_targeted_action_ast(
         ))
         .parse(input)
     }) {
+        // CR 115.1d + CR 601.2c: Strip a bare, BOUNDED "up to N" quantifier
+        // immediately after the verb before any destination or target parsing
+        // runs below. Left in place, the quantifier's own embedded "to"
+        // collides with the trailing "to <hand>" destination scan
+        // (`strip_return_destination_ext` just below) and derails BOTH
+        // destination recognition and the count together — Ill-Gotten Gains's
+        // "returns up to three cards from their graveyard to their hand"
+        // otherwise silently returns the ENTIRE graveyard instead of up to
+        // three cards. `strip_leading_quantifier` is pure slice arithmetic, so
+        // the remainder stays a true subslice of `rest` — no reconstruction
+        // needed. It ALSO recognizes the unrelated unbounded "any number of"
+        // quantifier (`max: None`) — that shape already has its own working
+        // mechanism a few lines below (`any_number_prefix` → `return_up_to` →
+        // `ReturnToZone.up_to`, the Grave Sifter class), so only act here on
+        // the genuinely bounded `max: Some(_)` result to avoid double-handling
+        // it or disturbing that already-correct path.
+        let (stripped_rest, return_multi_target) = strip_leading_quantifier(rest);
+        let return_multi_target = return_multi_target.filter(|spec| spec.max.is_some());
+        let rest = if return_multi_target.is_some() {
+            stripped_rest
+        } else {
+            rest
+        };
         let rest_lower = &lower[lower.len() - rest.len()..];
         let (trailing_target_text, trailing_dest) = super::strip_return_destination_ext(rest);
         let (leading_target_text, leading_dest) = super::strip_leading_return_destination_ext(rest);
@@ -1992,9 +2015,14 @@ pub(super) fn parse_targeted_action_ast(
                         origin,
                         destination: Zone::Hand,
                         up_to: return_up_to,
+                        multi_target: return_multi_target,
                     })
                 } else {
-                    Some(TargetedImperativeAst::Return { target, selection })
+                    Some(TargetedImperativeAst::Return {
+                        target,
+                        selection,
+                        multi_target: return_multi_target,
+                    })
                 }
             }
             Some(d) => {
@@ -2013,6 +2041,7 @@ pub(super) fn parse_targeted_action_ast(
                         origin,
                         destination: d.zone,
                         up_to: return_up_to,
+                        multi_target: return_multi_target,
                     })
                 }
             }
@@ -2024,7 +2053,11 @@ pub(super) fn parse_targeted_action_ast(
                 if is_mass {
                     Some(TargetedImperativeAst::ReturnAll { target, count })
                 } else {
-                    Some(TargetedImperativeAst::Return { target, selection })
+                    Some(TargetedImperativeAst::Return {
+                        target,
+                        selection,
+                        multi_target: return_multi_target,
+                    })
                 }
             }
         };
@@ -2198,7 +2231,16 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         // implicit (1 per parent-affected ID; the runtime expands ParentTarget
         // into the full set at rebind time).
         TargetedImperativeAst::DiscardCard { target } => Effect::DiscardCard { count: 1, target },
-        TargetedImperativeAst::Return { target, selection } => Effect::Bounce {
+        // CR 115.1d + CR 601.2c: the "up to N" cardinality is an ability-level
+        // field (`ParsedEffectClause.multi_target`), not an `Effect::Bounce`
+        // field. It is recovered at the clause layer in
+        // `lower_imperative_family_ast`; this bare-Effect lowering
+        // deliberately ignores `multi_target`.
+        TargetedImperativeAst::Return {
+            target,
+            selection,
+            multi_target: _,
+        } => Effect::Bounce {
             target,
             destination: None,
             selection,
@@ -2242,11 +2284,17 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_modified_if: None,
         },
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
+        // CR 115.1d + CR 601.2c: `multi_target` (the bounded "up to N" count)
+        // is an ability-level field (`ParsedEffectClause.multi_target`), not
+        // an `Effect::ChangeZone` field — recovered at the clause layer in
+        // `lower_imperative_family_ast`; this bare-Effect lowering
+        // deliberately ignores it.
         TargetedImperativeAst::ReturnToZone {
             target,
             origin,
             destination,
             up_to,
+            multi_target: _,
         } => Effect::ChangeZone {
             origin,
             destination,
@@ -11072,6 +11120,50 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.multi_target = multi_target;
             clause
         }
+        // CR 115.1d + CR 601.2c: "return up to N cards from your graveyard to
+        // your hand" (Ill-Gotten Gains) or "return that many cards …"
+        // (dynamic count) captured a `multi_target` on a non-targeted
+        // (`BounceSelection::AtResolution`) return. The bare-Effect lowering
+        // (`lower_targeted_action_ast`) cannot carry it, so intercept here and
+        // thread the count onto the clause — mirroring the Tap/Untap arm
+        // above. The runtime resolves the card selection via the shared
+        // `EffectZoneChoice` multi-target picker (Wrenn and Six precedent).
+        ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
+            ast @ TargetedImperativeAst::Return {
+                multi_target: Some(_),
+                ..
+            },
+        )) => {
+            let multi_target = match &ast {
+                TargetedImperativeAst::Return { multi_target, .. } => multi_target.clone(),
+                _ => None,
+            };
+            let mut clause = parsed_clause(lower_targeted_action_ast(ast));
+            clause.multi_target = multi_target;
+            clause
+        }
+        // CR 115.1d + CR 601.2c + CR 700.4: sibling of the `Return` arm above
+        // for the `origin.is_some()` shape ("return up to N cards from your
+        // graveyard to your hand" lowers to a `ChangeZone`, not a `Bounce`,
+        // when an explicit origin zone is present — Ill-Gotten Gains). Mirrors
+        // `ZoneCounterImperativeAst::Exile`'s `multi_target` handling (#5649 /
+        // Forage precedent): `Effect::ChangeZone` has no count slot of its
+        // own, so the quantity rides the clause's `MultiTargetSpec` instead,
+        // resolved by the same shared `EffectZoneChoice` picker.
+        ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
+            ast @ TargetedImperativeAst::ReturnToZone {
+                multi_target: Some(_),
+                ..
+            },
+        )) => {
+            let multi_target = match &ast {
+                TargetedImperativeAst::ReturnToZone { multi_target, .. } => multi_target.clone(),
+                _ => None,
+            };
+            let mut clause = parsed_clause(lower_targeted_action_ast(ast));
+            clause.multi_target = multi_target;
+            clause
+        }
         // CR 701.41a: Support N → PutCounter with multi-target "up to N".
         // On permanents (is_other=true): "up to N other target creatures"
         // On instants/sorceries (is_other=false): "up to N target creatures"
@@ -19772,6 +19864,122 @@ mod tests {
             def.multi_target,
             Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 })),
             "the count must ride the clause MultiTargetSpec as exact(Fixed {{ 2 }})"
+        );
+    }
+
+    /// Ill-Gotten Gains class (issue filed alongside this fix): "return up to
+    /// N cards from your graveyard to your hand" with no "target" keyword
+    /// lowers to `Effect::ChangeZone` (via `ReturnToZone` — an explicit origin
+    /// zone routes here rather than the target-less `Return`/`Bounce` arm,
+    /// confirmed against the actual parser output) — the shape the *targeted*
+    /// sibling "return up to N target cards …" already handles correctly via
+    /// `strip_optional_target_prefix`. Before this fix the bare "up to N"
+    /// prefix was silently absorbed by the destination/target parser: the
+    /// count never reached `ParsedEffectClause.multi_target`, so the effect
+    /// resolved as an unbounded "return every matching graveyard card"
+    /// instead of "up to N". Pins the `Fixed` arm (this test) and the dynamic
+    /// arm (below), plus a negative proving the singular case is untouched.
+    #[test]
+    fn return_up_to_n_cards_from_graveyard_binds_bounded_multi_target() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "return up to three cards from your graveyard to your hand",
+            AbilityKind::Spell,
+        );
+        let Effect::ChangeZone {
+            origin: Some(crate::types::zones::Zone::Graveyard),
+            destination: crate::types::zones::Zone::Hand,
+            target,
+            ..
+        } = &*def.effect
+        else {
+            panic!(
+                "expected a graveyard-to-hand ChangeZone, got {:?}",
+                def.effect
+            );
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected a Typed graveyard-card filter, got {target:?}");
+        };
+        assert!(
+            tf.properties
+                .contains(&crate::types::ability::FilterProp::InZone {
+                    zone: crate::types::zones::Zone::Graveyard
+                }),
+            "target must be constrained to the graveyard, got {target:?}"
+        );
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 })),
+            "the count must ride the clause MultiTargetSpec as up_to(Fixed {{ 3 }}), got {:?}",
+            def.multi_target
+        );
+    }
+
+    /// Dynamic-count sibling of the test above: "return up to that many
+    /// cards …" (the Nefarious-Lich-shaped anaphoric back-reference, CR
+    /// 608.2c, composed with the "up to" quantifier this fix handles) must
+    /// bind `QuantityRef::EventContextAmount` through the same seam rather
+    /// than silently dropping to a fixed/absent count. `strip_leading_quantifier`
+    /// only recognizes "any number of "/"up to " as top-level prefixes (a bare
+    /// "that many" with no "up to" is a distinct, not-yet-handled shape — see
+    /// `parse_exile_count_from_your_graveyard`'s bare "that many" arm for
+    /// `exile`, #5649), so this exercises the dynamic count *inside* the "up
+    /// to" branch via `parse_multi_target_count_expr`; not tied to a specific
+    /// named card.
+    #[test]
+    fn return_up_to_that_many_cards_from_graveyard_binds_dynamic_multi_target() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "return up to that many cards from your graveyard to your hand",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    origin: Some(crate::types::zones::Zone::Graveyard),
+                    destination: crate::types::zones::Zone::Hand,
+                    ..
+                }
+            ),
+            "expected a graveyard-to-hand ChangeZone, got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::EventContextAmount
+            })),
+            "the dynamic count must ride the clause MultiTargetSpec, got {:?}",
+            def.multi_target
+        );
+    }
+
+    /// Negative: the ordinary singular "return a card from your graveyard to
+    /// your hand" (Forbidden Crypt / Recall / Skullwinder class) carries no
+    /// quantifier at all and must stay `multi_target: None` — the resolver's
+    /// existing single-object default is unaffected by this fix.
+    #[test]
+    fn return_a_card_from_graveyard_has_no_multi_target() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "return a card from your graveyard to your hand",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    origin: Some(crate::types::zones::Zone::Graveyard),
+                    destination: crate::types::zones::Zone::Hand,
+                    ..
+                }
+            ),
+            "expected a graveyard-to-hand ChangeZone, got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.multi_target, None,
+            "a bare singular return must not gain a multi_target, got {:?}",
+            def.multi_target
         );
     }
 }
