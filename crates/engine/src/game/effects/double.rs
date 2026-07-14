@@ -345,6 +345,7 @@ mod tests {
             description: None,
             repeat_for: None,
             min_x_value: 0,
+            announced_x: None,
             cant_be_copied: false,
             copy_count_status: crate::types::ability::CopyCountStatus::Pending,
             forward_result: false,

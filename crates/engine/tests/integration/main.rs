@@ -11,6 +11,7 @@ mod anax_instead_branch_not_chain;
 mod ancient_brass_dragon_roll_d20;
 mod ancient_bronze_dragon_roll_d20;
 mod ancient_copper_dragon_roll_d20;
+mod announce_locked_x_runtime;
 mod another_round_repeat;
 mod archmage_ascension_gated_draw_replacement;
 mod ark_of_hunger_play_from_graveyard_751;

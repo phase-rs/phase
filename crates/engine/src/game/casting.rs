@@ -10588,7 +10588,7 @@ fn continue_with_prepared(
 
     // Build the resolved ability from the ability_def, or a placeholder for auras
     // with no spell-level ability (aura targeting is via the Enchant keyword).
-    let resolved = if let Some(ref ability_def) = prepared.ability_def {
+    let mut resolved = if let Some(ref ability_def) = prepared.ability_def {
         // CR 601.2c: The player announcing a spell with modes chooses the mode(s).
         if let Some(ref modal_choice) = prepared.modal {
             let placeholder = ResolvedAbility::new(
@@ -10694,6 +10694,12 @@ fn continue_with_prepared(
             player,
         )
     };
+
+    // CR 601.2b: X is announced BEFORE targets are chosen (CR 601.2c). A text-defined,
+    // announce-locked X ("where X is <count> as you cast this spell") is measured here,
+    // once, and published onto the object's single X channel — every target count, damage
+    // division, and resolution-time amount below then reads the SAME locked number.
+    super::ability_utils::publish_announced_x(state, &mut resolved, player, prepared.object_id);
 
     // 5. Handle targeting -- ensure layers evaluated before target legality
     super::layers::flush_layers(state);
@@ -15150,6 +15156,12 @@ pub fn handle_activate_ability(
     // `else_ability`, and other typed fields survive into resolution
     // (issue #310 — same root cause as the spell-cast path).
     let mut resolved = build_resolved_from_def(&ability_def, source_id, player);
+    // CR 602.2b -> CR 601.2b: activating an ability follows the spell-announcement rules
+    // 601.2b-i identically, so a text-defined, announce-locked X ("where X is <count> as
+    // you activate this ability") is measured HERE — at announcement, before targets are
+    // chosen (CR 601.2c) — and published onto the object's single X channel. This is the
+    // SAME computation the cast path uses; a loyalty ability rides it too.
+    super::ability_utils::publish_announced_x(state, &mut resolved, player, source_id);
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking
     // before any branch path that pushes this ability onto the stack.
     resolved.ability_index = Some(ability_index);

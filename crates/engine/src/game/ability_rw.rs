@@ -3585,6 +3585,7 @@ fn walk_ability(
         player_scope,
         starting_with,
         repeat_for,
+        announced_x,
         multi_target,
         target_constraints,
         unless_pay,
@@ -3606,7 +3607,7 @@ fn walk_ability(
         optional_for: _,
         target_choice_timing: _,
         description: _,
-        min_x_value: _,
+        min_x_value: _, // u32, no read
         cant_be_copied: _,
         copy_count_status: _,
         forward_result: _,
@@ -3655,6 +3656,12 @@ fn walk_ability(
     }
     if let Some(rf) = repeat_for {
         acc.merge(rw_quantity_expr(rf));
+    }
+    // CR 601.2b: the announce-time-locked X definition is a live board read, merely
+    // read at announcement rather than at resolution. Same read-kind as any other
+    // quantity slot.
+    if let Some(ax) = announced_x {
+        acc.merge(rw_quantity_expr(ax));
     }
     if let Some(MultiTargetSpec { min, max }) = multi_target {
         acc.merge(rw_quantity_expr(min));
@@ -3707,6 +3714,7 @@ fn walk_definition(
         player_scope,
         starting_with,
         repeat_for,
+        announced_x,
         multi_target,
         target_constraints,
         unless_pay,
@@ -3766,6 +3774,12 @@ fn walk_definition(
     }
     if let Some(rf) = repeat_for {
         acc.merge(rw_quantity_expr(rf));
+    }
+    // CR 601.2b: the announce-time-locked X definition is a live board read, merely
+    // read at announcement rather than at resolution. Same read-kind as any other
+    // quantity slot.
+    if let Some(ax) = announced_x {
+        acc.merge(rw_quantity_expr(ax));
     }
     if let Some(MultiTargetSpec { min, max }) = multi_target {
         acc.merge(rw_quantity_expr(min));

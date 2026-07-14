@@ -8910,10 +8910,75 @@ fn rebind_context_dependent_where_x(
     .then(|| "the amount of excess damage dealt this way".to_string())
 }
 
+/// CR 601.2a-b + CR 602.2b: recognize the announce-time-lock qualifier that ends a
+/// "where X is …" tail, and return the bare count expression with it removed.
+///
+/// "as you cast this spell" names a spell's announcement (CR 601.2a-b); "as you
+/// activate this ability" names an activated ability's, which CR 602.2b makes
+/// *identical* to 601.2b-i. They are the SAME moment, so one combinator recognizes
+/// both through a single `alt()` over the shared tail rather than two bespoke arms.
+///
+/// The qualifier is load-bearing, not decoration. CR 107.3c makes a text-defined X a
+/// LIVE value by default — "Note that the value of X may change while that spell or
+/// ability is on the stack" — so binding the stripped expression into the ability's X
+/// slots as an ordinary quantity would re-evaluate it at resolution, which is exactly
+/// what the qualifier forbids. The only correct consumer is
+/// `AbilityDefinition::announced_x`, which the engine evaluates once at announcement.
+fn announce_locked_count(input: &str) -> OracleResult<'_, &str> {
+    terminated(
+        take_until(" as you "),
+        terminated(
+            preceded(
+                tag(" as you "),
+                alt((tag("cast this spell"), tag("activate this ability"))),
+            ),
+            eof,
+        ),
+    )
+    .parse(input)
+}
+
+fn strip_announce_lock(expression: &str) -> Option<&str> {
+    let bare = expression.trim().trim_end_matches('.');
+    // `to_ascii_lowercase` is length-preserving, so a byte offset found in the
+    // lowercase copy transfers to the original-case slice returned to the caller.
+    let lower = bare.to_ascii_lowercase();
+    let (_, prefix) = announce_locked_count(lower.as_str()).ok()?;
+    Some(bare[..prefix.len()].trim_end())
+}
+
 pub(super) fn apply_where_x_ability_expression(
     def: &mut AbilityDefinition,
     where_x_expression: Option<&str>,
 ) {
+    // CR 601.2b + CR 602.2b: an announce-time-locked "where X is …" clause defines X
+    // as a count MEASURED AT ANNOUNCEMENT, overriding CR 107.3c's default that a
+    // text-defined X "may change while that spell or ability is on the stack". Park
+    // the count on the def and STOP: every `QuantityRef::Variable("X")` in this
+    // ability is left intact and already reads the object's single X channel
+    // (`chosen_x`, CR 107.3i), which the announcement step fills from `announced_x`.
+    //
+    // Binding the count into the X slots here instead — the tempting "just strip the
+    // suffix" fix — would make each slot re-evaluate the board at whatever moment it
+    // happens to be read (resolution, for a damage amount or a draw count), which is
+    // precisely the behaviour the printed qualifier exists to forbid.
+    if let Some(locked) = where_x_expression.and_then(strip_announce_lock) {
+        match parse_where_x_quantity_expression(locked) {
+            Some(expr) => {
+                def.announced_x = Some(expr);
+                return;
+            }
+            // CR 107.3c: the clause defines X but the count has no typed home. Report
+            // the gap rather than keep a raw-text placeholder that resolves to 0 while
+            // still reading as supported.
+            None => {
+                *def.effect =
+                    Effect::unimplemented("where_x_binding", format!("where X is {locked}"));
+                return;
+            }
+        }
+    }
+
     // CR 120.10: a context-dependent demonstrative tail is licensed against this
     // def's condition and normalized onto the phrase the shared grammar binds,
     // BEFORE any of the rewrites below consume it. Unlicensed demonstratives fall
@@ -10536,6 +10601,54 @@ mod where_x_tests {
     /// CR 107.3i + CR 202.3: the where-X traversal rebinds a `TotalManaValue`
     /// target constraint's `Variable("X")` cap to the die-result
     /// `EventContextAmount` (Ancient Brass Dragon's "where X is the result").
+    /// CR 601.2a-b + CR 602.2b: the announce-lock recognizer is a BUILDING BLOCK, so it is
+    /// tested across its input range, not on one card. Both wordings name the same
+    /// announcement step (602.2b makes activating follow 601.2b-i identically), so one
+    /// `alt()` must accept both; anything else must fall through untouched, because a
+    /// false positive here would FREEZE a value CR 107.3c says may change while on the
+    /// stack.
+    #[test]
+    fn strip_announce_lock_accepts_both_wordings_and_nothing_else() {
+        // SPELL surface (CR 601.2a-b)
+        assert_eq!(
+            super::strip_announce_lock(
+                "the number of Mountains you control as you cast this spell"
+            ),
+            Some("the number of Mountains you control")
+        );
+        // ACTIVATED-ABILITY surface (CR 602.2b) — same channel, same combinator
+        assert_eq!(
+            super::strip_announce_lock(
+                "the number of Bobbleheads you control as you activate this ability"
+            ),
+            Some("the number of Bobbleheads you control")
+        );
+        // Trailing period + mixed case: the returned slice keeps ORIGINAL case.
+        assert_eq!(
+            super::strip_announce_lock(
+                "the greatest power among creatures you control As You Cast This Spell."
+            ),
+            Some("the greatest power among creatures you control")
+        );
+
+        // NEGATIVE: an UNLOCKED text-defined X (CR 107.3c) must not match — it is a live
+        // value and freezing it would be rules-wrong.
+        assert_eq!(
+            super::strip_announce_lock("the number of creatures you control"),
+            None
+        );
+        // NEGATIVE: a lock-shaped phrase that is not the announce qualifier.
+        assert_eq!(
+            super::strip_announce_lock("the number of cards you drew as you cast your last spell"),
+            None
+        );
+        // NEGATIVE: the qualifier must TERMINATE the tail (eof), not sit mid-phrase.
+        assert_eq!(
+            super::strip_announce_lock("X as you cast this spell plus the number of Islands"),
+            None
+        );
+    }
+
     #[test]
     fn apply_where_x_to_target_constraint_binds_total_mana_value_cap() {
         use crate::types::ability::Comparator;

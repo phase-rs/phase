@@ -163,6 +163,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         player_scope,
         starting_with,
         repeat_for,
+        announced_x,
         multi_target,
         target_constraints,
         unless_pay,
@@ -226,6 +227,14 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
     }
     if let Some(repeat_for) = repeat_for {
         acc = acc.or(scan_quantity_expr(repeat_for));
+    }
+    // CR 601.2b: the announce-time-locked definition of X ("where X is <count> as
+    // you cast this spell") is a live board read like any other quantity — it is
+    // merely READ EARLIER (at announcement) than a resolution-time slot. It is
+    // read-bearing and must be scanned, not classified as a cast-time snapshot;
+    // `chosen_x` (below) is the concrete VALUE this expression produces.
+    if let Some(announced_x) = announced_x {
+        acc = acc.or(scan_quantity_expr(announced_x));
     }
     // CR 601.2c / CR 115.1d: variable-count targeting bounds (min/max) are
     // `QuantityExpr`s that can read a projected/event resource (e.g. a die-result X).
@@ -3633,6 +3642,7 @@ fn ability_definition_axes(def: &AbilityDefinition) -> Axes {
         modal,
         mode_abilities,
         repeat_for,
+        announced_x,
         player_scope,
         starting_with,
         target_chooser,
@@ -3676,6 +3686,11 @@ fn ability_definition_axes(def: &AbilityDefinition) -> Axes {
     }
     if let Some(condition) = condition {
         acc = acc.or(scan_ability_condition(condition));
+    }
+    // CR 601.2b: the announce-time-locked definition of X is a live board read,
+    // merely read earlier (at announcement) than a resolution-time slot.
+    if let Some(announced_x) = announced_x {
+        acc = acc.or(scan_quantity_expr(announced_x));
     }
     if let Some(MultiTargetSpec { min, max }) = multi_target {
         acc = acc.or(scan_quantity_expr(min));
@@ -4677,6 +4692,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         player_scope: _, // iteration fan-out, pure player-filter eval
         starting_with: _, // APNAP start override, no prompt
         repeat_for: _, // "for each" count, pure quantity eval (game/quantity.rs)
+        announced_x: _, // CR 601.2b announce-time count, pure quantity eval, no prompt
         multi_target: _, // announce-time variable-count bounds (Resolution case caught by timing)
         target_constraints: _, // announce-time cross-target legality, no resolution prompt
         distribution: _, // CR 601.2d concrete pre-assigned portions (announce-time)

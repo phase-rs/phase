@@ -2357,6 +2357,18 @@ impl<'a> CastCommit<'a> {
         &self.runner.state
     }
 
+    /// Mutate the board WHILE the committed spell is still on the stack.
+    ///
+    /// The spell has been announced (CR 601.2a-i) but not resolved (CR 608.2), which
+    /// is the only window in which "did this value LOCK at announcement, or is it
+    /// re-read at resolution?" is answerable. A test that merely casts and resolves
+    /// against a static board cannot tell a locked snapshot from a live re-read —
+    /// both produce the same number. Changing the board here and then resolving is
+    /// what discriminates them.
+    pub fn state_mut(&mut self) -> &mut GameState {
+        &mut self.runner.state
+    }
+
     /// The cast variant option selected during `CastingVariantChoice`, if the
     /// cast surfaced that prompt.
     pub fn selected_casting_variant(&self) -> Option<&CastingVariantChoiceOption> {

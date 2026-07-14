@@ -2052,6 +2052,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         description,
         repeat_for,
         min_x_value,
+        announced_x,
         cant_be_copied,
         copy_count_status,
         forward_result,
@@ -2107,6 +2108,9 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && description.is_none()
         && repeat_for.is_none()
         && *min_x_value == 0
+        // CR 601.2b: an announce-locked X makes this ability's X board-dependent;
+        // it is not the vanilla self-counter shape this batch path proves safe.
+        && announced_x.is_none()
         && !*cant_be_copied
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result

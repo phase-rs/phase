@@ -15675,6 +15675,25 @@ pub struct AbilityDefinition {
     /// Minimum legal announced value for X. Defaults to zero; set to one by
     /// "X can't be 0" annotations.
     pub min_x_value: u32,
+    /// CR 601.2b + CR 602.2b: X for this spell/ability is DEFINED BY ITS TEXT and
+    /// MEASURED AT ANNOUNCEMENT — the count behind a "where X is <expression> as
+    /// you cast this spell" / "... as you activate this ability" clause (Jaws of
+    /// Stone, Monstrous Onslaught, Agility Bobblehead, Lukka's [-4]).
+    ///
+    /// The printed qualifier is not decoration. CR 107.3c makes a text-defined X a
+    /// LIVE value by default — "Note that the value of X may change while that
+    /// spell or ability is on the stack" — and the qualifier is the card text that
+    /// OVERRIDES that default, pinning the count to the announcement step (CR
+    /// 601.2a-b; CR 602.2b makes 601.2b-i apply identically to an activated
+    /// ability, so one field serves both surfaces).
+    ///
+    /// The engine evaluates this ONCE at announcement and publishes the result
+    /// through the object's single X channel (`chosen_x`, CR 107.3i), which every
+    /// `QuantityRef::Variable("X")` on the ability already reads. Binding the
+    /// expression directly into the X slots instead would re-evaluate it at
+    /// whatever moment each slot happens to be read — which is exactly the
+    /// resolution-time behaviour the qualifier exists to forbid.
+    pub announced_x: Option<QuantityExpr>,
     /// Stack-copy restriction from "This ability can't be copied."
     pub cant_be_copied: bool,
     /// CR 601.2f: Self-referential cost reduction applied before activation.
@@ -15778,6 +15797,8 @@ struct AbilityDefinitionRepr<'a> {
     repeat_for: &'a Option<QuantityExpr>,
     #[serde(skip_serializing_if = "is_zero_u32")]
     min_x_value: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    announced_x: &'a Option<QuantityExpr>,
     #[serde(skip_serializing_if = "is_false")]
     cant_be_copied: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -15830,6 +15851,7 @@ impl Serialize for AbilityDefinition {
             mode_abilities,
             repeat_for,
             min_x_value,
+            announced_x,
             cant_be_copied,
             cost_reduction,
             forward_result,
@@ -15868,6 +15890,7 @@ impl Serialize for AbilityDefinition {
             mode_abilities,
             repeat_for,
             min_x_value: *min_x_value,
+            announced_x,
             cant_be_copied: *cant_be_copied,
             cost_reduction,
             forward_result: *forward_result,
@@ -15965,6 +15988,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     min_x_value: u32,
     #[serde(default)]
+    announced_x: Option<QuantityExpr>,
+    #[serde(default)]
     cant_be_copied: bool,
     #[serde(default)]
     cost_reduction: Option<CostReduction>,
@@ -16022,6 +16047,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             mode_abilities: de.mode_abilities,
             repeat_for: de.repeat_for,
             min_x_value: de.min_x_value,
+            announced_x: de.announced_x,
             cant_be_copied: de.cant_be_copied,
             cost_reduction: de.cost_reduction,
             forward_result: de.forward_result,
@@ -16175,6 +16201,7 @@ impl AbilityDefinition {
             mode_abilities: Vec::new(),
             repeat_for: None,
             min_x_value: 0,
+            announced_x: None,
             cant_be_copied: false,
             cost_reduction: None,
             forward_result: false,
@@ -19852,6 +19879,11 @@ pub struct ResolvedAbility {
     /// "X can't be 0" annotations.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub min_x_value: u32,
+    /// CR 601.2b + CR 602.2b: the announce-time-locked definition of X, carried
+    /// from `AbilityDefinition::announced_x`. Resolved ONCE at announcement into
+    /// `chosen_x` (the CR 107.3i single-X-per-object channel); never re-read after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_x: Option<QuantityExpr>,
     /// Stack-copy restriction from "This ability can't be copied."
     #[serde(default, skip_serializing_if = "is_false")]
     pub cant_be_copied: bool,
@@ -20021,6 +20053,7 @@ impl ResolvedAbility {
             description: None,
             repeat_for: None,
             min_x_value: 0,
+            announced_x: None,
             cant_be_copied: false,
             copy_count_status: CopyCountStatus::Pending,
             forward_result: false,
