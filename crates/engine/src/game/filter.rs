@@ -4849,19 +4849,75 @@ fn zone_change_record_matches_property(
             .lki_cache
             .get(&record.object_id)
             .is_some_and(|lki| !lki.tapped),
+        // CR 508.1a + CR 608.2h: "attacked this turn" is a turn-scoped HISTORICAL FACT about
+        // the object as it most recently existed, not a query against live combat state.
+        // `creatures_attacked_this_turn` (and the per-defender
+        // `creature_attacked_defenders_this_turn`) are keyed by the battlefield ObjectId,
+        // written at attacker declaration (combat.rs) and cleared ONLY at turn cleanup
+        // (turns.rs) — never on a zone change. The ledger therefore already outlives the
+        // object, and the record carries the very id it is keyed by, so a look-back rider
+        // ("if Taigam attacked this turn" — Taigam, Ojutai Master, re-checked at resolution
+        // per CR 603.4 after the source has died) reads the SAME ledger the live evaluator
+        // uses. Mirrors the live arm exactly, and the `WasDealtDamageThisTurn` arm above.
+        //
+        // NOT A CR 400.7 VIOLATION. CR 400.7 says the object that ARRIVES in the new zone is
+        // a new object with no memory of its previous existence — and that stays true: this
+        // arm is only ever reached for a subject that is NOT on the battlefield, and it
+        // reports what the object did while it WAS there. CR 608.2h names exactly that
+        // subject: "the effect uses the object's last known information ... If an ability
+        // states that an object does something, it's the object as it exists — OR AS IT MOST
+        // RECENTLY EXISTED — that does it." Failing closed here does not protect CR 400.7; it
+        // just refuses to answer a question the game still has the record for.
+        // CR 508.1a + CR 608.2h: "attacked this turn" is a turn-scoped HISTORICAL FACT about the
+        // object as it most recently existed, not a query against live combat state.
+        // `creatures_attacked_this_turn` (and the per-defender
+        // `creature_attacked_defenders_this_turn`) are keyed by the battlefield ObjectId, written
+        // at attacker declaration (combat.rs) and cleared ONLY at turn cleanup (turns.rs) — never
+        // on a zone change. The ledger therefore already outlives the object, and the record
+        // carries the very id it is keyed by, so a look-back rider ("if Taigam attacked this
+        // turn" — Taigam, Ojutai Master, re-checked at resolution per CR 603.4 after the source
+        // has died) reads the SAME ledger the live evaluator uses. Mirrors the live arm, and the
+        // `WasDealtDamageThisTurn` arm above.
+        //
+        // NOT A CR 400.7 VIOLATION (the rationale this arm previously fail-closed on). CR 400.7
+        // governs the object that ARRIVES in the new zone — it is a new object with no memory of
+        // its previous existence, and that stays true: this arm is reached only for a subject
+        // that is NOT on the battlefield, and it reports what the object did while it WAS there.
+        // CR 608.2h names exactly that subject: "the effect uses the object's last known
+        // information ... If an ability states that an object does something, it's the object as
+        // it exists — OR AS IT MOST RECENTLY EXISTED — that does it." Failing closed did not
+        // protect CR 400.7; it declined to answer a question the game still had the record for.
+        FilterProp::AttackedThisTurn { defender } => match defender {
+            None => state
+                .creatures_attacked_this_turn
+                .contains(&record.object_id),
+            // CR 508.6 + CR 508.1b: defender-scoped — the object attacked THAT player.
+            Some(_) => state
+                .creature_attacked_defenders_this_turn
+                .get(&record.object_id)
+                .is_some_and(|defs| {
+                    defs.iter()
+                        .any(|&d| attacking_defender_matches(state, source, d, defender.as_ref()))
+                }),
+        },
+        // CR 509.1a + CR 608.2h: sibling of `AttackedThisTurn` — same durable id-keyed ledger,
+        // same look-back reasoning.
+        FilterProp::BlockedThisTurn => state.creatures_blocked_this_turn.contains(&record.object_id),
+        // CR 508.1a + CR 509.1a + CR 608.2h: disjunction of the two ledgers above.
+        FilterProp::AttackedOrBlockedThisTurn => {
+            state
+                .creatures_attacked_this_turn
+                .contains(&record.object_id)
+                || state
+                    .creatures_blocked_this_turn
+                    .contains(&record.object_id)
+        }
+
         FilterProp::IsSaddled
         | FilterProp::SaddledSource
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
-        // CR 400.7: a permanent that changes zones becomes a new object with no
-        // memory of its previous existence, so the zone-change snapshot captures
-        // no attack history. Intentionally fail-closed for both `None` (board-wide)
-        // and `Some` (defender-scoped), matching the `Attacking { defender }`
-        // look-back behavior.
-        | FilterProp::AttackedThisTurn { .. }
-        | FilterProp::BlockedThisTurn
-        | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource

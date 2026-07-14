@@ -631,6 +631,7 @@ mod primo_unbounded_fractal_counters;
 mod printed_ability_order;
 mod proliferate_zero_counter;
 mod purged_source_attachment_count_lki;
+mod purged_source_attacked_this_turn_lki;
 mod purged_source_intervening_if_lki;
 mod purged_source_matches_filter_lki;
 mod quirion_ranger_activation;
