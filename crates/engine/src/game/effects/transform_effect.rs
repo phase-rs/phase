@@ -30,8 +30,20 @@ pub fn resolve(
         }
     };
 
-    transform_permanent(state, object_id, events)
-        .map_err(|err| EffectError::InvalidParam(err.to_string()))?;
+    let stale_self_transform = object_id == ability.source_id
+        && ability
+            .context
+            .source_transformation_count
+            .is_some_and(|captured| {
+                state
+                    .objects
+                    .get(&object_id)
+                    .is_some_and(|object| object.transformation_count != captured)
+            });
+    if !stale_self_transform {
+        transform_permanent(state, object_id, events)
+            .map_err(|err| EffectError::InvalidParam(err.to_string()))?;
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Transform,
@@ -166,5 +178,88 @@ mod tests {
 
         assert!(state.objects[&target_id].transformed);
         assert!(!state.objects[&source_id].transformed);
+    }
+
+    #[test]
+    fn repeated_activated_self_transform_ignores_the_stale_instruction() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::stack::push_to_stack;
+        use crate::types::ability::QuantityExpr;
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        crate::game::effects::incubate::resolve(
+            &mut state,
+            &ResolvedAbility::new(
+                Effect::Incubate {
+                    count: QuantityExpr::Fixed { value: 5 },
+                },
+                vec![],
+                ObjectId(99),
+                PlayerId(0),
+            ),
+            &mut events,
+        )
+        .expect("Sunfall-style Incubator is created");
+        let source_id = *state
+            .battlefield
+            .iter()
+            .find(|id| state.objects[id].name == "Incubator")
+            .expect("Incubator on battlefield");
+        let definition = state.objects[&source_id]
+            .abilities
+            .first()
+            .expect("Incubator has a transform ability")
+            .clone();
+        let transform = || build_resolved_from_def(&definition, source_id, PlayerId(0));
+
+        for entry_id in [ObjectId(100), ObjectId(101)] {
+            push_to_stack(
+                &mut state,
+                StackEntry {
+                    id: entry_id,
+                    source_id,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::ActivatedAbility {
+                        source_id,
+                        ability: transform(),
+                    },
+                },
+                &mut events,
+            );
+        }
+
+        for _ in 0..2 {
+            let entry = state.stack.pop_back().expect("transform ability on stack");
+            resolve(
+                &mut state,
+                entry.ability().expect("activated ability"),
+                &mut events,
+            )
+            .expect("transform ability resolves");
+        }
+
+        assert!(
+            state.objects[&source_id].transformed,
+            "CR 701.27f: the second self-transform instruction must be ignored"
+        );
+        assert_eq!(state.objects[&source_id].name, "Phyrexian Token");
+        assert_eq!(
+            state.objects[&source_id]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&5)
+        );
+        assert_eq!(state.objects[&source_id].transformation_count, 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::Transformed { object_id } if *object_id == source_id))
+                .count(),
+            1,
+            "only the first resolving activation transforms the Incubator"
+        );
     }
 }

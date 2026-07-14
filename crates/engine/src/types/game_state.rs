@@ -11596,7 +11596,8 @@ pub(crate) fn objects_content_eq(
 /// `_gameobject_partition_is_total`): every per-object field a MANDATORY action can
 /// change on a stable (same-zone) object between two loop frames. Fields omitted
 /// here are justified by write site, not doc-string — volatile layer identity
-/// (`timestamp`/`incarnation`), projected P/T, cast-fact latches co-variate of a
+/// (`timestamp`/`incarnation`/`transformation_count`), projected P/T, cast-fact
+/// latches co-variate of a
 /// compared field, monotone-saturating latches (`foretold`/`monstrous`/…), and
 /// layer-derived characteristics (firewall-scanned statics) — see §5.2c.
 ///

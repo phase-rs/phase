@@ -352,6 +352,11 @@ pub struct GameObject {
     pub face_down: bool,
     pub flipped: bool,
     pub transformed: bool,
+    /// CR 701.27f: Number of successful transforms/conversions of this object.
+    /// Stack abilities capture this generation so a stale self-transform
+    /// instruction can be ignored after another ability has already flipped it.
+    #[serde(default, skip_serializing_if = "is_zero_u32_field")]
+    pub transformation_count: u32,
     /// CR 712.8a + CR 400.7: True when this object is showing its MDFC back face
     /// (set via ChooseModalFace back_face=true). Reverted to front face on any
     /// zone exit that is not to the battlefield (CR 712.8a: front face only in
@@ -1041,7 +1046,7 @@ pub struct GameObject {
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
-/// (types/game_state.rs) — the §5.2c 136-field partition. `GameObject` deliberately
+/// (types/game_state.rs) — the §5.2c 137-field partition. `GameObject` deliberately
 /// does NOT derive `PartialEq` (constant-depth loop detection must omit `timestamp`
 /// / `incarnation`), so the row comparator is hand-rolled and needs this no-`..`
 /// destructure: adding a field breaks the build until it is classified into a
@@ -1060,6 +1065,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         face_down: _,
         flipped: _,
         transformed: _,
+        transformation_count: _,
         modal_back_face: _,
         damage_marked: _,
         dealt_deathtouch_damage: _,
@@ -1652,6 +1658,7 @@ impl GameObject {
             face_down: false,
             flipped: false,
             transformed: false,
+            transformation_count: 0,
             modal_back_face: false,
             damage_marked: 0,
             dealt_deathtouch_damage: false,
