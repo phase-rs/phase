@@ -8194,9 +8194,9 @@ mod tests {
         use crate::types::actions::GameAction;
 
         let mut state = GameState::new_two_player(42);
-        // Construct two shock-style objects but place them in HAND so that the
-        // EffectZoneChoice code path (which scans eligible cards) is the one
-        // that drives them onto the battlefield.
+        // Construct two shock-style objects in hand and a land in the
+        // graveyard. The mixed-origin choice exercises the replacement-pause
+        // resume path used by Worldsoul's Rage.
         let shock_a = {
             use crate::game::game_object::GameObject;
             use crate::types::ability::{
@@ -8316,7 +8316,7 @@ mod tests {
                 cards: vec![shock_a, shock_b, graveyard_land],
             },
         )
-        .expect("select both cards");
+        .expect("select all three cards");
 
         // First shock prompts; decline it (index 1 → tap).
         assert!(
