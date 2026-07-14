@@ -82,7 +82,7 @@ fn etching_back_face() -> BackFaceData {
 }
 
 #[test]
-fn fable_chapter_three_without_back_face_stays_saga_and_gains_lore() {
+fn fable_chapter_three_without_back_face_stays_exiled() {
     let execute = parse_effect_chain(
         "Exile this Saga, then return it to the battlefield transformed under your control.",
         AbilityKind::Spell,
@@ -113,14 +113,23 @@ fn fable_chapter_three_without_back_face_stays_saga_and_gains_lore() {
         .expect("chapter III resolves");
 
     let fable = &runner.state().objects[&fable_id];
-    assert_eq!(fable.zone, Zone::Battlefield);
+    assert_eq!(
+        fable.zone,
+        Zone::Exile,
+        "a single-faced copy instructed to return transformed must remain in exile"
+    );
     assert!(
         !fable.transformed,
-        "without back_face, enter_transformed is a silent no-op"
+        "a single-faced object cannot enter transformed"
     );
     assert!(
         fable.card_types.subtypes.iter().any(|s| s == "Saga"),
         "must remain the saga front face when transform cannot fire"
+    );
+    assert_eq!(
+        fable.counters.get(&CounterType::Lore).copied().unwrap_or(0),
+        0,
+        "counters from the exiled Saga must cease to exist"
     );
 }
 
