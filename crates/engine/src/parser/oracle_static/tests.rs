@@ -72,26 +72,16 @@ fn classify_quoted_inner_normalizes_trailing_sentence_comma() {
     let clean = classify_quoted_inner(base);
     for suffix in [",", " ,", ",,"] {
         let dirty = classify_quoted_inner(&format!("{base}{suffix}"));
-        assert_eq!(
-            format!("{dirty:?}"),
-            format!("{clean:?}"),
-            "trailing {suffix:?} changed the parse",
-        );
+        assert_eq!(dirty, clean, "trailing {suffix:?} changed the parse",);
     }
-    assert!(
-        clean
-            .iter()
-            .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })),
-        "expected a granted activated ability: {clean:?}",
-    );
-    // The granted duration is nested inside a granted activated ability; a
-    // Debug-substring check is clearer than walking the full AST.
-    // allow-noncombinator: string assertion in test
-    let clean_has_duration = format!("{clean:?}").contains("UntilEndOfTurn");
-    assert!(
-        clean_has_duration,
-        "granted ability's duration must survive as a typed UntilEndOfTurn: {clean:?}",
-    );
+    let ContinuousModification::GrantAbility { definition } = clean
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("expected a granted activated ability")
+    else {
+        unreachable!()
+    };
+    assert_eq!(definition.duration, Some(Duration::UntilEndOfTurn));
     // A trailing period is NOT stripped — it is the ability's own terminal
     // punctuation, preserved verbatim in the serialized description (#5599).
     let with_period = classify_quoted_inner("{T}: Add {G}.");

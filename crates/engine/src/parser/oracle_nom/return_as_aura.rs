@@ -124,7 +124,7 @@ fn parse_loses_clause(input: &str) -> OracleResult<'_, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
+    use crate::types::ability::{ControllerRef, Duration, TypeFilter, TypedFilter};
 
     fn lower(s: &str) -> String {
         s.to_ascii_lowercase()
@@ -176,17 +176,15 @@ mod tests {
         // turn,"). That trailing comma must be normalized away before the inner
         // sub-parse, so the duration survives as a typed `UntilEndOfTurn` rather
         // than being dropped into prose. Assert on the typed duration, not the
-        // leftover text.
-        let debug = format!("{grants:?}");
-        // The granted duration is nested inside a granted activated ability, so a
-        // Debug-substring check is clearer than walking the full AST.
-        // allow-noncombinator: string assertion in test
-        let has_typed_duration = debug.contains("UntilEndOfTurn");
-        assert!(
-            has_typed_duration,
-            "granted ability lost its UntilEndOfTurn duration to the trailing comma inside \
-             the closing quote: {debug}",
-        );
+        // debug representation.
+        let ContinuousModification::GrantAbility { definition } = grants
+            .iter()
+            .find(|grant| matches!(grant, ContinuousModification::GrantAbility { .. }))
+            .expect("expected the quoted activated ability to be granted")
+        else {
+            unreachable!()
+        };
+        assert_eq!(definition.duration, Some(Duration::UntilEndOfTurn));
     }
 
     #[test]
