@@ -4274,6 +4274,15 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
 /// distinct `ParsedItem`s. Without this, a scope-only fix (e.g. a self-scoped
 /// damage shield flipping `valid_card` from `None` to `Some(SelfRef)`) shows a
 /// false "no card-parse changes detected" diff.
+///
+/// Covers every parse-time semantic axis on the struct: recipient/player
+/// scope, mode, shield kind, damage source/target/combat/modification,
+/// quantity modification, destination zone, condition, redirect target, draw
+/// scope, token owner scope/redirect, mana modification/scope, additional and
+/// ensure-all token specs, counter match, and controller overrides
+/// (`enters_under`) and expiry. Deliberately excludes runtime-only state
+/// (`execute`, `runtime_execute`, `consume_on_apply`, `is_consumed`,
+/// `source_controller`) which carries no parse-time signal of its own.
 fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
     let mut d = Vec::new();
     // Recipient scope — the field a shield-scoping fix changes.
@@ -4319,6 +4328,36 @@ fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
     }
     if let Some(scope) = &repl.draw_scope {
         d.push(("draw scope".into(), format!("{scope:?}")));
+    }
+    if let Some(scope) = &repl.token_owner_scope {
+        d.push(("token owner scope".into(), format!("{scope:?}")));
+    }
+    if let Some(redirect) = &repl.token_owner_redirect {
+        d.push(("token owner redirect".into(), format!("{redirect:?}")));
+    }
+    if let Some(mm) = &repl.mana_modification {
+        d.push(("mana mod".into(), format!("{mm:?}")));
+    }
+    if !repl.mana_replacement_scope.is_any() {
+        d.push((
+            "mana scope".into(),
+            format!("{:?}", repl.mana_replacement_scope),
+        ));
+    }
+    if let Some(spec) = &repl.additional_token_spec {
+        d.push(("additional token".into(), format!("{spec:?}")));
+    }
+    if let Some(specs) = &repl.ensure_token_specs {
+        d.push(("ensure tokens".into(), format!("{specs:?}")));
+    }
+    if let Some(cm) = &repl.counter_match {
+        d.push(("counter match".into(), format!("{cm:?}")));
+    }
+    if let Some(cref) = &repl.enters_under {
+        d.push(("enters under".into(), format!("{cref:?}")));
+    }
+    if let Some(expiry) = &repl.expiry {
+        d.push(("expiry".into(), format!("{expiry:?}")));
     }
     d
 }
@@ -10671,6 +10710,74 @@ mod tests {
         assert!(
             !unscoped.iter().any(|(k, _)| k == "scope"),
             "an absent valid_card must not appear, so unqualified signatures stay stable",
+        );
+    }
+
+    #[test]
+    fn replacement_signature_exposes_enters_under_and_token_owner_scope() {
+        // Review follow-up on #5673/#5800: the first projection pass covered
+        // `valid_card` but still left other parse-time semantic axes
+        // (`enters_under`, `token_owner_scope`, `mana_modification`, etc.)
+        // unprojected, so a fix that only changes one of those still produced
+        // a byte-identical signature. Guard the two axes matthewevans called
+        // out by name so this class of omission cannot silently recur.
+        let details = |enters_under: Option<ControllerRef>| -> Vec<(String, String)> {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield);
+            if let Some(cref) = enters_under {
+                repl = repl.enters_under(cref);
+            }
+            let mut face = make_face();
+            face.replacements = vec![repl];
+            let items = build_parse_details_for_face(&face);
+            let repl_item = items
+                .iter()
+                .find(|i| i.category == ParseCategory::Replacement)
+                .expect("replacement item must be projected");
+            repl_item.details.clone()
+        };
+
+        let owner_controlled = details(None);
+        let opponent_redirected = details(Some(ControllerRef::Opponent));
+
+        assert_ne!(
+            owner_controlled, opponent_redirected,
+            "an enters_under controller override must produce a different replacement signature",
+        );
+        assert!(
+            opponent_redirected.iter().any(|(k, _)| k == "enters under"),
+            "a set enters_under must appear as an `enters under` detail row; got {opponent_redirected:?}",
+        );
+        assert!(
+            !owner_controlled.iter().any(|(k, _)| k == "enters under"),
+            "an absent enters_under must not appear, so unqualified signatures stay stable",
+        );
+
+        let mut token_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .token_owner_scope(ControllerRef::Opponent);
+        let mut token_face = make_face();
+        token_face.replacements = vec![token_repl.clone()];
+        let scoped = build_parse_details_for_face(&token_face)
+            .into_iter()
+            .find(|i| i.category == ParseCategory::Replacement)
+            .expect("replacement item must be projected")
+            .details;
+        token_repl.token_owner_scope = None;
+        token_face.replacements = vec![token_repl];
+        let unscoped_token = build_parse_details_for_face(&token_face)
+            .into_iter()
+            .find(|i| i.category == ParseCategory::Replacement)
+            .expect("replacement item must be projected")
+            .details;
+
+        assert!(
+            scoped.iter().any(|(k, _)| k == "token owner scope"),
+            "a set token_owner_scope must appear as a `token owner scope` detail row; got {scoped:?}",
+        );
+        assert!(
+            !unscoped_token.iter().any(|(k, _)| k == "token owner scope"),
+            "an absent token_owner_scope must not appear",
         );
     }
 
