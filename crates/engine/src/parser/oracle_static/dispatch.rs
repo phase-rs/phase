@@ -1378,6 +1378,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 611.3 + CR 105.3 + CR 613.1e: multi-zone Oxford compound color static —
+    // "All cards that aren't on the battlefield, spells, and permanents are
+    // <color predicate>" (Painter's Servant / Mycosynth Lattice). Must precede
+    // `parse_all_subject_are_color` / `parse_subject_is_color` so the Oxford
+    // subject is never partial-claimed by the single-subject color paths.
+    if let Some(def) = parse_compound_multi_zone_color_static(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 613.1e + CR 105.1 / CR 105.2c / CR 105.3: "All [subject] are [color(s)]."
     // — a global color-defining static (Layer 5) that sets every matching object
     // to a new color or to colorless. Covers Darkest Hour, Thran Lens, Ghostflame

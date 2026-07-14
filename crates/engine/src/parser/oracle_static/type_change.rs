@@ -2090,6 +2090,195 @@ fn and_modification_boundary(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 105.3: the additive "in addition to `<pronoun>` other colors" retain-
+/// suffix, shared by the single-subject ([`parse_subject_is_color`]) and
+/// multi-zone-compound ([`parse_compound_multi_zone_color_static`]) color
+/// handlers. Mirrors [`parse_chosen_type_additive_suffix`] for the type axis.
+fn parse_chosen_color_additive_suffix<'a>(input: &'a str, pronoun: &str) -> OracleResult<'a, ()> {
+    let (input, _) = tag(" in addition to ").parse(input)?;
+    let (input, _) = tag(pronoun).parse(input)?;
+    let (input, _) = tag(" other colors").parse(input)?;
+    Ok((input, ()))
+}
+
+/// CR 109.2 + CR 400.1 + CR 611.3a: off-battlefield card population for the
+/// Painter's Servant / Mycosynth Lattice Oxford subject. "Cards that aren't on
+/// the battlefield" means every zone where a card can sit *except* the
+/// battlefield and the stack (stack objects are spells, covered by a sibling
+/// leg). Matches the zone set used by off-battlefield keyword grants
+/// (`keyword_grant` "cards you own that aren't on the battlefield") plus
+/// Library (Painter applies in all zones globally, not only "you own").
+fn off_battlefield_card_zones() -> Vec<Zone> {
+    vec![
+        Zone::Library,
+        Zone::Hand,
+        Zone::Graveyard,
+        Zone::Exile,
+        Zone::Command,
+    ]
+}
+
+/// CR 109.2 + CR 400.1: one Oxford leg of the multi-zone color subject class.
+/// Built for the category of legs that appear in Painter's Servant / Mycosynth
+/// Lattice — not a single card. Bare "spells" lowers via the same stack scoping
+/// that Secret Arcade's spell conjunct uses (`TargetFilter::StackSpell`).
+fn parse_multi_zone_color_subject_leg(input: &str) -> OracleResult<'_, TargetFilter> {
+    // "cards that aren't on the battlefield" — optional plural spelling.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("cards that aren't on the battlefield"),
+        tag("card that isn't on the battlefield"),
+        tag("cards that are not on the battlefield"),
+    ))
+    .parse(input)
+    {
+        return Ok((
+            rest,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InAnyZone {
+                zones: off_battlefield_card_zones(),
+            }])),
+        ));
+    }
+
+    // Bare "spells" / "spell" → stack objects (CR 109.2).
+    if let Ok((rest, _)) = alt((tag::<_, _, OracleError<'_>>("spells"), tag("spell"))).parse(input)
+    {
+        return Ok((rest, TargetFilter::StackSpell));
+    }
+
+    // Bare "permanents" / "permanent" → battlefield permanents.
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("permanents"), tag("permanent"))).parse(input)
+    {
+        return Ok((
+            rest,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+        ));
+    }
+
+    Err(nom::Err::Error(OracleError::new(
+        input,
+        nom::error::ErrorKind::Tag,
+    )))
+}
+
+/// CR 611.3a: peel an Oxford / dual-leg multi-zone color subject into a genuine
+/// `Or` of 2+ zone-scoped filters. Accepts the Painter's Servant / Mycosynth
+/// Lattice canonical form
+/// `"All cards that aren't on the battlefield, spells, and permanents"` and the
+/// dual-leg `"…spells and permanents"` compression. Declines a single-leg
+/// subject so Shifting Sky / Darkest Hour stay with the single-subject color
+/// handlers.
+fn parse_multi_zone_oxford_color_subject(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (input, _) = opt(alt((tag::<_, _, OracleError<'_>>("all "), tag("each ")))).parse(input)?;
+
+    let (mut remaining, first) = parse_multi_zone_color_subject_leg(input)?;
+    let mut filters = vec![first];
+
+    // ", <leg>" middle legs (Oxford comma list).
+    loop {
+        let Ok((after_comma, _)) = tag::<_, _, OracleError<'_>>(", ").parse(remaining) else {
+            break;
+        };
+        // Optional "and " after the final Oxford comma.
+        let after_and = match tag::<_, _, OracleError<'_>>("and ").parse(after_comma) {
+            Ok((rest, _)) => rest,
+            Err(_) => after_comma,
+        };
+        let Ok((rest, leg)) = parse_multi_zone_color_subject_leg(after_and) else {
+            break;
+        };
+        filters.push(leg);
+        remaining = rest;
+    }
+
+    // Dual-leg / trailing " and <leg>" without a preceding comma.
+    if let Ok((after_and, _)) = tag::<_, _, OracleError<'_>>(" and ").parse(remaining) {
+        let (rest, leg) = parse_multi_zone_color_subject_leg(after_and)?;
+        filters.push(leg);
+        remaining = rest;
+    }
+
+    let remaining = remaining.trim();
+    if !remaining.is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            remaining,
+            nom::error::ErrorKind::Eof,
+        )));
+    }
+    if filters.len() < 2 {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((remaining, TargetFilter::Or { filters }))
+}
+
+/// CR 105.3 + CR 613.1e: additive chosen-color predicate
+/// `"the chosen color in addition to their other colors[.]"`.
+fn parse_chosen_color_additive_predicate(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("the chosen color").parse(input)?;
+    let (input, ()) = parse_chosen_color_additive_suffix(input, "their")?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    eof.parse(input)?;
+    Ok((input, ()))
+}
+
+/// CR 105.2c / CR 105.1 / CR 105.3 + CR 613.1e: color predicate owned by the
+/// multi-zone compound handler — additive chosen color (Painter's Servant) or
+/// a fully-consumed fixed/colorless expression (Mycosynth Lattice).
+fn parse_multi_zone_color_predicate(input: &str) -> OracleResult<'_, Vec<ContinuousModification>> {
+    if let Ok((rest, ())) = parse_chosen_color_additive_predicate(input) {
+        return Ok((rest, vec![ContinuousModification::AddChosenColor]));
+    }
+
+    let (input, predicate) = alt((
+        terminated(take_until::<_, _, OracleError<'_>>("."), tag(".")),
+        rest,
+    ))
+    .parse(input)?;
+    eof::<_, OracleError<'_>>(input)?;
+    let colors = parse_color_predicate(predicate.trim())
+        .ok_or_else(|| nom::Err::Error(OracleError::new(predicate, nom::error::ErrorKind::Fail)))?;
+    Ok((input, vec![ContinuousModification::SetColor { colors }]))
+}
+
+/// CR 611.3 + CR 611.3a + CR 105.3 + CR 613.1e: compound-subject sibling of
+/// [`parse_subject_is_color`]. "`All cards that aren't on the battlefield,
+/// spells, and permanents are <color predicate>`" (Painter's Servant /
+/// Mycosynth Lattice) — an Oxford multi-zone subject the single-subject color
+/// dispatcher can't reach because (1) `parse_continuous_subject_filter` has no
+/// Oxford peeler for this class and (2) Painter's additive chosen-color suffix
+/// rejects `all_consuming("the chosen color")`.
+///
+/// Structural mirror of [`parse_compound_you_control_chosen_type_static`] (#5406):
+/// own only the color predicate, require a genuine `Or` of 2+ zone-scoped legs,
+/// reuse the fully-wired `AddChosenColor` / `SetColor` runtime — no new variant.
+pub(crate) fn parse_compound_multi_zone_color_static(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, predicate_tp) = tp.split_around(" are ")?;
+    let (_, affected) = parse_multi_zone_oxford_color_subject(subject_tp.lower.trim()).ok()?;
+    match &affected {
+        TargetFilter::Or { filters } if filters.len() >= 2 => {}
+        _ => return None,
+    }
+
+    let modifications = nom_on_lower(
+        predicate_tp.original,
+        predicate_tp.lower,
+        parse_multi_zone_color_predicate,
+    )?;
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(description.to_string()),
+    )
+}
+
 /// CR 613.1e (Layer 5) + CR 105.2 / CR 105.3: Parse a color-defining static of
 /// the form "[subject] is/are [color expression]." for an ARBITRARY filter
 /// subject — generalizing [`parse_all_subject_are_color`] (which only accepts the
@@ -2104,6 +2293,8 @@ fn and_modification_boundary(input: &str) -> OracleResult<'_, ()> {
 /// - "the chosen color" → `AddChosenColor`, reading the source's
 ///   `ChosenAttribute::Color` (Shimmerwilds Growth: "Enchanted land is the chosen
 ///   color" — a preceding `As ~ enters, choose a color` binds the attribute).
+///   The additive retain-suffix `"in addition to their/its other colors"`
+///   (CR 105.3) is accepted via [`parse_chosen_color_additive_suffix`].
 ///
 /// The copula is " is " (singular subject) or " are " (plural subject); both
 /// route to the same color modification. Dispatched AFTER the specialized
@@ -2112,7 +2303,8 @@ fn and_modification_boundary(input: &str) -> OracleResult<'_, ()> {
 /// (self-referential CDA color lines, all-zone + `characteristic_defining`), so
 /// those keep ownership of their cases and this branch only claims the residual
 /// general-filter subjects. A self-referential subject is declined here outright
-/// (it must be a CDA, never a plain Layer-5 static).
+/// (it must be a CDA, never a plain Layer-5 static). Multi-zone Oxford compounds
+/// belong to [`parse_compound_multi_zone_color_static`].
 pub(crate) fn parse_subject_is_color(
     tp: &TextPair<'_>,
     description: &str,
@@ -2126,6 +2318,12 @@ pub(crate) fn parse_subject_is_color(
     let subject = subject_tp.original.trim();
     let predicate = predicate_tp.original.trim().trim_end_matches('.');
     let predicate_lower = predicate.to_lowercase();
+
+    // Decline the multi-zone Oxford compound subject so the dedicated compound
+    // handler owns it (Painter's Servant / Mycosynth Lattice).
+    if parse_multi_zone_oxford_color_subject(subject_tp.lower.trim()).is_ok() {
+        return None;
+    }
 
     // The subject must resolve to a concrete filter — otherwise this is not a
     // color-defining static (a bare "It is ..." / "this is ..." anaphor falls
@@ -2155,8 +2353,23 @@ pub(crate) fn parse_subject_is_color(
         return None;
     }
 
-    // CR 105.3: "the chosen color" reads the source's chosen color attribute.
+    // CR 105.3: "the chosen color" [+ optional additive retain-suffix] reads the
+    // source's chosen color attribute. Additive "in addition to their/its other
+    // colors" is retain (CR 105.3); bare "the chosen color" still maps to
+    // `AddChosenColor` for the Shimmerwilds Growth / Shifting Sky class that
+    // the existing runtime has always emitted.
     if all_consuming(tag::<_, _, OracleError<'_>>("the chosen color"))
+        .parse(predicate_lower.as_str())
+        .is_ok()
+        || all_consuming(|i| {
+            let (i, _) = tag::<_, _, OracleError<'_>>("the chosen color").parse(i)?;
+            let (i, ()) = alt((
+                |i| parse_chosen_color_additive_suffix(i, "their"),
+                |i| parse_chosen_color_additive_suffix(i, "its"),
+            ))
+            .parse(i)?;
+            Ok((i, ()))
+        })
         .parse(predicate_lower.as_str())
         .is_ok()
     {

@@ -4698,7 +4698,21 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
             }
         }
         other => {
-            if let Some(zone) = other.extract_in_zone() {
+            // Prefer the multi-zone union (`InAnyZone` / `InZone` via
+            // `extract_zones`) so Painter's Servant–class off-battlefield card
+            // legs scan every non-battlefield zone, not only Battlefield. Fall
+            // back to `extract_in_zone` for stack-spell / exiled-by-source leaves
+            // that encode their zone without a Typed `In*` property.
+            let leaf_zones = {
+                let mut zones = other.extract_zones();
+                if zones.is_empty() {
+                    if let Some(zone) = other.extract_in_zone() {
+                        zones.push(zone);
+                    }
+                }
+                zones
+            };
+            for zone in leaf_zones {
                 if !out.contains(&zone) {
                     out.push(zone);
                 }
@@ -6094,6 +6108,46 @@ mod tests {
              (falling back to the battlefield default, where it simply matches nothing). \
              off_zone_characteristics owns exile keywords; this pass must not write them."
         );
+    }
+
+    /// CR 400.1 + CR 611.3a + issue #5798: Painter's Servant Oxford subject
+    /// includes an `InAnyZone` off-battlefield card leg. Scan-zone collection
+    /// must honor `extract_zones()` (not just `extract_in_zone()`), otherwise
+    /// the card leg silently collapses to Battlefield and never paints hand /
+    /// library / exile cards.
+    #[test]
+    fn painters_servant_or_filter_scans_off_battlefield_in_any_zone() {
+        let state = GameState::new_two_player(0);
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InAnyZone {
+                    zones: vec![
+                        Zone::Library,
+                        Zone::Hand,
+                        Zone::Graveyard,
+                        Zone::Exile,
+                        Zone::Command,
+                    ],
+                }])),
+                TargetFilter::StackSpell,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+            ],
+        };
+        let zones = continuous_effect_scan_zones(&state, &filter);
+        for expected in [
+            Zone::Library,
+            Zone::Hand,
+            Zone::Graveyard,
+            Zone::Exile,
+            Zone::Command,
+            Zone::Stack,
+            Zone::Battlefield,
+        ] {
+            assert!(
+                zones.contains(&expected),
+                "expected scan zone {expected:?} in {zones:?}"
+            );
+        }
     }
 
     /// CR 109.2 + CR 611.3a + issue #5740: Secret Arcade's compound-subject
