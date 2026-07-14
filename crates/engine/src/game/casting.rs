@@ -13102,6 +13102,42 @@ pub fn pending_cast_remaining_mana_cost(state: &GameState, player: PlayerId) -> 
     ))
 }
 
+/// Return whether an activated mana ability can produce mana that is eligible
+/// to pay the spell currently being cast.
+///
+/// CR 106.6: activating a restricted mana ability is legal during payment,
+/// but mana such as Cavern of Souls' creature-only output cannot contribute to
+/// an artifact spell. Search should not spend an activation on that branch
+/// when selecting a cast-payment action.
+pub fn mana_ability_can_pay_pending_cast(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    let Some(pending) = state.pending_cast.as_deref() else {
+        return true;
+    };
+    let Some(ability) = state
+        .objects
+        .get(&source_id)
+        .and_then(|source| source.abilities.get(ability_index))
+    else {
+        return true;
+    };
+    let Effect::Mana { restrictions, .. } = &*ability.effect else {
+        return true;
+    };
+    let Some(spell_meta) = build_spell_meta(state, player, pending.object_id) else {
+        return true;
+    };
+    let spell_ctx = PaymentContext::Spell(&spell_meta);
+
+    super::effects::mana::resolve_restrictions(restrictions, state, source_id)
+        .iter()
+        .all(|restriction| restriction.allows(&spell_ctx))
+}
+
 pub fn can_pay_cost_after_auto_tap_with_probe(
     state: &GameState,
     player: PlayerId,
