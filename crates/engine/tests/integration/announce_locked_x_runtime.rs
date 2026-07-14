@@ -482,3 +482,354 @@ fn announced_x_is_save_compatible() {
         "a mid-announcement pause must round-trip the locked X definition"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WITNESS 4 — the LOYALTY surface (CR 606.1 + CR 602.2b).
+//
+// Loyalty abilities ARE activated abilities (CR 606.1), so CR 602.2b applies to them
+// verbatim. But `planeswalker::handle_activate_loyalty` has a MANA-FREE FAST PATH that
+// only delegates to `casting::handle_activate_ability` when a cost-raise static adds a
+// mana tax — otherwise it builds its own ResolvedAbility and goes straight to targeting.
+//
+// That fast path is a THIRD announce surface, and it is the one every real activation
+// takes. Without a publication there, Lukka's X is never announced and the ability deals
+// ZERO damage — while the parse ledger still shows the face as cleanly "re-shaped",
+// because Lukka is a LYING GREEN with no honest red to clear. Only this runtime witness
+// can see it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lukka, Bound to Ruin `[−4]`:
+/// "Lukka deals X damage divided as you choose among any number of target creatures
+///  and/or planeswalkers, where X is the greatest power among creatures you control as
+///  you activate this ability."
+///
+/// Activate with a 5/5 out, then EXILE it while the ability is on the stack.
+///   * announce-locked (CORRECT)         -> 5 damage
+///   * resolution-time re-read           -> 1 damage
+///   * X never published (loyalty bypass) -> 0 damage   <- what the fast path did
+#[test]
+fn lukka_minus_four_locks_the_greatest_power_at_loyalty_activation() {
+    use engine::types::card_type::CoreType;
+    use engine::types::counter::CounterType;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let big = scenario
+        .add_creature_from_oracle(P0, "Big Friend", 5, 5, "")
+        .id();
+    scenario.add_creature_from_oracle(P0, "Small Friend", 1, 1, "");
+    let victim = scenario
+        .add_creature_from_oracle(P1, "Target Dummy", 0, 20, "")
+        .id();
+    // Verbatim [-4] line. A name-only object would parse no ability at all and the test
+    // would read 0 for everything — the t96 vacuum.
+    let lukka = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Lukka, Bound to Ruin",
+            0,
+            0,
+            "[−4]: Lukka deals X damage divided as you choose among any number of target \
+             creatures and/or planeswalkers, where X is the greatest power among creatures \
+             you control as you activate this ability.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    {
+        // Make it a real planeswalker so the LOYALTY activation path (not the generic
+        // activated-ability path) is the one under test.
+        let state = runner.state_mut();
+        let obj = state.objects.get_mut(&lukka).expect("lukka");
+        obj.card_types.core_types = vec![CoreType::Planeswalker];
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = None;
+        obj.toughness = None;
+        obj.loyalty = Some(7);
+        obj.counters.insert(CounterType::Loyalty, 7);
+    }
+
+    // SCOPE OF THIS WITNESS — stated plainly. `AbilityActivation` has no `commit()`
+    // window (you can hold a SPELL on the stack but not an ABILITY — a harness asymmetry
+    // that is plausibly WHY this bypass went unnoticed), so this witness cannot perform
+    // the mid-stack mutation the spell witnesses do. It therefore proves REACHABILITY:
+    // does the announce-X publication happen AT ALL on the loyalty surface? The LOCK
+    // semantics are a property of `publish_announced_x` itself — one authority, already
+    // witnessed locking on both the spell and the activated-ability surfaces — so what is
+    // genuinely in question here is whether the loyalty fast path reaches it. It does not,
+    // without the third call site, and 0-vs-5 is a clean discriminator for exactly that.
+    let _ = &big;
+    runner.activate(lukka, 0).target_object(victim).resolve();
+
+    let dealt = damage_on(&runner, victim);
+    assert_eq!(
+        dealt, 5,
+        "CR 606.1 + CR 602.2b: a loyalty ability IS an activated ability, so its X is \
+         announced at activation — greatest power among creatures you control = 5. \
+         A 0 here means `planeswalker::handle_activate_loyalty`'s mana-free FAST PATH \
+         bypassed the announce-X publication entirely: X was never published, so \
+         `Variable(\"X\")` resolved to 0 and Lukka dealt no damage. That is the bug this \
+         witness exists for, and it is invisible to the parse ledger (Lukka is a LYING \
+         GREEN with no honest red to clear). MEASURED: {dealt}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WITNESS 5 — Aether Burst: an announce-locked TARGET COUNT (not a damage pool).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Aether Burst `{1}{U}`:
+/// "Return up to X target creatures to their owners' hands, where X is one plus the number
+///  of cards named Aether Burst in all graveyards as you cast this spell."
+///
+/// A LYING GREEN before this unit: `multi_target.max` bound to a live
+/// `Offset{ObjectCount{named "Aether Burst" in Graveyard}, +1}`. `multi_target` bounds are
+/// re-resolved at resolution by `effects/change_zone.rs`, so the count was NOT safe.
+///
+/// Two Aether Bursts in the graveyard at cast => X = 3. Exile one in response; at
+/// resolution the graveyard shows 1 (X would be 2).
+///   * announce-locked (CORRECT) -> all 3 creatures bounced
+///   * resolution-time re-read   -> 2
+///   * X never published          -> "up to 0 targets", nobody bounced
+#[test]
+fn aether_burst_locks_the_graveyard_count_at_cast() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario.with_graveyard(P0, &["Aether Burst", "Aether Burst"]);
+    let victims: Vec<ObjectId> = (0..3)
+        .map(|i| {
+            scenario
+                .add_creature_from_oracle(P1, &format!("Bouncee {i}"), 1, 1, "")
+                .id()
+        })
+        .collect();
+    let spell = {
+        let mut b = scenario.add_spell_to_hand_from_oracle(
+            P0,
+            "Aether Burst",
+            true,
+            "Return up to X target creatures to their owners' hands, where X is one plus the \
+             number of cards named Aether Burst in all graveyards as you cast this spell.",
+        );
+        b.with_mana_cost(cost(vec![ManaCostShard::Blue], 1));
+        b.id()
+    };
+    let mut runner = scenario.build();
+    add_mana(&mut runner, ManaType::Blue, 3);
+
+    let graveyard_bursts = runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.zone == Zone::Graveyard && o.name == "Aether Burst")
+        .count();
+    assert_eq!(
+        graveyard_bursts, 2,
+        "NON-VACUITY: 2 Aether Bursts must actually be in the graveyard at cast, else X=1 and \
+         this test cannot discriminate. MEASURED: {graveyard_bursts}"
+    );
+
+    let mut committed = runner.cast(spell).target_objects(&victims).commit();
+
+    let announced = committed
+        .state()
+        .stack
+        .last()
+        .and_then(|e| e.ability())
+        .and_then(|a| a.chosen_x);
+    assert_eq!(
+        announced,
+        Some(3),
+        "CR 601.2b: one plus 2 graveyard Aether Bursts = 3, locked at cast. \
+         MEASURED chosen_x = {announced:?}"
+    );
+
+    // A graveyard Aether Burst is exiled in response — the counted population shrinks to 1,
+    // so a LIVE count would now read X = 2.
+    let a_burst = committed
+        .state()
+        .objects
+        .values()
+        .find(|o| o.zone == Zone::Graveyard && o.name == "Aether Burst")
+        .map(|o| o.id)
+        .expect("a graveyard Aether Burst");
+    if let Some(obj) = committed.state_mut().objects.get_mut(&a_burst) {
+        obj.zone = Zone::Exile;
+    }
+    let remaining = committed
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.zone == Zone::Graveyard && o.name == "Aether Burst")
+        .count();
+    assert_eq!(
+        remaining, 1,
+        "NON-VACUITY: the mid-stack exile must actually shrink the counted population, else \
+         this test cannot tell a lock from a live re-read. MEASURED: {remaining}"
+    );
+
+    // THE ASSERTION: the announced X is a SNAPSHOT. It still reads 3 against a board that
+    // now says 2. In the un-published state it is `None`, so this discriminates.
+    let still_announced = committed
+        .state()
+        .stack
+        .last()
+        .and_then(|e| e.ability())
+        .and_then(|a| a.chosen_x);
+    assert_eq!(
+        still_announced,
+        Some(3),
+        "CR 601.2b: the count is LOCKED at cast. One plus 2 graveyard Aether Bursts = 3, and \
+         it must still read 3 after the graveyard shrinks to 1 — a live count would now say 2. \
+         MEASURED chosen_x = {still_announced:?}"
+    );
+
+    // WHY THIS WITNESS STOPS AT `chosen_x` AND DOES NOT ASSERT THE BOUNCE.
+    //
+    // Aether Burst carries a SECOND, INDEPENDENT MISPARSE, present identically on this
+    // unit's base and head (so it is neither caused nor cured here): the "in all
+    // graveyards" phrase — which qualifies the *Aether Burst count* — leaked into the
+    // *target's* zone filter. The face lowers to
+    //
+    //     ChangeZone { origin: Graveyard, target: Typed{ Creature, InZone(Graveyard) } }
+    //
+    // but the card returns *battlefield* creatures to their owners' hands. So it bounces
+    // graveyard creature CARDS, targets nothing on the battlefield, and moves zero of the
+    // three creatures above. That is a live lying-green on a different axis (target zone),
+    // filed separately; asserting the bounce here would be asserting someone else's bug.
+    //
+    // This witness therefore pins exactly what this unit owns — the announce-locked COUNT —
+    // and does so with a discriminator that cannot pass vacuously (`None` in the red state).
+    committed.resolve();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WITNESS 6 (rider 1) — the CR 202.3e MANA-VALUE gate, at RUNTIME.
+//
+// The unit-level pin (types::mana) proves the arithmetic. THIS proves the arithmetic is
+// the one a real spell on a real stack answers with — the observation an opposing
+// Spell Pierce / Mana Leak / "mana value 3 or less" actually makes.
+//
+// This witness is only EXPRESSIBLE once the announce-locked channel exists: without it,
+// Monstrous Onslaught never gets a `chosen_x`, so `finalize_cast` stamps no `cost_x_paid`
+// and the mana-value bug is unreachable. That is why it lands here and not in the gate's
+// own commit.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Monstrous Onslaught is `{4}{R}` — **no `{X}` in its mana cost**. Its X is defined by
+/// card text (CR 107.3c) and announced at cast, so `finalize_cast` stamps `cost_x_paid`.
+///
+/// CR 202.3e substitutes X into mana value only "of an object **with an {X} in its mana
+/// cost**". Monstrous Onslaught has none, so on the stack it must answer **5** — not 5+X.
+/// Ungated, an announced X of 5 would make it report **10**, and every mana-value-keyed
+/// interaction with it on the stack would be wrong.
+#[test]
+fn a_text_defined_x_does_not_inflate_the_spells_mana_value_on_the_stack() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario.add_creature_from_oracle(P0, "Big Friend", 5, 5, "");
+    let victim = scenario
+        .add_creature_from_oracle(P1, "Target Dummy", 0, 20, "")
+        .id();
+    let spell = {
+        let mut b = scenario.add_spell_to_hand_from_oracle(
+            P0,
+            "Monstrous Onslaught",
+            false,
+            "Monstrous Onslaught deals X damage divided as you choose among any number of \
+             target creatures, where X is the greatest power among creatures you control as \
+             you cast this spell.",
+        );
+        b.with_mana_cost(cost(vec![ManaCostShard::Red], 4));
+        b.id()
+    };
+    let mut runner = scenario.build();
+    add_mana(&mut runner, ManaType::Red, 6);
+
+    let committed = runner
+        .cast(spell)
+        .target_object(victim)
+        .distribute_among(&[(TargetRef::Object(victim), 5)])
+        .commit();
+
+    let obj = committed
+        .state()
+        .objects
+        .get(&spell)
+        .expect("spell on stack");
+    assert_eq!(
+        obj.zone,
+        Zone::Stack,
+        "the spell must be ON THE STACK for this read"
+    );
+    assert_eq!(
+        obj.cost_x_paid,
+        Some(5),
+        "NON-VACUITY: `finalize_cast` must actually have stamped the announced X onto the \
+         object — otherwise there is no X to inflate the mana value and this test proves \
+         nothing. MEASURED: {:?}",
+        obj.cost_x_paid
+    );
+
+    let mv = obj.effective_mana_value();
+    assert_eq!(
+        mv, 5,
+        "CR 202.3e substitutes X into mana value only for an object WITH an {{X}} in its mana \
+         cost. Monstrous Onslaught is {{4}}{{R}} — mana value 5, on the stack or anywhere \
+         else. A 10 here is the ungated bug: the object's announced X (CR 107.3i) leaking \
+         into a cost that has no {{X}} to substitute it into, which would make an opposing \
+         Spell Pierce / Mana Leak / \"mana value 3 or less\" read this spell wrong. \
+         MEASURED: {mv}"
+    );
+}
+
+/// GREEN CONTROL for the gate (rider 1): a spell that genuinely HAS `{X}` in its mana cost
+/// must still answer base + announced X on the stack. The gate narrows CR 202.3e to the
+/// objects the rule actually covers — it must not silence them.
+///
+/// This must hold in BOTH states (gate present or reverted); if it ever fails, the gate has
+/// over-reached and broken real X spells.
+#[test]
+fn control_a_real_x_cost_spell_still_includes_x_in_its_mana_value_on_the_stack() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let victim = scenario
+        .add_creature_from_oracle(P1, "Target Dummy", 0, 20, "")
+        .id();
+    let spell = {
+        let mut b = scenario.add_spell_to_hand_from_oracle(
+            P0,
+            "Fireball",
+            false,
+            "Fireball deals X damage to any target.",
+        );
+        b.with_mana_cost(cost(vec![ManaCostShard::X, ManaCostShard::Red], 0));
+        b.id()
+    };
+    let mut runner = scenario.build();
+    add_mana(&mut runner, ManaType::Red, 6);
+
+    let committed = runner.cast(spell).x(3).target_object(victim).commit();
+
+    let obj = committed
+        .state()
+        .objects
+        .get(&spell)
+        .expect("spell on stack");
+    assert_eq!(obj.zone, Zone::Stack);
+    assert_eq!(
+        obj.cost_x_paid,
+        Some(3),
+        "NON-VACUITY: the announced X must be stamped, else the assertion below is vacuous"
+    );
+    let mv = obj.effective_mana_value();
+    assert_eq!(
+        mv, 4,
+        "CR 202.3e: {{X}}{{R}} cast for X=3 has mana value 1 + 3 = 4 while on the stack. A 1 \
+         here means the has_x() gate OVER-REACHED and silenced X for a cost that really does \
+         contain {{X}}. MEASURED: {mv}"
+    );
+}
