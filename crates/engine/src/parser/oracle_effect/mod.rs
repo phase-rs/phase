@@ -99,16 +99,16 @@ use crate::types::ability::{
     ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission,
     CopyScale, DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
     DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction,
-    GuessSubject, IntensityScope, IterationKindBinding, LibraryPosition, ManaProduction,
-    ManaSpendPermission, MultiTargetSpec, NumberDistinctness, ObjectProperty, ObjectScope,
-    OriginConstraint, PlayPermissionInvalidation, PlayerFilter, PlayerRelation, PlayerScope,
-    PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
-    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SkipScope,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
-    SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, UntilCondition, ZoneOwner,
+    GuessSubject, IntensityScope, IterationKindBinding, KeeperConstraint, LibraryPosition,
+    ManaProduction, ManaSpendPermission, MultiTargetSpec, NumberDistinctness, ObjectProperty,
+    ObjectScope, OriginConstraint, PlayPermissionInvalidation, PlayerFilter, PlayerRelation,
+    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, RestrictionExpiry,
+    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    SharedQualityRelation, SkipScope, SpellStackToGraveyardReplacement, StaticCondition,
+    StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TrackedAnaphorSource, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -12335,6 +12335,160 @@ pub(crate) fn try_parse_balance_equalization(
     Some(chain)
 }
 
+/// CR 101.4 + CR 701.21a + CR 701.23i: Whole-line parser for the generic
+/// threshold-land keeper/search/shuffle grammar represented by Natural Balance.
+///
+/// Every textual axis is parsed independently with nom: the upper threshold,
+/// exact keeper count, lower threshold, local-X base, and final action-logged
+/// shuffle are not a verbatim card-name/text special case. The lowering uses
+/// the existing player-count filter, exact keeper constraint, self-library
+/// search, ParentTarget delivery, and PerformedActionThisWay ledger.
+pub(crate) fn try_parse_threshold_land_balance(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let lower = text.to_lowercase();
+    let ((sacrifice_threshold, keep_count, search_threshold, x_base), _) = nom_on_lower(
+        text,
+        &lower,
+        |input| {
+            let (input, _) = tag("each player who controls ").parse(input)?;
+            let (input, sacrifice_threshold) = nom_primitives::parse_number.parse(input)?;
+            let (input, _) = tag(" or more lands chooses ").parse(input)?;
+            let (input, keep_count) = nom_primitives::parse_number.parse(input)?;
+            let (input, _) = tag(" lands they control and sacrifices the rest. ").parse(input)?;
+            let (input, _) = tag("each player who controls ").parse(input)?;
+            let (input, search_threshold) = nom_primitives::parse_number.parse(input)?;
+            let (input, _) = tag(" or fewer lands may search their library for up to x basic land cards and put them onto the battlefield, where x is ").parse(input)?;
+            let (input, x_base) = nom_primitives::parse_number.parse(input)?;
+            let (input, _) = tag(" minus the number of lands they control. then each player who searched their library this way shuffles").parse(input)?;
+            let (input, _) = opt(tag(".")).parse(input)?;
+            let (input, _) = eof.parse(input)?;
+            Ok((
+                input,
+                (sacrifice_threshold, keep_count, search_threshold, x_base),
+            ))
+        },
+    )?;
+    // `parse_number` is naturally unsigned; engine quantity expressions are
+    // signed so they can compose with subtraction. Reject an out-of-range
+    // Oracle numeral rather than lossy-casting it into a negative threshold.
+    let sacrifice_threshold = i32::try_from(sacrifice_threshold).ok()?;
+    let keep_count = i32::try_from(keep_count).ok()?;
+    let search_threshold = i32::try_from(search_threshold).ok()?;
+    let x_base = i32::try_from(x_base).ok()?;
+
+    let land = TargetFilter::Typed(TypedFilter::land());
+    let basic_land =
+        TargetFilter::Typed(
+            TypedFilter::land().properties(vec![FilterProp::HasSupertype {
+                value: Supertype::Basic,
+            }]),
+        );
+    let scoped_land =
+        TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::ScopedPlayer));
+
+    let sacrifice_scope = PlayerFilter::ControlsCount {
+        relation: PlayerRelation::All,
+        filter: land.clone(),
+        comparator: Comparator::GE,
+        count: Box::new(QuantityExpr::Fixed {
+            value: sacrifice_threshold,
+        }),
+    };
+    let search_scope = PlayerFilter::ControlsCount {
+        relation: PlayerRelation::All,
+        filter: land.clone(),
+        comparator: Comparator::LE,
+        count: Box::new(QuantityExpr::Fixed {
+            value: search_threshold,
+        }),
+    };
+
+    let mut shuffle = AbilityDefinition::new(
+        kind,
+        Effect::Shuffle {
+            target: TargetFilter::Controller,
+        },
+    );
+    // CR 701.23i + CR 701.24a: only a player who accepted and performed the
+    // prior library search shuffles, including a player who found zero cards.
+    shuffle.player_scope = Some(PlayerFilter::PerformedActionThisWay {
+        relation: PlayerRelation::All,
+        action: crate::types::events::PlayerActionKind::SearchedLibrary,
+    });
+    shuffle.sub_link = SubAbilityLink::SequentialSibling;
+
+    let mut delivery = AbilityDefinition::new(
+        kind,
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Battlefield,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Tapped,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: Vec::new(),
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    );
+    delivery.sub_ability = Some(Box::new(shuffle));
+
+    let mut search = AbilityDefinition::new(
+        kind,
+        Effect::SearchLibrary {
+            filter: basic_land,
+            // CR 107.1b: This is directed subtraction, not the engine's
+            // absolute-value `Difference` expression. `SearchLibrary` clamps
+            // a negative upper bound to zero, so this remains correct for every
+            // threshold/base combination accepted by the generic grammar.
+            count: QuantityExpr::up_to(QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Fixed { value: x_base },
+                    QuantityExpr::Multiply {
+                        factor: -1,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount {
+                                filter: scoped_land,
+                            },
+                        }),
+                    },
+                ],
+            }),
+            reveal: false,
+            target_player: None,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
+            split: None,
+            source_zones: vec![Zone::Library],
+        },
+    );
+    search.player_scope = Some(search_scope);
+    search.optional = true;
+    search.sub_ability = Some(Box::new(delivery));
+
+    let mut sacrifice = AbilityDefinition::new(
+        kind,
+        Effect::ChooseAndSacrificeRest {
+            categories: Vec::new(),
+            chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
+            choose_filter: land.clone(),
+            sacrifice_filter: land,
+            total_power_cap: None,
+            keeper_constraint: Some(KeeperConstraint::ExactCount {
+                count: QuantityExpr::Fixed { value: keep_count },
+            }),
+        },
+    );
+    sacrifice.player_scope = Some(sacrifice_scope);
+    sacrifice.sub_ability = Some(Box::new(search));
+    Some(sacrifice)
+}
+
 /// CR 121.1 + CR 402.1 + CR 608.2e: Whole-line interceptor for the "catch up to
 /// the player with the most cards in hand" equalize-upward draw (Tales of the
 /// Ancestors). Structured like [`try_parse_balance_equalization`]: the
@@ -24282,6 +24436,9 @@ fn try_parse_chain_bypass(
         return Some(def);
     }
     if let Some(def) = try_parse_balance_equalization(text, kind) {
+        return Some(def);
+    }
+    if let Some(def) = try_parse_threshold_land_balance(text, kind) {
         return Some(def);
     }
     if let Some(def) = try_parse_each_player_copy_chosen(text, kind) {

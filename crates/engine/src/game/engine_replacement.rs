@@ -152,6 +152,15 @@ pub(super) fn handle_replacement_choice(
         .as_ref()
         .map(|pending| pending.lifelink_bonus)
         .unwrap_or(0);
+    // CR 701.21a + CR 614.1: An inner graveyard move can have parked after a
+    // sacrifice was accepted. The resumed payload is only a ZoneChange, so
+    // capture the enclosing sacrifice before `continue_replacement` consumes
+    // the pending record; the ZoneChange arm below emits its trigger event only
+    // after delivery succeeds.
+    let parked_sacrifice_provenance = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.sacrifice_provenance);
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -242,7 +251,30 @@ pub(super) fn handle_replacement_choice(
                         // epilogue still owns the continuation drain). Surface
                         // the parked prompt; the epilogue must not run yet.
                         crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                            if let (Some(provenance), Some(pending)) = (
+                                parked_sacrifice_provenance,
+                                state.pending_replacement.as_mut(),
+                            ) {
+                                if pending.proposed.affected_object_id()
+                                    == Some(provenance.object_id)
+                                {
+                                    pending.sacrifice_provenance = Some(provenance);
+                                }
+                            }
                             return Ok(state.waiting_for.clone());
+                        }
+                    }
+                    if let Some(provenance) = parked_sacrifice_provenance {
+                        if provenance.object_id == object_id {
+                            // CR 701.21a + CR 603.2: The resumed move is the
+                            // terminal part of the already-accepted sacrifice.
+                            // Emit this exactly once, after the move completes,
+                            // so sacrifice triggers see its real event rather
+                            // than a generic ZoneChanged surrogate.
+                            events.push(GameEvent::PermanentSacrificed {
+                                object_id,
+                                player_id: provenance.player_id,
+                            });
                         }
                     }
                     enters_battlefield = to == Zone::Battlefield;
@@ -794,25 +826,6 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && (state.pending_continuation.is_some()
-                    || state.pending_change_zone_iteration.is_some())
-            {
-                // CR 614.12b + CR 614.1c + CR 614.13: drain BOTH the chained
-                // continuation and the multi-target ChangeZone iteration that
-                // paused on this replacement choice (issue #535). The drain
-                // helper covers both: it runs the continuation chain (if any)
-                // then the ChangeZone iteration drain hook.
-                effects::drain_pending_continuation(state, events);
-                // CR 616.1e: The continuation may itself pause on another replacement
-                // (e.g., the second direction of fight damage hitting the same shield),
-                // in which case it sets `state.waiting_for` to the next ReplacementChoice.
-                // Propagate that back so the engine surfaces the correct prompt.
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                }
-            }
-
-            if matches!(waiting_for, WaitingFor::Priority { .. })
                 && state.pending_player_scope_sacrifice_choice.is_some()
             {
                 // CR 101.4: a simultaneous each-player sacrifice paused by a
@@ -831,6 +844,26 @@ pub(super) fn handle_replacement_choice(
                             waiting_for = state.waiting_for.clone();
                         }
                     }
+                }
+            }
+
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && (state.pending_continuation.is_some()
+                    || state.pending_change_zone_iteration.is_some())
+            {
+                // CR 614.12b + CR 614.1c + CR 614.13: drain BOTH the chained
+                // continuation and the multi-target ChangeZone iteration that
+                // paused on this replacement choice (issue #535). This runs
+                // AFTER a collected simultaneous sacrifice queue: CR 101.4
+                // requires every already-announced sacrifice to finish before
+                // the original ability's later instructions resume.
+                effects::drain_pending_continuation(state, events);
+                // CR 616.1e: The continuation may itself pause on another replacement
+                // (e.g., the second direction of fight damage hitting the same shield),
+                // in which case it sets `state.waiting_for` to the next ReplacementChoice.
+                // Propagate that back so the engine surfaces the correct prompt.
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
                 }
             }
 
@@ -922,6 +955,11 @@ pub(super) fn handle_replacement_choice(
                 // re-parked record so a second ordering choice cannot drop it.
                 if pending.lifelink_bonus == 0 {
                     pending.lifelink_bonus = parked_lifelink_bonus;
+                }
+                if let Some(provenance) = parked_sacrifice_provenance {
+                    if pending.proposed.affected_object_id() == Some(provenance.object_id) {
+                        pending.sacrifice_provenance = Some(provenance);
+                    }
                 }
             }
             Ok(super::replacement::replacement_choice_waiting_for(
@@ -2677,6 +2715,7 @@ mod tests {
                 cant_regenerate: false,
                 applied: std::collections::HashSet::new(),
             },
+            sacrifice_provenance: None,
             candidates: vec![ReplacementId {
                 source: bear,
                 index: 0,
@@ -3039,6 +3078,151 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::PermanentSacrificed { object_id, .. } if *object_id == victim)),
             "PermanentSacrificed event must be emitted"
         );
+    }
+
+    /// CR 101.4 + CR 616.1 + CR 701.21a: A player-scope sacrifice batch whose
+    /// final announced permanent pauses on an inner graveyard-move replacement
+    /// must retain its terminal bookkeeping through the real replacement
+    /// response. In particular, an empty remaining queue must still publish the
+    /// completed count and changed id before any chained effect could continue.
+    #[test]
+    fn final_player_scope_sacrifice_replacement_resume_commits_batch_bookkeeping() {
+        use crate::game::effects::{
+            perform_collected_player_scope_sacrifices, PendingPlayerScopeSacrificeOutcome,
+        };
+        use crate::types::ability::EffectKind;
+
+        let mut state = GameState::new_two_player(42);
+        let victim = make_creature(&mut state, PlayerId(0), "Final sacrifice victim");
+        // The outer Sacrifice proposal proceeds, then this optional Moved
+        // replacement pauses its inner Battlefield→graveyard move.
+        install_optional_replacement(&mut state, ReplacementEvent::Moved);
+
+        let mut events = Vec::new();
+        let outcome = perform_collected_player_scope_sacrifices(
+            &mut state,
+            ObjectId(9_999),
+            PlayerId(0),
+            vec![(PlayerId(0), vec![victim])],
+            &mut events,
+        )
+        .expect("the announced sacrifice must enter the replacement pipeline");
+        assert!(matches!(
+            outcome,
+            PendingPlayerScopeSacrificeOutcome::PausedForReplacement
+        ));
+        let pending = state
+            .pending_player_scope_sacrifice_choice
+            .as_ref()
+            .expect("the final paused sacrifice must retain a terminal batch record");
+        assert!(
+            pending.selections.is_empty(),
+            "the regression requires the replacement to pause the final queue item"
+        );
+        assert_eq!(pending.completion.announced, vec![victim]);
+
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accepting the replacement must drain the empty sacrifice queue");
+
+        assert!(state.players[0].graveyard.contains(&victim));
+        assert_eq!(state.last_effect_count, Some(1));
+        assert_eq!(state.last_zone_changed_ids, vec![victim]);
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Sacrifice,
+                    source_id,
+                } if *source_id == ObjectId(9_999)
+            )),
+            "the empty queue still has to publish its terminal sacrifice result"
+        );
+    }
+
+    /// CR 603.10a + CR 616.1 + CR 701.21a: two permanents announced for one
+    /// simultaneous sacrifice instruction remain one co-departure group even
+    /// when the second permanent's inner move pauses for a replacement choice.
+    /// The first action must not leak a partial `ZoneChanged` event span; the
+    /// replacement response reunites both events, stamps reciprocal
+    /// `co_departed` values, and updates the per-turn LKI records.
+    #[test]
+    fn player_scope_sacrifice_replacement_resume_stamps_the_full_departure_batch() {
+        use crate::game::effects::{
+            perform_collected_player_scope_sacrifices, PendingPlayerScopeSacrificeOutcome,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let first = make_creature(&mut state, PlayerId(0), "First sacrifice victim");
+        let paused = make_creature(&mut state, PlayerId(0), "Paused sacrifice victim");
+        let shield = install_optional_replacement(&mut state, ReplacementEvent::Moved);
+        state
+            .objects
+            .get_mut(&shield)
+            .unwrap()
+            .replacement_definitions[0]
+            .valid_card = Some(TargetFilter::SpecificObject { id: paused });
+
+        let mut events = Vec::new();
+        let outcome = perform_collected_player_scope_sacrifices(
+            &mut state,
+            ObjectId(9_998),
+            PlayerId(0),
+            vec![(PlayerId(0), vec![first, paused])],
+            &mut events,
+        )
+        .expect("the second sacrifice must pause on its selected Moved replacement");
+        assert!(matches!(
+            outcome,
+            PendingPlayerScopeSacrificeOutcome::PausedForReplacement
+        ));
+        assert!(
+            events.is_empty(),
+            "the first departed permanent's events must stay pending until the full batch completes"
+        );
+        let pending = state
+            .pending_player_scope_sacrifice_choice
+            .as_ref()
+            .expect("the pause must retain the full sacrifice completion");
+        assert!(pending.completion.spans_replacement_pause);
+        assert!(pending.completion.deferred_events.iter().any(
+            |event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == first)
+        ));
+
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accepting the replacement must complete the whole sacrifice batch");
+        assert!(state.players[0].graveyard.contains(&first));
+        assert!(state.players[0].graveyard.contains(&paused));
+
+        let event_co_departed = |object_id| {
+            result
+                .events
+                .iter()
+                .find_map(|event| match event {
+                    GameEvent::ZoneChanged {
+                        object_id: changed,
+                        from: Some(Zone::Battlefield),
+                        record,
+                        ..
+                    } if *changed == object_id => Some(record.co_departed.clone()),
+                    _ => None,
+                })
+                .expect("every sacrifice batch member must be present in the terminal event span")
+        };
+        assert_eq!(event_co_departed(first), vec![paused]);
+        assert_eq!(event_co_departed(paused), vec![first]);
+
+        let record_co_departed = |object_id| {
+            state
+                .zone_changes_this_turn
+                .iter()
+                .find_map(|record| {
+                    (record.object_id == object_id && record.from_zone == Some(Zone::Battlefield))
+                        .then(|| record.co_departed.clone())
+                })
+                .expect("terminal stamping must update the authoritative LKI record")
+        };
+        assert_eq!(record_co_departed(first), vec![paused]);
+        assert_eq!(record_co_departed(paused), vec![first]);
     }
 
     /// CR 701.21a + CR 614.6: When the inner ZoneChange is redirected (e.g.,

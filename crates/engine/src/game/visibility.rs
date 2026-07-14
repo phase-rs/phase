@@ -696,6 +696,20 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 101.4a + CR 701.23i: A simultaneous multi-player library search keeps
+    // each prior searcher's found cards private while later players decide.
+    // `SearchChoice` above hides the current candidate list, but the protocol's
+    // pending state also retains prior selections for deferred batch delivery;
+    // redact those ids per selector so an observer cannot recover library
+    // identities from `pending_scoped_library_search`.
+    if let Some(pending) = filtered.pending_scoped_library_search.as_mut() {
+        for (selector, selected) in &mut pending.selections {
+            if !can_view_private_for_player(*selector) {
+                *selected = selected.iter().map(|_| ObjectId(0)).collect();
+            }
+        }
+    }
+
     // CR 701.23a: The cultivate-class partition pick exposes the found set only
     // to the searcher; opponents see opaque ids (mirrors SearchChoice above).
     if let WaitingFor::SearchPartitionChoice {
@@ -1417,7 +1431,7 @@ mod tests {
     use crate::types::game_state::{
         AutoMayChoice, CastPaymentMode, CastingVariant, CostResume, ManaAbilityResume,
         MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingBeginGameAbility, PendingCast,
-        PendingManaAbility,
+        PendingManaAbility, PendingScopedLibrarySearch,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -1984,6 +1998,89 @@ mod tests {
             filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
             Some("Hidden Tutor Target")
         );
+    }
+
+    /// CR 101.4a + CR 701.23i: In a three-player simultaneous library search,
+    /// each selector sees only their own already-found cards and only the
+    /// current searcher sees that search's candidates. The deferred delivery
+    /// state must not leak a prior selector's library object ids to the third
+    /// player while the current `SearchChoice` is correctly redacted.
+    #[test]
+    fn scoped_library_search_redacts_prior_selection_and_current_candidates_per_viewer() {
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let p2 = PlayerId(2);
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let p0_selected = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "P0 Secret Forest".to_string(),
+            Zone::Library,
+        );
+        let p1_candidate = create_object(
+            &mut state,
+            CardId(2),
+            p1,
+            "P1 Secret Island".to_string(),
+            Zone::Library,
+        );
+        let source_id = ObjectId(99);
+        state.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "test scoped search".to_string(),
+                    description: None,
+                },
+                Vec::new(),
+                source_id,
+                p0,
+            )),
+            remaining_players: Vec::new(),
+            selections: vec![(p0, vec![p0_selected])],
+            current_player: Some(p1),
+            after_scope: None,
+        });
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: p1,
+            cards: vec![p1_candidate],
+            count: 1,
+            reveal: false,
+            up_to: true,
+            allows_partial_find: true,
+            constraint: crate::types::ability::SearchSelectionConstraint::None,
+            split: None,
+        };
+
+        let p0_view = filter_state_for_viewer(&state, p0);
+        let p0_pending = p0_view
+            .pending_scoped_library_search
+            .expect("P0 view retains the deferred search state");
+        assert_eq!(p0_pending.selections, vec![(p0, vec![p0_selected])]);
+        assert!(matches!(
+            p0_view.waiting_for,
+            WaitingFor::SearchChoice { cards, .. } if cards == vec![ObjectId(0)]
+        ));
+
+        let p1_view = filter_state_for_viewer(&state, p1);
+        let p1_pending = p1_view
+            .pending_scoped_library_search
+            .expect("P1 view retains the deferred search state");
+        assert_eq!(p1_pending.selections, vec![(p0, vec![ObjectId(0)])]);
+        assert!(matches!(
+            p1_view.waiting_for,
+            WaitingFor::SearchChoice { cards, .. } if cards == vec![p1_candidate]
+        ));
+
+        let p2_view = filter_state_for_viewer(&state, p2);
+        let p2_pending = p2_view
+            .pending_scoped_library_search
+            .expect("spectating player retains only the public pending-state shape");
+        assert_eq!(p2_pending.selections, vec![(p0, vec![ObjectId(0)])]);
+        assert!(matches!(
+            p2_view.waiting_for,
+            WaitingFor::SearchChoice { cards, .. } if cards == vec![ObjectId(0)]
+        ));
     }
 
     #[test]

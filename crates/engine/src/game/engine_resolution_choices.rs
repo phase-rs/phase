@@ -175,6 +175,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::CategoryChoice { .. }
             | WaitingFor::EachPlayerCopyChosenSelection { .. }
             | WaitingFor::KeepWithinTotalPowerChoice { .. }
+            | WaitingFor::KeepExactPermanentsChoice { .. }
             | WaitingFor::PayAmountChoice { .. }
     )
 }
@@ -2224,6 +2225,24 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
+            if effects::scoped_library_search::submit_selection(
+                state,
+                player,
+                &cards,
+                count,
+                reveal,
+                up_to,
+                allows_partial_find,
+                &constraint,
+                &chosen,
+                events,
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?
+            {
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
             // CR 701.23b/d: "up to N", hidden-zone stated-quality searches, or
             // explicit stated-quality selection constraints accept a short/empty
             // pick. A pure quantity search needs exactly `count`.
@@ -4778,6 +4797,94 @@ pub(super) fn handle_resolution_choice(
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
         }
+        // CR 101.4 + CR 701.21a: An exact-cardinality keeper choice. The
+        // collected protected sets are handed to the shared scope-sacrifice
+        // queue only once every scoped player has chosen, so replacement
+        // choices cannot bypass later sacrifices or the parked continuation.
+        (
+            WaitingFor::KeepExactPermanentsChoice {
+                player,
+                target_player: _,
+                eligible,
+                required_count,
+                choose_filter,
+                sacrifice_filter,
+                chooser_scope,
+                source_id,
+                source_controller,
+                remaining_players,
+                mut all_kept,
+                scoped_players,
+            },
+            GameAction::ChooseKeptPermanents { kept },
+        ) => {
+            if kept.len() != required_count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must keep exactly {required_count} permanent(s), got {}",
+                    kept.len()
+                )));
+            }
+            let mut chosen = Vec::with_capacity(kept.len());
+            for id in &kept {
+                if !eligible.contains(id) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Permanent {id:?} is not eligible to keep"
+                    )));
+                }
+                if chosen.contains(id) {
+                    return Err(EngineError::InvalidAction(
+                        "Cannot keep the same permanent more than once".to_string(),
+                    ));
+                }
+                chosen.push(*id);
+            }
+            all_kept.extend(chosen);
+
+            let events_before_sacrifice = events.len();
+            set_priority(state, player);
+            effects::choose_and_sacrifice_rest::step_exact_count(
+                state,
+                source_id,
+                source_controller,
+                chooser_scope,
+                &remaining_players,
+                all_kept,
+                &choose_filter,
+                &sacrifice_filter,
+                required_count,
+                &scoped_players,
+                events,
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+            if matches!(
+                state.waiting_for,
+                WaitingFor::KeepExactPermanentsChoice { .. }
+            ) {
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+
+            let events_after_sacrifice = events.len();
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                resume_with_error_propagation(state, events)?;
+            }
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                }
+            } else {
+                let trigger_events: Vec<GameEvent> = events
+                    [events_before_sacrifice..events_after_sacrifice]
+                    .iter()
+                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                    .cloned()
+                    .collect();
+                super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+            }
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
         (waiting_for, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Cannot perform {:?} while waiting for {:?}",
@@ -5062,6 +5169,25 @@ pub(crate) fn run_batch_completion(
                     events,
                 );
             }
+        }
+        BatchCompletion::ScopedLibrarySearchDelivery {
+            player,
+            source_id,
+            after_scope,
+        } => {
+            // CR 101.4 + CR 701.23i + CR 616.1: the parked batch has finally
+            // delivered every selected card. The searched-this-way shuffle tail
+            // may now resolve; a failure here would mean corrupted serialized
+            // engine state because the completion is created only by the typed
+            // scoped-search protocol above.
+            effects::scoped_library_search::finish_delivery_tail(
+                state,
+                player,
+                source_id,
+                after_scope,
+                events,
+            )
+            .expect("scoped library search batch completion must resolve");
         }
     }
 }

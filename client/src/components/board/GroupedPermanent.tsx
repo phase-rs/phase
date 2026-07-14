@@ -81,6 +81,7 @@ function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | n
     case "SaddleMount":
     case "HarmonizeTapChoice":
     case "KeepWithinTotalPowerChoice":
+    case "KeepExactPermanentsChoice":
       return waitingFor.data.player;
     default:
       return null;

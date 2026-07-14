@@ -45828,3 +45828,114 @@ fn investigate_subject_lifts_parent_target_controller_to_player_scope() {
         "a bare \"investigate\" must not gain a repeat count"
     );
 }
+
+/// Natural Balance's threshold grammar must lower through the generic exact
+/// keeper/search/delivery/shuffle building blocks, not a card-name special case.
+/// The alternate numerals prove every numeric axis is parsed independently.
+#[test]
+fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
+    let def = parse_effect_chain(
+        "Each player who controls 7 or more lands chooses 4 lands they control and sacrifices the rest. Each player who controls 3 or fewer lands may search their library for up to X basic land cards and put them onto the battlefield, where X is 6 minus the number of lands they control. Then each player who searched their library this way shuffles.",
+        AbilityKind::Spell,
+    );
+
+    assert!(matches!(
+        def.player_scope,
+        Some(PlayerFilter::ControlsCount {
+            comparator: Comparator::GE,
+            count,
+            ..
+        }) if matches!(count.as_ref(), QuantityExpr::Fixed { value: 7 })
+    ));
+    let Effect::ChooseAndSacrificeRest {
+        keeper_constraint: Some(KeeperConstraint::ExactCount { count }),
+        choose_filter,
+        sacrifice_filter,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected exact keeper sacrifice root, got {:?}", def.effect);
+    };
+    assert_eq!(choose_filter, sacrifice_filter);
+    assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+
+    let search = def
+        .sub_ability
+        .as_deref()
+        .expect("exact keeper must continue to the scoped search");
+    assert!(search.optional);
+    assert!(matches!(
+        &search.player_scope,
+        Some(PlayerFilter::ControlsCount {
+            comparator: Comparator::LE,
+            count,
+            ..
+        }) if matches!(count.as_ref(), QuantityExpr::Fixed { value: 3 })
+    ));
+    assert!(matches!(
+        search.effect.as_ref(),
+        Effect::SearchLibrary {
+            count: QuantityExpr::UpTo { max },
+            target_player: None,
+            source_zones,
+            ..
+        } if source_zones == &vec![Zone::Library]
+            && matches!(
+                max.as_ref(),
+                QuantityExpr::Sum { exprs }
+                    if matches!(exprs.as_slice(), [
+                        QuantityExpr::Fixed { value: 6 },
+                        QuantityExpr::Multiply { factor: -1, inner },
+                    ] if matches!(
+                        inner.as_ref(),
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter }
+                        } if matches!(filter, TargetFilter::Typed(tf)
+                            if tf.controller == Some(ControllerRef::ScopedPlayer))
+                    ))
+            )
+    ));
+
+    let delivery = search
+        .sub_ability
+        .as_deref()
+        .expect("search must carry a result-delivery continuation");
+    assert!(matches!(
+        delivery.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Battlefield,
+            target: TargetFilter::ParentTarget,
+            enter_tapped: crate::types::zones::EtbTapState::Tapped,
+            ..
+        }
+    ));
+    let shuffle = delivery
+        .sub_ability
+        .as_deref()
+        .expect("delivery must retain the final scoped shuffle");
+    assert!(matches!(
+        shuffle.effect.as_ref(),
+        Effect::Shuffle {
+            target: TargetFilter::Controller
+        }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::PerformedActionThisWay {
+            relation: PlayerRelation::All,
+            action: crate::types::events::PlayerActionKind::SearchedLibrary,
+        })
+    ));
+}
+
+/// The dedicated whole-line grammar must fail closed when the independently
+/// parsed axes no longer describe the same threshold-land instruction class.
+#[test]
+fn threshold_land_balance_rejects_nonbasic_search_variant() {
+    let def = parse_effect_chain(
+        "Each player who controls 6 or more lands chooses 5 lands they control and sacrifices the rest. Each player who controls 4 or fewer lands may search their library for up to X land cards and put them onto the battlefield, where X is 5 minus the number of lands they control. Then each player who searched their library this way shuffles.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(def.effect.as_ref(), Effect::Unimplemented { .. }));
+}

@@ -26172,6 +26172,7 @@ pub mod tests {
                     crate::types::ability::TypedFilter::permanent(),
                 ),
                 total_power_cap: None,
+                keeper_constraint: None,
             },
         );
         let trigger = TriggerDefinition::new(TriggerMode::Phase).execute(ability);

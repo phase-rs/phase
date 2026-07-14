@@ -1593,6 +1593,16 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseKeptCreatures { kept })
         }
 
+        // CR 101.4 + CR 701.21a: choose a valid exact-size baseline subset.
+        WaitingFor::KeepExactPermanentsChoice {
+            eligible,
+            required_count,
+            ..
+        } => {
+            let kept = eligible.iter().copied().take(*required_count).collect();
+            Some(GameAction::ChooseKeptPermanents { kept })
+        }
+
         // CR 700.3: Pile-separation fallbacks — empty pile-A partition (every
         // object goes to derived pile B) is the simplest legal partition, and
         // pile A is the default choice for the chooser. Tactical AI override

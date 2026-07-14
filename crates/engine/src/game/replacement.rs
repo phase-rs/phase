@@ -7124,6 +7124,7 @@ fn pipeline_loop(
                 let affected = proposed.affected_player(state);
                 state.pending_replacement = Some(PendingReplacement {
                     proposed,
+                    sacrifice_provenance: None,
                     candidates,
                     depth,
                     is_optional: true,
@@ -7162,6 +7163,7 @@ fn pipeline_loop(
             let affected = proposed.affected_player(state);
             state.pending_replacement = Some(PendingReplacement {
                 proposed,
+                sacrifice_provenance: None,
                 candidates,
                 depth,
                 is_optional: false,
@@ -7326,6 +7328,7 @@ fn continue_replacement_impl(
         let reparked_candidates = pending.candidates.clone();
         let reparked_depth = pending.depth;
         let reparked_library_placement = pending.library_placement.clone();
+        let reparked_sacrifice_provenance = pending.sacrifice_provenance;
         let mut proposed = pending.proposed;
         proposed.mark_applied(rid);
         // CR 614.1a: the "first time you would create … each turn" window is
@@ -7381,6 +7384,7 @@ fn continue_replacement_impl(
                 // before it is read.
                 state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
                     proposed: proposed.clone(),
+                    sacrifice_provenance: reparked_sacrifice_provenance,
                     candidates: reparked_candidates,
                     depth: reparked_depth,
                     is_optional: true,
@@ -9739,6 +9743,7 @@ mod tests {
         // replacement, decline is synthetic. This isolates the label builder.
         state.pending_replacement = Some(PendingReplacement {
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
+            sacrifice_provenance: None,
             candidates: vec![ReplacementId {
                 source: ObjectId(20),
                 index: 0,
@@ -9820,6 +9825,7 @@ mod tests {
                 units: vec![],
                 applied: HashSet::new(),
             },
+            sacrifice_provenance: None,
             // The candidate's own source is the sentinel; `index` addresses the
             // handler list above.
             candidates: vec![ReplacementId {
@@ -13002,6 +13008,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.pending_replacement = Some(PendingReplacement {
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
+            sacrifice_provenance: None,
             candidates: vec![],
             depth: 0,
             is_optional: false,

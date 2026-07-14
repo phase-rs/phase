@@ -94,10 +94,10 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, ControllerRef,
     CountScope, Duration, EachDamageRecipient, Effect, FilterProp, ForEachCategoryAction,
-    GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition, ResolvedAbility,
-    StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource, TriggerCondition,
-    TypedFilter,
+    GuessSubject, KeeperConstraint, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition,
+    ResolvedAbility, StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource,
+    TriggerCondition, TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::keywords::Keyword;
@@ -1225,6 +1225,7 @@ fn scan_effect(x: &Effect) -> Axes {
             choose_filter,
             sacrifice_filter,
             total_power_cap,
+            keeper_constraint,
             categories: _,
             chooser_scope: _,
         } => {
@@ -1233,6 +1234,9 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(sacrifice_filter));
             if let Some(x) = total_power_cap {
                 acc = acc.or(scan_quantity_expr(x));
+            }
+            if let Some(KeeperConstraint::ExactCount { count }) = keeper_constraint {
+                acc = acc.or(scan_quantity_expr(count));
             }
             acc
         }

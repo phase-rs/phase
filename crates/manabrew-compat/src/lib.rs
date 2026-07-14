@@ -1410,6 +1410,9 @@ fn build_prompt_input(
         WaitingFor::KeepWithinTotalPowerChoice { .. } => {
             unsupported_prompt(waiting_for, "local.keep-with-total-power-unsupported")
         }
+        WaitingFor::KeepExactPermanentsChoice { .. } => {
+            unsupported_prompt(waiting_for, "local.keep-exact-permanents-unsupported")
+        }
         WaitingFor::OptionalEffectChoice { .. } | WaitingFor::OpponentMayChoice { .. } => {
             unsupported_prompt(waiting_for, "local.optional-trigger-unsupported")
         }
@@ -1771,7 +1774,8 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         | GameAction::ChooseLegend { .. }
         | GameAction::ChooseBattleProtector { .. }
         | GameAction::SelectCategoryPermanents { .. }
-        | GameAction::ChooseKeptCreatures { .. } => {
+        | GameAction::ChooseKeptCreatures { .. }
+        | GameAction::ChooseKeptPermanents { .. } => {
             AvailableActionConversion::Unsupported("local.non-target-selection-unsupported")
         }
         GameAction::ChooseDungeon { .. }

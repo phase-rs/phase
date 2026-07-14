@@ -32,38 +32,48 @@ pub(super) fn handle_optional_effect_choice(
 ) -> Result<WaitingFor, EngineError> {
     let events_before = events.len();
     state.cost_payment_failed_flag = false;
-    set_active_priority(state);
 
     // CR 603.12a: a repeated-optional-payment process (Hawkeye, Master Marksman)
     // drives its own per-iteration payment + once-after-loop reflexive modal,
     // distinct from the generic single up-front optional effect below.
-    if state.pending_repeated_optional_payment.is_some() {
-        effects::resolve_repeated_optional_payment_choice(state, accept, events)
-            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-    } else if let Some(ability) = state.pending_optional_effect.take() {
-        let choice = if accept {
-            AutoMayChoice::Accept
-        } else {
-            AutoMayChoice::Decline
-        };
-        // CR 608.2: an ability's resolution is a single process; a triggered
-        // ability suspended for its optional ("may") decision retains its
-        // triggering event context. Restore it for the resumed resolution so
-        // `TriggeringPlayer` and other event-context refs resolve correctly.
-        let pending_event = state.pending_optional_trigger_event.take();
-        let previous_trigger_event = state.current_trigger_event.clone();
-        state.current_trigger_event = pending_event;
-        // CR 603.2c + CR 608.2: mirror restoration of the batched-trigger
-        // subject count so a `QuantityRef::EventContextAmount` resolved during
-        // the resumed sub-ability reads the same "that many" the pre-pause
-        // resolution would have observed.
-        let pending_count = state.pending_optional_trigger_match_count.take();
-        let previous_trigger_match_count = state.current_trigger_match_count;
-        state.current_trigger_match_count = pending_count;
-        let result = effects::resolve_optional_effect_decision(state, *ability, choice, events, 1);
-        state.current_trigger_event = previous_trigger_event;
-        state.current_trigger_match_count = previous_trigger_match_count;
-        result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+    if effects::scoped_library_search::handle_optional_decision(state, accept, events)
+        .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?
+    {
+        // CR 101.4 + CR 701.23i: This optional decision belongs to the
+        // simultaneous scoped-library-search protocol. It owns the next APNAP
+        // prompt / final delivery and must not be mistaken for a normal
+        // `pending_optional_effect` continuation.
+    } else {
+        set_active_priority(state);
+        if state.pending_repeated_optional_payment.is_some() {
+            effects::resolve_repeated_optional_payment_choice(state, accept, events)
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+        } else if let Some(ability) = state.pending_optional_effect.take() {
+            let choice = if accept {
+                AutoMayChoice::Accept
+            } else {
+                AutoMayChoice::Decline
+            };
+            // CR 608.2: an ability's resolution is a single process; a triggered
+            // ability suspended for its optional ("may") decision retains its
+            // triggering event context. Restore it for the resumed resolution so
+            // `TriggeringPlayer` and other event-context refs resolve correctly.
+            let pending_event = state.pending_optional_trigger_event.take();
+            let previous_trigger_event = state.current_trigger_event.clone();
+            state.current_trigger_event = pending_event;
+            // CR 603.2c + CR 608.2: mirror restoration of the batched-trigger
+            // subject count so a `QuantityRef::EventContextAmount` resolved during
+            // the resumed sub-ability reads the same "that many" the pre-pause
+            // resolution would have observed.
+            let pending_count = state.pending_optional_trigger_match_count.take();
+            let previous_trigger_match_count = state.current_trigger_match_count;
+            state.current_trigger_match_count = pending_count;
+            let result =
+                effects::resolve_optional_effect_decision(state, *ability, choice, events, 1);
+            state.current_trigger_event = previous_trigger_event;
+            state.current_trigger_match_count = previous_trigger_match_count;
+            result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+        }
     }
 
     resume_pending_continuation_if_priority(state, events)?;

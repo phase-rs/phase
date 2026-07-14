@@ -991,6 +991,35 @@ pub fn mark_simultaneous_departures(events: &mut [GameEvent], group: &[ObjectId]
     }
 }
 
+/// CR 603.10a: Mirror a simultaneous-departure stamp into the authoritative
+/// per-turn LKI records. A replacement-choice pause can split one logical
+/// simultaneous action across two action-result event buffers; the prior
+/// buffer is intentionally deferred until terminal completion, while these
+/// records were already committed to `GameState` when each zone move occurred.
+/// Updating the exact record indices retained by the batch preserves the same
+/// co-departure fact for later look-back queries and trigger processing.
+pub fn mark_simultaneous_departure_records(
+    state: &mut GameState,
+    record_indices: &[usize],
+    group: &[ObjectId],
+) {
+    if group.len() < 2 {
+        return;
+    }
+    for &index in record_indices {
+        let Some(record) = state.zone_changes_this_turn.get_mut(index) else {
+            continue;
+        };
+        if record.from_zone == Some(Zone::Battlefield) && group.contains(&record.object_id) {
+            record.co_departed = group
+                .iter()
+                .copied()
+                .filter(|&member| member != record.object_id)
+                .collect();
+        }
+    }
+}
+
 /// CR 603.10a: Filter `ids` to those whose object has actually left the
 /// battlefield (now resides in some other zone). Producers that accumulate a
 /// candidate ID list — bounce, change-zone, sacrifice, destroy — pass that list

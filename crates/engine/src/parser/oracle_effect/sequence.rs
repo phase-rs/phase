@@ -8544,6 +8544,7 @@ mod tests {
             choose_filter: TargetFilter::Typed(TypedFilter::permanent()),
             sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
             total_power_cap: None,
+            keeper_constraint: None,
         };
         assert_eq!(
             parse_followup_continuation_ast(

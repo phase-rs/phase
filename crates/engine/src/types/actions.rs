@@ -735,6 +735,13 @@ pub enum GameAction {
     ChooseKeptCreatures {
         kept: Vec<ObjectId>,
     },
+    /// CR 101.4 + CR 701.21a: Answer to an exact keeper-cardinality choice.
+    /// Every object must be eligible and the submitted set must contain the
+    /// required number of distinct objects (or every eligible object when the
+    /// required number exceeds availability).
+    ChooseKeptPermanents {
+        kept: Vec<ObjectId>,
+    },
     /// CR 107.1b + CR 601.2f: Choose the value of X for a spell or activated
     /// ability whose cost contains X. Chosen as part of determining total cost,
     /// before mana is paid.
@@ -1532,6 +1539,7 @@ impl GameAction {
             | GameAction::LearnDecision { .. }
             | GameAction::SelectCategoryPermanents { .. }
             | GameAction::ChooseKeptCreatures { .. }
+            | GameAction::ChooseKeptPermanents { .. }
             | GameAction::ChooseX { .. }
             | GameAction::SubmitPhyrexianChoices { .. }
             | GameAction::ChooseManaColor { .. }

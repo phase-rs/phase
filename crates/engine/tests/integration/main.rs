@@ -600,6 +600,7 @@ mod mycoloth_upkeep_trigger;
 mod myrkul_crew_phase1_incarnation;
 mod mystic_forge_regression;
 mod narset_jeskai_waymaster_draw_spells_cast;
+mod natural_balance;
 mod necrodominance_pay_any_life_draw;
 mod nettling_imp_continuity_target;
 mod niko_light_of_hope;
