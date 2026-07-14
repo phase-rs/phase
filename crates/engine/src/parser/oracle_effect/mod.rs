@@ -21314,7 +21314,7 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
 ///
 /// Reuses `try_parse_labeled_choice`'s structural Oxford-comma / "or" splitting
 /// (the canonical N-ary disjunction grammar) and then maps every label through
-/// the shared single-keyword parser `parse_keyword_from_oracle`. Returns `None`
+/// the shared single-keyword parser `parse_granted_keyword_fragment`. Returns `None`
 /// unless **every** label maps to a real keyword — partial matches fall through
 /// to the generic labeled-choice handler so non-keyword disjunctions are
 /// unaffected. Building for the class: any "choose <kw>, <kw>, or <kw>" line,
@@ -21324,7 +21324,7 @@ fn try_parse_keyword_choice(rest: &str) -> Option<Vec<Keyword>> {
     let keywords: Vec<Keyword> = labels
         .iter()
         .map(|label| {
-            crate::parser::oracle_keyword::parse_keyword_from_oracle(&label.to_lowercase())
+            crate::parser::oracle_keyword::parse_granted_keyword_fragment(&label.to_lowercase())
         })
         .collect::<Option<Vec<_>>>()?;
     Some(keywords)
@@ -21339,7 +21339,7 @@ fn try_parse_keyword_choice(rest: &str) -> Option<Vec<Keyword>> {
 /// Strips the leading "<number> abilities/keywords from among " preamble, then
 /// reuses the shared `split_choice_list_items` list splitter (the FromAmong
 /// grammar — it accepts ", and " as the final separator over bare keyword
-/// names) and maps every item through `parse_keyword_from_oracle`. Returns
+/// names) and maps every item through `parse_granted_keyword_fragment`. Returns
 /// `None` unless **every** item maps to a real keyword, so non-keyword "from
 /// among" lists fall through to the generic handlers. Building for the class:
 /// any "choose <N> abilities from among <list>" line, not the single card.
@@ -21359,13 +21359,15 @@ fn try_parse_keyword_choice_from_among(rest: &str) -> Option<(Vec<Keyword>, usiz
     // CR 608.2d: Greymond's printed text ends "...and lifelink." — strip the
     // trailing sentence period (and surrounding whitespace) BEFORE splitting so
     // the final item arrives as "lifelink", not "lifelink." (which
-    // `parse_keyword_from_oracle` would reject, failing the whole list).
+    // `parse_granted_keyword_fragment` would reject, failing the whole list).
     let list = list.trim().trim_end_matches('.').trim_end();
     let items = split_choice_list_items(list)?;
     let keywords: Vec<Keyword> = items
         .iter()
         .map(|item| {
-            crate::parser::oracle_keyword::parse_keyword_from_oracle(&item.trim().to_lowercase())
+            crate::parser::oracle_keyword::parse_granted_keyword_fragment(
+                &item.trim().to_lowercase(),
+            )
         })
         .collect::<Option<Vec<_>>>()?;
     Some((keywords, count as usize))

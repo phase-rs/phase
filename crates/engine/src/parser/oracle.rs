@@ -68,7 +68,7 @@ use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
-    extract_keyword_line, is_keyword_cost_line, parse_keyword_from_oracle,
+    extract_granted_keyword_list, is_keyword_cost_line, parse_granted_keyword_fragment,
     parse_kicker_additional_cost_line,
 };
 use super::oracle_level::parse_level_blocks;
@@ -2158,13 +2158,13 @@ fn is_semicolon_keyword_line(line: &str, mtgjson_keyword_names: &[String]) -> bo
         return false;
     };
 
-    if extract_keyword_line(first, mtgjson_keyword_names).is_none() {
+    if extract_granted_keyword_list(first, mtgjson_keyword_names).is_none() {
         return false;
     }
 
     for part in parts {
         saw_multiple_parts = true;
-        if extract_keyword_line(part, mtgjson_keyword_names).is_none() {
+        if extract_granted_keyword_list(part, mtgjson_keyword_names).is_none() {
             return false;
         }
     }
@@ -2202,7 +2202,7 @@ fn is_spell_resolution_instruction_line(
     }
 
     if !is_ability_activate_cost_static(&lower)
-        && extract_keyword_line(line, mtgjson_keyword_names).is_some()
+        && extract_granted_keyword_list(line, mtgjson_keyword_names).is_some()
     {
         return false;
     }
@@ -3716,12 +3716,14 @@ pub(crate) fn parse_oracle_ir(
                 .filter(|s| !s.is_empty())
                 .collect();
             if parts.len() > 1 {
-                let all_keywords = parts
-                    .iter()
-                    .all(|part| extract_keyword_line(part, mtgjson_keyword_names).is_some());
+                let all_keywords = parts.iter().all(|part| {
+                    extract_granted_keyword_list(part, mtgjson_keyword_names).is_some()
+                });
                 if all_keywords {
                     for part in &parts {
-                        if let Some(extracted) = extract_keyword_line(part, mtgjson_keyword_names) {
+                        if let Some(extracted) =
+                            extract_granted_keyword_list(part, mtgjson_keyword_names)
+                        {
                             for __item in extracted {
                                 emitter.keyword_at(item_line, __item);
                             }
@@ -3769,7 +3771,7 @@ pub(crate) fn parse_oracle_ir(
 
         // CR 702.122 + CR 602.5b: Crew with a trailing "Activate only once each
         // turn." cadence sentence. Must run before the generic keyword-only
-        // extraction below — that path parses "Crew N" via `parse_keyword_from_oracle`
+        // extraction below — that path parses "Crew N" via `parse_granted_keyword_fragment`
         // and would consume the line, dropping the cadence sentence.
         if lower_starts_with(&lower, "crew ") {
             if let Some(crew_kw) = parse_crew_keyword(&lower) {
@@ -3784,7 +3786,7 @@ pub(crate) fn parse_oracle_ir(
         // not a keyword line. Don't let keyword extraction consume it.
         let is_ability_cost_static = is_ability_activate_cost_static(&lower);
         if !is_ability_cost_static {
-            if let Some(extracted) = extract_keyword_line(&line, mtgjson_keyword_names) {
+            if let Some(extracted) = extract_granted_keyword_list(&line, mtgjson_keyword_names) {
                 if let Some(cost) = parse_kicker_additional_cost_line(&line, &lower) {
                     merge_kicker_additional_cost(&mut result.additional_cost, cost);
                     additional_cost_line.get_or_insert(item_line);
@@ -4668,7 +4670,7 @@ pub(crate) fn parse_oracle_ir(
         if lower_starts_with(&lower, "flashback") {
             if line.contains('\u{2014}') {
                 let lower_clean = lower.trim_end_matches('.').trim();
-                if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
+                if let Some(kw) = parse_granted_keyword_fragment(lower_clean) {
                     emitter.keyword_at(item_line, kw);
                     i += 1;
                     continue;
@@ -4677,7 +4679,7 @@ pub(crate) fn parse_oracle_ir(
                 split_flashback_trailing_self_spell_cost_reduction(&line, &lower)
             {
                 let flashback_lower = flashback_part.to_lowercase();
-                if let Some(kw) = parse_keyword_from_oracle(&flashback_lower) {
+                if let Some(kw) = parse_granted_keyword_fragment(&flashback_lower) {
                     emitter.keyword_at(item_line, kw);
                 }
                 if let Some(def) =
@@ -5087,7 +5089,7 @@ pub(crate) fn parse_oracle_ir(
         // Spells (instants/sorceries) with Suspend would otherwise be caught by
         // the is_spell branch and produce an Unimplemented effect.
         if lower_starts_with(&lower, "suspend ") {
-            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+            if let Some(kw) = parse_granted_keyword_fragment(&lower) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5097,7 +5099,7 @@ pub(crate) fn parse_oracle_ir(
         // Digital-only Specialize: "specialize {cost}" — MTGJSON may omit the keyword
         // when it appears as a standalone rules line; intercept before dispatch fallback.
         if lower_starts_with(&lower, "specialize ") {
-            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+            if let Some(kw) = parse_granted_keyword_fragment(&lower) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5109,7 +5111,7 @@ pub(crate) fn parse_oracle_ir(
         // is intercepted as a keyword, not parsed as an effect.
         // MTGJSON keywords array only says "Harmonize" (no cost), so we extract cost here.
         // Format: "Harmonize {cost} (reminder text)" — space-separated.
-        // Note: When MTGJSON provides "Harmonize" in keywords, extract_keyword_line at
+        // Note: When MTGJSON provides "Harmonize" in keywords, extract_granted_keyword_list at
         // priority 1b already handles this. This is a fallback for test/edge cases.
         if lower_starts_with(&lower, "harmonize ") {
             if let Some(harmonize_kw) = parse_harmonize_keyword(&line) {
@@ -5149,7 +5151,7 @@ pub(crate) fn parse_oracle_ir(
             if let Some(cost) = parse_kicker_additional_cost_line(&line, &lower) {
                 merge_kicker_additional_cost(&mut result.additional_cost, cost);
             }
-            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+            if let Some(kw) = parse_granted_keyword_fragment(&lower) {
                 emitter.keyword_at(item_line, kw);
             }
             i += 1;
@@ -5158,14 +5160,14 @@ pub(crate) fn parse_oracle_ir(
 
         // CR 702.27a: Buyback em-dash form — "Buyback—Sacrifice a land." (Constant
         // Mists) etc. MTGJSON omits the Buyback keyword when the cost is non-mana,
-        // so `extract_keyword_line` bails and the line would otherwise fall through
+        // so `extract_granted_keyword_list` bails and the line would otherwise fall through
         // to the spell-effect catch-all and produce `Unimplemented`. Intercept here
         // before the spell catch-all, mirroring the Flashback em-dash intercept above.
         // structural: not dispatch — em-dash char presence gates the cost sub-parser,
         // which uses nom combinators in `parse_buyback_cost` / `parse_oracle_cost`.
         if lower_starts_with(&lower, "buyback") && line.contains('\u{2014}') {
             let lower_clean = lower.trim_end_matches('.').trim();
-            if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
+            if let Some(kw) = parse_granted_keyword_fragment(lower_clean) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5181,7 +5183,7 @@ pub(crate) fn parse_oracle_ir(
             .is_ok()
         {
             let lower_clean = lower.trim_end_matches('.').trim();
-            if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
+            if let Some(kw) = parse_granted_keyword_fragment(lower_clean) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5200,7 +5202,7 @@ pub(crate) fn parse_oracle_ir(
             // lives in `is_spell_resolution_instruction_line`; this covers the
             // case where the keyword-cost line is its own main-loop iteration.
             if is_keyword_cost_line(&lower) {
-                if let Some(kw) = parse_keyword_from_oracle(&lower) {
+                if let Some(kw) = parse_granted_keyword_fragment(&lower) {
                     emitter.keyword_at(item_line, kw);
                     i += 1;
                     continue;
@@ -5510,7 +5512,7 @@ pub(crate) fn parse_oracle_ir(
 
         // CR 702.49d: Commander ninjutsu is not in MTGJSON keywords — extract explicitly.
         if lower_starts_with(&lower, "commander ninjutsu ") {
-            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+            if let Some(kw) = parse_granted_keyword_fragment(&lower) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5520,7 +5522,7 @@ pub(crate) fn parse_oracle_ir(
         // CR 702.138a: Escape is extracted by the generic keyword-cost guards —
         // the `is_spell` guard above (Priority 9) for instants/sorceries and the
         // `is_keyword_cost_line` guard below (Priority 13) for permanents — via the
-        // `escape—` branch registered in `parse_keyword_from_oracle`, alongside its
+        // `escape—` branch registered in `parse_granted_keyword_fragment`, alongside its
         // evoke/embalm/eternalize/escalate em-dash siblings. No dedicated intercept
         // is needed here.
 
@@ -5543,7 +5545,7 @@ pub(crate) fn parse_oracle_ir(
                 split_flashback_trailing_self_spell_cost_reduction(&line, &lower)
             {
                 let flashback_lower = flashback_part.to_lowercase();
-                if let Some(kw) = parse_keyword_from_oracle(&flashback_lower) {
+                if let Some(kw) = parse_granted_keyword_fragment(&flashback_lower) {
                     emitter.keyword_at(item_line, kw);
                 }
                 if let Some(def) =
@@ -5556,7 +5558,7 @@ pub(crate) fn parse_oracle_ir(
             }
         }
         if is_keyword_cost_line(&lower) {
-            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+            if let Some(kw) = parse_granted_keyword_fragment(&lower) {
                 emitter.keyword_at(item_line, kw);
             }
             i += 1;
@@ -5629,7 +5631,7 @@ pub(crate) fn parse_oracle_ir(
             // Try as keyword — the ability-word prefix ("Void Shields —") was
             // stripped, so the remainder may be a keyword line that Priority 1b
             // missed because it ran on the unprefixed original line.
-            if let Some(kw) = parse_keyword_from_oracle(&effect_lower) {
+            if let Some(kw) = parse_granted_keyword_fragment(&effect_lower) {
                 if !matches!(kw, Keyword::Unknown(_)) {
                     emitter.keyword_at(item_line, kw);
                     i += 1;

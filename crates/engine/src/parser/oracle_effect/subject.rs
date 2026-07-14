@@ -26,7 +26,7 @@ use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::statics::{ProhibitionScope, StaticMode};
 
-use super::super::oracle_keyword::parse_keyword_from_oracle;
+use super::super::oracle_keyword::parse_granted_keyword_fragment;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::duration::parse_duration;
 use super::super::oracle_nom::error::OracleResult;
@@ -3274,8 +3274,8 @@ fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Opti
     {
         let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
         let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
-        let first = parse_keyword_from_oracle(left.trim())?;
-        let second = parse_keyword_from_oracle(right.trim())?;
+        let first = parse_granted_keyword_fragment(left.trim())?;
+        let second = parse_granted_keyword_fragment(right.trim())?;
         return Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))));
     }
 
@@ -3303,7 +3303,7 @@ fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Opti
         nom_primitives::split_once_on(quality_text.trim(), " or from ").ok()?;
     // The halves are bare qualities (the "protection from " prefix is already
     // stripped), so map each with parse_protection_target — NOT
-    // parse_keyword_from_oracle, which expects the full "protection from …" form.
+    // parse_granted_keyword_fragment, which expects the full "protection from …" form.
     let first = Keyword::Protection(crate::types::keywords::parse_protection_target(left.trim()));
     let second = Keyword::Protection(crate::types::keywords::parse_protection_target(
         right.trim(),

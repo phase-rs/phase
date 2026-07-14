@@ -97,7 +97,7 @@ fn parse_graveyard_granted_keyword_phrase(
     if let Some((keyword, where_x)) = parse_keyword_with_where_x(keyword_text) {
         return normalize_graveyard_granted_keyword(keyword, where_x, kind);
     }
-    let keyword = super::oracle_keyword::parse_keyword_from_oracle(keyword_text.trim())?;
+    let keyword = super::oracle_keyword::parse_granted_keyword_fragment(keyword_text.trim())?;
     normalize_graveyard_granted_keyword(keyword, None, kind)
 }
 
@@ -200,7 +200,7 @@ pub(crate) fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option
     let (rest, keyword_text) = nom::bytes::complete::take_till::<_, _, VE<'_>>(|c| c == ',')
         .parse(input)
         .ok()?;
-    let keyword = super::oracle_keyword::parse_keyword_from_oracle(keyword_text.trim())?;
+    let keyword = super::oracle_keyword::parse_granted_keyword_fragment(keyword_text.trim())?;
     let rest = rest.trim();
     if rest.is_empty() {
         return Some((keyword, None));
@@ -283,7 +283,7 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     // the keyword text. Strip it structurally (period then suffix) BEFORE the
     // separator split so the keyword residue is "evoke {4}" rather than
     // "evoke {4} as you cast them" — `parse_keyword_with_where_x` takes up to the
-    // first comma as keyword_text, and `parse_keyword_from_oracle` would reject
+    // first comma as keyword_text, and `parse_granted_keyword_fragment` would reject
     // the trailing clause. Mirror the existing trailing-period handling.
     let trimmed_tp = tp.trim_end_matches('.');
     let trimmed_tp = trimmed_tp
@@ -1874,7 +1874,7 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
 
     // CR 702.6a: a standalone "Equip {N}" line is the equip activated ability —
     // detect it BEFORE keyword extraction. An MTGJSON keyword name can match the
-    // printed equip cost, so parse_keyword_from_oracle("equip {2}") would otherwise
+    // printed equip cost, so parse_granted_keyword_fragment("equip {2}") would otherwise
     // land an inert AddKeyword{Equip}; but equip is an activated ability that needs
     // its Effect::Attach body. Mirrors oracle.rs's "Pre-keyword activated ability"
     // ordering. `try_parse_equip` assumes its caller has already confirmed the
@@ -1891,7 +1891,7 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
 
     // CR 702: Quoted text that is a keyword (e.g. "Ward—Pay 2 life") should be
     // granted as AddKeyword, not wrapped in an AbilityDefinition.
-    if let Some(keyword) = super::oracle_keyword::parse_keyword_from_oracle(&lower) {
+    if let Some(keyword) = super::oracle_keyword::parse_granted_keyword_fragment(&lower) {
         return vec![ContinuousModification::AddKeyword { keyword }];
     }
 

@@ -64,7 +64,7 @@ fn clockspinning_parses_choose_counter_adjustment_with_zero_unimplemented() {
 #[test]
 fn escape_keyword_extracted_on_instants_and_sorceries() {
     // CR 702.138a: Escape is castable from graveyard regardless of card type.
-    // The em-dash alt-cost branch in `parse_keyword_from_oracle` must surface
+    // The em-dash alt-cost branch in `parse_granted_keyword_fragment` must surface
     // escape to BOTH generic keyword-cost guards (spell at Priority 9 and
     // permanent at Priority 13), so extraction is card-type-agnostic.
     let esc = "Escape\u{2014}{2}{U}{R}, Exile four other cards from your graveyard. \

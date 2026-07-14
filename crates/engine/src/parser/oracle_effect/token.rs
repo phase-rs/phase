@@ -1457,10 +1457,12 @@ pub(super) fn map_token_keyword(text: &str) -> Option<Keyword> {
     }
     match Keyword::from_str(trimmed) {
         Ok(Keyword::Unknown(_)) => {
-            super::super::oracle_keyword::parse_keyword_from_oracle(&trimmed.to_lowercase())
+            super::super::oracle_keyword::parse_granted_keyword_fragment(&trimmed.to_lowercase())
         }
         Ok(keyword) => Some(keyword),
-        Err(_) => super::super::oracle_keyword::parse_keyword_from_oracle(&trimmed.to_lowercase()),
+        Err(_) => {
+            super::super::oracle_keyword::parse_granted_keyword_fragment(&trimmed.to_lowercase())
+        }
     }
 }
 

@@ -1765,7 +1765,7 @@ pub(crate) fn map_keyword(text: &str) -> Option<Keyword> {
         Ok(Keyword::Unknown(_)) => {
             // Fall through to Oracle-format parser for parameterized keywords
             // like "protection from red" that use spaces instead of colons.
-            super::oracle_keyword::parse_keyword_from_oracle(word)
+            super::oracle_keyword::parse_granted_keyword_fragment(word)
         }
         Ok(kw) => Some(kw),
         Err(_) => None, // Infallible, but satisfy the compiler

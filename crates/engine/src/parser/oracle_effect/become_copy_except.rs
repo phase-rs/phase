@@ -76,7 +76,7 @@ use nom::combinator::{eof, opt, peek, value};
 use nom::sequence::preceded;
 use nom::Parser;
 
-use super::super::oracle_keyword::parse_keyword_from_oracle;
+use super::super::oracle_keyword::parse_granted_keyword_fragment;
 use super::super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, split_keyword_list};
@@ -236,7 +236,7 @@ fn parse_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModification>)
     let (kw_text, remainder) = split_at_body_boundary(rest);
     let mut modifications = Vec::new();
     for part in split_keyword_list(kw_text) {
-        if let Some(keyword) = parse_keyword_from_oracle(part.trim()) {
+        if let Some(keyword) = parse_granted_keyword_fragment(part.trim()) {
             modifications.push(ContinuousModification::AddKeyword { keyword });
         }
     }
@@ -1021,7 +1021,7 @@ fn parse_it_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModificatio
     let (kw_text, remainder) = split_at_body_boundary(rest);
     let mut modifications = Vec::new();
     for part in split_keyword_list(kw_text) {
-        if let Some(keyword) = parse_keyword_from_oracle(part.trim()) {
+        if let Some(keyword) = parse_granted_keyword_fragment(part.trim()) {
             modifications.push(ContinuousModification::AddKeyword { keyword });
         }
     }
@@ -1092,7 +1092,7 @@ fn parse_it_has_keywords_then_quoted_ability(
 
     let mut modifications = Vec::new();
     for part in split_keyword_list(keyword_text) {
-        if let Some(keyword) = parse_keyword_from_oracle(part.trim()) {
+        if let Some(keyword) = parse_granted_keyword_fragment(part.trim()) {
             modifications.push(ContinuousModification::AddKeyword { keyword });
         }
     }
@@ -1505,7 +1505,7 @@ mod tests {
     /// CR 707.9a: Copy effects can add abilities to copiable values.
     ///
     /// Flesh Duplicate's except-clause path must carry the count 3 through
-    /// `parse_keyword_from_oracle` into an `AddKeyword { Vanishing(3) }`, not
+    /// `parse_granted_keyword_fragment` into an `AddKeyword { Vanishing(3) }`, not
     /// lose it to the FromStr fallback (0).
     #[test]
     fn except_it_has_vanishing_with_trailing_condition_keeps_count() {

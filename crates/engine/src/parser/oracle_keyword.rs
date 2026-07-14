@@ -311,7 +311,7 @@ fn parse_kicker_cost_payload(input: &str) -> Option<AbilityCost> {
 /// Returns only keywords not already covered by MTGJSON names — these are typically
 /// parameterized keywords where MTGJSON lists the name (e.g. "Protection") but
 /// Oracle text has the full form (e.g. "Protection from multicolored").
-pub(crate) fn extract_keyword_line(
+pub(crate) fn extract_granted_keyword_list(
     line: &str,
     mtgjson_keyword_names: &[String],
 ) -> Option<Vec<Keyword>> {
@@ -392,7 +392,7 @@ pub(crate) fn extract_keyword_line(
                 // place printed multiplicity survives — emit one Keyword per occurrence
                 // so the runtime's per-instance trigger loop fires correctly. Synthesis
                 // reconciles the deduped MTGJSON copy against these.
-                if let Some(kw) = parse_keyword_from_oracle(&lower) {
+                if let Some(kw) = parse_granted_keyword_fragment(&lower) {
                     if kw.instances_function_separately() {
                         new_keywords.push(kw);
                     }
@@ -402,14 +402,14 @@ pub(crate) fn extract_keyword_line(
 
             // Prefix match: Oracle text has more detail (e.g. "protection from red").
             // Extract the full parameterized keyword.
-            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+            if let Some(kw) = parse_granted_keyword_fragment(&lower) {
                 new_keywords.push(kw);
                 continue;
             }
         }
 
         // Not an MTGJSON match — try parsing as any keyword (for keyword-only line validation)
-        if let Some(kw) = parse_keyword_from_oracle(&lower) {
+        if let Some(kw) = parse_granted_keyword_fragment(&lower) {
             if !matches!(kw, Keyword::Unknown(_)) {
                 // Keywords not in MTGJSON (e.g., firebending) must be extracted here.
                 // They also validate the line as a keyword line.
@@ -477,7 +477,7 @@ fn strip_activation_cost_dash(rest: &str) -> Option<&str> {
 
 fn parse_mtgjson_missing_standalone_keyword_line(line: &str) -> Option<Vec<Keyword>> {
     let lower = line.to_lowercase();
-    let keyword = parse_keyword_from_oracle(&lower)?;
+    let keyword = parse_granted_keyword_fragment(&lower)?;
     match keyword {
         Keyword::ForMirrodin => Some(vec![keyword]),
         // CR 702.89a: Umbra armor (printed as "umbra armor"/"totem armor") is a
@@ -1129,7 +1129,7 @@ pub(crate) fn classify_cant_be_targeted(predicate_lower: &str) -> Option<CantBeT
 /// Oracle text uses space-separated format: "protection from red", "ward {2}",
 /// "flashback {2}{U}". Converts to the colon format that `FromStr` expects,
 /// handling the "from" preposition used by protection keywords.
-pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
+pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
     use crate::types::keywords::PartnerType;
 
     // CR 702.124: Partner variant keywords — must come BEFORE generic "partner" match.
@@ -2215,9 +2215,9 @@ mod tests {
     use crate::types::mana::ManaCost;
 
     #[test]
-    fn parse_keyword_from_oracle_cascade() {
+    fn parse_granted_keyword_fragment_cascade() {
         // CR 702.85a: Cascade is a no-parameter keyword.
-        let kw = parse_keyword_from_oracle("cascade").unwrap();
+        let kw = parse_granted_keyword_fragment("cascade").unwrap();
         assert_eq!(kw, Keyword::Cascade);
     }
 
@@ -2226,40 +2226,40 @@ mod tests {
     /// skip the leading qualifier word so the count is 3, not the `FromStr`
     /// `unwrap_or(1)` fallback (which produced the reported Devour 1).
     #[test]
-    fn parse_keyword_from_oracle_devour_quality_qualifier_count() {
+    fn parse_granted_keyword_fragment_devour_quality_qualifier_count() {
         assert_eq!(
-            parse_keyword_from_oracle("devour land 3"),
+            parse_granted_keyword_fragment("devour land 3"),
             Some(Keyword::Devour(3))
         );
         // CR 702.82a: the plain "Devour N" form is unaffected.
         assert_eq!(
-            parse_keyword_from_oracle("devour 3"),
+            parse_granted_keyword_fragment("devour 3"),
             Some(Keyword::Devour(3))
         );
         // Regression: a sibling numeric-count keyword still extracts its leading
         // count — the qualifier-skip only fires on the parse_number-fails branch.
         assert_eq!(
-            parse_keyword_from_oracle("vanishing 3"),
+            parse_granted_keyword_fragment("vanishing 3"),
             Some(Keyword::Vanishing(3))
         );
     }
 
     /// CR 702.24: a GRANTED cumulative upkeep (the quoted-ability grant path
-    /// routes through `parse_keyword_from_oracle`) must parse with its cost, like
+    /// routes through `parse_granted_keyword_fragment`) must parse with its cost, like
     /// the top-level keyword-line path — Mana Chains / Dreams of the Dead (mana),
     /// Decomposition (pay-life em-dash form).
     #[test]
-    fn parse_keyword_from_oracle_granted_cumulative_upkeep() {
+    fn parse_granted_keyword_fragment_granted_cumulative_upkeep() {
         assert!(matches!(
-            parse_keyword_from_oracle("cumulative upkeep {1}"),
+            parse_granted_keyword_fragment("cumulative upkeep {1}"),
             Some(Keyword::CumulativeUpkeep(AbilityCost::Mana { .. }))
         ));
         assert!(matches!(
-            parse_keyword_from_oracle("cumulative upkeep {2}"),
+            parse_granted_keyword_fragment("cumulative upkeep {2}"),
             Some(Keyword::CumulativeUpkeep(AbilityCost::Mana { .. }))
         ));
         assert!(matches!(
-            parse_keyword_from_oracle("cumulative upkeep\u{2014}pay 1 life"),
+            parse_granted_keyword_fragment("cumulative upkeep\u{2014}pay 1 life"),
             Some(Keyword::CumulativeUpkeep(AbilityCost::PayLife { .. }))
         ));
     }
@@ -2267,17 +2267,17 @@ mod tests {
     /// CR 702.85c: a spell printing cascade as repeated bare words has one instance
     /// per word; each triggers separately. MTGJSON dedupes the keywords array to a
     /// single "Cascade", so the Oracle line is the sole source of printed
-    /// multiplicity — extract_keyword_line must recover every occurrence.
+    /// multiplicity — extract_granted_keyword_list must recover every occurrence.
     #[test]
-    fn extract_keyword_line_recovers_repeated_cascade_instances() {
+    fn extract_granted_keyword_list_recovers_repeated_cascade_instances() {
         let mtgjson_kws = vec!["cascade".to_string()];
-        let two = extract_keyword_line("Cascade, cascade", &mtgjson_kws)
+        let two = extract_granted_keyword_list("Cascade, cascade", &mtgjson_kws)
             .expect("repeated cascade line is a keyword line");
         assert_eq!(
             two.iter().filter(|k| matches!(k, Keyword::Cascade)).count(),
             2
         );
-        let four = extract_keyword_line("Cascade, cascade, cascade, cascade", &mtgjson_kws)
+        let four = extract_granted_keyword_list("Cascade, cascade, cascade, cascade", &mtgjson_kws)
             .expect("repeated cascade line is a keyword line");
         assert_eq!(
             four.iter()
@@ -2290,9 +2290,9 @@ mod tests {
     /// CR 702.85c regression guard: a single printed cascade (Bloodbraid Elf) must
     /// still net exactly one instance — recovery must not over-count.
     #[test]
-    fn extract_keyword_line_single_cascade_yields_one_instance() {
+    fn extract_granted_keyword_list_single_cascade_yields_one_instance() {
         let mtgjson_kws = vec!["cascade".to_string()];
-        let one = extract_keyword_line("Cascade", &mtgjson_kws)
+        let one = extract_granted_keyword_list("Cascade", &mtgjson_kws)
             .expect("single cascade line is a keyword line");
         assert_eq!(
             one.iter().filter(|k| matches!(k, Keyword::Cascade)).count(),
@@ -2303,12 +2303,12 @@ mod tests {
     /// CR 702.116b: a creature printing myriad as repeated bare words has one
     /// instance per word; each triggers separately. MTGJSON dedupes the keywords
     /// array to a single "Myriad", so the Oracle line is the sole source of printed
-    /// multiplicity — extract_keyword_line must recover every occurrence. Scurry of
+    /// multiplicity — extract_granted_keyword_list must recover every occurrence. Scurry of
     /// Squirrels ("Myriad, myriad") is the real card this fixes.
     #[test]
-    fn extract_keyword_line_recovers_repeated_myriad_instances() {
+    fn extract_granted_keyword_list_recovers_repeated_myriad_instances() {
         let mtgjson_kws = vec!["myriad".to_string()];
-        let two = extract_keyword_line("Myriad, myriad", &mtgjson_kws)
+        let two = extract_granted_keyword_list("Myriad, myriad", &mtgjson_kws)
             .expect("repeated myriad line is a keyword line");
         assert_eq!(
             two.iter().filter(|k| matches!(k, Keyword::Myriad)).count(),
@@ -2319,9 +2319,9 @@ mod tests {
     /// CR 702.116b regression guard: a single printed myriad must net exactly one
     /// instance — recovery must not over-count.
     #[test]
-    fn extract_keyword_line_single_myriad_yields_one_instance() {
+    fn extract_granted_keyword_list_single_myriad_yields_one_instance() {
         let mtgjson_kws = vec!["myriad".to_string()];
-        let one = extract_keyword_line("Myriad", &mtgjson_kws)
+        let one = extract_granted_keyword_list("Myriad", &mtgjson_kws)
             .expect("single myriad line is a keyword line");
         assert_eq!(
             one.iter().filter(|k| matches!(k, Keyword::Myriad)).count(),
@@ -2338,9 +2338,9 @@ mod tests {
     /// the `{cost} —` keyword-line parser does not yet strip (see the deferred-gap
     /// pin below). When a clean printed instance lands, this test already covers it.
     #[test]
-    fn extract_keyword_line_recovers_repeated_exalted_instances() {
+    fn extract_granted_keyword_list_recovers_repeated_exalted_instances() {
         let mtgjson_kws = vec!["exalted".to_string()];
-        let two = extract_keyword_line("Exalted, exalted", &mtgjson_kws)
+        let two = extract_granted_keyword_list("Exalted, exalted", &mtgjson_kws)
             .expect("repeated exalted line is a keyword line");
         assert_eq!(
             two.iter().filter(|k| matches!(k, Keyword::Exalted)).count(),
@@ -2350,11 +2350,11 @@ mod tests {
 
     /// CR 113.2c / CR 702.83a: Urza's Dark Cannonball prints a keyword line behind
     /// an activation-cost prefix. The prefix is not part of the keyword text, so
-    /// `extract_keyword_line` must still recover both Exalted instances.
+    /// `extract_granted_keyword_list` must still recover both Exalted instances.
     #[test]
-    fn extract_keyword_line_cost_prefixed_exalted_recovers_instances() {
+    fn extract_granted_keyword_list_cost_prefixed_exalted_recovers_instances() {
         let mtgjson_kws = vec!["exalted".to_string()];
-        let result = extract_keyword_line("{TK}{TK} — Exalted, exalted", &mtgjson_kws)
+        let result = extract_granted_keyword_list("{TK}{TK} — Exalted, exalted", &mtgjson_kws)
             .expect("cost-prefixed repeated exalted line is a keyword line");
         assert_eq!(
             result
@@ -2369,9 +2369,9 @@ mod tests {
     /// dedupes the keywords array to one "Provoke", so keyword-line extraction
     /// must recover every printed occurrence before synthesis installs triggers.
     #[test]
-    fn extract_keyword_line_recovers_repeated_provoke_instances() {
+    fn extract_granted_keyword_list_recovers_repeated_provoke_instances() {
         let mtgjson_kws = vec!["provoke".to_string()];
-        let result = extract_keyword_line("Provoke, provoke", &mtgjson_kws)
+        let result = extract_granted_keyword_list("Provoke, provoke", &mtgjson_kws)
             .expect("repeated provoke line is a keyword line");
         assert_eq!(
             result
@@ -2385,18 +2385,18 @@ mod tests {
     /// CR 702.60a: Ripple N triggers when the spell is cast. N is captured into
     /// the parameterized `Keyword::Ripple(u32)`; trailing text is rejected.
     #[test]
-    fn parse_keyword_from_oracle_ripple() {
+    fn parse_granted_keyword_fragment_ripple() {
         assert_eq!(
-            parse_keyword_from_oracle("ripple 4"),
+            parse_granted_keyword_fragment("ripple 4"),
             Some(Keyword::Ripple(4)),
             "ripple 4 (Thrumming Stone grant)"
         );
         assert_eq!(
-            parse_keyword_from_oracle("ripple 2"),
+            parse_granted_keyword_fragment("ripple 2"),
             Some(Keyword::Ripple(2)),
             "ripple 2 — N is captured"
         );
-        assert_eq!(parse_keyword_from_oracle("ripple 4 extra"), None);
+        assert_eq!(parse_granted_keyword_fragment("ripple 4 extra"), None);
     }
 
     /// CR 702.63a: Vanishing N.
@@ -2408,16 +2408,16 @@ mod tests {
     /// instead of feeding the whole remainder to FromStr and falling back. This
     /// tests the building-block class, not a single card.
     #[test]
-    fn parse_keyword_from_oracle_numeric_count_with_trailing_text() {
+    fn parse_granted_keyword_fragment_numeric_count_with_trailing_text() {
         // Regression: Flesh Duplicate's conditional except-clause grant.
         assert_eq!(
-            parse_keyword_from_oracle("vanishing 3 if that creature doesn't have vanishing"),
+            parse_granted_keyword_fragment("vanishing 3 if that creature doesn't have vanishing"),
             Some(Keyword::Vanishing(3)),
             "trailing 'if ...' clause must not erase the count"
         );
         // No-trailing-text form is unchanged.
         assert_eq!(
-            parse_keyword_from_oracle("vanishing 3"),
+            parse_granted_keyword_fragment("vanishing 3"),
             Some(Keyword::Vanishing(3))
         );
         // CR 702.63b: a single-word bare keyword has no space, so the normalizer's
@@ -2425,23 +2425,23 @@ mod tests {
         // (bare vanishing reaches the engine via the MTGJSON colon-form path, not
         // this Oracle-grant normalizer). This is unchanged pre-existing behavior;
         // the fix must not start spuriously accepting the space-less form.
-        assert_eq!(parse_keyword_from_oracle("vanishing"), None);
+        assert_eq!(parse_granted_keyword_fragment("vanishing"), None);
         // Fading shares the normalizer with no dedicated arm — proves the class.
         assert_eq!(
-            parse_keyword_from_oracle("fading 2 if it's an artifact"),
+            parse_granted_keyword_fragment("fading 2 if it's an artifact"),
             Some(Keyword::Fading(2))
         );
         // Renown's dedicated `all_consuming` arm rejects trailing text, so the
         // trailing-text form falls through to the fixed normalizer.
         assert_eq!(
-            parse_keyword_from_oracle("renown 2 if it's your turn"),
+            parse_granted_keyword_fragment("renown 2 if it's your turn"),
             Some(Keyword::Renown(2))
         );
         // CR 702.122a: Crew N is also a bare-integer count keyword. A conditional
         // grant must keep the leading total-power threshold and drop the trailing
         // clause, exactly like the rest of the class.
         assert_eq!(
-            parse_keyword_from_oracle("crew 2 if it's an artifact"),
+            parse_granted_keyword_fragment("crew 2 if it's an artifact"),
             Some(Keyword::Crew {
                 power: 2,
                 once_per_turn: None,
@@ -2450,26 +2450,26 @@ mod tests {
         // Non-numeric keyword must NOT be hijacked by the numeric branch: the
         // "from " preposition strip still produces a protection target.
         assert!(matches!(
-            parse_keyword_from_oracle("protection from red"),
+            parse_granted_keyword_fragment("protection from red"),
             Some(Keyword::Protection(_))
         ));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_bands_with_other_quality() {
+    fn parse_granted_keyword_fragment_bands_with_other_quality() {
         assert_eq!(
-            parse_keyword_from_oracle("bands with other wolves"),
+            parse_granted_keyword_fragment("bands with other wolves"),
             Some(Keyword::BandsWithOther("Wolf".to_string()))
         );
         assert_eq!(
-            parse_keyword_from_oracle("bands with other legends"),
+            parse_granted_keyword_fragment("bands with other legends"),
             Some(Keyword::BandsWithOther("Legend".to_string()))
         );
     }
 
     #[test]
-    fn extract_keyword_line_bands_with_other_quality() {
-        let result = extract_keyword_line("Bands with other Wolves", &[])
+    fn extract_granted_keyword_list_bands_with_other_quality() {
+        let result = extract_granted_keyword_list("Bands with other Wolves", &[])
             .expect("bands with other should parse from Oracle keyword line");
         assert_eq!(result, vec![Keyword::BandsWithOther("Wolf".to_string())]);
     }
@@ -2479,9 +2479,9 @@ mod tests {
     /// no arm matched, so Keyword::Offering was never produced and the cast path
     /// was unreachable. Quality is canonicalized to subtype casing.
     #[test]
-    fn parse_keyword_from_oracle_offering() {
+    fn parse_granted_keyword_fragment_offering() {
         assert_eq!(
-            parse_keyword_from_oracle(
+            parse_granted_keyword_fragment(
                 "goblin offering (you may cast this spell any time you could cast an instant \
                  by sacrificing a goblin and paying the difference in mana costs.)"
             ),
@@ -2489,19 +2489,22 @@ mod tests {
             "Patron of the Akki — Goblin offering"
         );
         assert_eq!(
-            parse_keyword_from_oracle("artifact offering (...)"),
+            parse_granted_keyword_fragment("artifact offering (...)"),
             Some(Keyword::Offering("Artifact".to_string())),
             "Blast-Furnace Hellkite — Artifact offering"
         );
         // Not a keyword line: a prose sentence merely ending in "offering".
-        assert_eq!(parse_keyword_from_oracle("make a generous offering"), None);
+        assert_eq!(
+            parse_granted_keyword_fragment("make a generous offering"),
+            None
+        );
     }
 
     #[test]
-    fn extract_keyword_line_ripple_preserves_oracle_depth() {
+    fn extract_granted_keyword_list_ripple_preserves_oracle_depth() {
         let mtgjson_kws = vec!["ripple".to_string()];
 
-        let result = extract_keyword_line("Ripple 4", &mtgjson_kws)
+        let result = extract_granted_keyword_list("Ripple 4", &mtgjson_kws)
             .expect("Ripple N line should be recognized as a keyword line");
 
         assert_eq!(
@@ -2547,64 +2550,64 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_toxic() {
+    fn parse_granted_keyword_fragment_toxic() {
         // CR 702.164: Toxic N — parameterized keyword from Oracle text
-        let kw = parse_keyword_from_oracle("toxic 2").unwrap();
+        let kw = parse_granted_keyword_fragment("toxic 2").unwrap();
         assert_eq!(kw, Keyword::Toxic(2));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_renown() {
+    fn parse_granted_keyword_fragment_renown() {
         // CR 702.112a: Renown N — parameterized keyword from Oracle text.
-        let kw = parse_keyword_from_oracle("renown 2").unwrap();
+        let kw = parse_granted_keyword_fragment("renown 2").unwrap();
         assert_eq!(kw, Keyword::Renown(2));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_frenzy() {
+    fn parse_granted_keyword_fragment_frenzy() {
         // CR 702.68a: Frenzy N — parameterized keyword from Oracle/grant text.
-        let kw = parse_keyword_from_oracle("frenzy 2").unwrap();
+        let kw = parse_granted_keyword_fragment("frenzy 2").unwrap();
         assert_eq!(kw, Keyword::Frenzy(2));
         // CR 702.68a: the Frenzy Sliver grant line "frenzy 1" must resolve to
         // Frenzy(1), not fall to Unknown/Unimplemented.
-        let kw1 = parse_keyword_from_oracle("frenzy 1").unwrap();
+        let kw1 = parse_granted_keyword_fragment("frenzy 1").unwrap();
         assert_eq!(kw1, Keyword::Frenzy(1));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_saddle() {
+    fn parse_granted_keyword_fragment_saddle() {
         // CR 702.171a: Saddle N
-        let kw = parse_keyword_from_oracle("saddle 3").unwrap();
+        let kw = parse_granted_keyword_fragment("saddle 3").unwrap();
         assert_eq!(kw, Keyword::Saddle(3));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_soulshift() {
+    fn parse_granted_keyword_fragment_soulshift() {
         // CR 702.46: Soulshift N
-        let kw = parse_keyword_from_oracle("soulshift 7").unwrap();
+        let kw = parse_granted_keyword_fragment("soulshift 7").unwrap();
         assert_eq!(kw, Keyword::Soulshift(7));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_backup() {
+    fn parse_granted_keyword_fragment_backup() {
         // CR 702.165: Backup N
-        let kw = parse_keyword_from_oracle("backup 1").unwrap();
+        let kw = parse_granted_keyword_fragment("backup 1").unwrap();
         assert_eq!(kw, Keyword::Backup(1));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_squad() {
+    fn parse_granted_keyword_fragment_squad() {
         // CR 702.157: Squad {cost}
-        let kw = parse_keyword_from_oracle("squad {2}").unwrap();
+        let kw = parse_granted_keyword_fragment("squad {2}").unwrap();
         assert!(matches!(kw, Keyword::Squad(ManaCost::Cost { .. })));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_more_than_meets_the_eye() {
+    fn parse_granted_keyword_fragment_more_than_meets_the_eye() {
         use crate::types::mana::ManaCostShard;
         // CR 702.162a: "more than meets the eye {cost}" — the alternative cost
         // is supplied by the Oracle line. Colored cost case (Flamewar: {B}{R}).
-        let kw = parse_keyword_from_oracle("more than meets the eye {b}{r}").unwrap();
+        let kw = parse_granted_keyword_fragment("more than meets the eye {b}{r}").unwrap();
         match kw {
             Keyword::MoreThanMeetsTheEye(ManaCost::Cost { shards, generic }) => {
                 assert_eq!(generic, 0);
@@ -2617,7 +2620,7 @@ mod tests {
 
         // Class-general: a generic + single color cost parses the same way,
         // proving the arm is not specialized to one card's cost.
-        let kw2 = parse_keyword_from_oracle("more than meets the eye {2}{u}").unwrap();
+        let kw2 = parse_granted_keyword_fragment("more than meets the eye {2}{u}").unwrap();
         match kw2 {
             Keyword::MoreThanMeetsTheEye(ManaCost::Cost { shards, generic }) => {
                 assert_eq!(generic, 2);
@@ -2629,33 +2632,33 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_typecycling() {
+    fn parse_granted_keyword_fragment_typecycling() {
         // CR 702.29: Typecycling — "plainscycling {2}" is typecycling, not regular cycling
-        let kw = parse_keyword_from_oracle("plainscycling {2}").unwrap();
+        let kw = parse_granted_keyword_fragment("plainscycling {2}").unwrap();
         assert!(matches!(kw, Keyword::Typecycling { .. }));
         if let Keyword::Typecycling { subtype, .. } = &kw {
             assert_eq!(subtype, "Plains");
         }
 
         // "forestcycling {1}{G}" — different subtype
-        let kw2 = parse_keyword_from_oracle("forestcycling {1}{G}").unwrap();
+        let kw2 = parse_granted_keyword_fragment("forestcycling {1}{G}").unwrap();
         if let Keyword::Typecycling { subtype, .. } = &kw2 {
             assert_eq!(subtype, "Forest");
         }
     }
 
     #[test]
-    fn parse_keyword_from_oracle_regular_cycling_not_typecycling() {
+    fn parse_granted_keyword_fragment_regular_cycling_not_typecycling() {
         // "cycling {2}" must remain regular Cycling, not Typecycling
-        let kw = parse_keyword_from_oracle("cycling {2}").unwrap();
+        let kw = parse_granted_keyword_fragment("cycling {2}").unwrap();
         assert!(matches!(kw, Keyword::Cycling(CyclingCost::Mana(_))));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_cycling_em_dash_pay_life() {
+    fn parse_granted_keyword_fragment_cycling_em_dash_pay_life() {
         // CR 702.29a: Street Wraith — "cycling—pay 2 life" must yield
         // Keyword::Cycling(CyclingCost::NonMana(PayLife { life: 2 })).
-        let kw = parse_keyword_from_oracle("cycling\u{2014}pay 2 life").unwrap();
+        let kw = parse_granted_keyword_fragment("cycling\u{2014}pay 2 life").unwrap();
         let Keyword::Cycling(CyclingCost::NonMana(ac)) = kw else {
             panic!("expected Cycling NonMana variant, got {kw:?}");
         };
@@ -2666,28 +2669,28 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_cycling_mana_backward_compat() {
+    fn parse_granted_keyword_fragment_cycling_mana_backward_compat() {
         // Regression: plain mana cycling still dispatches through the direct
         // `FromStr` path and yields CyclingCost::Mana (unchanged behaviour).
-        let kw = parse_keyword_from_oracle("cycling {2}").unwrap();
+        let kw = parse_granted_keyword_fragment("cycling {2}").unwrap();
         let Keyword::Cycling(CyclingCost::Mana(_)) = kw else {
             panic!("expected Cycling Mana variant, got {kw:?}");
         };
     }
 
     #[test]
-    fn parse_keyword_from_oracle_protection_from_color() {
+    fn parse_granted_keyword_fragment_protection_from_color() {
         use crate::types::keywords::ProtectionTarget;
         use crate::types::mana::ManaColor;
 
         // CR 702.16: "protection from red" parses to Protection(Color(Red))
-        let kw = parse_keyword_from_oracle("protection from red").unwrap();
+        let kw = parse_granted_keyword_fragment("protection from red").unwrap();
         assert_eq!(
             kw,
             Keyword::Protection(ProtectionTarget::Color(ManaColor::Red))
         );
 
-        let kw = parse_keyword_from_oracle("protection from blue").unwrap();
+        let kw = parse_granted_keyword_fragment("protection from blue").unwrap();
         assert_eq!(
             kw,
             Keyword::Protection(ProtectionTarget::Color(ManaColor::Blue))
@@ -2695,23 +2698,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_protection_from_chosen_color() {
+    fn parse_granted_keyword_fragment_protection_from_chosen_color() {
         use crate::types::keywords::ProtectionTarget;
 
         // CR 702.16: "protection from the chosen color" parses to Protection(ChosenColor)
-        let kw = parse_keyword_from_oracle("protection from the chosen color").unwrap();
+        let kw = parse_granted_keyword_fragment("protection from the chosen color").unwrap();
         assert_eq!(kw, Keyword::Protection(ProtectionTarget::ChosenColor));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_protection_from_each_of_your_opponents() {
+    fn parse_granted_keyword_fragment_protection_from_each_of_your_opponents() {
         use crate::types::ability::ControllerRef;
         use crate::types::keywords::ProtectionTarget;
 
         // Issue #767 / CR 702.16k: Figure of Fable's Avatar form. Previously
         // fell through to ProtectionTarget::CardType("each of your opponents"),
         // which never matched any source at runtime.
-        let kw = parse_keyword_from_oracle("protection from each of your opponents").unwrap();
+        let kw = parse_granted_keyword_fragment("protection from each of your opponents").unwrap();
         assert_eq!(
             kw,
             Keyword::Protection(ProtectionTarget::FromPlayer(ControllerRef::Opponent))
@@ -2719,30 +2722,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_gift_a_card() {
+    fn parse_granted_keyword_fragment_gift_a_card() {
         use crate::types::keywords::GiftKind;
-        let kw = parse_keyword_from_oracle("gift a card").unwrap();
+        let kw = parse_granted_keyword_fragment("gift a card").unwrap();
         assert_eq!(kw, Keyword::Gift(GiftKind::Card));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_gift_a_treasure() {
+    fn parse_granted_keyword_fragment_gift_a_treasure() {
         use crate::types::keywords::GiftKind;
-        let kw = parse_keyword_from_oracle("gift a treasure").unwrap();
+        let kw = parse_granted_keyword_fragment("gift a treasure").unwrap();
         assert_eq!(kw, Keyword::Gift(GiftKind::Treasure));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_gift_a_food() {
+    fn parse_granted_keyword_fragment_gift_a_food() {
         use crate::types::keywords::GiftKind;
-        let kw = parse_keyword_from_oracle("gift a food").unwrap();
+        let kw = parse_granted_keyword_fragment("gift a food").unwrap();
         assert_eq!(kw, Keyword::Gift(GiftKind::Food));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_gift_a_tapped_fish() {
+    fn parse_granted_keyword_fragment_gift_a_tapped_fish() {
         use crate::types::keywords::GiftKind;
-        let kw = parse_keyword_from_oracle("gift a tapped fish").unwrap();
+        let kw = parse_granted_keyword_fragment("gift a tapped fish").unwrap();
         assert_eq!(kw, Keyword::Gift(GiftKind::TappedFish));
     }
 
@@ -2956,7 +2959,7 @@ mod tests {
     #[test]
     fn expand_protection_baneslayer_pattern() {
         // CR 702.16: "protection from Demons and from Dragons" → two Protection keywords
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "Flying, first strike, lifelink, protection from Demons and from Dragons",
             &[
                 "flying".to_string(),
@@ -2982,7 +2985,7 @@ mod tests {
         use crate::types::mana::ManaColor;
 
         // CR 702.16: "protection from black and from red" → two color protections
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "Flying, protection from black and from red",
             &["flying".to_string(), "protection".to_string()],
         )
@@ -3002,7 +3005,7 @@ mod tests {
     #[test]
     fn expand_protection_three_comma_continuation() {
         // CR 702.16: comma + Oxford comma continuation
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "First strike, protection from Vampires, from Werewolves, and from Zombies",
             &["first strike".to_string(), "protection".to_string()],
         )
@@ -3022,7 +3025,7 @@ mod tests {
         use crate::types::keywords::ProtectionTarget;
 
         // Emrakul pattern: qualifier text preserved after split
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "protection from spells and from permanents that were cast this turn",
             &["protection".to_string()],
         )
@@ -3046,7 +3049,7 @@ mod tests {
         // CR 702.16j: "protection from everything" → typed `Everything` variant
         // (no " and from " present, no expansion).
         let keywords =
-            extract_keyword_line("protection from everything", &["protection".to_string()])
+            extract_granted_keyword_list("protection from everything", &["protection".to_string()])
                 .unwrap();
         assert_eq!(keywords.len(), 1);
         assert_eq!(
@@ -3061,7 +3064,7 @@ mod tests {
         use crate::types::mana::ManaColor;
 
         // Single protection — expansion is a no-op
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "Flying, protection from red",
             &["flying".to_string(), "protection".to_string()],
         )
@@ -3080,7 +3083,7 @@ mod tests {
     #[test]
     fn expand_protection_non_protection_line_unchanged() {
         // Non-protection keyword line — all matched by MTGJSON, no extracted keywords
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "Flying, first strike, lifelink",
             &[
                 "flying".to_string(),
@@ -3101,7 +3104,7 @@ mod tests {
         use crate::types::mana::ManaColor;
 
         // Three-way inline split: "protection from red and from blue and from green"
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "Flying, protection from red and from blue and from green",
             &["flying".to_string(), "protection".to_string()],
         )
@@ -3131,7 +3134,7 @@ mod tests {
         // CR 702.16 + CR 105.2: "protection from each color" is shorthand for
         // protection from white, blue, black, red, and green simultaneously
         // (Akroma's Will, Iridescent Angel, Spectra Ward, etc.).
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "Flying, protection from each color",
             &["flying".to_string(), "protection".to_string()],
         )
@@ -3171,7 +3174,7 @@ mod tests {
         // shorthand as "from each color" (Pristine Angel pattern, simplified
         // form ignoring the artifact clause).
         let keywords =
-            extract_keyword_line("protection from all colors", &["protection".to_string()])
+            extract_granted_keyword_list("protection from all colors", &["protection".to_string()])
                 .unwrap();
         let prots: Vec<_> = keywords
             .iter()
@@ -3200,7 +3203,8 @@ mod tests {
         // CR 702.11d + CR 105.2: "hexproof from each color" — Breaker of
         // Creation. Mirrors the protection-from-each-color expansion.
         let keywords =
-            extract_keyword_line("hexproof from each color", &["hexproof".to_string()]).unwrap();
+            extract_granted_keyword_list("hexproof from each color", &["hexproof".to_string()])
+                .unwrap();
         let hf: Vec<_> = keywords
             .iter()
             .filter_map(|k| match k {
@@ -3263,11 +3267,11 @@ mod tests {
         super::push_quality_entry(&mut expanded, "protection from", "each color.");
         assert_eq!(expanded.len(), 5);
 
-        // End-to-end through extract_keyword_line is the more conservative
+        // End-to-end through extract_granted_keyword_list is the more conservative
         // check — current callers do strip the period, so we don't assert
         // on that path. The helper-level guard is what we're locking in.
         let keywords =
-            extract_keyword_line("protection from each color", &["protection".to_string()])
+            extract_granted_keyword_list("protection from each color", &["protection".to_string()])
                 .unwrap();
         let prots = keywords
             .iter()
@@ -3286,7 +3290,7 @@ mod tests {
         // qualifiers — the "each color" prefix here is NOT the bare 5-WUBRG
         // shorthand. Expansion must leave them untouched so a future dynamic
         // handler can interpret them.
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "protection from each color that's not in your commander's color identity",
             &["protection".to_string()],
         )
@@ -3308,19 +3312,19 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_transmute() {
+    fn extract_granted_keyword_list_transmute() {
         // CR 702.53a: Transmute {cost} — single-keyword line with parameterized cost
         let mtgjson_kws = vec!["transmute".to_string()];
 
-        // Verify parse_keyword_from_oracle works directly
-        let direct = parse_keyword_from_oracle("transmute {1}{b}{b}");
+        // Verify parse_granted_keyword_fragment works directly
+        let direct = parse_granted_keyword_fragment("transmute {1}{b}{b}");
         assert!(
             direct.is_some(),
-            "parse_keyword_from_oracle should handle 'transmute {{1}}{{b}}{{b}}'"
+            "parse_granted_keyword_fragment should handle 'transmute {{1}}{{b}}{{b}}'"
         );
         assert!(matches!(direct.unwrap(), Keyword::Transmute(_)));
 
-        let result = extract_keyword_line("Transmute {1}{B}{B}", &mtgjson_kws);
+        let result = extract_granted_keyword_list("Transmute {1}{B}{B}", &mtgjson_kws);
         assert!(result.is_some(), "Should recognize as keyword line");
         let keywords = result.unwrap();
         assert_eq!(keywords.len(), 1);
@@ -3328,21 +3332,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_umbra_and_totem_armor() {
+    fn parse_granted_keyword_fragment_umbra_and_totem_armor() {
         // CR 702.89a/b: both the current "umbra armor" and the obsolete
         // "totem armor" spelling map to Keyword::TotemArmor.
         assert_eq!(
-            parse_keyword_from_oracle("umbra armor"),
+            parse_granted_keyword_fragment("umbra armor"),
             Some(Keyword::TotemArmor)
         );
         assert_eq!(
-            parse_keyword_from_oracle("totem armor"),
+            parse_granted_keyword_fragment("totem armor"),
             Some(Keyword::TotemArmor)
         );
     }
 
     #[test]
-    fn extract_keyword_line_umbra_armor_reachable_without_mtgjson_keyword() {
+    fn extract_granted_keyword_list_umbra_armor_reachable_without_mtgjson_keyword() {
         // CR 702.89a: the Umbra cycle's "Umbra armor (…)" line carries reminder
         // text and is NOT surfaced in MTGJSON's `keywords` array, so it must be
         // recovered from the Oracle line. Regression guard that the runtime
@@ -3351,7 +3355,7 @@ mod tests {
             "Umbra armor (If enchanted permanent would be destroyed, instead remove all damage marked on it and destroy this Aura.)",
             "Totem armor (If enchanted creature would be destroyed, instead remove all damage marked on it and destroy this Aura.)",
         ] {
-            let result = extract_keyword_line(line, &[]);
+            let result = extract_granted_keyword_list(line, &[]);
             assert_eq!(
                 result,
                 Some(vec![Keyword::TotemArmor]),
@@ -3361,10 +3365,10 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_splice() {
+    fn extract_granted_keyword_list_splice() {
         // CR 702.47a: Splice onto [type] {cost}
         let mtgjson_kws = vec!["splice".to_string()];
-        let result = extract_keyword_line("Splice onto Arcane {1}{W}", &mtgjson_kws);
+        let result = extract_granted_keyword_list("Splice onto Arcane {1}{W}", &mtgjson_kws);
         assert!(result.is_some(), "Should recognize as keyword line");
         let keywords = result.unwrap();
         assert_eq!(keywords.len(), 1);
@@ -3382,11 +3386,11 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_mobilize_where_x_quantity() {
+    fn extract_granted_keyword_list_mobilize_where_x_quantity() {
         use crate::types::ability::{CountScope, QuantityRef, TypeFilter, ZoneRef};
 
         let mtgjson_kws = vec!["mobilize".to_string()];
-        let result = extract_keyword_line(
+        let result = extract_granted_keyword_list(
             "Mobilize X, where X is the number of creature cards in your graveyard",
             &mtgjson_kws,
         )
@@ -3412,9 +3416,9 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_mobilize_fixed_quantity() {
+    fn extract_granted_keyword_list_mobilize_fixed_quantity() {
         let mtgjson_kws = vec!["mobilize".to_string()];
-        let result = extract_keyword_line("Mobilize 2", &mtgjson_kws)
+        let result = extract_granted_keyword_list("Mobilize 2", &mtgjson_kws)
             .expect("fixed mobilize line should be recognized");
 
         assert_eq!(
@@ -3424,12 +3428,13 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_firebending_source_power() {
+    fn extract_granted_keyword_list_firebending_source_power() {
         use crate::types::ability::{ObjectScope, QuantityRef};
 
         let mtgjson_kws = vec!["firebending".to_string()];
-        let result = extract_keyword_line("Firebending X, where X is ~'s power.", &mtgjson_kws)
-            .expect("firebending source-power line should be recognized");
+        let result =
+            extract_granted_keyword_list("Firebending X, where X is ~'s power.", &mtgjson_kws)
+                .expect("firebending source-power line should be recognized");
 
         assert_eq!(result.len(), 1);
         assert!(matches!(
@@ -3443,7 +3448,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_firebending_comma_separated_fixed_amounts() {
+    fn extract_granted_keyword_list_firebending_comma_separated_fixed_amounts() {
         let mtgjson_kws = vec![
             "flying".to_string(),
             "firebending".to_string(),
@@ -3452,22 +3457,23 @@ mod tests {
             "haste".to_string(),
         ];
 
-        let flying = extract_keyword_line("Flying, firebending 2", &mtgjson_kws)
+        let flying = extract_granted_keyword_list("Flying, firebending 2", &mtgjson_kws)
             .expect("comma-separated flying/firebending should parse");
         assert_eq!(
             flying,
             vec![Keyword::Firebending(QuantityExpr::Fixed { value: 2 })]
         );
 
-        let menace = extract_keyword_line("Menace, firebending 3", &mtgjson_kws)
+        let menace = extract_granted_keyword_list("Menace, firebending 3", &mtgjson_kws)
             .expect("comma-separated menace/firebending should parse");
         assert_eq!(
             menace,
             vec![Keyword::Firebending(QuantityExpr::Fixed { value: 3 })]
         );
 
-        let trample_haste = extract_keyword_line("Trample, firebending 4, haste", &mtgjson_kws)
-            .expect("comma-separated trample/firebending/haste should parse");
+        let trample_haste =
+            extract_granted_keyword_list("Trample, firebending 4, haste", &mtgjson_kws)
+                .expect("comma-separated trample/firebending/haste should parse");
         assert_eq!(
             trample_haste,
             vec![Keyword::Firebending(QuantityExpr::Fixed { value: 4 })]
@@ -3475,11 +3481,11 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_firebending_creatures_you_control() {
+    fn extract_granted_keyword_list_firebending_creatures_you_control() {
         use crate::types::ability::{ControllerRef, QuantityRef, TargetFilter, TypeFilter};
 
         let mtgjson_kws = vec!["firebending".to_string()];
-        let result = extract_keyword_line(
+        let result = extract_granted_keyword_list(
             "Firebending X, where X is the number of creatures you control.",
             &mtgjson_kws,
         )
@@ -3501,12 +3507,12 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_firebending_experience_counters() {
+    fn extract_granted_keyword_list_firebending_experience_counters() {
         use crate::types::ability::{CountScope, QuantityRef};
         use crate::types::player::PlayerCounterKind;
 
         let mtgjson_kws = vec!["firebending".to_string()];
-        let result = extract_keyword_line(
+        let result = extract_granted_keyword_list(
             "Firebending X, where X is the number of experience counters you have.",
             &mtgjson_kws,
         )
@@ -3525,7 +3531,7 @@ mod tests {
     }
 
     fn craft_keyword(text: &str) -> (TargetFilter, CostObjectCount) {
-        match parse_keyword_from_oracle(text).expect("craft keyword should parse") {
+        match parse_granted_keyword_fragment(text).expect("craft keyword should parse") {
             Keyword::Craft {
                 materials, count, ..
             } => (materials, count),
@@ -3588,7 +3594,7 @@ mod tests {
             "craft with four or more nonlands with activated abilities {8}{u}",
             "craft with a dinosaur, a merfolk, a pirate, and a vampire {4}",
         ] {
-            let parsed = parse_keyword_from_oracle(text);
+            let parsed = parse_granted_keyword_fragment(text);
             assert!(
                 parsed.is_none(),
                 "{text} must not parse as an approximate Craft cost, got {parsed:?}"
@@ -3597,16 +3603,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_firebending_fixed_amount() {
+    fn parse_granted_keyword_fragment_firebending_fixed_amount() {
         assert_eq!(
-            parse_keyword_from_oracle("firebending 5"),
+            parse_granted_keyword_fragment("firebending 5"),
             Some(Keyword::Firebending(QuantityExpr::Fixed { value: 5 }))
         );
     }
 
     #[test]
-    fn extract_keyword_line_bloodthirst_x_overrides_mtgjson_fallback() {
-        let result = extract_keyword_line(
+    fn extract_granted_keyword_list_bloodthirst_x_overrides_mtgjson_fallback() {
+        let result = extract_granted_keyword_list(
             "Bloodthirst X (This creature enters with X +1/+1 counters on it, where X is the damage dealt to your opponents this turn.)",
             &["bloodthirst".to_string()],
         )
@@ -3616,52 +3622,52 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_bloodthirst_fixed_and_x() {
+    fn parse_granted_keyword_fragment_bloodthirst_fixed_and_x() {
         assert_eq!(
-            parse_keyword_from_oracle("bloodthirst 2").unwrap(),
+            parse_granted_keyword_fragment("bloodthirst 2").unwrap(),
             Keyword::Bloodthirst(BloodthirstValue::Fixed(2))
         );
         assert_eq!(
-            parse_keyword_from_oracle("bloodthirst x").unwrap(),
+            parse_granted_keyword_fragment("bloodthirst x").unwrap(),
             Keyword::Bloodthirst(BloodthirstValue::X)
         );
     }
 
     #[test]
-    fn parse_keyword_from_oracle_landwalk_variants() {
+    fn parse_granted_keyword_fragment_landwalk_variants() {
         // CR 702.14: Landwalk variants from Oracle text
-        let kw = parse_keyword_from_oracle("swampwalk").unwrap();
+        let kw = parse_granted_keyword_fragment("swampwalk").unwrap();
         assert_eq!(kw, Keyword::Landwalk("Swamp".to_string()));
 
-        let kw = parse_keyword_from_oracle("islandwalk").unwrap();
+        let kw = parse_granted_keyword_fragment("islandwalk").unwrap();
         assert_eq!(kw, Keyword::Landwalk("Island".to_string()));
 
-        let kw = parse_keyword_from_oracle("forestwalk").unwrap();
+        let kw = parse_granted_keyword_fragment("forestwalk").unwrap();
         assert_eq!(kw, Keyword::Landwalk("Forest".to_string()));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_unit_keywords() {
+    fn parse_granted_keyword_fragment_unit_keywords() {
         // Unit keywords that should be recognized
-        let kw = parse_keyword_from_oracle("bargain").unwrap();
+        let kw = parse_granted_keyword_fragment("bargain").unwrap();
         assert_eq!(kw, Keyword::Bargain);
 
-        let kw = parse_keyword_from_oracle("training").unwrap();
+        let kw = parse_granted_keyword_fragment("training").unwrap();
         assert_eq!(kw, Keyword::Training);
 
-        let kw = parse_keyword_from_oracle("jump-start").unwrap();
+        let kw = parse_granted_keyword_fragment("jump-start").unwrap();
         assert_eq!(kw, Keyword::JumpStart);
 
-        let kw = parse_keyword_from_oracle("undaunted").unwrap();
+        let kw = parse_granted_keyword_fragment("undaunted").unwrap();
         assert_eq!(kw, Keyword::Undaunted);
 
-        let kw = parse_keyword_from_oracle("for mirrodin!").unwrap();
+        let kw = parse_granted_keyword_fragment("for mirrodin!").unwrap();
         assert_eq!(kw, Keyword::ForMirrodin);
     }
 
     #[test]
-    fn extract_keyword_line_for_mirrodin_without_mtgjson_keyword() {
-        let keywords = extract_keyword_line(
+    fn extract_granted_keyword_list_for_mirrodin_without_mtgjson_keyword() {
+        let keywords = extract_granted_keyword_list(
             "For Mirrodin! (When this Equipment enters, create a 2/2 red Rebel creature token, then attach this to it.)",
             &[],
         )
@@ -3669,7 +3675,7 @@ mod tests {
 
         assert_eq!(keywords, vec![Keyword::ForMirrodin]);
         assert!(
-            extract_keyword_line("Flying", &[]).is_none(),
+            extract_granted_keyword_list("Flying", &[]).is_none(),
             "the MTGJSON-missing path should stay scoped to known omissions"
         );
     }
@@ -3692,11 +3698,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_escape_em_dash() {
+    fn parse_granted_keyword_fragment_escape_em_dash() {
         // CR 702.138a: Escape joins the em-dash alt-cost keyword family.
-        // parse_keyword_from_oracle receives already-lowercased oracle text.
+        // parse_granted_keyword_fragment receives already-lowercased oracle text.
         use crate::types::keywords::EscapeCost;
-        let kw = parse_keyword_from_oracle(
+        let kw = parse_granted_keyword_fragment(
             "escape\u{2014}{2}{u}{r}, exile four other cards from your graveyard",
         )
         .expect("escape em-dash keyword must parse");
@@ -3722,11 +3728,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_suspend() {
+    fn parse_granted_keyword_fragment_suspend() {
         use crate::types::mana::ManaCost;
 
         // CR 702.62a: Suspend N—{cost}
-        let kw = parse_keyword_from_oracle("suspend 4\u{2014}{u}").unwrap();
+        let kw = parse_granted_keyword_fragment("suspend 4\u{2014}{u}").unwrap();
         match kw {
             Keyword::Suspend { count, cost } => {
                 assert_eq!(count, 4);
@@ -3736,7 +3742,7 @@ mod tests {
         }
 
         // Suspend 1—{R} (Rift Bolt)
-        let kw = parse_keyword_from_oracle("suspend 1\u{2014}{r}").unwrap();
+        let kw = parse_granted_keyword_fragment("suspend 1\u{2014}{r}").unwrap();
         match kw {
             Keyword::Suspend { count, .. } => assert_eq!(count, 1),
             other => panic!("Expected Suspend, got {other:?}"),
@@ -3757,7 +3763,7 @@ mod tests {
         // CR 702.160a + CR 718.3b: "Prototype {cost} — {P}/{T}" carries the
         // alternative power/toughness. The prototype P/T (2/1) must come from the
         // Oracle "— P/T" segment, NOT the card's top-level P/T (Arcane Proxy: 4/3).
-        let kw = parse_keyword_from_oracle("prototype {1}{u}{u} \u{2014} 2/1").unwrap();
+        let kw = parse_granted_keyword_fragment("prototype {1}{u}{u} \u{2014} 2/1").unwrap();
         match kw {
             Keyword::Prototype {
                 cost,
@@ -3779,7 +3785,7 @@ mod tests {
     fn parse_prototype_keyword_line_without_pt_falls_through() {
         // Graceful degradation: a cost-only "prototype {2}" line (no "— P/T")
         // must NOT panic — it falls through to the cost-only keyword path.
-        let kw = parse_keyword_from_oracle("prototype {2}");
+        let kw = parse_granted_keyword_fragment("prototype {2}");
         if let Some(Keyword::Prototype {
             power, toughness, ..
         }) = kw
@@ -3794,30 +3800,30 @@ mod tests {
         use crate::types::keywords::PartnerType;
 
         // CR 702.124: Partner variant keywords from Oracle text
-        let kw = parse_keyword_from_oracle(
+        let kw = parse_granted_keyword_fragment(
             "partner\u{2014}character select (you can have two commanders if both have this ability.)",
         ).unwrap();
         assert_eq!(kw, Keyword::Partner(PartnerType::CharacterSelect));
 
-        let kw = parse_keyword_from_oracle(
+        let kw = parse_granted_keyword_fragment(
             "partner\u{2014}friends forever (you can have two commanders if both have this ability.)",
         ).unwrap();
         assert_eq!(kw, Keyword::Partner(PartnerType::FriendsForever));
 
-        let kw = parse_keyword_from_oracle(
+        let kw = parse_granted_keyword_fragment(
             "choose a background (you can have a background as a second commander.)",
         )
         .unwrap();
         assert_eq!(kw, Keyword::Partner(PartnerType::ChooseABackground));
 
-        let kw = parse_keyword_from_oracle(
+        let kw = parse_granted_keyword_fragment(
             "doctor\u{2019}s companion (you can have two commanders if the other is the doctor.)",
         )
         .unwrap();
         assert_eq!(kw, Keyword::Partner(PartnerType::DoctorsCompanion));
 
         // Also test with straight apostrophe
-        let kw = parse_keyword_from_oracle("doctor's companion").unwrap();
+        let kw = parse_granted_keyword_fragment("doctor's companion").unwrap();
         assert_eq!(kw, Keyword::Partner(PartnerType::DoctorsCompanion));
     }
 
@@ -3834,8 +3840,8 @@ mod tests {
         assert_eq!(expanded[0], "hexproof from white");
         assert_eq!(expanded[1], "hexproof from black");
 
-        // Through extract_keyword_line
-        let keywords = extract_keyword_line(
+        // Through extract_granted_keyword_list
+        let keywords = extract_granted_keyword_list(
             "hexproof from white and from black",
             &["hexproof".to_string()],
         )
@@ -3858,7 +3864,7 @@ mod tests {
 
         // Single hexproof-from — no expansion needed
         let keywords =
-            extract_keyword_line("hexproof from red", &["hexproof".to_string()]).unwrap();
+            extract_granted_keyword_list("hexproof from red", &["hexproof".to_string()]).unwrap();
         let hf: Vec<_> = keywords
             .iter()
             .filter(|k| matches!(k, Keyword::HexproofFrom(_)))
@@ -3875,14 +3881,14 @@ mod tests {
         use crate::types::keywords::HexproofFilter;
         use crate::types::mana::ManaColor;
 
-        // parse_keyword_from_oracle handles "hexproof from red"
-        let kw = parse_keyword_from_oracle("hexproof from red").unwrap();
+        // parse_granted_keyword_fragment handles "hexproof from red"
+        let kw = parse_granted_keyword_fragment("hexproof from red").unwrap();
         assert_eq!(
             kw,
             Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Red))
         );
 
-        let kw = parse_keyword_from_oracle("hexproof from artifacts").unwrap();
+        let kw = parse_granted_keyword_fragment("hexproof from artifacts").unwrap();
         assert_eq!(
             kw,
             Keyword::HexproofFrom(HexproofFilter::CardType("artifacts".to_string()))
@@ -3892,8 +3898,8 @@ mod tests {
     /// CR 702.xxx: Paradigm (Strixhaven) — bare-keyword recognition.
     /// Assign when WotC publishes SOS CR update.
     #[test]
-    fn parse_keyword_from_oracle_paradigm() {
-        let kw = parse_keyword_from_oracle("paradigm").unwrap();
+    fn parse_granted_keyword_fragment_paradigm() {
+        let kw = parse_granted_keyword_fragment("paradigm").unwrap();
         assert_eq!(kw, Keyword::Paradigm);
     }
 
@@ -3904,13 +3910,13 @@ mod tests {
     /// through the normal mana-payment flow and the life piece through
     /// `pay_additional_cost`.
     #[test]
-    fn parse_keyword_from_oracle_flashback_compound_mana_and_life() {
+    fn parse_granted_keyword_fragment_flashback_compound_mana_and_life() {
         use crate::types::ability::QuantityExpr;
         use crate::types::mana::ManaCostShard;
 
-        // Lowercased Oracle text passed through `parse_keyword_from_oracle` after
+        // Lowercased Oracle text passed through `parse_granted_keyword_fragment` after
         // reminder text is stripped by the upstream pipeline.
-        let kw = parse_keyword_from_oracle("flashback\u{2014}{1}{u}, pay 3 life").unwrap();
+        let kw = parse_granted_keyword_fragment("flashback\u{2014}{1}{u}, pay 3 life").unwrap();
         let Keyword::Flashback(FlashbackCost::NonMana(AbilityCost::Composite { costs })) = kw
         else {
             panic!("expected NonMana(Composite), got {:?}", kw);
@@ -3939,10 +3945,11 @@ mod tests {
     /// `Eternalize(EternalizeCost::NonMana(Composite[Mana{3UU}, Discard]))`,
     /// i.e. the discard suffix is NOT dropped.
     #[test]
-    fn parse_keyword_from_oracle_eternalize_em_dash_discard() {
+    fn parse_granted_keyword_fragment_eternalize_em_dash_discard() {
         use crate::types::mana::ManaCostShard;
 
-        let kw = parse_keyword_from_oracle("eternalize\u{2014}{3}{u}{u}, discard a card").unwrap();
+        let kw =
+            parse_granted_keyword_fragment("eternalize\u{2014}{3}{u}{u}, discard a card").unwrap();
         let Keyword::Eternalize(EternalizeCost::NonMana(AbilityCost::Composite { costs })) = kw
         else {
             panic!("expected Eternalize NonMana(Composite), got {kw:?}");
@@ -3971,8 +3978,8 @@ mod tests {
 
     /// CR 702.128a: Embalm em-dash composite cost parses the discard suffix.
     #[test]
-    fn parse_keyword_from_oracle_embalm_em_dash_discard() {
-        let kw = parse_keyword_from_oracle("embalm\u{2014}{2}{w}{w}, discard a card").unwrap();
+    fn parse_granted_keyword_fragment_embalm_em_dash_discard() {
+        let kw = parse_granted_keyword_fragment("embalm\u{2014}{2}{w}{w}, discard a card").unwrap();
         let Keyword::Embalm(EmbalmCost::NonMana(AbilityCost::Composite { costs })) = kw else {
             panic!("expected Embalm NonMana(Composite), got {kw:?}");
         };
@@ -3984,16 +3991,16 @@ mod tests {
     /// Regression: pure-mana embalm/eternalize still dispatch through the direct
     /// `FromStr` path to the `Mana` variant (backward compat at the keyword level).
     #[test]
-    fn parse_keyword_from_oracle_eternalize_mana_backward_compat() {
-        let kw = parse_keyword_from_oracle("eternalize {3}{b}{b}").unwrap();
+    fn parse_granted_keyword_fragment_eternalize_mana_backward_compat() {
+        let kw = parse_granted_keyword_fragment("eternalize {3}{b}{b}").unwrap();
         assert!(matches!(kw, Keyword::Eternalize(EternalizeCost::Mana(_))));
     }
 
     /// CR 702.34a regression: Battle Screech's tap-creatures flashback shape
     /// must continue to parse to `FlashbackCost::NonMana(TapCreatures)`.
     #[test]
-    fn parse_keyword_from_oracle_flashback_tap_creatures_unchanged() {
-        let kw = parse_keyword_from_oracle(
+    fn parse_granted_keyword_fragment_flashback_tap_creatures_unchanged() {
+        let kw = parse_granted_keyword_fragment(
             "flashback\u{2014}tap three untapped white creatures you control",
         )
         .unwrap();
@@ -4011,8 +4018,8 @@ mod tests {
     /// Roar of the Wurm) goes through the FromStr direct-parse branch and
     /// produces `FlashbackCost::Mana`.
     #[test]
-    fn parse_keyword_from_oracle_flashback_simple_mana_unchanged() {
-        let kw = parse_keyword_from_oracle("flashback {3}{g}").unwrap();
+    fn parse_granted_keyword_fragment_flashback_simple_mana_unchanged() {
+        let kw = parse_granted_keyword_fragment("flashback {3}{g}").unwrap();
         let Keyword::Flashback(FlashbackCost::Mana(_)) = kw else {
             panic!("expected FlashbackCost::Mana, got {:?}", kw);
         };
@@ -4020,18 +4027,18 @@ mod tests {
 
     /// CR 702.74a + CR 118.9: MH2 Incarnation evoke ("Evoke—Exile a [color]
     /// card from your hand.") parses into `EvokeCost::NonMana(Exile{..})`.
-    /// Discriminator for #580: pre-fix `parse_keyword_from_oracle` returns
+    /// Discriminator for #580: pre-fix `parse_granted_keyword_fragment` returns
     /// `None` for this line (no `evoke—` arm); post-fix returns the typed
     /// non-mana cost so the runtime can surface the alt-cast prompt.
     #[test]
-    fn parse_keyword_from_oracle_evoke_exile_white_card_from_hand() {
+    fn parse_granted_keyword_fragment_evoke_exile_white_card_from_hand() {
         use crate::types::ability::FilterProp;
         use crate::types::keywords::EvokeCost;
         use crate::types::mana::ManaColor;
         use crate::types::zones::Zone;
 
-        let kw =
-            parse_keyword_from_oracle("evoke\u{2014}exile a white card from your hand.").unwrap();
+        let kw = parse_granted_keyword_fragment("evoke\u{2014}exile a white card from your hand.")
+            .unwrap();
         let Keyword::Evoke(EvokeCost::NonMana(AbilityCost::Exile {
             count,
             zone,
@@ -4078,9 +4085,10 @@ mod tests {
 
     /// CR 702.120a: Escalate accepts any additional-cost shape, not just mana.
     #[test]
-    fn parse_keyword_from_oracle_escalate_tap_creature_cost() {
-        let kw = parse_keyword_from_oracle("escalate\u{2014}tap an untapped creature you control")
-            .unwrap();
+    fn parse_granted_keyword_fragment_escalate_tap_creature_cost() {
+        let kw =
+            parse_granted_keyword_fragment("escalate\u{2014}tap an untapped creature you control")
+                .unwrap();
         let Keyword::Escalate(AbilityCost::TapCreatures { requirement, .. }) = kw else {
             panic!("expected Escalate(TapCreatures), got {:?}", kw);
         };
@@ -4093,7 +4101,7 @@ mod tests {
     /// to match a keyword name.
     #[test]
     fn extract_enchant_multi_type_union() {
-        let kws = extract_keyword_line(
+        let kws = extract_granted_keyword_list(
             "Enchant creature, land, or planeswalker",
             &["enchant".to_string()],
         )
@@ -4325,11 +4333,11 @@ mod tests {
         assert!(is_keyword_cost_line("freerunning {1}{b}"));
     }
 
-    /// CR 702.173a: Freerunning parsed from oracle text via parse_keyword_from_oracle.
+    /// CR 702.173a: Freerunning parsed from oracle text via parse_granted_keyword_fragment.
     #[test]
-    fn parse_keyword_from_oracle_freerunning() {
+    fn parse_granted_keyword_fragment_freerunning() {
         use crate::types::keywords::Keyword;
-        let kw = parse_keyword_from_oracle("freerunning {3}{b}{b}").unwrap();
+        let kw = parse_granted_keyword_fragment("freerunning {3}{b}{b}").unwrap();
         match kw {
             Keyword::Freerunning(_cost) => {
                 // Successfully parsed — cost structure validated by ManaCost parser
