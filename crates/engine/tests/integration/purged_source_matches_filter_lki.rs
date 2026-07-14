@@ -360,3 +360,252 @@ fn purged_token_source_that_was_not_enchanted_answers_false() {
         );
     }
 }
+
+// ===========================================================================
+// RIDERS (ruling on the t105 checkpoint)
+// ===========================================================================
+
+/// RIDER — SOULBOND MUST STAY FALSE FOR A PURGED SOURCE (CR 702.95b).
+///
+/// Soulbond is the largest slice of this class: **50 of the 91 trigger defs, 25 of the 65
+/// faces**. Its `SourceMatchesFilter` is `Creature{You} + InZone(Battlefield) + Unpaired`,
+/// and a creature that has ceased to exist must NOT pair — **CR 702.95b**: pairing exists
+/// only between creatures on the battlefield. Today it stays false *structurally* (`InZone`
+/// reads `record.from_zone`, which the LKI synthesizer leaves `None`; `Unpaired` reads live
+/// `state.objects`), but structural immunity is one refactor away from gone. This pins the
+/// BEHAVIOR, not the mechanism.
+///
+/// PROVENANCE OF THE FILTER. Soulbond's triggers are synthesized from the keyword during the
+/// card-data build, not by `parse_oracle_text`, so — unlike Dreampod Druid — they cannot be
+/// pulled off an oracle-synthesized object in this harness (the documented inline-keyword
+/// foot-gun). The filter is therefore constructed here, and then **asserted byte-identical to
+/// the filter actually carried by all 50 soulbond defs in the pool**, measured from the
+/// card-data snapshot. That assertion is what stops this from being a hand-rolled fabrication:
+/// if the real card's shape ever drifts from this literal, the premise fails loudly rather
+/// than the pin passing against a filter no card carries.
+#[test]
+fn purged_token_soulbond_source_must_not_pair_cr_702_95b() {
+    use engine::game::filter::{
+        matches_target_filter, matches_target_filter_on_lki_snapshot, FilterContext,
+    };
+    use engine::types::ability::{
+        ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+    };
+
+    let filter = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Creature],
+        controller: Some(ControllerRef::You),
+        properties: vec![
+            FilterProp::InZone {
+                zone: Zone::Battlefield,
+            },
+            FilterProp::Unpaired,
+        ],
+    });
+
+    // PREMISE GUARD — anti-fabrication. This must be EXACTLY the filter the pool carries.
+    // Verbatim from the card-data census (all 50 soulbond defs / 25 faces share this shape).
+    let measured: serde_json::Value = serde_json::from_str(
+        r#"{"controller":"You","properties":[{"type":"InZone","zone":"Battlefield"},{"type":"Unpaired"}],"type":"Typed","type_filters":["Creature"]}"#,
+    )
+    .expect("the measured literal must be valid JSON");
+    assert_eq!(
+        serde_json::to_value(&filter).expect("filter must serialize"),
+        measured,
+        "PREMISE: the soulbond filter under test must be byte-identical to the one all 50 \
+         soulbond defs actually carry in card-data. If this fails, the pin below is testing a \
+         filter no real card has."
+    );
+
+    // A soulbond-shaped creature. Only the FILTER is soulbond's; the body is irrelevant to the
+    // predicate under test, which reads type / controller / zone / pairing.
+    let mut scenario = GameScenario::new();
+    let wing = scenario.add_creature(P0, "Wingcrafter", 1, 1).id();
+    let mut runner = scenario.build();
+
+    // NON-VACUITY LEG: alive, on the battlefield, unpaired ⇒ the filter MUST match.
+    {
+        let state = runner.state();
+        let ctx = FilterContext::from_source(state, wing);
+        assert!(
+            matches_target_filter(state, wing, &filter, &ctx),
+            "a LIVE unpaired creature you control must match the soulbond filter — if this is \
+             false the pin below is vacuous (a predicate that never matches proves nothing)"
+        );
+    }
+
+    // Purge it as a token (CR 111.7 / CR 704.5d).
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&wing)
+        .expect("wingcrafter")
+        .is_token = true;
+    let mut events = Vec::new();
+    zones::move_to_zone(runner.state_mut(), wing, Zone::Graveyard, &mut events);
+    sba::check_state_based_actions(runner.state_mut(), &mut events);
+    assert!(
+        !runner.state().objects.contains_key(&wing),
+        "CR 111.7: the token must have ceased to exist, or this pin is vacuous"
+    );
+
+    let state = runner.state();
+    let lki = state
+        .lki_cache
+        .get(&wing)
+        .expect("CR 400.7: the purged token must still have an LKI snapshot");
+    let ctx = FilterContext::from_source(state, wing);
+    assert!(
+        !matches_target_filter_on_lki_snapshot(state, wing, lki, &filter, &ctx),
+        "CR 702.95b: pairing exists only between creatures on the BATTLEFIELD. A soulbond \
+         source that has ceased to exist must NOT satisfy its own intervening-if. The LKI \
+         look-back restores the source's ability to ANSWER a question about its \
+         characteristics; it must never resurrect the source's ZONE."
+    );
+}
+
+/// RIDER — THE SNAPSHOTTED ATTACHMENT IDs ARE NOT A DANGLING-REFERENCE TRAP.
+///
+/// `LKISnapshot::attachments` reuses `AttachmentSnapshot { object_id, controller, kind }` —
+/// the same shape `ZoneChangeRecord::attachments` already persists. The ruling flagged the
+/// stored `ObjectId` as a possible dangling reference. It is not: `object_id` is used in
+/// exactly two places in the filter layer (`filter.rs`), and BOTH are pure identity
+/// comparisons (`att.object_id == source_id` / `!= source.id`, for `exclude_source`) — it is
+/// never fed to `state.objects.get()`. The `controller` and `kind` the gate actually reads are
+/// stored BY VALUE in the snapshot.
+///
+/// This pins that: the Aura object itself is destroyed outright after the host is purged, so
+/// its id dangles — and `HasAttachment` must still answer TRUE from the snapshot, without a
+/// panic and without consulting the vanished Aura.
+#[test]
+fn lki_attachment_ids_are_identity_only_and_survive_a_purged_aura() {
+    use engine::game::filter::{matches_target_filter_on_lki_snapshot, FilterContext};
+    use engine::types::ability::TriggerCondition;
+
+    let mut scenario = GameScenario::new();
+    let druid = scenario
+        .add_creature_from_oracle(P0, "Dreampod Druid", 2, 2, DREAMPOD_DRUID)
+        .id();
+    let mut runner = scenario.build();
+
+    let filter = match runner
+        .state()
+        .objects
+        .get(&druid)
+        .expect("druid")
+        .trigger_definitions
+        .first()
+        .expect("PREMISE: one trigger")
+        .condition
+        .as_ref()
+        .expect("PREMISE: intervening-if")
+    {
+        TriggerCondition::SourceMatchesFilter { filter } => filter.clone(),
+        other => panic!("PREMISE: expected SourceMatchesFilter, got {other:?}"),
+    };
+
+    let aura = make_aura(runner.state_mut(), P0);
+    attach::attach_to(runner.state_mut(), aura, druid);
+
+    // Purge the HOST (token).
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&druid)
+        .expect("druid")
+        .is_token = true;
+    let mut events = Vec::new();
+    zones::move_to_zone(runner.state_mut(), druid, Zone::Graveyard, &mut events);
+    sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+    // Now DESTROY THE AURA OBJECT OUTRIGHT, so the id stored in the host's LKI snapshot
+    // refers to an object that no longer exists anywhere. If anything in the gate
+    // dereferenced that id, this is where it would panic or silently answer false.
+    runner.state_mut().objects.remove(&aura);
+    runner.state_mut().battlefield.retain(|id| *id != aura);
+    assert!(
+        !runner.state().objects.contains_key(&aura),
+        "the Aura must be gone from state.objects, or this pin proves nothing"
+    );
+
+    let state = runner.state();
+    let lki = state.lki_cache.get(&druid).expect("host LKI");
+    assert!(
+        lki.attachments.iter().any(|a| a.object_id == aura),
+        "the snapshot must still carry the (now dangling) Aura id — that is the whole point"
+    );
+    let ctx = FilterContext::from_source(state, druid);
+    assert!(
+        matches_target_filter_on_lki_snapshot(state, druid, lki, &filter, &ctx),
+        "CR 608.2h: 'is it enchanted' must be answered from the snapshot's own kind/controller \
+         values. The stored ObjectId is identity-only (self-exclusion); it is never \
+         dereferenced, so a purged Aura cannot break the look-back."
+    );
+}
+
+/// RIDER — SAVE-COMPAT ROUND TRIP, BOTH DIRECTIONS.
+///
+/// `GameState` is `Serialize`/`Deserialize` and owns `lki_cache: HashMap<ObjectId, LKISnapshot>`,
+/// so `LKISnapshot` IS persisted into saves. The new field therefore needs `#[serde(default)]`
+/// (it has it) and a two-way round-trip proof:
+///
+/// * OLD → NEW: a save written before this change has no `attachments` key. It must still
+///   deserialize, defaulting to the empty set — which is exactly the pre-change fail-closed
+///   answer, so an old save cannot start fabricating attachment matches.
+/// * NEW → NEW: a snapshot carrying attachments must survive a full `GameState` round trip.
+#[test]
+fn lki_snapshot_attachments_are_save_compatible_both_directions() {
+    use engine::types::game_state::LKISnapshot;
+
+    // --- OLD → NEW: legacy save, no `attachments` key at all.
+    let legacy = serde_json::json!({
+        "name": "Legacy Creature",
+        "power": 2,
+        "toughness": 2,
+        "mana_value": 3,
+        "controller": 0,
+        "owner": 0
+    });
+    let decoded: LKISnapshot = serde_json::from_value(legacy)
+        .expect("a pre-change save (no `attachments` key) MUST still deserialize");
+    assert!(
+        decoded.attachments.is_empty(),
+        "an old save must default to NO attachments — the pre-change fail-closed answer. \
+         Anything else would let a legacy save fabricate attachment matches."
+    );
+
+    // --- NEW → NEW: a live snapshot carrying attachments survives a full GameState round trip.
+    let mut scenario = GameScenario::new();
+    let druid = scenario
+        .add_creature_from_oracle(P0, "Dreampod Druid", 2, 2, DREAMPOD_DRUID)
+        .id();
+    let mut runner = scenario.build();
+    let aura = make_aura(runner.state_mut(), P0);
+    attach::attach_to(runner.state_mut(), aura, druid);
+    let mut events = Vec::new();
+    zones::move_to_zone(runner.state_mut(), druid, Zone::Graveyard, &mut events);
+
+    let before = runner
+        .state()
+        .lki_cache
+        .get(&druid)
+        .expect("host LKI")
+        .attachments
+        .clone();
+    assert!(
+        !before.is_empty(),
+        "the round trip is vacuous unless the snapshot actually carries an attachment"
+    );
+
+    let json = serde_json::to_string(runner.state()).expect("GameState must serialize");
+    let restored: GameState = serde_json::from_str(&json).expect("GameState must deserialize");
+    assert_eq!(
+        restored
+            .lki_cache
+            .get(&druid)
+            .expect("LKI must survive the save round trip")
+            .attachments,
+        before,
+        "the LKI attachment set must survive a save/load round trip intact"
+    );
+}
