@@ -3099,6 +3099,7 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         // Their drift breaks the board-equality gate (item 1), not the item-4 scan.
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource

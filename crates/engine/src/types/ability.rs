@@ -3365,6 +3365,10 @@ pub enum FilterProp {
     Token,
     /// CR 111.1: Matches objects that are not tokens.
     NonToken,
+    /// CR 108.2 + CR 108.2b: Matches an object represented by a Magic card,
+    /// excluding tokens and object copies. This is distinct from `NonToken`:
+    /// a non-token copy is not represented by a card.
+    RepresentedByCard,
     /// CR 607.2d / CR 607.2m (by analogy) + CR 611.2c: matches objects whose
     /// CONTROLLER's durable per-player choice records the anchor `label`
     /// ("creatures controlled by players who last chose red waterfall …", Two
@@ -22036,6 +22040,7 @@ mod tests {
     fn filter_prop_roundtrip() {
         let props = vec![
             FilterProp::Token,
+            FilterProp::RepresentedByCard,
             FilterProp::Attacking { defender: None },
             FilterProp::Attacking {
                 defender: Some(ControllerRef::You),

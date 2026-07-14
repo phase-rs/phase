@@ -657,6 +657,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
         match prop {
             FilterProp::Token => parts.push("token".into()),
             FilterProp::NonToken => parts.push("nontoken".into()),
+            FilterProp::RepresentedByCard => parts.push("represented by a card".into()),
             FilterProp::ControllerChoseLabel { label } => {
                 parts.push(format!("controlled by a player who last chose {label}"))
             }

@@ -1526,6 +1526,9 @@ fn census_of_typed(tf: &TypedFilter) -> Census {
             FilterProp::NonToken => {
                 tags.insert("nontoken".into());
             }
+            FilterProp::RepresentedByCard => {
+                tags.insert("represented-card".into());
+            }
             _ => {}
         }
     }
@@ -2308,6 +2311,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         FilterProp::InTrackedSet { .. } => false,
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -2565,6 +2569,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         FilterProp::InTrackedSet { .. } => true,
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource

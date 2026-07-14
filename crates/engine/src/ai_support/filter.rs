@@ -706,6 +706,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         // SAFE — read only candidate fingerprint fields.
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Tapped
         | FilterProp::Untapped

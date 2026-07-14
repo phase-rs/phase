@@ -1486,6 +1486,33 @@ impl GameObject {
         }
     }
 
+    /// CR 702.102b + CR 709.4d: Restore the combined card types and colors of
+    /// a fused split spell after a characteristic reset. The fusion marker is
+    /// cast-state, while the union is a derived stack characteristic and must
+    /// therefore be re-applied on every layer pass.
+    pub fn restore_fused_split_characteristics(&mut self) {
+        if self.zone != Zone::Stack || !self.fused_split_spell {
+            return;
+        }
+        let right_half_characteristics = self
+            .back_face
+            .as_ref()
+            .filter(|back| back.layout_kind == Some(LayoutKind::Split))
+            .map(|back| (back.card_types.core_types.clone(), back.color.clone()));
+        if let Some((core_types, colors)) = right_half_characteristics {
+            for core_type in core_types {
+                if !self.card_types.core_types.contains(&core_type) {
+                    self.card_types.core_types.push(core_type);
+                }
+            }
+            for color in colors {
+                if !self.color.contains(&color) {
+                    self.color.push(color);
+                }
+            }
+        }
+    }
+
     /// CR 603.10 + CR 400.7: Snapshot this object's public characteristics
     /// for a zone-change event. The record captures state *at the moment of
     /// the move* so zone-change trigger filters and past-tense conditions

@@ -199,6 +199,16 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         // ("the number of A plus the number of B is N or greater").
         parse_additive_two_term_count_threshold,
         parse_there_are_conditions,
+        parse_control_presence_conditions,
+        parse_remaining_state_presence_conditions,
+    ))
+    .parse(input)
+}
+
+/// Keeps the top-level state-condition grammar below nom's tuple-arity limit
+/// while preserving the precedence of its control-related productions.
+fn parse_control_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
         // CR 201.2: Named-control clauses MUST precede the generic compound
         // control combinator so " and " between named cards binds to the
         // names list, not interpreted as a second `you control` clause.
@@ -209,10 +219,41 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         // `parse_control_conditions` so the bare count phrase is not mis-read as
         // "you control N or more creatures".
         parse_creatures_are_attacking_count_ge,
+        parse_source_controlled_or_your_commander,
         parse_control_conditions,
-        parse_remaining_state_presence_conditions,
     ))
     .parse(input)
+}
+
+/// CR 903.3 + CR 903.3d + CR 611.3a: "you control ~ or it's your commander"
+/// gates a source's static ability by either its current controller or its
+/// owner-relative commander designation. The two arms remain explicit because a
+/// stolen commander still satisfies "it's your commander" for its owner, while
+/// a noncommander source controlled by you satisfies the first arm.
+fn parse_source_controlled_or_your_commander(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (input, _) = tag("you control ~ or ").parse(input)?;
+    let (input, _) = alt((tag("it's your commander"), tag("it is your commander"))).parse(input)?;
+
+    Ok((
+        input,
+        StaticCondition::Or {
+            conditions: vec![
+                StaticCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    ),
+                },
+                StaticCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::Owned {
+                            controller: ControllerRef::You,
+                        },
+                        FilterProp::IsCommander,
+                    ])),
+                },
+            ],
+        },
+    ))
 }
 
 fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {

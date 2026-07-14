@@ -197,11 +197,6 @@ fn parse_chosen_creature_type_static_sentence_with_scope(
     Ok((input, (scope, application)))
 }
 
-pub(crate) fn parse_chosen_creature_type_static_prefix(input: &str) -> OracleResult<'_, ()> {
-    let (input, _) = parse_chosen_creature_type_static_scope_body(input)?;
-    Ok((input, ()))
-}
-
 /// CR 205.1a / CR 205.1b + CR 607.2d: Parse the "<scope> are the chosen [creature]
 /// type [in addition to their other types]" body, returning the affected scope and
 /// whether the effect is additive (CR 205.1b "in addition") or replacing (CR 205.1a
@@ -326,43 +321,14 @@ fn parse_compound_chosen_type_additive_predicate(input: &str) -> OracleResult<'_
     Ok((input, ()))
 }
 
-/// Prefix matcher for the `oracle.rs` "The same is true for ..." tail splitter:
-/// consumes "`<compound subject>` are the chosen [creature ]type in addition to
-/// their other [creature ]types[.]" so Rukarumel's trailing sentence is preserved
-/// as an `Unimplemented` residual (matching Arcane Adaptation / Maskwood Nexus)
-/// rather than collapsing the whole line into a strict-fail. Verifies the subject
-/// is a genuine compound `Or` before claiming, so single-subject chosen-type lines
-/// stay with [`parse_chosen_creature_type_static_prefix`].
-pub(crate) fn parse_compound_you_control_chosen_type_static_prefix(
-    input: &str,
-) -> OracleResult<'_, ()> {
-    let (after_subject, subject) =
-        take_until::<_, _, OracleError<'_>>(" are the chosen").parse(input)?;
-    match parse_continuous_subject_filter(subject) {
-        Some(TargetFilter::Or { filters }) if filters.len() >= 2 => {}
-        _ => {
-            return Err(nom::Err::Error(OracleError::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
-        }
-    }
-    let (input, _) = tag(" are ").parse(after_subject)?;
-    let (input, _) = alt((tag("the chosen creature type"), tag("the chosen type"))).parse(input)?;
-    let (input, ()) = parse_chosen_type_additive_suffix(input, "their")?;
-    let (input, _) = opt(tag(".")).parse(input)?;
-    Ok((input, ()))
-}
-
 // CR 613.1d + CR 205.3m: "<creatures you control are> every creature type" —
 // Layer 4 type-changing effect that adds every creature type (CR 205.3m) to each
 // creature the controller has on the battlefield. Maskwood Nexus is the
 // canonical printing; the static is the class of "<your creatures> are every
 // creature type" effects, paralleling `parse_arcane_adaptation_chosen_type_static`
-// for "the chosen type". Maskwood's "The same is true for creature spells you
-// control and creature cards you own that aren't on the battlefield" tail is
-// stripped upstream by `oracle.rs` (it's reported as `Unimplemented` because
-// continuous effects on non-battlefield zones aren't currently modeled).
+// for "the chosen type". The full two-sentence continuation is recognized by
+// `same_is_true::parse_same_is_true_type_static` before this battlefield-only
+// parser, so this function remains the single-sentence form's fallback.
 pub(crate) fn parse_every_creature_type_static(
     tp: &TextPair<'_>,
     description: &str,

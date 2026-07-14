@@ -86,6 +86,7 @@ mod keyword_grant;
 mod loyalty;
 mod mana_transform;
 mod restriction;
+mod same_is_true;
 mod shared;
 mod static_helpers;
 mod type_change;
@@ -176,10 +177,7 @@ pub(crate) use shared::{
 pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
 pub(crate) use static_helpers::parse_basic_land_type_plural;
 pub(crate) use static_helpers::peel_compound_all_quantified_conjuncts;
-pub(crate) use type_change::{
-    parse_additive_type_clause_modifications, parse_chosen_creature_type_static_prefix,
-    parse_compound_you_control_chosen_type_static_prefix, parse_every_creature_type_static_prefix,
-};
+pub(crate) use type_change::parse_additive_type_clause_modifications;
 
 /// Parse a static/continuous ability line into a `StaticDefinition`.
 #[tracing::instrument(level = "debug")]

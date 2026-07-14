@@ -20928,12 +20928,11 @@ fn parse_chosen_land_type_adds_chosen_basic_land_type() {
     );
 }
 
-// CR 205.1a + CR 607.2d: full Conspiracy oracle. The battlefield SET static must be
-// present (composed RemoveAllSubtypes + AddChosenSubtype) AND the non-battlefield
-// "the same is true for ..." tail must surface as an Unimplemented residual (the
-// multi-zone type application is honestly gapped).
+// CR 205.1a + CR 607.2d + CR 611.3a + CR 613.1d: Conspiracy's full static
+// replaces battlefield creature subtypes and applies the same effect to its
+// controlled creature spells and owned creature cards outside the battlefield.
 #[test]
-fn parse_conspiracy_full_oracle_sets_static_and_gaps_tail() {
+fn parse_conspiracy_full_oracle_models_all_same_is_true_recipients() {
     let oracle = "As this enchantment enters, choose a creature type.\nCreatures you control are the chosen type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.";
     let result = crate::parser::oracle::parse_oracle_text(
         oracle,
@@ -20942,7 +20941,9 @@ fn parse_conspiracy_full_oracle_sets_static_and_gaps_tail() {
         &["Enchantment".to_string()],
         &[],
     );
-    let has_set_static = result.statics.iter().any(|def| {
+    assert_eq!(result.statics.len(), 1, "Conspiracy must have one static");
+    let def = &result.statics[0];
+    assert!(
         def.modifications
             .contains(&ContinuousModification::RemoveAllSubtypes {
                 set: crate::types::card_type::SubtypeSet::Creature,
@@ -20951,32 +20952,27 @@ fn parse_conspiracy_full_oracle_sets_static_and_gaps_tail() {
                 .modifications
                 .contains(&ContinuousModification::AddChosenSubtype {
                     kind: ChosenSubtypeKind::CreatureType,
-                })
-    });
-    assert!(
-        has_set_static,
-        "Conspiracy must produce the composed SET static: {:?}",
-        result.statics
+                }),
+        "Conspiracy must produce the composed SET static: {def:?}"
     );
-    let tail_gapped = result.abilities.iter().any(|ability| {
-        matches!(
-            *ability.effect,
-            crate::types::ability::Effect::Unimplemented { description: Some(ref frag), .. }
-                // allow-noncombinator: test assertion on a gapped Unimplemented fragment, not parser dispatch
-                if frag.contains("creature spells you control")
-        )
-    });
     assert!(
-        tail_gapped,
-        "the 'same is true for ...' multi-zone tail must be gapped as Unimplemented: {:?}",
+        matches!(def.affected, Some(TargetFilter::Or { ref filters }) if filters.len() == 3),
+        "Conspiracy must retain battlefield, spell, and owned-card recipient arms: {def:?}"
+    );
+    assert!(
+        !result.abilities.iter().any(|ability| matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Unimplemented { .. }
+        )),
+        "Conspiracy's continuation must not leave an Unimplemented residual: {:?}",
         result.abilities
     );
 }
 
-// CR 205.1b: full Arcane Adaptation oracle (regression). The additive static must be
-// present (AddChosenSubtype, no RemoveAllSubtypes) AND the tail gapped.
+// CR 205.1b + CR 611.3a + CR 613.1d: Arcane Adaptation's additive static
+// applies to all three complete recipient arms.
 #[test]
-fn parse_arcane_adaptation_full_oracle_adds_static_and_gaps_tail() {
+fn parse_arcane_adaptation_full_oracle_models_all_same_is_true_recipients() {
     let oracle = "As Arcane Adaptation enters, choose a creature type.\nCreatures you control are the chosen type in addition to their other types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.";
     let result = crate::parser::oracle::parse_oracle_text(
         oracle,
@@ -20985,7 +20981,13 @@ fn parse_arcane_adaptation_full_oracle_adds_static_and_gaps_tail() {
         &["Enchantment".to_string()],
         &[],
     );
-    let has_additive_static = result.statics.iter().any(|def| {
+    assert_eq!(
+        result.statics.len(),
+        1,
+        "Arcane Adaptation must have one static"
+    );
+    let def = &result.statics[0];
+    assert!(
         def.modifications
             .contains(&ContinuousModification::AddChosenSubtype {
                 kind: ChosenSubtypeKind::CreatureType,
@@ -20993,24 +20995,19 @@ fn parse_arcane_adaptation_full_oracle_adds_static_and_gaps_tail() {
             && !def
                 .modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. }))
-    });
-    assert!(
-        has_additive_static,
-        "Arcane Adaptation must produce the additive static: {:?}",
-        result.statics
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+        "Arcane Adaptation must produce only the additive chosen-type modification: {def:?}"
     );
-    let tail_gapped = result.abilities.iter().any(|ability| {
-        matches!(
-            *ability.effect,
-            crate::types::ability::Effect::Unimplemented { description: Some(ref frag), .. }
-                // allow-noncombinator: test assertion on a gapped Unimplemented fragment, not parser dispatch
-                if frag.contains("creature spells you control")
-        )
-    });
     assert!(
-        tail_gapped,
-        "the 'same is true for ...' tail must be gapped as Unimplemented: {:?}",
+        matches!(def.affected, Some(TargetFilter::Or { ref filters }) if filters.len() == 3),
+        "Arcane Adaptation must retain battlefield, spell, and owned-card recipient arms: {def:?}"
+    );
+    assert!(
+        !result.abilities.iter().any(|ability| matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Unimplemented { .. }
+        )),
+        "Arcane Adaptation's continuation must not leave an Unimplemented residual: {:?}",
         result.abilities
     );
 }
@@ -21043,12 +21040,11 @@ fn parser_shape_rukarumel_compound_subject_chosen_type_static() {
     }
 }
 
-// Issue #5246: full Rukarumel oracle. The compound-subject additive static must be
-// present AND the trailing "The same is true for ..." (non-battlefield-zone)
-// sentence must surface as an Unimplemented residual — mirroring Arcane
-// Adaptation / Maskwood Nexus, not collapsing the whole line into a strict-fail.
+// CR 205.1b + CR 611.3a + CR 613.1d + issue #5246: Rukarumel's compound
+// battlefield antecedent and two nonbattlefield continuation arms form one
+// additive continuous static.
 #[test]
-fn parse_rukarumel_full_oracle_adds_compound_static_and_gaps_tail() {
+fn parse_rukarumel_full_oracle_models_all_same_is_true_recipients() {
     let oracle = "As Rukarumel enters, choose a creature type.\nSlivers you control and nontoken creatures you control are the chosen type in addition to their other creature types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 1/1 colorless Sliver creature token.";
     let result = crate::parser::oracle::parse_oracle_text(
         oracle,
@@ -21057,34 +21053,30 @@ fn parse_rukarumel_full_oracle_adds_compound_static_and_gaps_tail() {
         &["Legendary".to_string(), "Creature".to_string()],
         &[],
     );
-    let has_compound_static = result.statics.iter().any(|def| {
-        matches!(def.affected, Some(TargetFilter::Or { ref filters }) if filters.len() >= 2)
-            && def
-                .modifications
-                .contains(&ContinuousModification::AddChosenSubtype {
-                    kind: ChosenSubtypeKind::CreatureType,
-                })
+    assert_eq!(result.statics.len(), 1, "Rukarumel must have one static");
+    let def = &result.statics[0];
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            })
             && !def
                 .modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. }))
-    });
-    assert!(
-        has_compound_static,
-        "Rukarumel must produce the compound-subject additive static: {:?}",
-        result.statics
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+        "Rukarumel must produce only the additive chosen-type modification: {def:?}"
     );
-    let tail_gapped = result.abilities.iter().any(|ability| {
-        matches!(
-            *ability.effect,
-            crate::types::ability::Effect::Unimplemented { description: Some(ref frag), .. }
-                // allow-noncombinator: test assertion on a gapped Unimplemented fragment, not parser dispatch
-                if frag.contains("creature spells you control")
-        )
-    });
     assert!(
-        tail_gapped,
-        "the 'same is true for ...' tail must be gapped as Unimplemented: {:?}",
+        matches!(def.affected, Some(TargetFilter::Or { ref filters })
+            if filters.len() == 3 && matches!(&filters[0], TargetFilter::Or { filters } if filters.len() == 2)),
+        "Rukarumel must retain its two-part battlefield antecedent plus spell/card arms: {def:?}"
+    );
+    assert!(
+        !result.abilities.iter().any(|ability| matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Unimplemented { .. }
+        )),
+        "Rukarumel's continuation must not leave an Unimplemented residual: {:?}",
         result.abilities
     );
 }
@@ -21165,9 +21157,9 @@ fn parser_shape_lifecraft_engine_vehicle_chosen_creature_type_static() {
 // CR 613.1d + CR 205.3m: Maskwood Nexus's battlefield static — "Creatures
 // you control are every creature type." — must lower to a Layer 4
 // type-changing effect that adds every creature type (CR 205.3m) to each
-// creature the controller has on the battlefield. The non-battlefield
-// "the same is true for ..." tail is stripped by the dispatcher in
-// `oracle.rs`; this test pins the battlefield-only static directly.
+// creature the controller has on the battlefield. The complete multi-zone
+// grammar is covered above; this direct unit test intentionally pins only the
+// standalone battlefield antecedent parser.
 #[test]
 fn parser_shape_maskwood_nexus_every_creature_type_applies_to_creatures_you_control() {
     let def = parse_static_line("Creatures you control are every creature type.").unwrap();

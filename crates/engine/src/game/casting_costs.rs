@@ -7055,28 +7055,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // protection all see the merged characteristics while the spell resolves.
     if casting_variant == CastingVariant::Fuse {
         if let Some(obj) = state.objects.get_mut(&object_id) {
-            // `fused_split_spell` was already set before mana payment (above). Here
-            // we union the right (Split back face) half's card types (CR 709.4c) and
-            // colors (CR 105.2) into the on-stack object so counterspell filters,
-            // type-matters effects, and protection that read `card_types`/`color`
-            // directly see the merged characteristics while the spell resolves.
-            let right_half_characteristics = obj
-                .back_face
-                .as_ref()
-                .filter(|bf| bf.layout_kind == Some(crate::types::card::LayoutKind::Split))
-                .map(|back| (back.card_types.core_types.clone(), back.color.clone()));
-            if let Some((core_types, colors)) = right_half_characteristics {
-                for ct in core_types {
-                    if !obj.card_types.core_types.contains(&ct) {
-                        obj.card_types.core_types.push(ct);
-                    }
-                }
-                for color in colors {
-                    if !obj.color.contains(&color) {
-                        obj.color.push(color);
-                    }
-                }
-            }
+            obj.restore_fused_split_characteristics();
         }
     }
 

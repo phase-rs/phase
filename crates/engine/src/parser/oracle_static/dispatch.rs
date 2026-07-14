@@ -6,7 +6,7 @@ use super::prelude::*;
 use super::support::*;
 use super::{
     anthem::*, cda::*, cost_mod::*, evasion::*, keyword_grant::*, loyalty::*, mana_transform::*,
-    restriction::*, type_change::*,
+    restriction::*, same_is_true::*, type_change::*,
 };
 use crate::types::statics::ProhibitionScope;
 
@@ -704,6 +704,16 @@ pub(crate) fn parse_static_line_inner(
     let lower = text.to_lowercase();
     let tp = TextPair::new(&text, &lower);
 
+    if let Some(def) = parse_same_is_true_type_static(&text, &lower) {
+        return Some(def);
+    }
+    if is_same_is_true_type_static_candidate(&text, &lower) {
+        // The dedicated all-consuming parser recognized this as a malformed
+        // continuation. Fail closed so a battlefield-only legacy parser cannot
+        // silently drop the unmodeled tail; the document dispatcher will retain
+        // the full line as an honest `Unimplemented` residual.
+        return None;
+    }
     if let Some(def) = parse_arcane_adaptation_chosen_type_static(&tp, &text) {
         return Some(def);
     }
