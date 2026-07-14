@@ -383,8 +383,8 @@ mod tests {
     /// not push it to the bottom (the collapsed `Zone::Library` behavior). Runs many
     /// conjures against a large library and asserts every one lands within the top
     /// five and that the slot actually varies (proving it is random, not a fixed
-    /// top/bottom placement). Reverting `reposition_conjured_in_library` — which
-    /// leaves the card at the bottom `create_object` places it — fails this test.
+    /// top/bottom placement). Reverting `place_conjured_in_library` — which leaves
+    /// the card at the bottom `create_object` places it — fails this test.
     #[test]
     fn conjure_random_within_top_lands_among_top_n_and_varies() {
         use crate::types::ability::LibraryPosition;
@@ -448,85 +448,90 @@ mod tests {
     }
 
     /// Issue #5614 (re-review blocker): a MULTI-card positional conjure must keep
-    /// EVERY copy within the final top-N window. The earlier design placed each copy
-    /// independently and mutated the library between insertions, so a copy inserted
-    /// near the bottom of the window could be shoved past slot N by a later sibling
-    /// inserted above it. Conjuring three copies into the "top three" of a ten-card
-    /// library is the adversarial case: the atomic placement reserves the whole
-    /// window, so the top three slots end up being EXACTLY the three copies (every
-    /// existing card pushed below). A per-card design would leave existing filler
-    /// interleaved inside the top three — this test fails against it for any seed.
+    /// EVERY copy within the final top-N window, and that must be proven against the
+    /// ADVERSE insertion order. The replaced per-copy design inserted each copy into
+    /// the *current* library and mutated it between insertions, so a copy placed near
+    /// slot n-1 could be shoved PAST slot n by a later sibling inserted above it —
+    /// landing outside the top n (exactly the "one of the three ends up outside its
+    /// top ten" flaw for Sandcloud Harbinger). Conjuring three copies into the top
+    /// FIVE of a ten-card library leaves that room (n > count), so a per-copy order
+    /// can displace a copy; the atomic placement reserves the whole window up front
+    /// and keeps every copy in-window regardless of insertion order.
+    ///
+    /// Deterministic witness: a single seed could sample a benign order (e.g.
+    /// successive slots 0, 1, 2 keep all copies in-window even per-copy), so the
+    /// resolver is swept over a FIXED seed range instead. The atomic placement holds
+    /// the invariant for EVERY seed, so reverting to the per-copy algorithm fails this
+    /// test on the adverse seeds in the range. Verified against the reverted per-copy
+    /// arm: it displaces a copy to index >= 5 for seeds in `0..64` (first at seed 3),
+    /// so this sweep deterministically fails when the atomic block is undone.
     #[test]
     fn conjure_multiple_into_top_n_keeps_every_copy_in_final_window() {
         use crate::types::ability::LibraryPosition;
-        use std::collections::HashSet;
 
-        let mut state = GameState::new_two_player(123);
+        for seed in 0..64 {
+            let mut state = GameState::new_two_player(seed);
 
-        // Ten existing cards, so "top three" is far tighter than the library and any
-        // per-card displacement necessarily leaves an existing card in the window.
-        for i in 0..10 {
-            crate::game::zones::create_object(
-                &mut state,
-                CardId(0),
+            // Ten existing cards, so "top five" is tighter than the library and a
+            // displaced copy is genuinely pushed outside the window.
+            for i in 0..10 {
+                crate::game::zones::create_object(
+                    &mut state,
+                    CardId(0),
+                    PlayerId(0),
+                    format!("Filler {i}"),
+                    Zone::Library,
+                );
+            }
+
+            // Three copies into the top five: n > count leaves room for the per-copy
+            // order to shove an earlier copy past slot 5, which the atomic placement
+            // must prevent for every sampled slot sequence.
+            let ability = ResolvedAbility::new(
+                Effect::Conjure {
+                    cards: vec![ConjureCard {
+                        source: ConjureSource::Named {
+                            name: "Conjured".to_string(),
+                        },
+                        count: QuantityExpr::Fixed { value: 3 },
+                    }],
+                    destination: Zone::Library,
+                    tapped: false,
+                    library_position: Some(LibraryPosition::RandomWithinTop {
+                        n: QuantityExpr::Fixed { value: 5 },
+                    }),
+                    library_players: None,
+                },
+                vec![],
+                ObjectId(99),
                 PlayerId(0),
-                format!("Filler {i}"),
-                Zone::Library,
             );
-        }
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
 
-        // Three copies into the top three (n == count) — the strongest window: the
-        // atomic placement must fill all three top slots with the conjured copies.
-        let ability = ResolvedAbility::new(
-            Effect::Conjure {
-                cards: vec![ConjureCard {
-                    source: ConjureSource::Named {
-                        name: "Conjured".to_string(),
-                    },
-                    count: QuantityExpr::Fixed { value: 3 },
-                }],
-                destination: Zone::Library,
-                tapped: false,
-                library_position: Some(LibraryPosition::RandomWithinTop {
-                    n: QuantityExpr::Fixed { value: 3 },
-                }),
-                library_players: None,
-            },
-            vec![],
-            ObjectId(99),
-            PlayerId(0),
-        );
-        let mut events = Vec::new();
-        resolve(&mut state, &ability, &mut events).unwrap();
-
-        let library = &state.players[0].library;
-        let conjured: Vec<ObjectId> = library
-            .iter()
-            .copied()
-            .filter(|id| state.objects[id].name == "Conjured")
-            .collect();
-        assert_eq!(
-            conjured.len(),
-            3,
-            "all three copies must be conjured into the library"
-        );
-
-        // Every copy is within the final top three, and — because the atomic placement
-        // reserves the whole window before inserting — the top three slots are exactly
-        // the three copies. The old per-card design cannot guarantee either invariant.
-        for id in &conjured {
-            let index = library.iter().position(|x| x == id).unwrap();
-            assert!(
-                index < 3,
-                "conjured copy must stay within the final top three, got index {index}"
+            let library = &state.players[0].library;
+            let conjured: Vec<ObjectId> = library
+                .iter()
+                .copied()
+                .filter(|id| state.objects[id].name == "Conjured")
+                .collect();
+            assert_eq!(
+                conjured.len(),
+                3,
+                "all three copies must be conjured into the library (seed {seed})"
             );
+
+            // Every copy stays within the final top five. The old per-copy design
+            // cannot guarantee this: a later sibling can shove an earlier copy past
+            // slot 5, the exact displacement the atomic reservation eliminates.
+            for id in &conjured {
+                let index = library.iter().position(|x| x == id).unwrap();
+                assert!(
+                    index < 5,
+                    "conjured copy must stay within the final top five, got index {index} (seed {seed})"
+                );
+            }
         }
-        let top_three: HashSet<ObjectId> = library.iter().copied().take(3).collect();
-        let conjured_set: HashSet<ObjectId> = conjured.iter().copied().collect();
-        assert_eq!(
-            top_three, conjured_set,
-            "the final top three slots must be exactly the three conjured copies"
-        );
     }
 
     #[test]
