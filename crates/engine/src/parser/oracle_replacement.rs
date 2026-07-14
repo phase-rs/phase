@@ -418,9 +418,21 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
                 DrawReplacementScope::IndividualDraw,
                 tag::<_, _, OracleError<'_>>("would draw a card"),
             ),
+            // CR 121.2a: a count-form antecedent — "would draw <N> or more cards"
+            // for any N ("one", "two", "three", ...) — modifies the draw
+            // INSTRUCTION before any individual card draw is considered, so every
+            // count collapses to the same InstructionCount scope (Quirion-style
+            // "one or more", Alms Collector "two or more"). Reuses `parse_number`
+            // rather than enumerating each count as a verbatim tag. The
+            // IndividualDraw arm above is tried first, so the singular "a card"
+            // never reaches `parse_number`'s "a" => 1 branch here.
             value(
                 DrawReplacementScope::InstructionCount,
-                tag("would draw one or more cards"),
+                (
+                    tag::<_, _, OracleError<'_>>("would draw "),
+                    nom_primitives::parse_number,
+                    tag(" or more cards"),
+                ),
             ),
         ))
         .parse(i)
@@ -17849,6 +17861,69 @@ mod tests {
             "expected SearchLibrary substitute, got {:?}",
             def.execute.as_ref().map(|e| &e.effect),
         );
+    }
+
+    /// #5678 + CR 121.2a: the draw-replacement antecedent is a building block —
+    /// any count-form "would draw <N> or more cards" modifies the draw
+    /// INSTRUCTION, so every count (not just the hardcoded "one") must lower to
+    /// `DrawReplacementScope::InstructionCount`, while the singular "a card"
+    /// stays `IndividualDraw`. Pins the generalization so a future edit can't
+    /// silently regress to a single verbatim count.
+    #[test]
+    fn draw_replacement_count_antecedent_maps_any_count_to_instruction_scope() {
+        // Singular antecedent is still an individual-draw hook.
+        let individual = parse_replacement_line(
+            "If you would draw a card, draw two cards instead.",
+            "Individual Draw Test",
+        )
+        .expect("singular draw replacement parses");
+        assert_eq!(individual.event, ReplacementEvent::Draw);
+        assert_eq!(
+            individual.draw_scope,
+            Some(DrawReplacementScope::IndividualDraw)
+        );
+
+        // Every count-form maps to the instruction scope — the count value is
+        // irrelevant (CR 121.2a modifies the instruction, not a single draw).
+        for antecedent in [
+            "one or more cards",
+            "two or more cards",
+            "three or more cards",
+        ] {
+            let def = parse_replacement_line(
+                &format!(
+                    "If you would draw {antecedent}, you draw that many cards plus one instead."
+                ),
+                "Count Draw Test",
+            )
+            .unwrap_or_else(|| panic!("count-form '{antecedent}' parses to a replacement"));
+            assert_eq!(
+                def.event,
+                ReplacementEvent::Draw,
+                "'{antecedent}' should be a Draw replacement",
+            );
+            assert_eq!(
+                def.draw_scope,
+                Some(DrawReplacementScope::InstructionCount),
+                "'{antecedent}' should map to InstructionCount",
+            );
+        }
+    }
+
+    /// #5678 + CR 121.2a: Alms Collector's antecedent is the count-form
+    /// "would draw two or more cards" — before the generalization it matched
+    /// neither the singular nor the hardcoded "one or more" arm, so the line
+    /// produced no replacement at all. It must now lower to a `Draw` replacement
+    /// scoped to the instruction, with the opponent player scope preserved.
+    #[test]
+    fn alms_collector_two_or_more_draw_replacement_parses() {
+        let def = parse_replacement_line(
+            "If an opponent would draw two or more cards, instead you and that player each draw a card.",
+            "Alms Collector",
+        )
+        .expect("Alms Collector count-form draw replacement parses");
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert_eq!(def.draw_scope, Some(DrawReplacementScope::InstructionCount));
     }
 
     /// CR 614.1a + CR 121.1: Opponent draw replacements with the shared
