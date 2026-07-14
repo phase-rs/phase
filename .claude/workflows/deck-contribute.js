@@ -480,7 +480,8 @@ function clusterPrPrompt(mechanic, cards, { impl, verify, partial }) {
     `FIRST discard build-regenerated data artifacts — they are NOT part of any card fix, a ` +
     `partial/local mtgjson env regenerates them DESTRUCTIVELY, and they produce large drift diffs ` +
     `that conflict with main and are not CI-checked: ` +
-    `git checkout -- crates/engine/data/known-tokens.toml data/engine-inventory.json crates/engine/data/oracle-subtypes.json 2>/dev/null . ` +
+    `git checkout -- crates/engine/data/known-tokens.toml data/engine-inventory.json crates/engine/data/oracle-subtypes.json 2>/dev/null\n` +
+    `(pass ONLY those three explicit paths — NEVER append a bare '.' pathspec, which would discard the ENTIRE working tree including the card fix; the trailing 2>/dev/null only suppresses git's "did not match" noise).\n` +
     `Confirm none are staged (\`git diff --cached --name-only | grep -cE 'known-tokens|engine-inventory|oracle-subtypes'\` must print 0) before committing. Then:\n` +
     `git add -A && git commit -m ${JSON.stringify(title)} && git push -u origin HEAD\n` +
     `Then: gh pr create --base main --title ${JSON.stringify(title)} --body <BODY> ` +
