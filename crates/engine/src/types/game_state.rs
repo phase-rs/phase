@@ -10083,8 +10083,8 @@ impl GameState {
 
     /// CR 603.3b: upsert a trigger-ordering [`DecisionTemplate`], replacing any existing
     /// template with the same `(owner, key)`. Used by both tiers: the prompt path and
-    /// the persistent-permute path register ephemeral markers, `SetTriggerOrderTemplate`
-    /// saves persistent ones.
+    /// the persistent-permute path register ephemeral markers; the live
+    /// `OrderTriggers` submission records persistent ones.
     pub fn set_trigger_order_template(
         &mut self,
         tmpl: crate::analysis::decision_template::DecisionTemplate,
@@ -10114,16 +10114,6 @@ impl GameState {
         self.decision_templates
             .iter()
             .find(|t| t.owner == controller && t.key.kind == kind && t.key.covers(group_sources))
-    }
-
-    /// CR 603.3b: revoke one saved persistent ordering preference by `(actor, key)`.
-    pub fn remove_trigger_order_template(
-        &mut self,
-        actor: PlayerId,
-        key: &crate::analysis::decision_template::DecisionGroupKey,
-    ) {
-        self.decision_templates
-            .retain(|t| !(t.owner == actor && &t.key == key));
     }
 
     /// CR 603.3b: revoke all of `actor`'s PERSISTENT (`AllCopies`-keyed) ordering

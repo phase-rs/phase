@@ -155,7 +155,7 @@ import {
   loyaltyBadge,
   stripLoyaltyCostPrefix,
 } from "../viewmodel/costLabel.ts";
-import { ManaFontIcon } from "../components/icons/ManaFontIcon.tsx";
+import { LoyaltyBadge } from "../components/ui/LoyaltyBadge.tsx";
 import {
   getCastableZoneViewerTarget,
   getBoardChoiceView,
@@ -2865,16 +2865,13 @@ function AbilityChoiceModal() {
         if (badge) {
           return {
             id: String(i),
-            label: stripLoyaltyCostPrefix(label),
-            description,
-            // No `size`: mana-font scales the loyalty glyph off the parent's
-            // font-size (font-size:1.5em), so it inherits the option row size.
+            // The ability effect is the option's primary content. The loyalty
+            // badge already expresses its cost, so keeping the effect in the
+            // secondary description would visually detach it from that badge.
+            label: description ?? stripLoyaltyCostPrefix(label),
+            labelTone: "secondary",
             icon: (
-              <ManaFontIcon
-                iconClass={badge.iconClasses}
-                fallbackText={badge.text}
-                label={badge.text}
-              />
+              <LoyaltyBadge amount={badge.amount} kind="cost" />
             ),
           };
         }

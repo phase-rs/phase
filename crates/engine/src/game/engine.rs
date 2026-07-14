@@ -2860,58 +2860,11 @@ fn apply_action(
         });
     }
 
-    // CR 603.3b: SetTriggerOrderTemplate propagates the actor's saved trigger-ordering
-    // templates (persistent, `AllCopies`-keyed). Mirrors SetMayTriggerAutoChoice: pure
-    // preference state, routed by `actor`, handled before the loop-ring / auto-pass
-    // teardown so it is a legal any-state mutation. Actor scoping is enforced by forcing
-    // `owner`/key player to `actor`, so a player can only mutate their own templates.
+    // CR 603.3b: Preferences are written only by a live `OrderTriggers` response.
+    // This public action can only forget the actor's saved preferences and remains a
+    // legal any-state, actor-scoped preference action.
     if let GameAction::SetTriggerOrderTemplate { op } = &action {
-        use crate::analysis::decision_template::{
-            DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
-        };
-        use crate::types::game_state::YieldTarget;
         match op {
-            TriggerOrderTemplateOp::Save { sources, order } => {
-                // `order[pos]` = index into `sources` of the trigger the player placed
-                // at ordering position `pos` (same convention as `OrderTriggers`).
-                // Resolve each source id → its `AllCopies` card identity (CR 704.5d, so
-                // the template survives token death / re-entry) and pin it at `pos`. A
-                // source that no longer resolves is skipped defensively — a divergent
-                // template simply won't cover a future batch (re-prompt), never a wrong
-                // order.
-                let mut decisions = Vec::with_capacity(order.len());
-                let mut key_sources = Vec::with_capacity(order.len());
-                for (pos, &src_idx) in order.iter().enumerate() {
-                    let Some(&source_id) = sources.get(src_idx) else {
-                        continue;
-                    };
-                    let Some(card_id) = state.objects.get(&source_id).map(|o| o.card_id) else {
-                        continue;
-                    };
-                    let src = YieldTarget::AllCopies {
-                        card_id,
-                        trigger_description: None,
-                    };
-                    decisions.push(PinnedDecision::Order {
-                        source: src.clone(),
-                        pos: pos as u8,
-                    });
-                    key_sources.push(src);
-                }
-                let tmpl = DecisionTemplate {
-                    owner: actor,
-                    decisions,
-                    replay: ReplayMode::Static,
-                    key: DecisionGroupKey::from_sources(
-                        &key_sources,
-                        DecisionKind::TriggerOrdering,
-                    ),
-                };
-                state.set_trigger_order_template(tmpl);
-            }
-            TriggerOrderTemplateOp::Remove { key } => {
-                state.remove_trigger_order_template(actor, key);
-            }
             TriggerOrderTemplateOp::ClearAll => {
                 state.clear_trigger_order_templates(actor);
             }

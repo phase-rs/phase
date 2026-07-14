@@ -2455,60 +2455,6 @@ fn set_trigger_order_template_clear_all_is_actor_scoped() {
     );
 }
 
-/// T5 (CR 603.3b): actor scoping on `Remove` — the handler binds the removal to the
-/// acting player, so a malicious P1 cannot delete P0's saved template by naming P0's
-/// key. A reach-guard proves the auth gate is otherwise live, and P1's own Remove is
-/// shown to take effect (non-vacuous).
-#[test]
-fn set_trigger_order_template_remove_cannot_target_another_player() {
-    use crate::types::actions::TriggerOrderTemplateOp;
-
-    let mut state = setup_game_at_main_phase();
-    let p0_tmpl = persistent_order_template(PlayerId(0), 100);
-    let p0_key = p0_tmpl.key.clone();
-    state.set_trigger_order_template(p0_tmpl);
-    // P1 owns a template under the SAME key (same card multiset) — proves Remove is
-    // scoped by owner, not key alone.
-    state.set_trigger_order_template(persistent_order_template(PlayerId(1), 100));
-    assert_eq!(state.decision_templates.len(), 2);
-
-    // Reach-guard: a non-exempt action from P1 in P0's priority window errors, proving
-    // the auth gate is live (so the exemption below is what lets P1 act).
-    let unauthorized = apply(&mut state, PlayerId(1), GameAction::PassPriority);
-    assert!(
-        matches!(unauthorized, Err(EngineError::WrongPlayer)),
-        "a non-priority player cannot pass priority (proves the auth gate is live)"
-    );
-
-    // P1 names P0's exact key, but the handler rebinds removal to the actor (P1).
-    apply(
-        &mut state,
-        PlayerId(1),
-        GameAction::SetTriggerOrderTemplate {
-            op: TriggerOrderTemplateOp::Remove {
-                key: p0_key.clone(),
-            },
-        },
-    )
-    .expect("SetTriggerOrderTemplate is exempt from the priority-holder gate");
-
-    // P1's own same-key template was removed (op took effect), P0's survives.
-    assert!(
-        state
-            .decision_templates
-            .iter()
-            .any(|t| t.owner == PlayerId(0) && t.key == p0_key),
-        "P0's saved template survives P1's attempt to remove it by naming P0's key"
-    );
-    assert!(
-        !state
-            .decision_templates
-            .iter()
-            .any(|t| t.owner == PlayerId(1)),
-        "P1's own same-key template WAS removed (the Remove op is non-vacuous)"
-    );
-}
-
 /// CR 117.3d: an `UntilEndOfTurn` auto-pass session normally ends (Finish) when
 /// an opponent-controlled trigger tops the stack, so the player can respond.
 /// A matching yield keeps the session auto-passing (Pass) through that trigger;

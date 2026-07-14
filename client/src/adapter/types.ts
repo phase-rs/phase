@@ -710,15 +710,10 @@ export type MayTriggerAutoChoiceOp =
   | { type: "Remove"; data: { key: MayTriggerAutoChoiceKey } }
   | { type: "ClearAll" };
 
-// CR 603.3b: The mutation a `SetTriggerOrderTemplate` action performs on the
-// acting player's saved trigger-ordering templates. `Save` echoes the prompted
-// group's source object ids + the submitted permutation; `Remove` echoes a
-// stored key; `ClearAll` drops every saved template belonging to the acting
-// player. Mirrors engine `TriggerOrderTemplateOp` (types/actions.rs).
-export type TriggerOrderTemplateOp =
-  | { type: "Save"; data: { sources: ObjectId[]; order: number[] } }
-  | { type: "Remove"; data: { key: DecisionGroupKey } }
-  | { type: "ClearAll" };
+// CR 603.3b: A live `OrderTriggers` answer is the only way to save a
+// trigger-ordering preference. This public action only forgets the acting
+// player's saved preferences.
+export type TriggerOrderTemplateOp = { type: "ClearAll" };
 
 // CR 603.3b: Order-insensitive identity of a recurring decision group — the
 // canonical sorted (identity, multiplicity) source multiset plus its kind.

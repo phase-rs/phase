@@ -277,6 +277,71 @@ describe("Discard cost modal", () => {
     expect(screen.queryByText(/battlefield/i)).not.toBeInTheDocument();
   });
 
+  it("describes exile selection without falling back to battlefield", () => {
+    setWaitingFor(
+      buildEffectZoneChoiceWaitingFor({
+        player: 0,
+        cards: [10],
+        count: 1,
+        min_count: 0,
+        up_to: false,
+        source_id: 1,
+        effect_kind: "Exile",
+        zone: "Hand",
+        destination: "Exile",
+      }),
+      { 10: makeObject(10, "Exile Target") },
+    );
+
+    render(<CardChoiceModal />);
+
+    expect(screen.getByText("Exile")).toBeInTheDocument();
+    expect(screen.getByText("Choose 1 card to exile")).toBeInTheDocument();
+    expect(screen.queryByText(/battlefield/i)).not.toBeInTheDocument();
+  });
+
+  it("allocates any-combination mana with color steppers", () => {
+    setWaitingFor({
+      type: "ChooseManaColor",
+      data: {
+        player: 0,
+        choice: {
+          type: "AnyCombination",
+          data: { count: 3, options: ["White", "Blue"] },
+        },
+        context: { type: "ManaAbility", data: {} },
+      },
+    });
+
+    render(<CardChoiceModal />);
+
+    const confirm = screen.getByRole("button", { name: "Confirm" });
+    expect(confirm).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add White mana" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add White mana" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add Blue mana" }));
+
+    expect(screen.getByText("3 / 3 mana selected")).toBeInTheDocument();
+    expect(confirm).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Add White mana" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove Blue mana" }));
+    expect(screen.getByText("2 / 3 mana selected")).toBeInTheDocument();
+    expect(confirm).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Blue mana" }));
+
+    fireEvent.click(confirm);
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "ChooseManaColor",
+      data: {
+        choice: { type: "Combination", data: ["White", "White", "Blue"] },
+      },
+    });
+  });
+
   it("suppresses battlefield return choices for board-native selection", () => {
     setWaitingFor(
       buildEffectZoneChoiceWaitingFor({

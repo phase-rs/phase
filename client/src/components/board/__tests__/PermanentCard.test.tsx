@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject, GameState } from "../../../adapter/types.ts";
@@ -217,7 +217,7 @@ describe("PermanentCard attachments", () => {
     expect(container.querySelectorAll('[data-object-id="2"]')).toHaveLength(1);
   });
 
-  it("collapses multiple direct attachments until the host is hovered", () => {
+  it("keeps multiple direct attachments collapsed through hover and inspection, but expands when selected", () => {
     const secondEquipment = makeObject({
       id: 4,
       card_id: 400,
@@ -246,34 +246,43 @@ describe("PermanentCard attachments", () => {
     act(() => {
       useUiStore.setState({ inspectedObjectId: 1 });
     });
-    expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
+    expect(container.querySelector('[data-object-id="4"]')).toBeNull();
+
+    fireEvent.mouseEnter(container.querySelector('[data-object-id="1"]') as HTMLElement);
+    expect(container.querySelector('[data-object-id="4"]')).toBeNull();
 
     act(() => {
-      useUiStore.setState({ inspectedObjectId: null });
+      useUiStore.setState({ selectedObjectId: 1 });
     });
-    fireEvent.mouseEnter(container.querySelector('[data-object-id="1"]') as HTMLElement);
-
     expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
   });
 
-  it("opens the attachment fan for the host via the hover badge", () => {
+  it("opens the attachment fan from the collapsed-count button without selecting the host", () => {
+    const gameState = makeState();
+    gameState.objects[1].attachments = [2, 4];
+    gameState.objects[4] = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      attachments: [],
+      name: "Second Equipment",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    gameState.battlefield = [1, 2, 3, 4];
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
     act(() => {
       useUiStore.setState({ attachmentFanHostId: null, inspectedObjectId: null });
     });
 
-    const { container } = renderPermanent();
-    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+    renderPermanent();
 
-    // On a pointer device the view-attachments badge is hover-revealed, so it
-    // is absent until the host is hovered. (The nested attachment cards never
-    // render a badge here — only the host owns attachments.)
-    expect(container.querySelector("button")).toBeNull();
-
-    // Hovering reveals the badge AND raises the card preview (inspectedObjectId).
-    fireEvent.mouseEnter(host);
-    expect(useUiStore.getState().inspectedObjectId).toBe(1);
-    const button = container.querySelector("button") as HTMLButtonElement;
-    expect(button).not.toBeNull();
+    const button = screen.getByRole("button", { name: "Show 1 hidden attached card" });
 
     // pointerdown must be stopped so the host motion.div never captures the
     // pointer (useLongPress.setPointerCapture) and retargets the click to the
@@ -281,9 +290,8 @@ describe("PermanentCard attachments", () => {
     fireEvent.pointerDown(button);
     fireEvent.click(button);
 
-    // Routes to the fan-host state (uiStore), clears the covering card preview
-    // so the z-[100] preview never veils the fan, and never selects the host
-    // (the click stayed on the badge).
+    // Routes to the fan-host state (uiStore), clears any covering preview, and
+    // never selects the host because the control stops propagation.
     expect(useUiStore.getState().attachmentFanHostId).toBe(1);
     expect(useUiStore.getState().selectedObjectId).toBeNull();
     expect(useUiStore.getState().inspectedObjectId).toBeNull();

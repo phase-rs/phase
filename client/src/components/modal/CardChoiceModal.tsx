@@ -1080,7 +1080,9 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
         ? "Topdeck"
         : data.destination === "Hand"
           ? "Hand"
-          : "Battlefield";
+          : data.destination === "Exile"
+            ? "Exile"
+            : "Battlefield";
   const visualClasses = EFFECT_ZONE_VISUAL_CLASSES[mode];
   const selectedOrder = isTopdeck ? Array.from(selected) : [];
   const selectedOrderLabels = selectedOrder.map((_, index) =>
@@ -3154,67 +3156,127 @@ function ManaAnyCombinationChoiceModal({
 }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const [selected, setSelected] = useState<(ManaType | null)[]>(
-    Array.from({ length: count }, () => null),
+  const [quantities, setQuantities] = useState<Record<ManaType, number>>(() =>
+    Object.fromEntries(options.map((color) => [color, 0])) as Record<
+      ManaType,
+      number
+    >,
+  );
+  const selectedCount = options.reduce(
+    (total, color) => total + (quantities[color] ?? 0),
+    0,
   );
 
-  const handleSelect = useCallback((slot: number, color: ManaType) => {
-    setSelected((current) => {
-      const next = [...current];
-      next[slot] = color;
-      return next;
-    });
-  }, []);
+  const adjustQuantity = useCallback(
+    (color: ManaType, delta: 1 | -1) => {
+      setQuantities((current) => {
+        const currentCount = current[color] ?? 0;
+        const total = options.reduce(
+          (sum, option) => sum + (current[option] ?? 0),
+          0,
+        );
+        if (
+          (delta > 0 && total >= count) ||
+          (delta < 0 && currentCount === 0)
+        ) {
+          return current;
+        }
+        return { ...current, [color]: currentCount + delta };
+      });
+    },
+    [count, options],
+  );
 
   const handleConfirm = useCallback(() => {
-    if (selected.every((color): color is ManaType => color !== null)) {
+    if (selectedCount === count) {
       dispatch({
         type: "ChooseManaColor",
         data: {
-          choice: { type: "Combination", data: selected },
+          choice: {
+            type: "Combination",
+            data: options.flatMap((color) =>
+              Array.from(
+                { length: quantities[color] ?? 0 },
+                () => color,
+              ),
+            ),
+          },
         },
       });
     }
-  }, [dispatch, selected]);
+  }, [count, dispatch, options, quantities, selectedCount]);
 
   return (
     <ChoiceOverlay
       title={t("cardChoice.manaCombination.title")}
       subtitle={t("cardChoice.manaCombination.subtitleAny")}
-      widthClassName="w-fit max-w-full"
-      maxWidthClassName="max-w-lg"
+      widthClassName="w-full"
+      maxWidthClassName="max-w-md"
       footer={
         <ConfirmButton
           onClick={handleConfirm}
-          disabled={selected.some((color) => color === null)}
+          disabled={selectedCount !== count}
         />
       }
     >
-      <div className="mx-auto flex w-fit flex-col gap-4 px-4 py-4 sm:px-6 sm:py-6">
-        {selected.map((slotColor, slot) => (
-          <div key={slot} className="flex items-center justify-center gap-3">
-            {options.map((color) => {
-              const isSelected = slotColor === color;
-              return (
-                <motion.button
-                  key={`${slot}-${color}`}
-                  className={`flex h-12 w-12 items-center justify-center rounded-full border-2 transition sm:h-14 sm:w-14 ${
-                    isSelected
-                      ? MANA_COLOR_SELECTED[color]
-                      : MANA_COLOR_STYLES[color]
-                  }`}
-                  initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  transition={{ delay: 0.04 + slot * 0.04, duration: 0.2 }}
-                  whileHover={{ scale: 1.08 }}
-                  onClick={() => handleSelect(slot, color)}
-                >
-                  <ManaSymbol shard={MANA_COLOR_SHARDS[color]} size="md" />
-                </motion.button>
-              );
+      <div className="mx-auto flex w-full max-w-sm flex-col gap-3 px-4 py-4 sm:px-6 sm:py-6">
+        <div className="rounded-xl border border-cyan-300/25 bg-cyan-400/10 px-4 py-3 text-center">
+          <span aria-live="polite" className="text-sm font-medium text-cyan-100">
+            {t("cardChoice.manaCombination.amount", {
+              selected: selectedCount,
+              count,
             })}
-          </div>
-        ))}
+          </span>
+        </div>
+        <div className="flex flex-col gap-2">
+          {options.map((color, index) => {
+            const quantity = quantities[color] ?? 0;
+            return (
+              <motion.div
+                key={color}
+                className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: index * 0.04, duration: 0.2 }}
+              >
+                <ManaSymbol shard={MANA_COLOR_SHARDS[color]} size="md" />
+                <div className="ml-auto flex items-center gap-3">
+                  <button
+                    type="button"
+                    aria-label={t("cardChoice.manaCombination.decrease", {
+                      color,
+                    })}
+                    disabled={quantity === 0}
+                    onClick={() => adjustQuantity(color, -1)}
+                    className="flex h-11 w-11 items-center justify-center rounded-full border border-white/20 text-xl leading-none text-white transition hover:border-white/40 disabled:opacity-30"
+                  >
+                    −
+                  </button>
+                  <output
+                    aria-label={t("cardChoice.manaCombination.quantity", {
+                      color,
+                      count: quantity,
+                    })}
+                    className="w-8 text-center text-xl font-semibold tabular-nums text-white"
+                  >
+                    {quantity}
+                  </output>
+                  <button
+                    type="button"
+                    aria-label={t("cardChoice.manaCombination.increase", {
+                      color,
+                    })}
+                    disabled={selectedCount === count}
+                    onClick={() => adjustQuantity(color, 1)}
+                    className="flex h-11 w-11 items-center justify-center rounded-full border border-white/20 text-xl leading-none text-white transition hover:border-white/40 disabled:opacity-30"
+                  >
+                    +
+                  </button>
+                </div>
+              </motion.div>
+            );
+          })}
+        </div>
       </div>
     </ChoiceOverlay>
   );

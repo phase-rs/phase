@@ -20,10 +20,10 @@ import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildGrantedKeywordSources, buildPTSources } from "../../viewmodel/attribution.ts";
 import { COUNTER_COLORS, computePTDisplay, counterIconClass, formatCounterType, toRoman } from "../../viewmodel/cardProps.ts";
-import { loyaltyStartIconClasses } from "../../viewmodel/costLabel.ts";
 import { getCardDisplayColors } from "../card/cardFrame.ts";
 import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
+import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { KeywordStrip } from "./KeywordStrip.tsx";
 import {
@@ -394,8 +394,8 @@ export const PermanentCard = memo(function PermanentCard({
     );
   const attachmentsLifted =
     obj.attachments.length > 0
-    && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree || isSelected || isInspected || attachmentsActionable);
-  const attachmentsExpanded = obj.attachments.length <= 1 || attachmentsLifted;
+    && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree);
+  const attachmentsExpanded = obj.attachments.length <= 1 || isSelected || attachmentsActionable;
   const visibleAttachmentIds = attachmentsExpanded ? obj.attachments : obj.attachments.slice(0, 1);
   const attachmentPathIds = new Set([...attachmentRenderPath, objectId]);
   const renderableAttachmentIds = visibleAttachmentIds.filter((id) => !attachmentPathIds.has(id));
@@ -474,10 +474,6 @@ export const PermanentCard = memo(function PermanentCard({
 
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
-
-  // mana-font shield glyph for the current loyalty total, or null when the
-  // total has no numeral glyph (falls back to the plain amber badge below).
-  const loyaltyShield = obj.loyalty != null ? loyaltyStartIconClasses(obj.loyalty) : null;
 
   // Tap rotation: 17deg in MTGA mode (or compact-height), 90deg in classic mode
   const tapBaseOpacity = (isCompactHeight || tapRotation === "mtga") && obj.tapped ? 0.85 : 1;
@@ -685,13 +681,20 @@ export const PermanentCard = memo(function PermanentCard({
         );
       })}
       {hiddenAttachmentCount > 0 && (
-        <div
-          className="pointer-events-none absolute -right-3 top-6 z-30 flex h-6 min-w-6 items-center justify-center rounded-full bg-amber-300 px-1.5 text-[11px] font-black leading-none text-amber-950 ring-2 ring-amber-950/80 shadow"
-          title={t("permanent.hiddenAttachments", { count: hiddenAttachmentCount })}
-          aria-label={t("permanent.hiddenAttachments", { count: hiddenAttachmentCount })}
+        <button
+          type="button"
+          className="absolute -right-3 top-6 z-30 flex h-6 min-w-6 items-center justify-center rounded-full bg-amber-300 px-1.5 text-[11px] font-black leading-none text-amber-950 ring-2 ring-amber-950/80 shadow transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          title={t("permanent.hiddenAttachmentsAria", { count: hiddenAttachmentCount })}
+          aria-label={t("permanent.hiddenAttachmentsAria", { count: hiddenAttachmentCount })}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            dismissPreview();
+            setAttachmentFanHost(objectId);
+          }}
         >
           +{hiddenAttachmentCount}
-        </div>
+        </button>
       )}
 
       {/* Exile ghosts — cards held in exile by this permanent, peeking from below */}
@@ -752,6 +755,7 @@ export const PermanentCard = memo(function PermanentCard({
           {ptDisplay && (
             <PTBox
               ptDisplay={ptDisplay}
+              position={obj.loyalty != null ? "left" : "right"}
               ptSources={ptSources}
               basePower={obj.base_power}
               baseToughness={obj.base_toughness}
@@ -765,26 +769,15 @@ export const PermanentCard = memo(function PermanentCard({
             </div>
           )}
 
-          {/* Loyalty shield for planeswalkers — mana-font shield glyph when a
-              numeral exists, else the plain amber badge (also the FOUC path). */}
-          {obj.loyalty != null && (loyaltyShield ? (
-            // Font-size on the wrapper drives the glyph: `.ms-loyalty-start` is
-            // 2em, so ~13px here → a ~26px shield with a white numeral overlay.
-            <div
-              className="absolute bottom-0 left-1/2 z-20 -translate-x-1/2 font-bold leading-none text-amber-300 drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)]"
-              style={{ fontSize: "13px" }}
-            >
-              <ManaFontIcon
-                iconClass={loyaltyShield}
-                fallbackText={String(obj.loyalty)}
-                label={String(obj.loyalty)}
-              />
-            </div>
-          ) : (
-            <div className="absolute bottom-0 left-1/2 z-20 -translate-x-1/2 rounded-t bg-gray-900/90 px-1.5 py-0.5 text-xs font-bold text-amber-300">
-              {obj.loyalty}
-            </div>
-          ))}
+          {obj.loyalty != null && (
+            <LoyaltyBadge
+              amount={obj.loyalty}
+              kind="total"
+              size="battlefield"
+              className="absolute bottom-0 right-0 z-30"
+              style={{ position: "absolute" }}
+            />
+          )}
 
           {/* Class level badge (CR 716) — gold-leaf bookmark */}
           {obj.class_level != null && (
@@ -948,51 +941,6 @@ export const PermanentCard = memo(function PermanentCard({
         />
       )}
 
-      {/* View-attachments affordance. Attached permanents (Equipment / Aura /
-          Fortification) render only as a narrow right-edge peek behind their
-          host, so their own click/hover handlers — including an Equipment's
-          re-Equip activation (CR 301.5: the Equipment is an independent object
-          and activation source) — are hard to reach. This badge opens the
-          AttachmentsDialog for the host, where each attachment is shown at full
-          size and is independently interactive (target-select / activate). Only
-          the host carries attachments, so it never appears on the peeked cards
-          themselves. Revealed on hover on pointer devices; always shown on
-          touch (no hover) since the dialog is the only reliable reach there.
-
-          Mirrors GroupedPermanent's expand/collapse badge — a circular corner
-          affordance sticking out past the card. Placed top-LEFT so it clears
-          the right-edge attachment peeks and the `hiddenAttachments` +N badge.
-
-          Two interaction traps this must sidestep, both from the host motion.div:
-          1. `useLongPress` calls `setPointerCapture` on pointerdown, which would
-             capture the pointer to the host and retarget this button's click to
-             the host (firing card selection, not the badge). Stopping pointerdown
-             propagation keeps capture from ever engaging — the same reason the
-             group badge works: it lives OUTSIDE the capturing element.
-          2. The hover preview (CardPreview `z-[100]`) paints above the dialog
-             (`z-50`); clearing it on click makes the opened dialog visible. */}
-      {obj.attachments.length > 0 && (isHovered || isInHoveredAttachmentTree || isInspected || isSelected || !canHover) && (
-        <button
-          type="button"
-          aria-label={t("permanent.viewAttachments", { count: obj.attachments.length })}
-          title={t("permanent.viewAttachments", { count: obj.attachments.length })}
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            // dismissPreview (not inspectObject(null), which only schedules a
-            // deferred 50ms clear) tears the preview down synchronously so the
-            // z-[100] preview never veils the fan.
-            dismissPreview();
-            setAttachmentFanHost(objectId);
-          }}
-          className="absolute -left-3 -top-3 z-40 flex h-6 min-w-6 items-center justify-center gap-0.5 rounded-full bg-black px-1.5 text-[11px] font-extrabold leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105"
-        >
-          <span aria-hidden className="text-[12px] leading-none">⧉</span>
-          {obj.attachments.length > 1 && (
-            <span className="tabular-nums">{obj.attachments.length}</span>
-          )}
-        </button>
-      )}
     </motion.div>
   );
 });
