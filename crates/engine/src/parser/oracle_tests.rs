@@ -1,7 +1,7 @@
 use super::*;
 use crate::parser::oracle_effect::parse_effect_chain;
 use crate::types::ability::{
-    AdditionalCostPaymentSource, CountScope, CounterAdjustment, DoorLockOp,
+    AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment, DoorLockOp,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 
@@ -3883,12 +3883,21 @@ fn bargained_etb_intervening_if_is_gated_at_trigger_time() {
         trigger.condition,
         Some(TriggerCondition::AdditionalCostPaid {
             source: AdditionalCostPaymentSource::NonKicker,
+            origin: Some(AdditionalCostOrigin::Bargain),
             variant: None,
             kicker_cost: None,
             min_count: 1,
             ..
         })
     ));
+    assert_eq!(
+        serde_json::to_value(&trigger.condition).unwrap(),
+        serde_json::json!({
+            "type": "AdditionalCostPaid",
+            "source": "NonKicker",
+            "origin": "Bargain",
+        })
+    );
     assert!(trigger
         .execute
         .as_ref()

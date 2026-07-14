@@ -5035,7 +5035,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // CR 601.2b/f + CR 113.2c: non-kicker keyword additional costs with
     // independently functioning instances are announced through a queue. This
     // preserves one payment record per Casualty/Offspring/Squad/Replicate/
-    // Teamwork instance while leaving Kicker on its existing `kickers_paid` path.
+    // Bargain/Teamwork instance while leaving Kicker on its existing `kickers_paid` path.
     let mut additional_cost_queue = Vec::new();
     additional_cost_queue.extend(effective_casualty_additional_cost_instances(
         state, player, object_id,
@@ -5047,6 +5047,9 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         state, player, object_id,
     ));
     additional_cost_queue.extend(effective_replicate_additional_cost_instances(
+        state, player, object_id,
+    ));
+    additional_cost_queue.extend(effective_bargain_additional_cost_instances(
         state, player, object_id,
     ));
     additional_cost_queue.extend(effective_teamwork_additional_cost_instances(
@@ -6918,6 +6921,28 @@ pub(super) fn effective_teamwork_additional_cost_instances(
                     },
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 },
+            )
+        })
+        .collect()
+}
+
+/// CR 702.166a: Return each effective Bargain keyword as its own optional
+/// sacrifice cost. The dedicated queue record distinguishes a bargained spell
+/// from one that merely paid an unrelated additional cost.
+pub(super) fn effective_bargain_additional_cost_instances(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<AdditionalCostInstance> {
+    super::casting::effective_spell_keyword_instances(state, player, object_id)
+        .into_iter()
+        .filter(|keyword| matches!(keyword, Keyword::Bargain))
+        .enumerate()
+        .map(|(ordinal, _)| {
+            AdditionalCostInstance::new_with_ordinal(
+                AdditionalCostOrigin::Bargain,
+                u32::try_from(ordinal).unwrap_or(u32::MAX),
+                crate::database::synthesis::bargain_additional_cost(),
             )
         })
         .collect()
@@ -11633,6 +11658,33 @@ mod tests {
             "only an explicit opponent-choice slot may record an announcing opponent"
         );
         assert_eq!(ability.context.announcing_opponent, None);
+    }
+
+    #[test]
+    fn bargain_additional_cost_instance_has_a_dedicated_origin() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9_900),
+            PlayerId(0),
+            "Realm-Scorcher Hellkite".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .keywords
+            .push(Keyword::Bargain);
+
+        let instances = effective_bargain_additional_cost_instances(&state, PlayerId(0), source);
+
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].origin, AdditionalCostOrigin::Bargain);
+        assert_eq!(
+            instances[0].cost,
+            crate::database::synthesis::bargain_additional_cost()
+        );
     }
 
     /// CR 614.1a + CR 608.2n (PLAN §8 Risk #2): the Invoke Calamity free-cast

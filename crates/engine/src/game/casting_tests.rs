@@ -23172,6 +23172,83 @@ fn voltage_surge_deals_four_when_its_artifact_cost_is_paid() {
     outcome.assert_zone(&[artifact], Zone::Graveyard);
 }
 
+fn resolve_torch_the_tower(
+    bargain: bool,
+) -> (crate::game::scenario::CastOutcome, ObjectId, ObjectId) {
+    use crate::game::scenario::{GameScenario, P0, P1};
+
+    const TORCH_ORACLE: &str = "Bargain (You may sacrifice an artifact, enchantment, or token as you cast this spell.)\nTorch the Tower deals 2 damage to target creature or planeswalker. If this spell was bargained, instead it deals 3 damage to that permanent and you scry 1.\nIf a permanent dealt damage by Torch the Tower would die this turn, exile it instead.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, ManaColor::Red);
+    scenario.with_library_top(P0, &["Scry Target"]);
+    let target = scenario.add_creature(P1, "Target Creature", 2, 5).id();
+    let artifact = create_object(
+        &mut scenario.state,
+        CardId(91_002),
+        P0,
+        "Blood Token".to_string(),
+        Zone::Battlefield,
+    );
+    scenario
+        .state
+        .objects
+        .get_mut(&artifact)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Artifact);
+    let mut spell = scenario.add_spell_to_hand(P0, "Torch the Tower", true);
+    spell
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .from_oracle_text_with_keywords(&["bargain"], TORCH_ORACLE);
+    let spell_id = spell.id();
+    let mut runner = scenario.build();
+    let cast = runner.cast(spell_id).target_object(target);
+    let outcome = if bargain {
+        cast.accept_optional().sacrifice_with(&[artifact]).resolve()
+    } else {
+        cast.decline_optional().resolve()
+    };
+    (outcome, target, artifact)
+}
+
+#[test]
+fn torch_the_tower_deals_two_without_bargaining() {
+    let (outcome, target, artifact) = resolve_torch_the_tower(false);
+    assert_eq!(outcome.state().objects[&target].damage_marked, 2);
+    outcome.assert_zone(&[artifact], Zone::Battlefield);
+    assert!(!outcome.events().iter().any(|event| {
+        matches!(
+            event,
+            crate::types::events::GameEvent::PlayerPerformedAction {
+                action: crate::types::events::PlayerActionKind::Scry,
+                ..
+            }
+        )
+    }));
+}
+
+#[test]
+fn torch_the_tower_deals_three_and_scries_when_bargained() {
+    let (outcome, target, artifact) = resolve_torch_the_tower(true);
+    assert_eq!(outcome.state().objects[&target].damage_marked, 3);
+    outcome.assert_zone(&[artifact], Zone::Graveyard);
+    assert!(outcome.events().iter().any(|event| {
+        matches!(
+            event,
+            crate::types::events::GameEvent::PlayerPerformedAction {
+                action: crate::types::events::PlayerActionKind::Scry,
+                ..
+            }
+        )
+    }));
+}
+
 /// Deadly Cover-Up fixture: P1 owns two `Grizzly Bears` in GY + one in hand
 /// (same-named), a `Llanowar Elves` decoy in GY and hand, and a two-card library
 /// with no Bears (so a draw is the only library change). P0 owns a same-named
