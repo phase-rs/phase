@@ -3827,7 +3827,11 @@ pub(super) fn handle_resolution_choice(
                                         remaining: chosen_ids[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
-                                        origin: ctx.origin,
+                                        // EffectZoneChoice can select across multiple
+                                        // origins (for example, hand and graveyard).
+                                        // The paused object's origin must not become
+                                        // a gate for the remaining selected cards.
+                                        origin: None,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
                                         enter_tapped: ctx.enter_tapped,
@@ -3865,7 +3869,11 @@ pub(super) fn handle_resolution_choice(
                                         remaining: chosen_ids[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
-                                        origin: ctx.origin,
+                                        // EffectZoneChoice can select across multiple
+                                        // origins (for example, hand and graveyard).
+                                        // The paused object's origin must not become
+                                        // a gate for the remaining selected cards.
+                                        origin: None,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
                                         enter_tapped: ctx.enter_tapped,

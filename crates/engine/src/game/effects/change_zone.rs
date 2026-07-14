@@ -8265,6 +8265,20 @@ mod tests {
             state.players[0].hand.push_back(oid);
             oid
         };
+        let graveyard_land = create_object(
+            &mut state,
+            CardId(803),
+            PlayerId(0),
+            "Graveyard Land".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&graveyard_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
 
@@ -8273,8 +8287,8 @@ mod tests {
         // present, so the test drives the resume path directly.
         state.waiting_for = WaitingFor::EffectZoneChoice {
             player: PlayerId(0),
-            cards: vec![shock_a, shock_b],
-            count: 2,
+            cards: vec![shock_a, shock_b, graveyard_land],
+            count: 3,
             min_count: 0,
             up_to: true,
             source_id: ObjectId(100),
@@ -8299,7 +8313,7 @@ mod tests {
         let _ = apply_as_current(
             &mut state,
             GameAction::SelectCards {
-                cards: vec![shock_a, shock_b],
+                cards: vec![shock_a, shock_b, graveyard_land],
             },
         )
         .expect("select both cards");
@@ -8325,6 +8339,7 @@ mod tests {
 
         assert_eq!(state.objects[&shock_a].zone, Zone::Battlefield);
         assert_eq!(state.objects[&shock_b].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&graveyard_land].zone, Zone::Battlefield);
         assert!(state.pending_change_zone_iteration.is_none());
     }
 
