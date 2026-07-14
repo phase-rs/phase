@@ -49,6 +49,7 @@ mod case_solve_condition;
 mod cast_during_resolution_pipeline;
 mod cda_counted_quantities_pt;
 mod chain_of_smog_copy;
+mod chains_of_mephistopheles_discard_draw_or_mill;
 mod chandra_revolution_doesnt_untap_slot;
 mod charging_cinderhorn_issue_2868;
 mod chatterstorm_storm;

@@ -10152,8 +10152,8 @@ mod tests {
     use super::*;
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        Comparator, ControllerRef, CountScope, QuantityExpr, QuantityModification, QuantityRef,
-        ReplacementCondition, ShieldKind, ZoneRef,
+        AbilityCondition, Comparator, ControllerRef, CountScope, QuantityExpr,
+        QuantityModification, QuantityRef, ReplacementCondition, ShieldKind, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
@@ -17903,6 +17903,64 @@ mod tests {
         assert_eq!(
             def.condition,
             Some(ReplacementCondition::ExceptFirstDrawInDrawStep)
+        );
+    }
+
+    /// Issue #5653 + CR 608.2c: the full Chains of Mephistopheles / Magus of
+    /// the Chains text carries two trailing sentences after the "discards a
+    /// card instead" antecedent — "If the player discards a card this way,
+    /// they draw a card. If the player doesn't discard a card this way, they
+    /// mill a card." Both must attach as typed `EffectOutcome` gates on the
+    /// execute chain's Draw/Mill sub-abilities, not run unconditionally.
+    #[test]
+    fn parses_chains_full_text_gates_draw_and_mill_on_discard_outcome() {
+        let def = parse_replacement_line(
+            "If a player would draw a card except the first one they draw in each of their draw steps, that player discards a card instead. If the player discards a card this way, they draw a card. If the player doesn't discard a card this way, they mill a card.",
+            "Chains of Mephistopheles",
+        )
+        .expect("Chains draw replacement must parse");
+
+        let discard = def.execute.as_deref().expect("execute chain present");
+        assert!(
+            matches!(&*discard.effect, Effect::Discard { .. }),
+            "the antecedent effect must be Discard, got {:?}",
+            discard.effect
+        );
+
+        let draw = discard
+            .sub_ability
+            .as_deref()
+            .expect("Draw sub-ability must be present");
+        assert!(
+            matches!(&*draw.effect, Effect::Draw { .. }),
+            "the first follow-on effect must be Draw, got {:?}",
+            draw.effect
+        );
+        assert_eq!(
+            draw.condition,
+            Some(AbilityCondition::effect_performed()),
+            "\"if the player discards a card this way\" must gate Draw on \
+             whether the discard actually happened, got {:?}",
+            draw.condition
+        );
+
+        let mill = draw
+            .sub_ability
+            .as_deref()
+            .expect("Mill sub-ability must be present");
+        assert!(
+            matches!(&*mill.effect, Effect::Mill { .. }),
+            "the second follow-on effect must be Mill, got {:?}",
+            mill.effect
+        );
+        assert_eq!(
+            mill.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed())
+            }),
+            "\"if the player doesn't discard a card this way\" must gate Mill \
+             on the discard having failed, got {:?}",
+            mill.condition
         );
     }
 
