@@ -616,6 +616,7 @@ mod oracle_parser;
 mod overload_no_legal_target;
 mod oversimplify_per_player_fractal;
 mod ozolith_leaves_battlefield_counters;
+mod painters_servant_multi_zone_additive_color;
 mod panther_habit_equipped_prevention_scope;
 mod peer_into_the_abyss;
 mod pendrell_flux_unless_pay_own_cost;

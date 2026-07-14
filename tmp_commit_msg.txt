@@ -1,0 +1,11 @@
+fix(engine): set-vs-add ColorChangeMode for AddChosenColor (CR 105.3)
+
+Address PR #5799 review blockers:
+
+- Parameterize AddChosenColor with typed ColorChangeMode::{Set, Add}
+  (not a boolean); bare "the chosen color" sets, Painter's "in addition"
+  adds/retains prior colors.
+- Runtime integration revert-probe covering hand/stack/battlefield Oxford
+  legs through evaluate_layers.
+- CR 611.3a annotation on InAnyZone leaf scan-zone collection.
+- Fold single-subject chosen-color predicate into one composed parser.

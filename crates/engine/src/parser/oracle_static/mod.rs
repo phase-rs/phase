@@ -46,11 +46,12 @@ mod prelude {
     };
     pub(super) use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction,
-        AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, CombatRelation,
-        CombatRelationSubject, Comparator, ContinuousModification, ControllerRef, CostCategory,
-        CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PtStat, PtValueScope,
-        QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SharedQualityRelation,
-        StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, ColorChangeMode,
+        CombatRelation, CombatRelationSubject, Comparator, ContinuousModification, ControllerRef,
+        CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PtStat,
+        PtValueScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
+        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     pub(super) use crate::types::card_type::{
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,

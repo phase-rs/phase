@@ -20427,7 +20427,7 @@ fn parser_shape_painters_servant_multi_zone_chosen_color_static() {
     use crate::types::zones::Zone;
 
     // CR 105.3 + CR 105.4 + CR 611.3a + CR 613.1e: Painter's Servant line →
-    // Or-of-3 affected + AddChosenColor.
+    // Or-of-3 affected + AddChosenColor { mode: Add } (CR 105.3 retain).
     let def = parse_static_line(
         "All cards that aren't on the battlefield, spells, and permanents are the chosen color in addition to their other colors.",
     )
@@ -20435,8 +20435,10 @@ fn parser_shape_painters_servant_multi_zone_chosen_color_static() {
     assert_eq!(def.mode, StaticMode::Continuous);
     assert!(
         def.modifications
-            .contains(&ContinuousModification::AddChosenColor),
-        "expected AddChosenColor, got {:?}",
+            .contains(&ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Add,
+            }),
+        "expected AddChosenColor {{ mode: Add }}, got {:?}",
         def.modifications
     );
     match &def.affected {
@@ -20534,8 +20536,10 @@ fn single_subject_chosen_color_static_not_hijacked_by_compound_handler() {
         .expect("single-subject chosen-color static must still parse");
     assert!(
         def.modifications
-            .contains(&ContinuousModification::AddChosenColor),
-        "expected AddChosenColor, got {:?}",
+            .contains(&ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Set,
+            }),
+        "expected AddChosenColor {{ mode: Set }}, got {:?}",
         def.modifications
     );
     match &def.affected {
@@ -20565,9 +20569,14 @@ fn single_subject_chosen_color_accepts_additive_retain_suffix() {
     let def =
         parse_static_line("Permanents are the chosen color in addition to their other colors.")
             .expect("single-subject additive chosen-color must parse");
-    assert!(def
-        .modifications
-        .contains(&ContinuousModification::AddChosenColor));
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Add,
+            }),
+        "expected AddChosenColor {{ mode: Add }}, got {:?}",
+        def.modifications
+    );
     assert!(
         !matches!(def.affected, Some(TargetFilter::Or { .. })),
         "single-subject additive must not be claimed as an Or compound"
@@ -20616,11 +20625,13 @@ fn painters_servant_full_oracle_adds_multi_zone_color_static() {
         matches!(def.affected, Some(TargetFilter::Or { ref filters }) if filters.len() == 3)
             && def
                 .modifications
-                .contains(&ContinuousModification::AddChosenColor)
+                .contains(&ContinuousModification::AddChosenColor {
+                    mode: ColorChangeMode::Add,
+                })
     });
     assert!(
         has_compound_static,
-        "Painter's Servant must produce the multi-zone AddChosenColor static: {:?}",
+        "Painter's Servant must produce the multi-zone AddChosenColor {{ Add }} static: {:?}",
         result.statics
     );
 }

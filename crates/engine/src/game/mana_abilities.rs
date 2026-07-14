@@ -137,7 +137,7 @@ fn chain_has_any_targets(ability: &ResolvedAbility) -> bool {
 
 /// CR 105.3 + CR 106.1a: True iff any reachable link of this mana ability sets a
 /// permanent's color to the mana produced earlier in the same activation — i.e.
-/// carries a `ContinuousModification::AddChosenColor` ("… becomes that color",
+/// carries a `ContinuousModification::AddChosenColor { .. }` ("… becomes that color",
 /// Foraging Wickermaw). Gates the `ChosenAttribute::Color` record in
 /// `produce_mana_from_ability` so ordinary producers (basics, City of Brass,
 /// painlands, filter lands) never touch `chosen_attributes` — zero blast radius.
@@ -149,7 +149,7 @@ fn chain_references_chosen_color(ability: &ResolvedAbility) -> bool {
         } => static_abilities.iter().any(|s| {
             s.modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::AddChosenColor))
+                .any(|m| matches!(m, ContinuousModification::AddChosenColor { .. }))
         }),
         _ => false,
     })
@@ -7104,7 +7104,7 @@ mod tests {
                     static_abilities.iter().any(|s| s
                         .modifications
                         .iter()
-                        .any(|m| matches!(m, ContinuousModification::AddChosenColor))),
+                        .any(|m| matches!(m, ContinuousModification::AddChosenColor { .. }))),
                     "become clause maps to AddChosenColor"
                 );
                 assert!(

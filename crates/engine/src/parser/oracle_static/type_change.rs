@@ -2229,7 +2229,13 @@ fn parse_chosen_color_additive_predicate(input: &str) -> OracleResult<'_, ()> {
 /// a fully-consumed fixed/colorless expression (Mycosynth Lattice).
 fn parse_multi_zone_color_predicate(input: &str) -> OracleResult<'_, Vec<ContinuousModification>> {
     if let Ok((rest, ())) = parse_chosen_color_additive_predicate(input) {
-        return Ok((rest, vec![ContinuousModification::AddChosenColor]));
+        // CR 105.3: Painter's Servant retain-suffix → add (not replace).
+        return Ok((
+            rest,
+            vec![ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Add,
+            }],
+        ));
     }
 
     let (input, predicate) = alt((
@@ -2354,29 +2360,36 @@ pub(crate) fn parse_subject_is_color(
     }
 
     // CR 105.3: "the chosen color" [+ optional additive retain-suffix] reads the
-    // source's chosen color attribute. Additive "in addition to their/its other
-    // colors" is retain (CR 105.3); bare "the chosen color" still maps to
-    // `AddChosenColor` for the Shimmerwilds Growth / Shifting Sky class that
-    // the existing runtime has always emitted.
-    if all_consuming(tag::<_, _, OracleError<'_>>("the chosen color"))
-        .parse(predicate_lower.as_str())
-        .is_ok()
-        || all_consuming(|i| {
-            let (i, _) = tag::<_, _, OracleError<'_>>("the chosen color").parse(i)?;
-            let (i, ()) = alt((
-                |i| parse_chosen_color_additive_suffix(i, "their"),
-                |i| parse_chosen_color_additive_suffix(i, "its"),
-            ))
-            .parse(i)?;
-            Ok((i, ()))
-        })
-        .parse(predicate_lower.as_str())
-        .is_ok()
-    {
+    // source's chosen color attribute. Bare form → set/replace
+    // ([`ColorChangeMode::Set`], Shimmerwilds Growth / Shifting Sky). Additive
+    // "in addition to their/its other colors" → retain
+    // ([`ColorChangeMode::Add`], Painter's Servant class). One composed
+    // all_consuming parser owns both forms.
+    let chosen_color_mode = all_consuming(|i| {
+        let (i, _) = tag::<_, _, OracleError<'_>>("the chosen color").parse(i)?;
+        let (i, additive) = opt(alt((
+            |i| parse_chosen_color_additive_suffix(i, "their"),
+            |i| parse_chosen_color_additive_suffix(i, "its"),
+        )))
+        .parse(i)?;
+        Ok((
+            i,
+            if additive.is_some() {
+                ColorChangeMode::Add
+            } else {
+                ColorChangeMode::Set
+            },
+        ))
+    })
+    .parse(predicate_lower.as_str())
+    .ok()
+    .map(|(_, mode)| mode);
+
+    if let Some(mode) = chosen_color_mode {
         return Some(
             StaticDefinition::continuous()
                 .affected(affected)
-                .modifications(vec![ContinuousModification::AddChosenColor])
+                .modifications(vec![ContinuousModification::AddChosenColor { mode }])
                 .description(description.to_string()),
         );
     }
