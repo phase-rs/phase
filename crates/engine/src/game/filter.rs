@@ -594,6 +594,36 @@ pub struct FilterContext<'a> {
     pub scoped_iteration_player: Option<PlayerId>,
 }
 
+/// CR 608.2h + CR 111.7: The controller of a filter context's SOURCE, from live
+/// state when the source still exists and from last known information when it does
+/// not.
+///
+/// CR 608.2h: "If the effect requires information from a specific object, INCLUDING
+/// THE SOURCE OF THE ABILITY ITSELF, the effect uses the current information of that
+/// object if it's in the public zone it was expected to be in; if it's no longer in
+/// that zone ... the effect uses the object's last known information."
+///
+/// A token that leaves the battlefield ceases to exist (CR 111.7 / CR 704.5d) and is
+/// purged from `state.objects` outright, so a live-only lookup answers `None` — and
+/// every `ControllerRef::You` predicate built on such a context is then unanswerable
+/// and fails closed. The CR 603.4 intervening-if re-check of a token's OWN triggered
+/// ability (stack.rs → `check_trigger_condition`) runs after the CR 111.7 SBA has
+/// purged the source, so "if you control a …" silently read false and the ability was
+/// removed from the stack. CR 113.7a: the ability on the stack exists independently of
+/// its source, so the source's death must not make "you" unanswerable.
+///
+/// `state.lki_cache` holds the at-exit controller (captured by `apply_zone_exit_cleanup`,
+/// zones.rs). Live state wins; LKI answers only when the object is gone — so this is a
+/// strict no-op for every source that still exists. Mirrors the live-then-LKI fallback
+/// `ability_utils::parent_target_controller` / `parent_target_owner` already use.
+fn source_controller_or_lki(state: &GameState, source_id: ObjectId) -> Option<PlayerId> {
+    state
+        .objects
+        .get(&source_id)
+        .map(|o| o.controller)
+        .or_else(|| state.lki_cache.get(&source_id).map(|lki| lki.controller))
+}
+
 impl<'a> FilterContext<'a> {
     /// Context-free object matching. Use only for constraints whose filters are
     /// printed object qualities rather than source/controller-relative clauses.
@@ -610,8 +640,11 @@ impl<'a> FilterContext<'a> {
     /// Bare context: source object known, controller derived from state.
     /// Use when no activating ability is in scope (combat restrictions, layer
     /// predicates, passive trigger condition checks).
+    ///
+    /// CR 608.2h: the controller falls back to the source's last known information
+    /// when the source has ceased to exist (CR 111.7) — see [`source_controller_or_lki`].
     pub fn from_source(state: &GameState, source_id: ObjectId) -> Self {
-        let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+        let source_controller = source_controller_or_lki(state, source_id);
         Self {
             source_id,
             source_controller,
@@ -642,7 +675,7 @@ impl<'a> FilterContext<'a> {
         source_id: ObjectId,
         recipient_id: ObjectId,
     ) -> Self {
-        let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+        let source_controller = source_controller_or_lki(state, source_id);
         Self {
             source_id,
             source_controller,
