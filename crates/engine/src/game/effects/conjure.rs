@@ -86,6 +86,14 @@ pub fn resolve(
             .collect(),
     };
 
+    // Positional library conjures are placed only after every copy for a recipient
+    // exists, so the final top-N window is computed atomically. Placing copies one at
+    // a time lets a later insertion shove an earlier copy out of the window (a copy at
+    // index N-1 pushed to N by a sibling inserted above it). Keyed by recipient and
+    // populated only for the positional-library arm; each entry lists that recipient's
+    // just-conjured copies in creation order (they sit at the bottom of the library).
+    let mut library_placements: Vec<(PlayerId, Vec<ObjectId>)> = Vec::new();
+
     for conjure_card in cards {
         let count =
             resolve_quantity_with_targets(state, &conjure_card.count, ability).max(0) as u32;
@@ -133,16 +141,6 @@ pub fn resolve(
                     card_name.clone(),
                     destination,
                 );
-
-                // `create_object` appends a library-bound card to the bottom. When
-                // the conjure carries a positional constraint (the Alchemy "into the
-                // top N cards … at random" arm), move it to the resolved slot within
-                // this recipient's library instead.
-                if destination == Zone::Library {
-                    if let Some(position) = &library_position {
-                        reposition_conjured_in_library(state, ability, recipient, obj_id, position);
-                    }
-                }
 
                 // CR 613.7d: an object receives a timestamp when it enters a zone.
                 // Stage 2 stamps battlefield entries only, so only draw one when the
@@ -223,6 +221,30 @@ pub fn resolve(
                     object_id: obj_id,
                     name: card_name.clone(),
                 });
+
+                // `create_object` appended this copy to the bottom of the recipient's
+                // library. Defer positional placement until every copy exists so the
+                // whole group is slotted into the final top-N window atomically.
+                if destination == Zone::Library && library_position.is_some() {
+                    match library_placements
+                        .iter_mut()
+                        .find(|(pid, _)| *pid == recipient)
+                    {
+                        Some((_, ids)) => ids.push(obj_id),
+                        None => library_placements.push((recipient, vec![obj_id])),
+                    }
+                }
+            }
+        }
+    }
+
+    // Positional library placement, once per recipient across the whole instruction
+    // (see `library_placements` above): the recipient's just-conjured copies are
+    // slotted together so every copy honors `position` against the final library.
+    if let Some(position) = &library_position {
+        if destination == Zone::Library {
+            for (recipient, obj_ids) in &library_placements {
+                place_conjured_in_library(state, ability, *recipient, obj_ids, position);
             }
         }
     }
@@ -262,58 +284,91 @@ fn resolve_duplicate_reference(
     object_ids.into_iter().next()
 }
 
-/// Reposition a just-conjured card within `owner`'s library. `create_object`
-/// appended it to the bottom of that player's library; this moves it to the slot
-/// named by `position`. `owner` is the recipient player (the controller for "your
-/// library", or each affected player for the "each player's library" fan-out),
-/// not necessarily the ability's controller. Only `RandomWithinTop` is produced
-/// by the parser today (the Alchemy "into the top N cards … at random" conjure);
-/// the other positions are honored for completeness so the field composes with
-/// any future positional conjure.
-fn reposition_conjured_in_library(
+/// Place every just-conjured copy for one recipient into `owner`'s library at the
+/// slots named by `position`, atomically across the whole group. `create_object`
+/// appended each copy to the bottom of `owner`'s library in creation order; this
+/// removes them and re-inserts the group so the final ordering honors `position`.
+///
+/// Atomicity is required for the parser-reachable `RandomWithinTop` arm (Alchemy
+/// "into the top N cards … at random"): each copy must remain inside the *final*
+/// top-N window after the entire instruction resolves. Placing copies one at a time
+/// — as an earlier design did — lets a later insertion shove an earlier copy past
+/// slot N (a copy at index N-1 pushed to N by a sibling inserted above it). Reserving
+/// the whole window and interleaving the copies among the top existing cards once
+/// guarantees every copy lands inside the window regardless of insertion order.
+///
+/// `owner` is the recipient (the controller for "your library", or each affected
+/// player for the "each player's library" fan-out), not necessarily the ability's
+/// controller. Only `RandomWithinTop` is produced by the parser today; the other
+/// positions are honored for completeness so the field composes with any future
+/// positional conjure.
+fn place_conjured_in_library(
     state: &mut GameState,
     ability: &ResolvedAbility,
     owner: PlayerId,
-    object_id: ObjectId,
+    conjured: &[ObjectId],
     position: &LibraryPosition,
 ) {
-    // Library length excluding the just-appended conjured card, so index math and
-    // the random range treat the card as being *inserted* among the existing ones.
-    let existing_len = state
-        .players
-        .iter()
-        .find(|p| p.id == owner)
-        .map_or(0, |p| p.library.len())
-        .saturating_sub(1);
-    let index = match position {
-        LibraryPosition::Top => 0,
-        LibraryPosition::Bottom => existing_len,
-        // 1-based ("second from the top" => n=2, index 1); clamped to the bottom.
-        LibraryPosition::NthFromTop { n } => (*n as usize).saturating_sub(1).min(existing_len),
-        LibraryPosition::BeneathTop { depth } => {
-            (resolve_quantity_with_targets(state, depth, ability).max(0) as usize).min(existing_len)
-        }
-        // Digital-only Alchemy (no CR entry): insert at a uniformly random 0-based
-        // index in `[0, min(n, existing_len + 1))`, so the card lands somewhere
-        // among the top N cards.
-        LibraryPosition::RandomWithinTop { n } => {
-            let n = resolve_quantity_with_targets(state, n, ability).max(1) as usize;
-            let upper = n.min(existing_len + 1).max(1);
-            state.rng.random_range(0..upper)
-        }
-    };
-    let Some(player) = state.players.iter_mut().find(|p| p.id == owner) else {
+    if conjured.is_empty() {
+        return;
+    }
+    let Some(pidx) = state.players.iter().position(|p| p.id == owner) else {
         return;
     };
-    // A just-conjured card is already in the library (create_object appended it);
-    // this only reorders within the same zone, so it is not a replaceable zone event.
-    if let Some(current) = player.library.iter().position(|id| *id == object_id) {
-        // allow-raw-zone: in-library reorder of a just-conjured card, not a zone event.
-        player.library.remove(current);
-    }
-    let clamped = index.min(player.library.len());
-    // allow-raw-zone: in-library reorder of a just-conjured card, not a zone event.
-    player.library.insert(clamped, object_id);
+    // The recipient's existing library, with the just-conjured copies (currently at
+    // the bottom in creation order) removed, so index math and the random window
+    // treat the copies as being *inserted* among the existing cards.
+    let mut rest: Vec<ObjectId> = state.players[pidx]
+        .library
+        .iter()
+        .copied()
+        .filter(|id| !conjured.contains(id))
+        .collect();
+    let k = conjured.len();
+
+    let final_library: Vec<ObjectId> = match position {
+        LibraryPosition::Top => {
+            rest.splice(0..0, conjured.iter().copied());
+            rest
+        }
+        LibraryPosition::Bottom => {
+            rest.extend(conjured.iter().copied());
+            rest
+        }
+        // 1-based ("second from the top" => n=2, index 1); clamped to the bottom.
+        LibraryPosition::NthFromTop { n } => {
+            let at = (*n as usize).saturating_sub(1).min(rest.len());
+            rest.splice(at..at, conjured.iter().copied());
+            rest
+        }
+        LibraryPosition::BeneathTop { depth } => {
+            let at = (resolve_quantity_with_targets(state, depth, ability).max(0) as usize)
+                .min(rest.len());
+            rest.splice(at..at, conjured.iter().copied());
+            rest
+        }
+        // Digital-only Alchemy (no CR entry): the final top-`window` slots hold all
+        // `k` copies plus the top `window - k` existing cards; the remaining existing
+        // cards follow. Interleaving each copy at a uniformly random slot inside that
+        // window keeps every copy within the top N of the *final* library, whatever
+        // the order — a copy can never be displaced past N by a sibling.
+        LibraryPosition::RandomWithinTop { n } => {
+            let n = resolve_quantity_with_targets(state, n, ability).max(1) as usize;
+            let window = n.min(rest.len() + k);
+            let existing_in_window = window.saturating_sub(k);
+            let tail = rest.split_off(existing_in_window.min(rest.len()));
+            let mut head = rest; // the top `existing_in_window` existing cards
+            for &id in conjured {
+                let slot = state.rng.random_range(0..head.len() + 1);
+                head.insert(slot, id);
+            }
+            head.extend(tail);
+            head
+        }
+    };
+
+    // allow-raw-zone: in-library reorder of just-conjured cards, not a zone event.
+    state.players[pidx].library = final_library.into_iter().collect();
 }
 
 #[cfg(test)]
@@ -389,6 +444,88 @@ mod tests {
         assert!(
             indices.len() > 1,
             "random-within-top slot should vary across draws, saw {indices:?}"
+        );
+    }
+
+    /// Issue #5614 (re-review blocker): a MULTI-card positional conjure must keep
+    /// EVERY copy within the final top-N window. The earlier design placed each copy
+    /// independently and mutated the library between insertions, so a copy inserted
+    /// near the bottom of the window could be shoved past slot N by a later sibling
+    /// inserted above it. Conjuring three copies into the "top three" of a ten-card
+    /// library is the adversarial case: the atomic placement reserves the whole
+    /// window, so the top three slots end up being EXACTLY the three copies (every
+    /// existing card pushed below). A per-card design would leave existing filler
+    /// interleaved inside the top three — this test fails against it for any seed.
+    #[test]
+    fn conjure_multiple_into_top_n_keeps_every_copy_in_final_window() {
+        use crate::types::ability::LibraryPosition;
+        use std::collections::HashSet;
+
+        let mut state = GameState::new_two_player(123);
+
+        // Ten existing cards, so "top three" is far tighter than the library and any
+        // per-card displacement necessarily leaves an existing card in the window.
+        for i in 0..10 {
+            crate::game::zones::create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                format!("Filler {i}"),
+                Zone::Library,
+            );
+        }
+
+        // Three copies into the top three (n == count) — the strongest window: the
+        // atomic placement must fill all three top slots with the conjured copies.
+        let ability = ResolvedAbility::new(
+            Effect::Conjure {
+                cards: vec![ConjureCard {
+                    source: ConjureSource::Named {
+                        name: "Conjured".to_string(),
+                    },
+                    count: QuantityExpr::Fixed { value: 3 },
+                }],
+                destination: Zone::Library,
+                tapped: false,
+                library_position: Some(LibraryPosition::RandomWithinTop {
+                    n: QuantityExpr::Fixed { value: 3 },
+                }),
+                library_players: None,
+            },
+            vec![],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let library = &state.players[0].library;
+        let conjured: Vec<ObjectId> = library
+            .iter()
+            .copied()
+            .filter(|id| state.objects[id].name == "Conjured")
+            .collect();
+        assert_eq!(
+            conjured.len(),
+            3,
+            "all three copies must be conjured into the library"
+        );
+
+        // Every copy is within the final top three, and — because the atomic placement
+        // reserves the whole window before inserting — the top three slots are exactly
+        // the three copies. The old per-card design cannot guarantee either invariant.
+        for id in &conjured {
+            let index = library.iter().position(|x| x == id).unwrap();
+            assert!(
+                index < 3,
+                "conjured copy must stay within the final top three, got index {index}"
+            );
+        }
+        let top_three: HashSet<ObjectId> = library.iter().copied().take(3).collect();
+        let conjured_set: HashSet<ObjectId> = conjured.iter().copied().collect();
+        assert_eq!(
+            top_three, conjured_set,
+            "the final top three slots must be exactly the three conjured copies"
         );
     }
 
