@@ -1689,31 +1689,49 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     }
 }
 
-/// CR 400.1 + CR 613.1: Every object in a zone that a continuous effect can
-/// explicitly affect must be re-seeded before the next layer pass. Battlefield
-/// recipients exclude phased-out permanents (CR 702.26b); the card zones remain
-/// eligible because a static such as Maskwood Nexus can modify cards and spells
-/// there. Keep the first-seen order stable for deterministic layer application.
-fn full_layer_reset_ids(state: &GameState, battlefield_ids: &[ObjectId]) -> Vec<ObjectId> {
-    let mut ids = Vec::new();
-    let mut seen = HashSet::new();
-    for id in battlefield_ids.iter().copied().chain(
-        [
-            Zone::Library,
-            Zone::Hand,
-            Zone::Graveyard,
-            Zone::Stack,
-            Zone::Exile,
-            Zone::Command,
-        ]
-        .into_iter()
-        .flat_map(|zone| super::targeting::zone_object_ids(state, zone)),
-    ) {
-        if seen.insert(id) {
-            ids.push(id);
-        }
+/// CR 613.1d: Recover the off-battlefield objects whose types were derived in
+/// the preceding Layer-4 evaluation. The cache is normally populated directly
+/// by the layer application pipeline. Attribution is its persisted, derived
+/// fallback after a save/load boundary, before the first new pass repopulates
+/// the cache.
+fn take_remote_type_layer_recipients(state: &mut GameState) -> im::HashSet<ObjectId> {
+    let mut recipients = std::mem::take(&mut state.remote_type_layer_recipients);
+    if recipients.is_empty() {
+        recipients.extend(
+            state
+                .attribution
+                .iter()
+                .filter(|(id, attribution)| {
+                    state
+                        .objects
+                        .get(*id)
+                        .is_some_and(|object| object.zone != Zone::Battlefield)
+                        && attribution.by_layer.contains_key(&Layer::Type)
+                })
+                .map(|(id, _)| *id),
+        );
     }
-    ids
+    recipients
+}
+
+/// CR 613.1 + CR 613.1d: Reset only remote objects previously changed in the
+/// type layer. Unlike a whole-characteristics reset, this preserves independent
+/// object state that is not a continuous effect, such as a spell's cast-time
+/// `CantBeCountered` grant or a searched card's pre-existing subtype.
+fn reset_remote_type_layer_recipients(
+    state: &mut GameState,
+    recipients: impl IntoIterator<Item = ObjectId>,
+) {
+    for id in recipients {
+        let Some(object) = state.objects.get_mut(&id) else {
+            continue;
+        };
+        if object.zone == Zone::Battlefield {
+            continue;
+        }
+        object.card_types = object.base_card_types.clone();
+        object.restore_fused_split_characteristics();
+    }
 }
 
 /// Unconditional full layer evaluation (CR 613.1).
@@ -1748,6 +1766,7 @@ pub fn evaluate_layers(state: &mut GameState) {
     // `im::HashMap::clear()` drops the cleared map's own root Arc; clones
     // taken by AI search or snapshot diffing retain their own roots, so this
     // does not break structural sharing across `GameState` clones.
+    let remote_type_layer_recipients = take_remote_type_layer_recipients(state);
     state.attribution.clear();
     let mut abilities_suppressed = HashSet::new();
     // CR 702.26b + CR 702.26e: Phased-out permanents are treated as though
@@ -1756,34 +1775,50 @@ pub fn evaluate_layers(state: &mut GameState) {
     // remains intact; they are frozen until phase-in marks layers dirty and
     // re-includes them.
     let bf_ids: Vec<ObjectId> = state.battlefield_phased_in_ids();
-    let reset_ids = full_layer_reset_ids(state, &bf_ids);
     // CR 613.2b: collect face-down permanents to re-apply their CR 708.2 profile
     // after Layer 1a.
     let mut face_down_ids: Vec<ObjectId> = Vec::new();
-    for &id in &reset_ids {
+    for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.sync_missing_base_characteristics();
             seed_live_characteristics_from_base(obj);
-            if obj.zone == Zone::Battlefield {
-                if obj.face_down {
-                    face_down_ids.push(id);
-                }
-                // CR 613.1b: Reset controller to the object's base controller;
-                // Layer 2 re-applies continuous control-changing effects.
-                obj.controller = obj.base_controller.unwrap_or(obj.owner);
-                // CR 613.11 + CR 510.1a: Reset combat-assignment rule flags;
-                // re-applied after object-characteristic layers are complete.
-                obj.assigns_damage_from_toughness = false;
-                obj.assigns_damage_as_though_unblocked = false;
-                obj.assigns_no_combat_damage = false;
-                // CR 701.60c: re-derive the suspected designation's menace +
-                // "can't block" onto the just-reset live fields (not base), so
-                // the grant lasts exactly as long as the designation.
-                derive_suspected_abilities(obj);
+            if obj.face_down {
+                face_down_ids.push(id);
             }
+            // CR 613.1b: Reset controller to the object's base controller;
+            // Layer 2 re-applies continuous control-changing effects.
+            obj.controller = obj.base_controller.unwrap_or(obj.owner);
+            // CR 613.11 + CR 510.1a: Reset combat-assignment rule flags;
+            // re-applied after object-characteristic layers are complete.
+            obj.assigns_damage_from_toughness = false;
+            obj.assigns_damage_as_though_unblocked = false;
+            obj.assigns_no_combat_damage = false;
+            // CR 701.60c: re-derive the suspected designation's menace +
+            // "can't block" onto the just-reset live fields (not base), so
+            // the grant lasts exactly as long as the designation.
+            derive_suspected_abilities(obj);
         }
     }
-    rehydrate_cast_form_characteristics(state, reset_ids.iter().copied());
+    // CR 702.94a + CR 400.3: Hand-zone continuous effects (Lorehold-style
+    // "Each [filter] card in your hand has [keyword]") grant keywords to hand
+    // objects. Reset those hand objects' keywords to their base set each layers
+    // pass so hand-zone grants don't accumulate across evaluations. Scoped
+    // narrowly to `keywords` because A6 only supports keyword grants to hand
+    // objects; other characteristics (P/T, types, abilities) are not granted to
+    // hand objects by any currently-supported static. Extend this reset set
+    // before landing a static that modifies them.
+    let hand_ids: Vec<ObjectId> = state
+        .players
+        .iter()
+        .flat_map(|p| p.hand.iter().copied())
+        .collect();
+    for id in hand_ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.sync_missing_base_characteristics();
+            obj.keywords = obj.base_keywords.clone();
+        }
+    }
+    reset_remote_type_layer_recipients(state, remote_type_layer_recipients);
 
     // CR 613.1 + CR 611.2c: Stack-zone continuous effects grant keywords to objects ON THE
     // STACK — a spell that "gains rebound" (Taigam, Ojutai Master; CR 702.88a: rebound
@@ -1797,9 +1832,11 @@ pub fn evaluate_layers(state: &mut GameState) {
     // Toxic) would accumulate one instance per evaluation, and a grant would outlive the
     // transient continuous effect that produced it.
     //
-    // Scoped narrowly to `keywords` for the same reason as the hand loop: keyword grants are
-    // the only characteristic any currently-supported static modifies on a stack object.
-    // Extend this reset set before landing a static that modifies them.
+    // Scoped narrowly to `keywords`: remote type-changing effects use
+    // `reset_remote_type_layer_recipients` above, which resets only their prior
+    // recipients and therefore preserves independent cast-time state on every
+    // other stack object. Extend the relevant reset authority before landing a
+    // static that modifies another stack characteristic.
     let stack_ids = super::targeting::zone_object_ids(state, crate::types::zones::Zone::Stack);
     for id in stack_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
@@ -1893,6 +1930,7 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
 
         if *layer == Layer::Type {
+            apply_prototype_characteristics(state, bf_ids.iter().copied());
             apply_intrinsic_basic_land_mana_abilities(state, &bf_ids);
         }
         if matches!(*layer, Layer::Control | Layer::Type) {
@@ -2500,8 +2538,6 @@ fn prepare_incremental_flush(
             derive_suspected_abilities(obj);
         }
     }
-    rehydrate_cast_form_characteristics(state, recipient_ids.iter().copied());
-
     crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
 
     let active_effects = collect_shared_active_continuous_effects(state);
@@ -2955,6 +2991,7 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
             apply_pt_counter_modifications(state, recipient_ids.iter().copied());
         }
         if *layer == Layer::Type {
+            apply_prototype_characteristics(state, recipient_ids.iter().copied());
             apply_intrinsic_basic_land_mana_abilities(state, &recipient_vec);
         }
     }
@@ -3036,32 +3073,22 @@ pub(crate) fn has_active_copy_layer_effects(state: &GameState) -> bool {
     !gather_active_effects_for_layer(state, Layer::Copy).is_empty()
 }
 
-/// Rehydrate any persistent non-base cast-form characteristic overlay before
-/// Layer 1. Fuse retains a cast marker whose combined type/color profile is
-/// restored here; alternative/back/modal faces write their selected face into
-/// `base_*`, face-down objects re-seed their CR 708.2 profile at Layer 1b, and
-/// Bestow/Cleave likewise establish their base characteristics during casting.
-/// Mutate has no independent overlay.
-///
-/// CR 718.2a + CR 718.3b: Prototype is the remaining persistent overlay: its
-/// alternative mana cost, P/T, and resulting colors must be present before
-/// continuous effects inspect spell/permanent characteristics, not injected
-/// after Layer 4.
-fn rehydrate_cast_form_characteristics(
-    state: &mut GameState,
-    ids: impl IntoIterator<Item = ObjectId>,
-) {
+/// CR 718.3b: A prototyped spell and the permanent it becomes have only their
+/// alternative mana cost and P/T characteristics. If that mana cost contains
+/// colored mana symbols, the spell/permanent is those colors. Reapply this after
+/// layer reset so the prototype marker survives normal layer recomputation.
+fn apply_prototype_characteristics(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
     for id in ids {
         let Some(obj) = state.objects.get_mut(&id) else {
             continue;
         };
-        if let Some(form) = obj.prototype_form.clone() {
-            obj.mana_cost = form.mana_cost;
-            obj.power = Some(form.power);
-            obj.toughness = Some(form.toughness);
-            obj.color = form.colors;
-        }
-        obj.restore_fused_split_characteristics();
+        let Some(form) = obj.prototype_form.clone() else {
+            continue;
+        };
+        obj.mana_cost = form.mana_cost;
+        obj.power = Some(form.power);
+        obj.toughness = Some(form.toughness);
+        obj.color = form.colors;
     }
 }
 
@@ -4605,6 +4632,29 @@ fn record_attribution(
     }
 }
 
+/// CR 613.1d: Record remote Layer-4 recipients for the next full evaluation.
+/// This derived-state bookkeeping deliberately sits beside effect application,
+/// rather than in display attribution, because it controls the narrow type
+/// baseline reset when a static effect changes or expires.
+fn record_remote_type_layer_recipients(
+    state: &mut GameState,
+    effect: &ActiveContinuousEffect,
+    affected_ids: &[ObjectId],
+) {
+    if effect.layer != Layer::Type {
+        return;
+    }
+    for &target in affected_ids {
+        if state
+            .objects
+            .get(&target)
+            .is_some_and(|object| object.zone != Zone::Battlefield)
+        {
+            state.remote_type_layer_recipients.insert(target);
+        }
+    }
+}
+
 fn apply_continuous_effect(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
@@ -4825,6 +4875,7 @@ fn apply_continuous_effect_filtered(
         .copied()
         .collect();
 
+    record_remote_type_layer_recipients(state, effect, &affected_ids);
     record_attribution(state, effect, &affected_ids);
 
     // Pre-read chosen subtype from source (avoids borrow conflict in the loop).

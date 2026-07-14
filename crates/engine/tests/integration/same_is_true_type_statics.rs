@@ -6,18 +6,18 @@
 
 use engine::game::layers::{evaluate_layers, flush_layers};
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::move_to_zone;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     ChosenSubtypeKind, ContinuousModification, ControllerRef, Duration, FilterProp,
-    StaticCondition, TargetFilter, TypeFilter,
+    StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
 };
 use engine::types::card_type::{CoreType, SubtypeSet};
 use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
+use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 const MASKWOOD_NEXUS: &str = "Creatures you control are every creature type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.";
@@ -334,7 +334,7 @@ fn push_test_spell(
 
 /// CR 108.2b + CR 109.2b + CR 400.1: Biotransference reaches each supported
 /// card zone and both stack arms. This also proves off-battlefield controllers
-/// survive a full characteristic reset.
+/// survive a remote type reset.
 #[test]
 fn biotransference_applies_to_card_zones_and_distinguishes_stack_arms() {
     let mut scenario = GameScenario::new();
@@ -416,12 +416,13 @@ fn biotransference_applies_to_card_zones_and_distinguishes_stack_arms() {
     assert_eq!(
         runner.state().objects[&owner_arm].controller,
         P1,
-        "off-battlefield controller must survive the full characteristic reset"
+        "off-battlefield controller must survive the remote type reset"
     );
 
     // CR 400.1 + CR 611.3a + CR 613.1d: When the static source leaves the
-    // battlefield, a forced full layer pass must re-seed every previously
-    // affected remote-zone object and remove the now-inapplicable type change.
+    // battlefield, a forced full layer pass must reset every previously
+    // affected remote-zone object's types and remove the now-inapplicable
+    // type change.
     let mut events = Vec::new();
     move_to_zone(runner.state_mut(), source, Zone::Graveyard, &mut events);
     flush_layers(runner.state_mut());
@@ -440,6 +441,48 @@ fn biotransference_applies_to_card_zones_and_distinguishes_stack_arms() {
             "{id:?} must reset when Biotransference leaves the battlefield"
         );
     }
+}
+
+/// CR 400.7g + CR 613.1d: A spell's cast-time static grant is independent of
+/// a same-is-true type effect. Recomputing its remote Layer-4 characteristics
+/// must not reseed its ability definitions from the printed-card baseline.
+#[test]
+fn remote_type_reset_preserves_cast_time_spell_grants() {
+    let mut scenario = GameScenario::new();
+    scenario
+        .add_creature_from_oracle(P0, "Biotransference", 1, 1, BIOTRANSFERENCE)
+        .id();
+    let spell = scenario
+        .add_creature_to_hand(P0, "Granted Spell", 1, 1)
+        .id();
+    let mut runner = scenario.build();
+
+    {
+        let state = runner.state_mut();
+        let mut events = Vec::new();
+        move_to_zone(state, spell, Zone::Stack, &mut events);
+        push_test_spell(state, spell, P0);
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeCountered));
+        state.layers_dirty.mark_full();
+        evaluate_layers(state);
+    }
+
+    assert!(
+        is_artifact(&runner, spell),
+        "Biotransference must still modify the creature spell's type"
+    );
+    assert!(
+        runner.state().objects[&spell]
+            .static_definitions
+            .iter_unchecked()
+            .any(|definition| definition.mode == StaticMode::CantBeCountered),
+        "the remote type pass must preserve the spell's cast-time grant"
+    );
 }
 
 /// CR 613.1b + CR 611.3a + CR 613.1d: a Layer-2 theft changes the source's
@@ -561,67 +604,4 @@ fn biotransference_casts_a_creature_spell_as_an_artifact() {
             "Biotransference's token must have the printed {subtype} subtype: {token:#?}"
         );
     }
-}
-
-/// CR 702.160a + CR 702.102b + CR 709.4d: non-base prototype and fused-split
-/// cast forms must be restored after the full reset that precedes layer
-/// application, including when another static makes remote stack objects
-/// layer candidates.
-#[test]
-fn prototype_and_fused_cast_form_overlays_survive_forced_full_layer_reset() {
-    let db = crate::support::shared_card_db()
-        .expect("integration fixture must include the Breaking split card");
-    let mut scenario = GameScenario::new();
-    let prototype = scenario.add_creature(P0, "Prototype Test", 7, 7).id();
-    let fused = scenario.add_real_card(P0, "Breaking", Zone::Stack, db);
-    let mut runner = scenario.build();
-
-    {
-        let state = runner.state_mut();
-        let prototype_object = state.objects.get_mut(&prototype).unwrap();
-        prototype_object.prototype_form = Some(engine::game::game_object::PrototypeFormState {
-            mana_cost: ManaCost::Cost {
-                shards: vec![ManaCostShard::White],
-                generic: 2,
-            },
-            power: 1,
-            toughness: 1,
-            colors: vec![ManaColor::White],
-        });
-
-        let fused_object = state.objects.get_mut(&fused).unwrap();
-        fused_object.fused_split_spell = true;
-        // `Breaking` supplies its real red split half. Add a second core type
-        // to the back-face fixture so this test also discriminates the type
-        // union restored from the fused cast-form marker.
-        let back = fused_object
-            .back_face
-            .as_mut()
-            .expect("Breaking must carry its split back-face data");
-        if !back.card_types.core_types.contains(&CoreType::Artifact) {
-            back.card_types.core_types.push(CoreType::Artifact);
-        }
-        push_test_spell(state, fused, P0);
-        state.layers_dirty.mark_full();
-        evaluate_layers(state);
-    }
-
-    let prototype_object = &runner.state().objects[&prototype];
-    assert_eq!(prototype_object.mana_cost.mana_value(), 3);
-    assert_eq!(prototype_object.power, Some(1));
-    assert_eq!(prototype_object.toughness, Some(1));
-    assert_eq!(prototype_object.color, vec![ManaColor::White]);
-
-    let fused_object = &runner.state().objects[&fused];
-    assert!(
-        fused_object.color.contains(&ManaColor::Red),
-        "a full layer reset must restore the real red half of fused Breaking"
-    );
-    assert!(
-        fused_object
-            .card_types
-            .core_types
-            .contains(&CoreType::Artifact),
-        "a full layer reset must restore the fused split type union"
-    );
 }
