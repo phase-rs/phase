@@ -26,6 +26,9 @@ use engine::types::zones::Zone;
 const PAINTER_ORACLE: &str = "As this creature enters, choose a color.\n\
 All cards that aren't on the battlefield, spells, and permanents are the chosen color in addition to their other colors.";
 
+const SET_CHOSEN_COLOR_ORACLE: &str = "As this creature enters, choose a color.\n\
+All creatures are the chosen color.";
+
 #[test]
 fn painters_servant_adds_chosen_color_across_oxford_zones() {
     let mut scenario = GameScenario::new();
@@ -111,4 +114,38 @@ fn painters_servant_adds_chosen_color_across_oxford_zones() {
         &runner.state().objects[&blue_hand_card].color,
     );
     assert_retains_blue_and_gains_red("stack spell", &runner.state().objects[&stack_spell].color);
+}
+
+#[test]
+fn bare_chosen_color_replaces_prior_colors() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let source = scenario
+        .add_creature_from_oracle(P0, "Color Setter", 1, 1, SET_CHOSEN_COLOR_ORACLE)
+        .id();
+    let blue_creature = scenario
+        .add_creature(P0, "Blue Bear", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Blue],
+        })
+        .id();
+    let mut runner = scenario.build();
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::Color(ManaColor::Red));
+
+    evaluate_layers(runner.state_mut());
+
+    assert_eq!(
+        runner.state().objects[&blue_creature].color,
+        vec![ManaColor::Red],
+        "bare chosen-color statics must retain their CR 105.3 set semantics"
+    );
 }
