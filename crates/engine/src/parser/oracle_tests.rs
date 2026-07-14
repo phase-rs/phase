@@ -21328,3 +21328,308 @@ fn ill_gotten_gains_return_clause_binds_bounded_multi_target() {
         return_clause.multi_target
     );
 }
+// ===========================================================================
+// Task #123 — router wiring: every router slot and routing classifier parses
+// keyword lines through a STRICT (remainder-checking) surface.
+//
+// The invariant under test is CONSUME-ON-SUCCESS: a router may advance past a
+// line only when the line parsed COMPLETELY. A keyword-cost line carrying a
+// semantic clause it cannot model must fall through and become an honest,
+// exact-unit `Effect::Unimplemented` — never vanish with no keyword and no
+// diagnostic, which renders the card as fully supported.
+//
+// Each swallow witness below is paired with a POSITIVE control on the same
+// family, because "everything is now Unimplemented" would satisfy the swallow
+// assertions vacuously. The controls prove the valid line still routes.
+// ===========================================================================
+
+/// The hostile suffix: semantic prose no permitted (`P`/`R`/`M`) tail admits.
+const T123_SEMANTIC_TAIL: &str = " if you control an artifact";
+
+fn t123_parse(text: &str, kws: &[&str], types: &[&str]) -> ParsedAbilities {
+    let kwv: Vec<String> = kws.iter().map(|s| s.to_string()).collect();
+    let tyv: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+    parse_oracle_text(text, "Witness", &kwv, &tyv, &[])
+}
+
+fn t123_unimplemented_count(parsed: &ParsedAbilities) -> usize {
+    parsed
+        .abilities
+        .iter()
+        .filter(|a| matches!(&*a.effect, Effect::Unimplemented { .. }))
+        .count()
+}
+
+/// A swallowed line: consumed, nothing recorded, nothing flagged. The exact
+/// failure this unit exists to remove.
+fn t123_assert_not_swallowed(label: &str, parsed: &ParsedAbilities) {
+    assert!(
+        t123_unimplemented_count(parsed) > 0,
+        "[{label}] the line was CONSUMED with no Effect::Unimplemented — a silent \
+         swallow. keywords={:?} abilities={} statics={} triggers={}",
+        parsed.extracted_keywords,
+        parsed.abilities.len(),
+        parsed.statics.len(),
+        parsed.triggers.len(),
+    );
+}
+
+/// THE 8f witness. `Kickerfoo {2}` is a fabricated keyword line: no such
+/// keyword exists, so nothing can parse it.
+///
+/// Before this unit, priority 8f dispatched on a bare `tag("kicker")` with NO
+/// word-boundary guard, so "kickerfoo" matched the "kicker" prefix; then
+/// `i += 1; continue;` sat OUTSIDE both `if let Some` blocks, so the line was
+/// consumed with no keyword, no additional cost, and no diagnostic. It vanished
+/// entirely, and the card rendered as fully supported.
+///
+/// Red-first: on pre-fix code this test FAILS with 0 abilities / 0 keywords /
+/// 0 Unimplemented — the line is simply gone.
+#[test]
+fn t123_kickerfoo_synthetic_line_is_honestly_unimplemented_not_swallowed() {
+    let parsed = t123_parse("Kickerfoo {2}", &[], &["Instant"]);
+
+    t123_assert_not_swallowed("kickerfoo", &parsed);
+    assert_eq!(
+        t123_unimplemented_count(&parsed),
+        1,
+        "expected exactly ONE exact-unit Unimplemented for the one bogus line"
+    );
+    assert!(
+        parsed.extracted_keywords.is_empty(),
+        "a fabricated keyword line must not manufacture a keyword, got {:?}",
+        parsed.extracted_keywords
+    );
+}
+
+/// Priority 8f, defect (a): a REAL kicker prefix at a word boundary, with a
+/// semantic tail neither the additional-cost parser nor the keyword parser can
+/// model. Pre-fix this produced `Kicker(generic: 0)` — the tail eaten AND the
+/// cost fabricated as 0 (`parse_oracle_cost` never fails, so the cost slot was
+/// built out of untyped prose).
+#[test]
+fn t123_kicker_with_semantic_tail_is_not_consumed() {
+    let text = format!("Kicker {{2}}{T123_SEMANTIC_TAIL}");
+    let parsed = t123_parse(&text, &[], &["Instant"]);
+
+    t123_assert_not_swallowed("kicker+tail", &parsed);
+    assert!(
+        !parsed
+            .extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Kicker(_))),
+        "must not commit a Kicker built from an unmodelled tail, got {:?}",
+        parsed.extracted_keywords
+    );
+}
+
+/// Positive control for 8f: the valid lines still route to typed keywords with
+/// their real costs, and raise no Unimplemented. Without this, the two tests
+/// above would pass even if 8f had simply been deleted.
+#[test]
+fn t123_kicker_family_valid_lines_still_route() {
+    for (text, label) in [
+        ("Kicker {2}", "kicker"),
+        ("Multikicker {1}{R}", "multikicker"),
+        ("Replicate {2}", "replicate"),
+    ] {
+        let parsed = t123_parse(text, &[], &["Instant"]);
+        assert_eq!(
+            t123_unimplemented_count(&parsed),
+            0,
+            "[{label}] a VALID keyword line must not become Unimplemented: {parsed:#?}"
+        );
+    }
+
+    // The cost must be the printed one, not a fabricated empty cost.
+    let replicate = t123_parse("Replicate {2}", &[], &["Instant"]);
+    assert!(
+        replicate
+            .extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Replicate(_))),
+        "Replicate {{2}} must yield a Replicate keyword, got {:?}",
+        replicate.extracted_keywords
+    );
+}
+
+/// THE SHADOW witness (priority 1b). This is the finding the census did not
+/// record: priority 1b runs LONG before the strict routers at priority 9/13, so
+/// whenever MTGJSON names the keyword — the common case — it is 1b, not those,
+/// that decides the line.
+///
+/// Pre-fix, 1b's permissive list parser consumed this whole line as a bare
+/// `Cycling`, dropped the conditional, and raised nothing. The strict wiring
+/// downstream never even saw it.
+///
+/// The `mtgjson EMPTY` half is the discriminator: it proves the difference is
+/// caused by 1b's MTGJSON-gated path and not by some unrelated slot.
+#[test]
+fn t123_priority_1b_does_not_shadow_the_strict_router() {
+    let text = format!("Cycling {{2}}{T123_SEMANTIC_TAIL}");
+
+    // MTGJSON names the keyword -> pre-fix, priority 1b claimed and swallowed it.
+    let named = t123_parse(&text, &["cycling"], &["Creature"]);
+    t123_assert_not_swallowed("1b cycling+tail (mtgjson named)", &named);
+    assert!(
+        !named
+            .extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Cycling(_))),
+        "must not commit a Cycling built from an unmodelled tail, got {:?}",
+        named.extracted_keywords
+    );
+
+    // MTGJSON silent -> 1b declines, and the line was ALREADY honest pre-fix.
+    // Both paths must now agree; that agreement is the point of the migration.
+    let unnamed = t123_parse(&text, &[], &["Creature"]);
+    t123_assert_not_swallowed("1b cycling+tail (mtgjson silent)", &unnamed);
+}
+
+/// Positive control for 1b: bare keyword lines and correctly-parameterized
+/// keyword lines still route. This is the path a naive "just make it strict"
+/// change would destroy, since `parse_router_keyword_line` alone cannot see a
+/// bare-keyword list.
+#[test]
+fn t123_priority_1b_valid_keyword_lines_still_route() {
+    let bare = t123_parse("Flying, vigilance", &["flying", "vigilance"], &["Creature"]);
+    assert_eq!(
+        t123_unimplemented_count(&bare),
+        0,
+        "a bare keyword list must still route: {bare:#?}"
+    );
+
+    let cycling = t123_parse("Cycling {2}", &["cycling"], &["Creature"]);
+    assert_eq!(
+        t123_unimplemented_count(&cycling),
+        0,
+        "a valid parameterized keyword line must still route: {cycling:#?}"
+    );
+    assert!(
+        cycling
+            .extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Cycling(_))),
+        "Cycling {{2}} must yield a Cycling keyword, got {:?}",
+        cycling.extracted_keywords
+    );
+}
+
+/// THE OVERREACH CONTROL, and the reason this unit does NOT refuse a line merely
+/// because its parsed keyword list came back empty.
+///
+/// A bare, MTGJSON-named keyword line parses to an EMPTY `extracted_keywords`: the
+/// keyword rides the card's MTGJSON metadata, and the router's job on this line is
+/// simply to consume it without raising anything. So "the strict parser produced no
+/// keywords" is NOT evidence of a swallow here — it is the normal, correct outcome
+/// for the single most common keyword line in the corpus. A refusal keyed on that
+/// emptiness would satisfy every swallow assertion above and false-red every vanilla
+/// evergreen creature in the pool.
+///
+/// Green in BOTH worlds, pre- and post-fix. That is the point: it is the line the
+/// migration must NOT move.
+#[test]
+fn t123_metadata_named_bare_keyword_line_still_routes() {
+    let parsed = t123_parse("Flying", &["flying"], &["Creature"]);
+
+    assert_eq!(
+        t123_unimplemented_count(&parsed),
+        0,
+        "a bare metadata-named keyword line must not become Unimplemented: {parsed:#?}"
+    );
+    assert!(
+        parsed.abilities.is_empty() && parsed.statics.is_empty() && parsed.triggers.is_empty(),
+        "a bare metadata-named keyword line must be consumed cleanly, got {parsed:#?}"
+    );
+}
+
+/// Priority 1b, Crew. The strict `parse_crew_keyword` intercept correctly
+/// DECLINES "Crew 2 <semantic tail>" (its cadence tail is `all_consuming`), and
+/// the line then fell into 1b's permissive list — which ate the tail. The leak
+/// was never in the Crew parser; it was downstream, exactly as the charter says.
+#[test]
+fn t123_crew_with_semantic_tail_falls_through_to_unimplemented() {
+    let text = format!("Crew 2{T123_SEMANTIC_TAIL}");
+    let parsed = t123_parse(&text, &["crew"], &["Artifact"]);
+
+    t123_assert_not_swallowed("crew+tail", &parsed);
+    assert!(
+        !parsed
+            .extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Crew { .. })),
+        "must not commit a Crew built from an unmodelled tail, got {:?}",
+        parsed.extracted_keywords
+    );
+
+    // Positive control: the plain Crew line, and the modeled cadence sentence,
+    // both still route (this is the NOT-A-DEFECT path — do not regress it).
+    let plain = t123_parse("Crew 2", &["crew"], &["Artifact"]);
+    assert!(
+        plain
+            .extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Crew { .. })),
+        "plain Crew 2 must still route, got {:?}",
+        plain.extracted_keywords
+    );
+}
+
+/// Priority 0, the semicolon keyword line. Every part must parse completely;
+/// one part carrying a semantic clause declines the WHOLE line.
+#[test]
+fn t123_semicolon_keyword_line_with_semantic_tail_is_not_consumed() {
+    let text = format!("Defender; cycling {{2}}{T123_SEMANTIC_TAIL}");
+    let parsed = t123_parse(&text, &["defender", "cycling"], &["Creature"]);
+
+    t123_assert_not_swallowed("semicolon+tail", &parsed);
+
+    // Positive control: a clean semicolon keyword line still routes.
+    let clean = t123_parse("Defender; reach", &["defender", "reach"], &["Creature"]);
+    assert_eq!(
+        t123_unimplemented_count(&clean),
+        0,
+        "a clean semicolon keyword line must still route: {clean:#?}"
+    );
+}
+
+/// The advance-on-partial family: each of these router intercepts used to call
+/// the permissive fragment parser and advance `i` on a parse that had discarded
+/// the remainder. Every one of them ate its tail AND fabricated its cost.
+///
+/// Driven as a table because the defect — and the fix — are one shape, not six.
+#[test]
+fn t123_advance_on_partial_intercepts_no_longer_eat_their_tails() {
+    let cases: [(&str, &str, &[&str]); 5] = [
+        ("suspend", "Suspend 3—{1}{R}", &["Sorcery"]),
+        ("specialize", "Specialize {2}", &["Creature"]),
+        ("escalate", "Escalate {2}", &["Instant"]),
+        (
+            "commander ninjutsu",
+            "Commander ninjutsu {1}{U}",
+            &["Creature"],
+        ),
+        ("buyback", "Buyback {3}", &["Instant"]),
+    ];
+
+    for (label, valid_line, types) in cases {
+        // Swallow witness: valid keyword + a clause nothing can model.
+        let hostile = format!("{valid_line}{T123_SEMANTIC_TAIL}");
+        let parsed = t123_parse(&hostile, &[], types);
+        t123_assert_not_swallowed(label, &parsed);
+
+        // Positive control: the same line WITHOUT the tail must still route,
+        // or the assertion above is passing for the wrong reason.
+        let clean = t123_parse(valid_line, &[], types);
+        assert_eq!(
+            t123_unimplemented_count(&clean),
+            0,
+            "[{label}] the valid line must still route to a keyword: {clean:#?}"
+        );
+        assert!(
+            !clean.extracted_keywords.is_empty(),
+            "[{label}] the valid line must yield a keyword, got {:?}",
+            clean.extracted_keywords
+        );
+    }
+}

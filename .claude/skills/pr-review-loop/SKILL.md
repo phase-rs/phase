@@ -1,6 +1,6 @@
 ---
 name: pr-review-loop
-description: Use to run a continuous review sweep over open contributor PRs in phase.rs. The skill is a thin orchestration layer over scripts/pr_review.py: discover candidates, detect stale reviews/follow-ups, dispatch review-impl for PRs that need judgment, and delegate authorized merge handling to pr-contribution-handler.
+description: "Use to run a continuous review sweep over open contributor PRs in phase.rs. The skill is a thin orchestration layer over scripts/pr_review.py: discover candidates, detect stale reviews/follow-ups, dispatch review-impl for PRs that need judgment, and delegate authorized merge handling to pr-contribution-handler."
 ---
 
 # PR Review Loop
@@ -47,6 +47,8 @@ python3 scripts/pr_review.py compact
 ```
 
 ## Sweep Protocol
+
+At sweep start, read `.agents/pr-review/campaign-hotspots.toml` if present (lead-maintained, untracked, updated at campaign routing/ship events). It lists: migrated areas with the rule now in force and the REDIRECT pointer for authors; coverage-delta semantics (an honest coverage DECREASE — silent swallows converted to explicit `Effect::Unimplemented` — is acceptable and must never be "restored"; in CI only the `engine_regress` bucket, a card LOSING a previously-supported handler, is fatal); diff content outside the contributor's control (generated-file dirt, export nondeterminism, staleness caused by maintainer-side churn — strip/normalize/rebase these yourself, never request changes for them); and files owned by in-flight campaign units (a contributor PR racing those files → hold + surface to the maintainer). Hotspots inform routing and comment content; they are NOT an additional review gate — if a hotspot prohibition reaches review without CI redding it, that is a gate gap: file it, don't make the contributor absorb the miss.
 
 1. Resolve the acting identity from GitHub. Do not review PRs authored by the acting login.
 2. Run `scan`. Use `action_counts` / `candidates_by_action` for routing; do not infer legacy bucket names. Treat its result as a triage packet, not a final approval gate.
@@ -126,6 +128,8 @@ A PR that adds only tests — no engine, parser, or frontend behavior change —
 - **Is the coverage unique?** Grep for existing tests over the same card, mechanic, or issue before accepting. Duplicated coverage of an already-tested path is a reason to decline, not merge.
 - **Is the blast radius justified?** Large test files that re-link the engine (see the `no_top_level_test_binaries` guard) must earn their compile cost.
 
+**Evaluate every test-only PR independently.** A series of narrowly scoped test PRs earns no collective presumption of value: each PR must cite the specific existing coverage it does *not* duplicate, name the distinct regression it guards, and demonstrate a failure against the plausible pre-fix or wrong implementation. “This is another test for the same area” is not merge value.
+
 Default to the **`value-bar`** signal — with a concrete "what already covers this" citation — when a test-only PR does not clear this bar, and do not enqueue it on green CI alone. Approve only when the added coverage is genuinely load-bearing. Apply the same discriminating-test standard whether tests ship alone or alongside a fix.
 
 ## Review Comment Format
@@ -148,6 +152,8 @@ Keep the tone specific and grounded: credit correct work, cite evidence for ever
 ## Authorized Mode
 
 When the user explicitly authorizes maintainer actions, the loop may pass clean PRs to `pr-contribution-handler`. That skill owns assignee locks, checkout/worktree handling, fixups, formal approval, labels, update-branch, enqueue, dequeue, and live GraphQL verification.
+
+When delegating labeling, require the handler to classify by the actual diff: ordinary additive engine, parser, or tooling capabilities are **enhancement** by default, even when they touch several files. Reserve **feature** for a genuinely broad mechanic or product change spanning distinct subsystems (for example, a combo workflow that jointly changes engine rules, priority handling, UI, and AI). Never infer `feature` from a `feat:` title, file count, or author identity.
 
 Do not perform GitHub mutations from this skill except ordinary review/comment actions explicitly required by the current sweep and policy-configured deferral labels. Approval, queue, update-branch, dequeue, and merge execution still belongs to `pr-contribution-handler`.
 
