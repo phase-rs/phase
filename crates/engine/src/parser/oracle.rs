@@ -5382,6 +5382,30 @@ pub(crate) fn parse_oracle_ir(
             // replaces the preceding ability's effect. Compose them so the engine
             // resolves the binary choice: the "instead" sub carries the condition;
             // the base ability becomes the fallback when it is not met.
+            // CR 614.15: the residual self-replacement printings. The three gates above
+            // recognize the shapes we can BIND: the whole-clause forms (bare trailing
+            // "instead", ", instead <effect>", "<effect> instead if <cond>") and the
+            // partial quantity form with a Dig antecedent. Everything else that is
+            // still a self-replacement override reaches here — e.g. a partial override
+            // whose antecedent is NOT a Dig ("search your library for up to three basic
+            // Forest cards instead of two"), or one that replaces a NON-first clause of
+            // the base chain ("You may put that card onto the battlefield instead of
+            // putting it into your hand").
+            //
+            // Those need a clause-level antecedent selection and a tail that survives in
+            // BOTH branches, which the FirstEmitted binder cannot express. We do NOT
+            // guess at them — but neither may they be published as independent abilities,
+            // which is what happened before and made the engine run the base effect AND
+            // the replacement (CR 614.6). They fall to the honest-failure floor below.
+            //
+            // The "would" exclusion is CR 614.1: a replacement effect watches for an
+            // event that WOULD happen. A "would" clause names an EVENT (CR 614.1a) and is
+            // owned by the replacement machinery, not by this self-replacement binder —
+            // claiming it here would replace a working rider encoding with an honest red.
+            let effect_line_lower = effect_line.to_lowercase();
+            let is_unbindable_self_replacement = scan_contains(&effect_line_lower, "instead")
+                && !scan_contains(&effect_line_lower, "would");
+
             if is_instead || is_cross_line_dig_alt || is_instead_replacement_line(&effect_line) {
                 if let Some(condition) = def.condition.take() {
                     if let Some(base_item) = emitter.pop_last_spell() {
@@ -5433,6 +5457,30 @@ pub(crate) fn parse_oracle_ir(
                     def.sub_ability = None;
                     def.else_ability = None;
                 }
+            } else if is_unbindable_self_replacement && emitter.builder.peek_last_spell().is_some()
+            {
+                // CR 614.6 + CR 614.15: the residual self-replacement printings — a
+                // PARTIAL override whose antecedent is not a Dig ("search your library
+                // for up to three basic Forest cards instead of two"), or one that
+                // replaces a NON-FIRST clause of the base chain ("You may put that card
+                // onto the battlefield instead of putting it into your hand").
+                //
+                // These have a perfectly good condition, so it is tempting to hand them to
+                // the binder above. That would be WRONG, and silently so: the binder binds
+                // the FIRST emitted clause and parks the base's tail in `else_ability`,
+                // which the runtime walks ONLY when the swap does not fire. Nissa's
+                // Pilgrimage would search for three basic Forests and then never reveal
+                // them, put one onto the battlefield, or shuffle. That trades a
+                // double-execution for an effect LOSS — a different silent wrong.
+                //
+                // A faithful bind needs clause-level antecedent selection plus a tail that
+                // survives in BOTH branches. Until that exists, fail honestly: the base
+                // ability stands exactly as printed and the override is reported
+                // unimplemented. Never an independent ability.
+                def.effect = Box::new(Effect::unimplemented("instead_override", &effect_line));
+                def.condition = None;
+                def.sub_ability = None;
+                def.else_ability = None;
             }
             emitter.ability_at(item_line, def);
             continue;

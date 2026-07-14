@@ -90,6 +90,54 @@ fn poison_counters(runner: &GameRunner, player: PlayerId) -> u32 {
     runner.state().players[player.0 as usize].poison_counters
 }
 
+/// CR 614.6 REGRESSION GUARD — the override's OWN tail must not leak into the
+/// not-replaced branch.
+///
+/// Precognitive Perception {3}{U}{U} — Instant:
+///   "Draw three cards.
+///    Addendum — If you cast this spell during your main phase, instead scry 3,
+///    then draw three cards."
+///
+/// The override body is a TWO-clause chain ("scry 3, then draw three cards") and
+/// BOTH clauses belong to the replacement. When the Addendum condition is false,
+/// the printed "Draw three cards" runs and NOTHING of the override may run.
+///
+/// This face is the one the full-pool ledger surfaced that this unit did not
+/// predict: widening the condition vocabulary made the line take the
+/// strip-the-body path, which moved the override's second clause out from under
+/// the condition the chain had been stamping on it. The engine runs an unswapped
+/// `ConditionInstead` sub's `sub_ability` tail when it has no `else_ability`
+/// (effects/mod.rs — a clause printed AFTER an "instead" sentence is an
+/// independent instruction), so an unguarded tail here would draw three MORE
+/// cards outside your main phase. Six cards off a card that draws three.
+///
+/// Cast in the UPKEEP (not a main phase) — exactly three cards, never six.
+#[test]
+fn precognitive_perception_override_tail_does_not_run_when_addendum_is_false() {
+    const PRECOG: &str = "Draw three cards.\nAddendum — If you cast this spell during your main phase, instead scry 3, then draw three cards.";
+
+    let mut scenario = GameScenario::new();
+    // NOT a main phase — the Addendum condition is false.
+    scenario.at_phase(Phase::Upkeep);
+    scenario.with_mana_pool(
+        P0,
+        (0..6)
+            .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Precognitive Perception", true, PRECOG)
+        .id();
+    for i in 0..12 {
+        scenario.add_card_to_library_top(P0, &format!("Filler {i}"));
+    }
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).resolve();
+
+    outcome.assert_hand_drawn(P0, 3);
+}
+
 /// SHAPE (CR 614.15 PARTIAL replacement): "… instead of one" replaces only the
 /// COUNT of the printed Dig — not the whole instruction.
 ///
