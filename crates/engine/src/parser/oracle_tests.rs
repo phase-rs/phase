@@ -21515,6 +21515,34 @@ fn t123_priority_1b_valid_keyword_lines_still_route() {
     );
 }
 
+/// THE OVERREACH CONTROL, and the reason this unit does NOT refuse a line merely
+/// because its parsed keyword list came back empty.
+///
+/// A bare, MTGJSON-named keyword line parses to an EMPTY `extracted_keywords`: the
+/// keyword rides the card's MTGJSON metadata, and the router's job on this line is
+/// simply to consume it without raising anything. So "the strict parser produced no
+/// keywords" is NOT evidence of a swallow here — it is the normal, correct outcome
+/// for the single most common keyword line in the corpus. A refusal keyed on that
+/// emptiness would satisfy every swallow assertion above and false-red every vanilla
+/// evergreen creature in the pool.
+///
+/// Green in BOTH worlds, pre- and post-fix. That is the point: it is the line the
+/// migration must NOT move.
+#[test]
+fn t123_metadata_named_bare_keyword_line_still_routes() {
+    let parsed = t123_parse("Flying", &["flying"], &["Creature"]);
+
+    assert_eq!(
+        t123_unimplemented_count(&parsed),
+        0,
+        "a bare metadata-named keyword line must not become Unimplemented: {parsed:#?}"
+    );
+    assert!(
+        parsed.abilities.is_empty() && parsed.statics.is_empty() && parsed.triggers.is_empty(),
+        "a bare metadata-named keyword line must be consumed cleanly, got {parsed:#?}"
+    );
+}
+
 /// Priority 1b, Crew. The strict `parse_crew_keyword` intercept correctly
 /// DECLINES "Crew 2 <semantic tail>" (its cadence tail is `all_consuming`), and
 /// the line then fell into 1b's permissive list — which ate the tail. The leak
