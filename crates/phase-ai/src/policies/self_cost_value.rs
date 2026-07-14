@@ -7,10 +7,12 @@
 //! payoff is rejected (scoring `-inf`, so Pass wins); a cheap cost is merely
 //! deprioritized; anything with a genuine payoff is left alone.
 
+use engine::types::ability::AbilityTag;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
+use super::activation::effective_activated_ability;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::self_cost::{
@@ -46,22 +48,17 @@ impl TacticalPolicy for SelfCostValuePolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        let GameAction::ActivateAbility {
-            source_id,
-            ability_index,
-        } = &ctx.candidate.action
-        else {
+        let GameAction::ActivateAbility { source_id, .. } = &ctx.candidate.action else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
         };
 
-        let Some(ability) = ctx
-            .state
-            .objects
-            .get(source_id)
-            .and_then(|object| object.abilities.get(*ability_index))
-        else {
+        let Some(ability) = effective_activated_ability(ctx.state, &ctx.candidate.action) else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
         };
+
+        if ability.ability_tag == Some(AbilityTag::Cycling) {
+            return PolicyVerdict::neutral(PolicyReason::new("self_cost_cycling_deferred"));
+        }
 
         let Some(cost) = ability.cost.as_ref() else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
@@ -79,13 +76,13 @@ impl TacticalPolicy for SelfCostValuePolicy {
             .cloned()
             .unwrap_or_default();
 
-        if synergy_justifies_self_cost(&features, ctx.state, ctx.ai_player, ability) {
+        if synergy_justifies_self_cost(&features, ctx.state, ctx.ai_player, &ability) {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_synergy_justified"));
         }
 
         let cost_value =
             real_self_cost(ctx.state, ctx.ai_player, *source_id, cost, ctx.penalties());
-        let trivial = benefit_is_trivial(ctx.state, ctx.ai_player, *source_id, ability);
+        let trivial = benefit_is_trivial(ctx.state, ctx.ai_player, *source_id, &ability);
 
         let cost_milli = (cost_value * 1000.0) as i64;
 
