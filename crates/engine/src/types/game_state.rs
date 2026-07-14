@@ -8639,6 +8639,19 @@ pub struct GameState {
     #[serde(skip)]
     pub last_choose_from_zone_found_nothing: bool,
 
+    /// CR 608.2c + issue #4950 (Thoughtseize): Set when the most recently
+    /// resolved `RevealHand` reveal-choice ("choose a nonland card from it")
+    /// found its eligible set empty — a choice was required but there was
+    /// nothing to choose. Like `last_dig_found_nothing`, this is a transient
+    /// relay consumed by the very next parent->child hand-off
+    /// (`effects::apply_parent_chain_context`) and copied onto the child
+    /// ability's `reveal_choice_found_nothing_for_parent_target` field. It
+    /// lets a `ParentTarget`-bound `Discard`/`DiscardCard` no-op instead of
+    /// falling back to a whole-hand discard, without affecting discards whose
+    /// own target is player-scoped (those never trigger a reveal-choice).
+    #[serde(skip)]
+    pub last_reveal_choice_found_nothing: bool,
+
     /// CR 701.20e: Cards the controller is privately "looking at" during the
     /// current resolution — the looker-scoped peek window of a bare
     /// "look at the top card of your library" (Dig with `keep_count == 0`,
@@ -10344,6 +10357,7 @@ impl GameState {
             last_revealed_ids: Vec::new(),
             last_dig_found_nothing: false,
             last_choose_from_zone_found_nothing: false,
+            last_reveal_choice_found_nothing: false,
             private_look_ids: Vec::new(),
             private_look_player: None,
             last_zone_changed_ids: Vec::new(),
@@ -11343,6 +11357,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         last_revealed_ids: _,
         last_dig_found_nothing: _,
         last_choose_from_zone_found_nothing: _,
+        last_reveal_choice_found_nothing: _,
         private_look_ids: _,
         private_look_player: _,
         last_zone_changed_ids: _,

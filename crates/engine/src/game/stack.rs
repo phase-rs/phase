@@ -2163,6 +2163,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         mode_abilities,
         dig_found_nothing_for_parent_target,
         choose_from_zone_found_nothing_for_parent_target,
+        reveal_choice_found_nothing_for_parent_target,
     } = ability;
 
     let self_counter = matches!(
@@ -2221,6 +2222,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && mode_abilities.is_empty()
         && !*dig_found_nothing_for_parent_target
         && !*choose_from_zone_found_nothing_for_parent_target
+        && !*reveal_choice_found_nothing_for_parent_target
 }
 
 /// CR 608.2: Apply a proven-safe batch. The per-resolution handler body runs

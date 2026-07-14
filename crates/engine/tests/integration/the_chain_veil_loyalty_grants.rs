@@ -156,6 +156,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         mode_abilities: vec![],
         dig_found_nothing_for_parent_target: false,
         choose_from_zone_found_nothing_for_parent_target: false,
+        reveal_choice_found_nothing_for_parent_target: false,
     }
 }
 

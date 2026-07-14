@@ -400,6 +400,7 @@ pub fn resolve_tally(
                 mode_abilities: vec![],
                 dig_found_nothing_for_parent_target: false,
                 choose_from_zone_found_nothing_for_parent_target: false,
+                reveal_choice_found_nothing_for_parent_target: false,
             };
             resolve_ability_chain(state, &chain, events, 1)?;
         } else if per_choice_effect[idx]
@@ -464,6 +465,7 @@ pub fn resolve_tally(
                 mode_abilities: vec![],
                 dig_found_nothing_for_parent_target: false,
                 choose_from_zone_found_nothing_for_parent_target: false,
+                reveal_choice_found_nothing_for_parent_target: false,
             };
             resolve_ability_chain(state, &chain, events, 1)?;
         } else {
@@ -703,6 +705,7 @@ fn resolved_from_def(
         mode_abilities: def.mode_abilities.clone(),
         dig_found_nothing_for_parent_target: false,
         choose_from_zone_found_nothing_for_parent_target: false,
+        reveal_choice_found_nothing_for_parent_target: false,
     }
 }
 
@@ -923,6 +926,7 @@ mod tests {
             mode_abilities: vec![],
             dig_found_nothing_for_parent_target: false,
             choose_from_zone_found_nothing_for_parent_target: false,
+            reveal_choice_found_nothing_for_parent_target: false,
         };
 
         let mut events = Vec::new();
@@ -1028,6 +1032,7 @@ mod tests {
             mode_abilities: vec![],
             dig_found_nothing_for_parent_target: false,
             choose_from_zone_found_nothing_for_parent_target: false,
+            reveal_choice_found_nothing_for_parent_target: false,
         }
     }
 
@@ -1364,6 +1369,7 @@ mod tests {
             mode_abilities: vec![],
             dig_found_nothing_for_parent_target: false,
             choose_from_zone_found_nothing_for_parent_target: false,
+            reveal_choice_found_nothing_for_parent_target: false,
         };
 
         // Resolution parks on VoteChoice with controller as first subject.
@@ -1526,6 +1532,7 @@ mod tests {
             mode_abilities: vec![],
             dig_found_nothing_for_parent_target: false,
             choose_from_zone_found_nothing_for_parent_target: false,
+            reveal_choice_found_nothing_for_parent_target: false,
         };
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).expect("vote initiates");

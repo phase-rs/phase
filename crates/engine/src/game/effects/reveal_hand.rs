@@ -155,6 +155,15 @@ pub fn resolve(
             state.private_look_ids.clear();
             state.private_look_player = None;
         }
+        // CR 608.2c + issue #4950 (Thoughtseize): a choice WAS required
+        // (`needs_reveal_choice`) but the eligible set came up empty — there
+        // is nothing to choose. Signal this so an immediately-chained
+        // `ParentTarget`-bound sub-ability (e.g. Thoughtseize's
+        // `DiscardCard{target: ParentTarget}`) can resolve to a hard no-op
+        // instead of falling back to a whole-hand action. Consumed by
+        // `apply_parent_chain_context` at the very next parent->child
+        // hand-off — see `GameState::last_reveal_choice_found_nothing`.
+        state.last_reveal_choice_found_nothing = true;
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id: ability.source_id,

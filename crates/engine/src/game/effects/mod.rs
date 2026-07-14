@@ -1895,6 +1895,17 @@ fn apply_parent_chain_context(
         child.choose_from_zone_found_nothing_for_parent_target = true;
         state.last_choose_from_zone_found_nothing = false;
     }
+    // CR 608.2c + issue #4950 (Thoughtseize): same relay shape as the two
+    // flags above, for a `RevealHand` reveal-choice ("choose a nonland card
+    // from it") whose eligible set was empty — nothing was ever chosen, so no
+    // object was bound as `ParentTarget`. Consumed immediately so it can only
+    // ever reach the ONE child handed off right after the empty reveal (e.g.
+    // Thoughtseize's `DiscardCard{target: ParentTarget}`), never a later,
+    // unrelated hand-off in the same resolution.
+    if state.last_reveal_choice_found_nothing {
+        child.reveal_choice_found_nothing_for_parent_target = true;
+        state.last_reveal_choice_found_nothing = false;
+    }
     // CR 608.2c: A sub-ability is part of the same printed ability instance as
     // its parent; its instructions are followed in order during a single
     // resolution. Propagate the parent's `ability_index` so chain-level
@@ -6179,6 +6190,12 @@ pub fn resolve_ability_chain(
         // resolution so that can never happen.
         state.last_dig_found_nothing = false;
         state.last_choose_from_zone_found_nothing = false;
+        // CR 608.2c + issue #4950: same defense-in-depth reset for the
+        // RevealHand reveal-choice-found-nothing relay — a RevealHand with no
+        // sub_ability at all (a bare reveal with no chained discard) would
+        // otherwise leave it dangling true into some unrelated later
+        // resolution's first hand-off.
+        state.last_reveal_choice_found_nothing = false;
         // CR 701.20e: A new top-level resolution ends any prior private "look at"
         // peek window — the looked-at card from an unrelated resolution must not
         // stay visible. Cleared here (depth 0 only) so a resumed optional-reveal

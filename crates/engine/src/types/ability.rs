@@ -20170,6 +20170,22 @@ pub struct ResolvedAbility {
     /// using the shared source fallback.
     #[serde(skip)]
     pub choose_from_zone_found_nothing_for_parent_target: bool,
+    /// CR 608.2c + issue #4950 (Thoughtseize): Stamped only by
+    /// `effects::apply_parent_chain_context` when this ability is the
+    /// immediate child of a `RevealHand` reveal-choice ("choose a nonland
+    /// card from it") whose eligible set came up empty — there was nothing to
+    /// choose, so no object was ever bound as `ParentTarget`. Distinct from a
+    /// `Discard`/`DiscardCard` whose OWN target is player-scoped (Tinybones'
+    /// "target player discards a card", Sonic Shrieker's "they discard a
+    /// card" forwarding a damaged PLAYER, not a chosen card): those never set
+    /// this flag, since no reveal-choice ran, and must still fall back to the
+    /// generic hand-choice/random discard path. Consulted by
+    /// `effects::discard::resolve` to resolve a `ParentTarget`-bound discard
+    /// with zero forwarded objects to a hard no-op (CR 608.2c: nothing to
+    /// choose) instead of the whole-hand fallback. Mirrors
+    /// `dig_found_nothing_for_parent_target` / `choose_from_zone_found_nothing_for_parent_target`.
+    #[serde(skip)]
+    pub reveal_choice_found_nothing_for_parent_target: bool,
 }
 
 impl ResolvedAbility {
@@ -20229,6 +20245,7 @@ impl ResolvedAbility {
             mode_abilities: Vec::new(),
             dig_found_nothing_for_parent_target: false,
             choose_from_zone_found_nothing_for_parent_target: false,
+            reveal_choice_found_nothing_for_parent_target: false,
         }
     }
 

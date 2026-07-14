@@ -3630,6 +3630,7 @@ fn walk_ability(
         replacement_applied: _,
         dig_found_nothing_for_parent_target: _,
         choose_from_zone_found_nothing_for_parent_target: _,
+        reveal_choice_found_nothing_for_parent_target: _,
     } = a;
 
     // §4.3.2: a definition's own `player_scope` overrides the inherited scope for
