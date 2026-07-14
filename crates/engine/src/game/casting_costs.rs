@@ -3471,7 +3471,7 @@ fn push_ability_entry(
     // publication is live, and `triggers::build_triggered_ability` stamps it onto the
     // trigger's `chosen_x`. An activation with no announced X publishes `None`, which
     // also clears any stale value.
-    state.activated_ability_x = resolved.chosen_x.map(|x| (source_id, x));
+    state.announced_source_x = resolved.chosen_x.map(|x| (source_id, x));
 
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
     resolved.ability_index = Some(ability_index);

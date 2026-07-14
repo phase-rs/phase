@@ -572,7 +572,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
 ///    an MV-3 artifact for X=3, and CANNOT target it for X=1);
 ///  * ungated triggers — the walk never runs there. Their X is a cast-X read through the trigger
 ///    event (Hydroid Krasis), or an activated ability's announced X (Shark Typhoon), which
-///    `GameState::activated_ability_x` now carries;
+///    `GameState::announced_source_x` now carries;
 ///  * pay-any-amount sentinels (CR 107.3f) — a bare X in a `PayLife`/`PayEnergy` amount is the
 ///    engine's "pay any amount" marker, not a fabrication.
 ///
@@ -16905,7 +16905,7 @@ mod cost_x_totality_guard_tests {
 
     /// GREEN CONTROL — an UNGATED trigger (the walk never runs on it). Shark Typhoon's cycle
     /// trigger keeps a bare X by design: it is the ACTIVATED ability's announced X, carried at
-    /// runtime by `GameState::activated_ability_x` (CR 107.3k — it is NOT the cast-X, so the
+    /// runtime by `GameState::announced_source_x` (CR 107.3k — it is NOT the cast-X, so the
     /// parser must not rewrite it to `CostXPaid`). The guard must not reach it.
     #[test]
     fn guard_does_not_red_an_ungated_activated_ability_x() {

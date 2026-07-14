@@ -241,7 +241,7 @@ fn gated_etb_multi_target_sibling_field() {
 /// which is what makes it a CLASS rather than a Shark Typhoon special case.
 ///
 /// t96 left this `#[ignore]`d as a verified-red witness. t97 built the carrier
-/// (`GameState::activated_ability_x`, published by `casting_costs::push_ability_entry` and
+/// (`GameState::announced_source_x`, published by `casting_costs::push_ability_entry` and
 /// `stack::resolve_top`, consumed by `triggers::build_triggered_ability`) and the `#[ignore]`
 /// is removed here: MEASURED 0 -> 2 tokens. Monstrosity emits its `EffectResolved` during
 /// RESOLUTION of the activated ability, so this exercises the resolution-scoped publication.
@@ -552,64 +552,95 @@ fn a_resolving_spell_never_publishes_an_activation_x() {
          gains half X = 2 life. If this is 0 the assertion below proves nothing."
     );
     assert_eq!(
-        runner.state().activated_ability_x,
+        runner.state().announced_source_x,
         None,
         "CR 107.3m + CR 107.3k: a resolving SPELL must never publish an activation X. A \
          published value here would (a) let a permanent this spell puts onto the battlefield \
          inherit X instead of 0, and (b) leak into the CostXPaid -> chosen_x fallback and \
          poison the gated-ETB sibling slots. MEASURED: {:?}",
-        runner.state().activated_ability_x
+        runner.state().announced_source_x
     );
 }
 
 /// RULING CONDITION 2 — save/wire compatibility, CHECKED rather than asserted.
 ///
-/// `activated_ability_x` is NEW PERSISTED `GameState` (it is serialized so a mid-activation
+/// `announced_source_x` is PERSISTED `GameState` (it is serialized so a mid-activation
 /// pause — e.g. an interactive cost payment between announcement and the trigger going on the
 /// stack — round-trips). It is therefore a save-format change and must be shown compatible:
 ///
-///  1. A save written by an OLDER binary has no `activated_ability_x` key at all. `#[serde(default)]`
+///  1. A save written by an OLDER binary has no key at all. `#[serde(default)]`
 ///     must make that load as `None` rather than fail. Because `skip_serializing_if` omits the key
 ///     whenever it is `None`, a fresh serialization of a state with no live activation IS
 ///     byte-identical to an old save on this axis — so serializing a `None` state and reloading it
 ///     exercises exactly the old-save path.
 ///  2. A live value must survive a round-trip.
+///  3. **A save written under the OLD FIELD NAME (`activated_ability_x`) must still load its
+///     value.** t104 renamed this field when it gained its second announce surface (CR 107.3d
+///     special actions, alongside CR 107.3a activated abilities). `GameState` sets no
+///     `deny_unknown_fields`, so WITHOUT `#[serde(alias = "activated_ability_x")]` an old
+///     mid-activation save would be accepted and its live X **silently dropped** — the worst
+///     failure mode, since it looks like a clean load. The alias is what makes this direction
+///     pass; delete it and this assertion fails while (1) and (2) still pass.
 ///
-/// (`GameState` does not use `deny_unknown_fields`, so the reverse direction — an OLD binary
-/// reading a NEW save that carries the key — ignores it rather than erroring.)
+/// (The reverse direction — an OLD binary reading a NEW save carrying the new key — ignores the
+/// unknown key rather than erroring, for the same `deny_unknown_fields` reason.)
 #[test]
-fn activated_ability_x_is_save_compatible() {
+fn announced_source_x_is_save_compatible() {
     let scenario = GameScenario::new();
     let runner = scenario.build();
     let mut state = runner.state().clone();
 
     // (1) OLD-SAVE SHAPE: `None` omits the key entirely.
-    state.activated_ability_x = None;
+    state.announced_source_x = None;
     let old_shape = serde_json::to_value(&state).expect("serialize");
     assert!(
-        old_shape.get("activated_ability_x").is_none(),
+        old_shape.get("announced_source_x").is_none(),
         "a `None` carrier must omit the key, so pre-field saves are byte-identical on this axis"
     );
     let reloaded: engine::types::game_state::GameState =
         serde_json::from_value(old_shape).expect("an old save (no key) must load, not fail");
     assert_eq!(
-        reloaded.activated_ability_x, None,
-        "a save with no `activated_ability_x` key must default to None"
+        reloaded.announced_source_x, None,
+        "a save with no `announced_source_x` key must default to None"
     );
 
     // (2) LIVE VALUE: round-trips intact.
-    state.activated_ability_x = Some((ObjectId(4242), 7));
+    state.announced_source_x = Some((ObjectId(4242), 7));
     let new_shape = serde_json::to_value(&state).expect("serialize");
     assert!(
-        new_shape.get("activated_ability_x").is_some(),
+        new_shape.get("announced_source_x").is_some(),
         "a live announced X must be persisted (it must survive a mid-activation pause)"
     );
     let reloaded: engine::types::game_state::GameState =
         serde_json::from_value(new_shape).expect("deserialize");
     assert_eq!(
-        reloaded.activated_ability_x,
+        reloaded.announced_source_x,
         Some((ObjectId(4242), 7)),
         "the announced X and its source must round-trip through a save"
+    );
+
+    // (3) PRE-RENAME SAVE: the old key must still bind, via `#[serde(alias)]`.
+    // Build a real save, then rewrite the key back to its pre-t104 name — this is exactly the
+    // JSON an older binary would have written while an activation was in flight.
+    let mut pre_rename = serde_json::to_value(&state).expect("serialize");
+    let carried = pre_rename
+        .as_object_mut()
+        .expect("GameState serializes as a JSON object")
+        .remove("announced_source_x")
+        .expect("the live carrier was just set, so the key must be present");
+    pre_rename
+        .as_object_mut()
+        .expect("GameState serializes as a JSON object")
+        .insert("activated_ability_x".to_string(), carried);
+
+    let reloaded: engine::types::game_state::GameState = serde_json::from_value(pre_rename)
+        .expect("a pre-rename save must still deserialize (no deny_unknown_fields)");
+    assert_eq!(
+        reloaded.announced_source_x,
+        Some((ObjectId(4242), 7)),
+        "CR 107.3a/107.3d: a mid-activation save written under the OLD field name must still load \
+         its announced X. Without `#[serde(alias = \"activated_ability_x\")]` the unknown key is \
+         SILENTLY IGNORED and this reads None — a live X lost on load, with no error."
     );
 }
 

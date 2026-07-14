@@ -8124,14 +8124,14 @@ pub(super) fn build_triggered_ability(
         // value X") which is consumed during target selection — before the trigger ever
         // resolves.
         //
-        // SCOPED BY SOURCE, and this scoping is load-bearing: `activated_ability_x` is
+        // SCOPED BY SOURCE, and this scoping is load-bearing: `announced_source_x` is
         // published only by an activated ability (never by a resolving spell — see
         // `stack::resolve_top`), so a permanent put onto the battlefield by an unrelated
         // X-spell keeps X = 0 (CR 107.3m) rather than inheriting that spell's X. It also
         // keeps `QuantityRef::CostXPaid` — the CR 107.3m *cast* channel, which falls back
         // to `chosen_x` — reading the cast X, never an activation X (CR 107.3k: the two
         // are independent).
-        if let Some((activating_source, announced_x)) = state.activated_ability_x {
+        if let Some((activating_source, announced_x)) = state.announced_source_x {
             if activating_source == source_id {
                 resolved.set_chosen_x_recursive(announced_x);
             }

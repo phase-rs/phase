@@ -195,7 +195,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 107.3a: the announced activation-X carrier is scoped to the activation that
     // published it. Clear it here so it never leaks into an unrelated resolution; it is
     // republished below for an `ActivatedAbility` entry (and only for that kind).
-    state.activated_ability_x = None;
+    state.announced_source_x = None;
 
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
     let entry = match state.stack.pop_back() {
@@ -479,7 +479,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         ability: activated,
     } = &entry.kind
     {
-        state.activated_ability_x = activated.chosen_x.map(|x| (*source_id, x));
+        state.announced_source_x = activated.chosen_x.map(|x| (*source_id, x));
     }
     let resolution_start_phase = state.phase;
 
