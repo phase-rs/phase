@@ -435,10 +435,19 @@ function clusterVerifyPrompt(mechanic, cards) {
     `order, fixing in-loop on failure (max ${MAX_VERIFY_RETRIES} retries per ` +
     `command):\n` +
     `1. cargo fmt --all\n` +
-    `2. ./scripts/check-parser-combinators.sh (Gate A)\n` +
+    `2. ./scripts/check-parser-combinators.sh "$(git merge-base upstream/main HEAD)" (Gate A) — ` +
+    `pass the upstream/main merge-base explicitly. The script's DEFAULT base is the stale fork ` +
+    `origin/main, which diffs the whole tree and false-flags pre-existing nom-combinator debt in ` +
+    `files this change never touched. Scoped to the correct base it only checks THIS change's lines; ` +
+    `treat a non-zero exit as a failure ONLY if a flagged line is in a file this change modified.\n` +
     `3. If \`tilt get uiresource clippy >/dev/null 2>&1\` succeeds: ` +
     `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data ; else ` +
     `cargo clippy-strict && cargo test -p engine && ./scripts/gen-card-data.sh\n` +
+    `   (If this change adds or removes a variant on an engine enum — Effect, TriggerMode, ` +
+    `StaticCondition, GameEvent, EffectKind — keep clippy WORKSPACE-wide, never narrowed to ` +
+    `\`-p engine\`, and also run \`cargo test -p phase-ai\`: phase-ai and engine-wasm match these ` +
+    `enums exhaustively, so a \`-p engine\`-only check cannot observe a non-exhaustive-match break ` +
+    `in those crates that fails CI's Rust-lint / WASM-compile jobs.)\n` +
     `4. cargo coverage — confirm EACH of these cards is now supported:true gap:0; ` +
     `list the ones that are in cardsSupported:\n${cards.map((c) => `- ${c}`).join('\n')}\n` +
     `5. cargo semantic-audit — confirm none of these cards has findings -> ` +
@@ -468,6 +477,11 @@ function clusterPrPrompt(mechanic, cards, { impl, verify, partial }) {
   return (
     `Commit the working-tree change for the "${mechanic}" mechanic, push the ` +
     `branch to your fork, and open a PR to phase-rs/phase with base main.\nRun:\n` +
+    `FIRST discard build-regenerated data artifacts — they are NOT part of any card fix, a ` +
+    `partial/local mtgjson env regenerates them DESTRUCTIVELY, and they produce large drift diffs ` +
+    `that conflict with main and are not CI-checked: ` +
+    `git checkout -- crates/engine/data/known-tokens.toml data/engine-inventory.json crates/engine/data/oracle-subtypes.json 2>/dev/null . ` +
+    `Confirm none are staged (\`git diff --cached --name-only | grep -cE 'known-tokens|engine-inventory|oracle-subtypes'\` must print 0) before committing. Then:\n` +
     `git add -A && git commit -m ${JSON.stringify(title)} && git push -u origin HEAD\n` +
     `Then: gh pr create --base main --title ${JSON.stringify(title)} --body <BODY> ` +
     `(do NOT pass --label; the upstream auto-labeler handles it).\n\n` +
