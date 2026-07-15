@@ -4848,11 +4848,18 @@ fn evaluate_replacement_condition(
                 return false;
             };
             let ctx = FilterContext::from_source(state, source_id);
+            let affected_incarnation = state
+                .objects
+                .get(&affected_id)
+                .map(|object| object.incarnation);
             state.damage_dealt_this_turn.iter().any(|record| {
                 // CR 608.2i + CR 608.2h: match the damage source against its
                 // damage-time snapshot (look-back), consistent with
                 // DamageDealtThisTurn / OpponentDealtDamage.
                 record.target == TargetRef::Object(affected_id)
+                    && record
+                        .target_incarnation
+                        .is_none_or(|incarnation| affected_incarnation == Some(incarnation))
                     && matches_target_filter_on_damage_record_source(state, record, source, &ctx)
             })
         }
@@ -12518,6 +12525,54 @@ mod tests {
             ObjectId(10),
             &state,
             Some(ObjectId(30)),
+            &dummy_begin_turn_event(),
+        ));
+    }
+
+    #[test]
+    fn dealt_damage_by_source_condition_ignores_prior_incarnation_after_reentry() {
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let victim = GameObject::new(
+            ObjectId(20),
+            CardId(2),
+            PlayerId(1),
+            "Victim".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(20), victim);
+        state.battlefield.push_back(ObjectId(20));
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: ObjectId(10),
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(ObjectId(20)),
+            target_controller: PlayerId(1),
+            target_incarnation: Some(0),
+            amount: 1,
+            is_combat: false,
+            ..Default::default()
+        });
+
+        let cond = ReplacementCondition::DealtDamageThisTurnBySource {
+            source: TargetFilter::SelfRef,
+        };
+        assert!(evaluate_replacement_condition(
+            &cond,
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            Some(ObjectId(20)),
+            &dummy_begin_turn_event(),
+        ));
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, ObjectId(20), Zone::Hand, &mut events);
+        crate::game::zones::move_to_zone(&mut state, ObjectId(20), Zone::Battlefield, &mut events);
+        assert!(!evaluate_replacement_condition(
+            &cond,
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            Some(ObjectId(20)),
             &dummy_begin_turn_event(),
         ));
     }

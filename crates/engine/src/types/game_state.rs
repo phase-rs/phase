@@ -852,6 +852,10 @@ pub struct DamageRecord {
     pub target: TargetRef,
     #[serde(default)]
     pub target_controller: PlayerId,
+    /// CR 400.7: Incarnation of an object target when it was dealt damage.
+    /// `None` preserves compatibility with legacy records and player targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_incarnation: Option<u64>,
     pub amount: u32,
     #[serde(default)]
     pub is_combat: bool,
@@ -912,6 +916,7 @@ impl Default for DamageRecord {
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(0)),
             target_controller: PlayerId(0),
+            target_incarnation: None,
             amount: 0,
             is_combat: false,
             source_name: String::new(),
@@ -13226,6 +13231,31 @@ mod tests {
         // Reconstruct RNG from seed since it's skipped in serde
         deserialized.rng = ChaCha20Rng::seed_from_u64(deserialized.rng_seed);
         assert_eq!(state, deserialized);
+    }
+
+    #[test]
+    fn damage_record_target_incarnation_roundtrips_and_defaults_for_legacy_records() {
+        let record = DamageRecord {
+            target: TargetRef::Object(ObjectId(7)),
+            target_incarnation: Some(3),
+            ..Default::default()
+        };
+        let mut value = serde_json::to_value(&record).unwrap();
+        assert_eq!(value["target_incarnation"], 3);
+        assert_eq!(
+            serde_json::from_value::<DamageRecord>(value.clone())
+                .unwrap()
+                .target_incarnation,
+            Some(3)
+        );
+
+        value.as_object_mut().unwrap().remove("target_incarnation");
+        assert_eq!(
+            serde_json::from_value::<DamageRecord>(value)
+                .unwrap()
+                .target_incarnation,
+            None
+        );
     }
 
     #[test]
