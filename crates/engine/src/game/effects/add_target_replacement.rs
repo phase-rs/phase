@@ -47,6 +47,9 @@ fn replacement_with_ability_expiry(
     replacement
 }
 
+// CR 614.12a + CR 707.2: If the resolving spell chose the object to copy, bind
+// that object into the delayed enter-as-copy replacement when the shield is
+// created so the later entry event does not ask for a new copy source.
 fn freeze_parent_copy_target(replacement: &mut ReplacementDefinition, ability: &ResolvedAbility) {
     let Some(copy_source) = ability.targets.iter().find_map(|target| match target {
         TargetRef::Object(id) => Some(*id),

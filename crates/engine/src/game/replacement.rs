@@ -3122,6 +3122,9 @@ fn create_token_applier(
     }
 }
 
+// CR 608.2h + CR 707.2: A Mystic Reflection-style token entry reads the
+// chosen source's current copiable values if it still exists, otherwise its
+// last-known copiable values from the public-zone exit snapshot.
 fn create_token_copy_spec_for_replacement(
     state: &GameState,
     repl_def: &ReplacementDefinition,
@@ -3139,13 +3142,36 @@ fn create_token_copy_spec_for_replacement(
     else {
         return None;
     };
-    let source = state.objects.get(copy_source)?;
-    let values = crate::game::layers::compute_current_copiable_values(state, *copy_source)?;
+    let (values, display_source, printed_ref, token_image_ref) =
+        if let Some(source) = state.objects.get(copy_source) {
+            (
+                crate::game::layers::compute_current_copiable_values(state, *copy_source)?,
+                source.display_source,
+                source.printed_ref.clone(),
+                source.token_image_ref.clone(),
+            )
+        } else {
+            let values = state.lki_copiable_values.get(copy_source)?.clone();
+            let lki = state.lki_cache.get(copy_source);
+            (
+                values,
+                if lki
+                    .and_then(|snapshot| snapshot.token_image_ref.as_ref())
+                    .is_some()
+                {
+                    crate::game::game_object::DisplaySource::Token
+                } else {
+                    crate::game::game_object::DisplaySource::Card
+                },
+                None,
+                lki.and_then(|snapshot| snapshot.token_image_ref.clone()),
+            )
+        };
     Some(CopyTokenSpec {
         values: Box::new(values),
-        display_source: source.display_source,
-        printed_ref: source.printed_ref.clone(),
-        token_image_ref: source.token_image_ref.clone(),
+        display_source,
+        printed_ref,
+        token_image_ref,
         extra_keywords: Vec::new(),
         additional_modifications: additional_modifications.clone(),
         tapped: false,
@@ -3156,6 +3182,9 @@ fn create_token_copy_spec_for_replacement(
     })
 }
 
+// CR 614.6 + CR 707.2: A copy replacement modifies how the token-entry event
+// happens; it must not be classified as a non-token substitute that zeros the
+// original token count.
 fn ability_becomes_copy(def: &AbilityDefinition) -> bool {
     let real_work = EventModifiers::first_non_modifier_ability(Some(def)).unwrap_or(def);
     matches!(&*real_work.effect, Effect::BecomeCopy { .. })

@@ -1,8 +1,11 @@
 //! Issue #5242: Mystic Reflection's delayed replacement must make the next
 //! creature/planeswalker entry copy the creature chosen when Mystic resolved.
 
+use engine::game::sba::check_state_based_actions;
 use engine::game::scenario::{GameScenario, P0};
+use engine::game::zones::move_to_zone;
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const MYSTIC_REFLECTION: &str = "Choose target nonlegendary creature. The next time one or more creatures or planeswalkers enter this turn, they enter as copies of the chosen creature.";
 
@@ -53,6 +56,78 @@ fn mystic_reflection_makes_next_creature_token_copy_chosen_creature() {
     assert!(
         obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
         "token must copy chosen creature subtype, got {:?}",
+        obj.card_types.subtypes
+    );
+}
+
+#[test]
+fn mystic_reflection_uses_lki_when_chosen_token_ceases_to_exist() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let source_token_spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Bestial Menace",
+            true,
+            "Create a 3/3 green Elephant creature token.",
+        )
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let token_spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Raise the Alarm",
+            true,
+            "Create a 1/1 white Soldier creature token.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    runner.cast(source_token_spell).resolve();
+    let chosen_token = runner
+        .state()
+        .last_created_token_ids
+        .first()
+        .copied()
+        .expect("source token spell must create a token");
+
+    runner.cast(mystic).target_object(chosen_token).resolve();
+
+    let mut events = Vec::new();
+    move_to_zone(
+        runner.state_mut(),
+        chosen_token,
+        Zone::Graveyard,
+        &mut events,
+    );
+    check_state_based_actions(runner.state_mut(), &mut events);
+    assert!(
+        !runner.state().objects.contains_key(&chosen_token),
+        "the chosen token must cease to exist before the replacement applies"
+    );
+
+    runner.cast(token_spell).resolve();
+
+    let copied_token = runner
+        .state()
+        .last_created_token_ids
+        .first()
+        .copied()
+        .expect("second token spell must create one token");
+    let obj = runner
+        .state()
+        .objects
+        .get(&copied_token)
+        .expect("created token must exist");
+
+    assert_eq!(obj.power, Some(3), "token must copy LKI power");
+    assert_eq!(obj.toughness, Some(3), "token must copy LKI toughness");
+    assert!(
+        obj.card_types.subtypes.iter().any(|s| s == "Elephant"),
+        "token must copy LKI subtype, got {:?}",
         obj.card_types.subtypes
     );
 }

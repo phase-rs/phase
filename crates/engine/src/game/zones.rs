@@ -167,6 +167,8 @@ pub(crate) fn apply_zone_exit_cleanup(
     // Power/toughness reflect layer modifications on battlefield (Layer 7);
     // from exile they will be None (no layer computation), which is correct.
     if from == Zone::Battlefield || from == Zone::Exile {
+        let lki_copiable_values =
+            crate::game::layers::compute_current_copiable_values(state, object_id);
         if let Some(obj) = state.objects.get(&object_id) {
             let lki = crate::types::game_state::LKISnapshot {
                 name: obj.name.clone(),
@@ -209,6 +211,9 @@ pub(crate) fn apply_zone_exit_cleanup(
                 attachments,
             };
             state.lki_cache.insert(object_id, lki);
+        }
+        if let Some(values) = lki_copiable_values {
+            state.lki_copiable_values.insert(object_id, values);
         }
     }
 
