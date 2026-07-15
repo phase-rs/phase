@@ -181,12 +181,23 @@ fn apply_scry_after_replacement_without_draw(
 
     let count = (count as usize).min(player.library.len());
     if count == 0 {
+        // No `PlayerPerformedAction::Scry` event is emitted below in this
+        // case, so "whenever you scry" does not fire and
+        // `last_scry_look_count` is never read — nothing to record here.
         return ReplacementResult::Execute(ProposedEvent::Scry {
             player_id,
             count: 0,
             applied: HashSet::new(),
         });
     }
+
+    // CR 701.22a: record this scry's effective look count — the requested
+    // amount clamped to library size — so a "whenever you scry" trigger's
+    // effect can reference "the number of cards looked at while scrying this
+    // way" (Elrond, Master of Healing → `QuantityRef::TriggeringScryLookCount`).
+    // Set before the trigger fires on the PlayerPerformedAction event below,
+    // mirroring `discover::resolve`'s `last_discover_value` write.
+    state.last_scry_look_count = Some(count as i32);
 
     events.push(GameEvent::PlayerPerformedAction {
         player_id,

@@ -5404,6 +5404,16 @@ pub enum QuantityRef {
     /// again for the same value". Resolves to 0 outside a discover-trigger
     /// context (fail-safe; no card references it elsewhere).
     TriggeringDiscoverValue,
+    /// CR 701.22a: The number of cards actually looked at by the scry that
+    /// fired the current "whenever you scry" trigger — read from
+    /// `GameState::last_scry_look_count`. This is the *effective* count after
+    /// clamping to library size (scrying N with fewer than N cards left in
+    /// the library looks at fewer than N cards), not the requested scry
+    /// amount. Elrond, Master of Healing: "put a +1/+1 counter on each of up
+    /// to X target creatures, where X is the number of cards looked at while
+    /// scrying this way". Resolves to 0 outside a scry-trigger context
+    /// (fail-safe, mirroring `TriggeringDiscoverValue`).
+    TriggeringScryLookCount,
     /// Count of objects on the battlefield matching a filter.
     /// Used for "for each creature you control" and similar patterns.
     ObjectCount { filter: TargetFilter },

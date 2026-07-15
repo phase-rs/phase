@@ -2054,6 +2054,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::ObjectCount { .. }
         | QuantityRef::ObjectCountDistinct { .. }
@@ -5736,6 +5737,10 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // discover resolution (never by a sibling trigger) — no ordering-relevant
         // read/write, mirroring StartingLifeTotal.
         QuantityRef::TriggeringDiscoverValue => RwProfile::empty(),
+        // CR 701.22a: reads the transient last-scry-look-count scalar,
+        // written only by scry resolution (never by a sibling trigger) — no
+        // ordering-relevant read/write, mirroring TriggeringDiscoverValue.
+        QuantityRef::TriggeringScryLookCount => RwProfile::empty(),
         QuantityRef::GraveyardSize { .. } => reads_zone_membership(),
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }

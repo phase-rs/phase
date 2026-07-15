@@ -12734,6 +12734,16 @@ pub struct GameState {
     /// game state, but serialized so a mid-resolution pause round-trips.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_discover_value: Option<i32>,
+    /// CR 701.22a: The number of cards actually looked at by the most
+    /// recently resolved scry (after clamping the requested amount to
+    /// library size). Set when a scry resolves so a "whenever you scry"
+    /// trigger's effect can reference "the number of cards looked at while
+    /// scrying this way" (Elrond, Master of Healing) via
+    /// `QuantityRef::TriggeringScryLookCount`. Transient — not part of
+    /// durable game state, but serialized so a mid-resolution pause
+    /// round-trips. Mirrors `last_discover_value`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scry_look_count: Option<i32>,
     /// Full event batches for triggered abilities currently on the stack,
     /// keyed by stack entry id. Single-event triggers omit an entry here.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -16297,6 +16307,7 @@ impl GameState {
             last_loop_action_sequence: Vec::new(),
             current_trigger_events: Vec::new(),
             last_discover_value: None,
+            last_scry_look_count: None,
             stack_trigger_event_batches: HashMap::new(),
             lki_cache: im::HashMap::new(),
             lki_copiable_values: HashMap::new(),
@@ -17576,6 +17587,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         liminal_entries: _,
         pending_liminal_entry_resume: _,
         last_discover_value: _,
+        last_scry_look_count: _,
         // Post-rebase upstream additions (rebased onto d1a1e995e), classified by ONE-SIDED-SAFETY
         // (COMPARED is fail-safe; EXCLUSION is the fail-DANGEROUS direction — a field is excluded
         // ONLY when COMPARING it would break legitimate loop detection):

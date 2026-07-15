@@ -8466,6 +8466,9 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     if let Some(expr) = parse_where_x_kicker_count(expression) {
         return Some(expr);
     }
+    if let Some(expr) = parse_where_x_scry_look_count(expression) {
+        return Some(expr);
+    }
     if let Some(expr) = parse_where_x_exiled_card_power(expression_lower.as_str()) {
         return Some(expr);
     }
@@ -8689,6 +8692,23 @@ fn parse_where_x_kicker_count(where_x_expression: &str) -> Option<QuantityExpr> 
     .0;
     rest.is_empty().then_some(QuantityExpr::Ref {
         qty: QuantityRef::KickerCount,
+    })
+}
+
+/// CR 701.22a: "where X is the number of cards looked at while scrying this
+/// way" (Elrond, Master of Healing) binds X to the effective (post-clamp)
+/// look count of the scry that fired the enclosing "whenever you scry"
+/// trigger — `QuantityRef::TriggeringScryLookCount`, read from
+/// `GameState::last_scry_look_count` at resolution time. Mirrors
+/// `parse_where_x_kicker_count`'s bare full-phrase match.
+fn parse_where_x_scry_look_count(where_x_expression: &str) -> Option<QuantityExpr> {
+    let lower = where_x_expression.to_ascii_lowercase();
+    let (rest, _) =
+        tag::<_, _, OracleError<'_>>("the number of cards looked at while scrying this way")
+            .parse(lower.as_str())
+            .ok()?;
+    rest.is_empty().then_some(QuantityExpr::Ref {
+        qty: QuantityRef::TriggeringScryLookCount,
     })
 }
 
