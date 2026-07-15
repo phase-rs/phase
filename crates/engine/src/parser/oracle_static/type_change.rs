@@ -1071,14 +1071,29 @@ pub(crate) fn parse_enchanted_is_type(
         (type_part, None)
     };
 
-    // Parse optional color
-    let (type_part, opt_color) = if let Ok((rest, color)) = nom_primitives::parse_color(type_part) {
-        (rest.trim(), Some(color))
+    // CR 105.2 + CR 613.1e: Parse every color in a color list. Witness
+    // Protection's "green and white Citizen creature" must preserve both
+    // colors before the type phrase is parsed.
+    let mut color_rest = type_part;
+    let mut colors = Vec::new();
+    while let Ok((rest, color)) = nom_primitives::parse_color(color_rest) {
+        colors.push(color);
+        let rest = rest.trim_start();
+        let candidate = rest.strip_prefix("and ").unwrap_or(rest);
+        if nom_primitives::parse_color(candidate).is_ok() {
+            color_rest = candidate;
+        } else {
+            color_rest = rest;
+            break;
+        }
+    }
+    let (type_part, colors) = if !colors.is_empty() {
+        (color_rest.trim(), colors)
     } else if let Ok((rest, _)) = tag::<_, _, VE>("colorless ").parse(type_part) {
         // "colorless" removes all colors — handled via SetColor([])
-        (rest.trim(), None)
+        (rest.trim(), Vec::new())
     } else {
-        (type_part, None)
+        (type_part, Vec::new())
     };
     let is_colorless = nom_primitives::scan_contains(is_rest_lower, "colorless");
 
@@ -1175,9 +1190,9 @@ pub(crate) fn parse_enchanted_is_type(
                 mods.push(ContinuousModification::SetCardTypes {
                     core_types: granted_core_types,
                 });
-                if let Some(color) = opt_color {
+                if !colors.is_empty() {
                     mods.push(ContinuousModification::SetColor {
-                        colors: vec![color],
+                        colors: colors.clone(),
                     });
                 } else if is_colorless {
                     mods.push(ContinuousModification::SetColor { colors: vec![] });
@@ -1273,12 +1288,17 @@ pub(crate) fn parse_enchanted_is_type(
         // CR 105.3 + CR 613.1e (Layer 5): a new color replaces all previous
         // colors unless the effect is "in addition"; additive "in addition to
         // its other types" appends via AddColor.
-        if let Some(color) = opt_color {
+        if !colors.is_empty() {
             if is_additive {
-                modifications.push(ContinuousModification::AddColor { color });
+                modifications.extend(
+                    colors
+                        .iter()
+                        .copied()
+                        .map(|color| ContinuousModification::AddColor { color }),
+                );
             } else {
                 modifications.push(ContinuousModification::SetColor {
-                    colors: vec![color],
+                    colors: colors.clone(),
                 });
             }
         } else if is_colorless {
@@ -1318,6 +1338,22 @@ pub(crate) fn parse_enchanted_is_type(
         //    RemoveAllSubtypes wipe.
         for sub in granted_subtypes {
             modifications.push(ContinuousModification::AddSubtype { subtype: sub });
+        }
+
+        // CR 612.8 + CR 613.1c: "named X" on a continuous type-changing
+        // effect replaces the enchanted object's name in Layer 3. Preserve
+        // printed capitalization from the original description.
+        let lower_description = description.to_ascii_lowercase();
+        if let Some(index) = lower_description.rfind(" named ") {
+            let name = description[index + " named ".len()..]
+                .trim()
+                .trim_end_matches('.')
+                .trim();
+            if !name.is_empty() {
+                modifications.push(ContinuousModification::SetTextName {
+                    name: name.to_string(),
+                });
+            }
         }
 
         if modifications.is_empty() {

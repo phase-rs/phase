@@ -2685,6 +2685,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         }
         ContinuousModification::CopyValues { .. }
         | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
         | ContinuousModification::SetPower { .. }

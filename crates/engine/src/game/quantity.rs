@@ -463,6 +463,7 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         // QuantityExpr-carrying variant forces a decision here.
         ContinuousModification::CopyValues { .. }
         | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
         | ContinuousModification::SetPower { .. }
