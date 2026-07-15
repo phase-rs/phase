@@ -45947,8 +45947,8 @@ fn threshold_land_balance_rejects_nonbasic_search_variant() {
 /// `target` slot as the ambiguous anaphor (correct for Fractal Harness-style
 /// "attach this Equipment to it", where the *source* is the Equipment being
 /// attached and the created token is the host) — which swapped the roles
-/// here, since U.S.Agent's created token IS the Equipment (CR 301.5: an
-/// Equipment can only ever be an `attachment`, never a host).
+/// here, since U.S.Agent's created token IS the Equipment and the attachment
+/// slot carries the anaphor.
 #[test]
 fn us_agent_attaches_created_equipment_token_to_self() {
     let parsed = parse_oracle_text(
@@ -45984,4 +45984,22 @@ fn us_agent_attaches_created_equipment_token_to_self() {
         TargetFilter::SelfRef,
         "U.S.Agent must remain the attachment's host"
     );
+}
+
+/// An attachable created token prefers an anaphor in the attachment slot, but
+/// must not suppress the target-side rewrite when that slot is explicit.
+#[test]
+fn attachable_token_creator_still_rewrites_target_side_anaphor() {
+    let mut effect = Effect::Attach {
+        attachment: TargetFilter::SelfRef,
+        target: TargetFilter::ParentTarget,
+    };
+
+    rewrite_parent_target_to_last_created(&mut effect, true);
+
+    let Effect::Attach { attachment, target } = effect else {
+        panic!("expected Attach effect");
+    };
+    assert_eq!(attachment, TargetFilter::SelfRef);
+    assert_eq!(target, TargetFilter::LastCreated);
 }

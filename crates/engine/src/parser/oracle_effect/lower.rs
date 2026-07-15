@@ -2311,12 +2311,11 @@ pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
 }
 
 /// CR 301.5 + CR 303.4: True when the nearest preceding token creator makes
-/// an Equipment or Aura token — a permanent that can only ever be the
-/// *attachment* in an `Attach` effect, never the host. Used to route the
-/// post-token anaphor rewrite (`rewrite_parent_target_to_last_created`) at the
-/// correct slot: an ambiguous "it" following an Equipment/Aura token creator
-/// (U.S.Agent, John Walker: "create ... Equipment ... token ... Attach it to
-/// ~") names the just-created token as the *attachment*, not the target.
+/// an Equipment or Aura token. Used to prefer the `attachment` slot for the
+/// post-token anaphor rewrite (`rewrite_parent_target_to_last_created`): in
+/// U.S.Agent, John Walker's "create ... Equipment ... token ... Attach it to
+/// ~", the created token is the attachment. If that slot is explicit, the
+/// target-side anaphor remains eligible for the normal fallback rewrite.
 fn token_creator_is_attachable(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -2783,20 +2782,17 @@ pub(super) fn rewrite_parent_target_to_last_created(
             attachment,
             target,
         } => {
-            if token_is_attachable {
-                // CR 301.5 + CR 303.4: the just-created token is itself an
-                // Equipment/Aura, so it can only be the *attachment* — an
-                // Equipment/Aura can never be an attachment's host. A bare
-                // "it" here (U.S.Agent, John Walker: "Attach it to ~") parses
-                // through the attachment-anaphor fallback as `ParentTarget`;
-                // rebind it to the created token and leave `target`'s
-                // explicit self-reference alone.
-                if matches!(
+            if token_is_attachable
+                && matches!(
                     attachment,
                     TargetFilter::ParentTarget | TargetFilter::TriggeringSource
-                ) {
-                    *attachment = TargetFilter::LastCreated;
-                }
+                )
+            {
+                // CR 301.5 + CR 303.4: the just-created token is itself an
+                // Equipment/Aura, and the attachment slot is the anaphor in
+                // U.S.Agent's "Attach it to ~". Rebind that slot and leave the
+                // explicit host alone.
+                *attachment = TargetFilter::LastCreated;
             } else if matches!(
                 target,
                 TargetFilter::SelfRef | TargetFilter::ParentTarget | TargetFilter::TriggeringSource
