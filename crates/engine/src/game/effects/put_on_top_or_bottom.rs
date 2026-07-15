@@ -1,4 +1,6 @@
-use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 /// CR 401.4: Target's owner puts it on top or bottom of their library.
@@ -8,8 +10,19 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let object_id = ability
-        .targets
+    // CR 608.2c + CR 603.10: Delegate target resolution to the unified 3-tier
+    // dispatch (`resolved_targets`) so this resolver picks up the same self-ref
+    // handling `Effect::Bounce` and the other zone-change resolvers use.
+    // `resolved_targets` short-circuits `SelfRef` to `ability.source_id`
+    // regardless of `ability.targets`, so a self-tuck (Arashin Sovereign: "When
+    // ~ dies, put it on your choice of the top or bottom of its owner's library")
+    // resolves to the source; a chosen/parent target is unchanged (tier 3
+    // returns the pre-selected targets satisfying the filter).
+    let target_filter = match &ability.effect {
+        Effect::PutOnTopOrBottom { target } => target,
+        _ => &TargetFilter::None,
+    };
+    let object_id = crate::game::targeting::resolved_targets(ability, target_filter, state)
         .iter()
         .find_map(|t| {
             if let TargetRef::Object(id) = t {

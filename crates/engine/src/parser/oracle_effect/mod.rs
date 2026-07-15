@@ -8052,6 +8052,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
+    // CR 608.2k + CR 401.4: self/controller-framing sibling of the above —
+    // "[you may ]put it/~ on [your choice of ]the top or bottom of its owner's
+    // library" (Arashin Sovereign). Routes the SELF form to the same
+    // Effect::PutOnTopOrBottom the owner-framing patterns produce.
+    if let Some(clause) = try_parse_self_put_on_top_or_bottom(tp, ctx) {
+        return clause;
+    }
+
     // CR 701.24a + CR 400.3: "the owner of target [filter] shuffles it into their library"
     if let Some(clause) = try_parse_owner_of_target_shuffle(tp, ctx) {
         return clause;
@@ -10040,6 +10048,49 @@ fn try_parse_put_on_top_or_bottom(
     }
 
     None
+}
+
+/// CR 608.2k + CR 401.4: "put it/~ on [your choice of ]the top or bottom of its
+/// owner's library" — the self/controller-framing sibling of the owner-framing
+/// patterns in [`try_parse_put_on_top_or_bottom`]. Arashin Sovereign: "When this
+/// creature dies, you may put it on your choice of the top or bottom of its
+/// owner's library." The dying source's owner IS the controller the card tells to
+/// choose, so `Effect::PutOnTopOrBottom`'s owner-chooses resolution (CR 401.4)
+/// matches the "your choice" text with no new effect variant and no runtime path.
+///
+/// Scoped to the SELF reference via `resolve_it_pronoun` (CR 608.2k): a non-self
+/// "it" — a triggering object another player owns, where "your choice" is NOT the
+/// owner's choice (S.N.E.A.K. Dispatcher) — or a "that card" subject (Hinder) is
+/// declined so it stays an honest coverage gap rather than letting the wrong
+/// player choose the library position.
+fn try_parse_self_put_on_top_or_bottom(
+    tp: TextPair,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let tp = tp.trim_end_matches('.');
+
+    let matched = super::oracle_nom::bridge::nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("put ").parse(i)?;
+        let (i, _) = alt((tag("it"), tag("~"))).parse(i)?;
+        let (i, _) = tag(" on ").parse(i)?;
+        let (i, _) = opt(tag("your choice of ")).parse(i)?;
+        let (i, _) = tag("the top or bottom of its owner's library").parse(i)?;
+        value((), eof).parse(i)
+    })
+    .is_some();
+    if !matched {
+        return None;
+    }
+
+    // CR 608.2k: "it"/"~" names the source only in a self context. Restrict the
+    // owner-chooses `PutOnTopOrBottom` to that case so a non-self reference (whose
+    // owner is not the "your choice" controller) is never mis-modelled.
+    let target = resolve_it_pronoun(ctx);
+    if !matches!(target, TargetFilter::SelfRef) {
+        return None;
+    }
+
+    Some(parsed_clause(Effect::PutOnTopOrBottom { target }))
 }
 
 /// CR 701.57a: Parse "[player] discover[s] N/X" and return the discovering
