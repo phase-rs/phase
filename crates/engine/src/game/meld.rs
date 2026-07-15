@@ -175,13 +175,7 @@ pub fn perform_meld(
     // entry-replacement consult (CR 614.1c) can park a `NeedsChoice` pause, and
     // absorbing first guarantees the partner is never stranded in exile across
     // that pause.
-    let partner_owner = state.objects.get(&partner_id).map(|o| o.owner);
-    if let Some(owner) = partner_owner {
-        crate::game::zones::remove_from_zone(state, partner_id, Zone::Exile, owner);
-    }
-    if let Some(partner) = state.objects.get_mut(&partner_id) {
-        partner.zone = Zone::Battlefield;
-    }
+    crate::game::zones::absorb_component(state, partner_id, Some(Zone::Exile));
 
     // CR 603.6a / CR 701.42a: drive the survivor's exile→battlefield entry through
     // the zone-change pipeline so the `ZoneChanged { to: Battlefield }` event

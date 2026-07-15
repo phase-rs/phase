@@ -954,6 +954,19 @@ pub fn move_to_zone(
     });
 }
 
+/// CR 601.2 + CR 733.1: Restore an object while reversing an incomplete action.
+/// This intentionally uses the raw mover rather than the replacement-consulting
+/// pipeline: an undone action does not apply replacement effects, but preserves
+/// the prior raw move's event and ordering behavior.
+pub(crate) fn restore_after_rollback(
+    state: &mut GameState,
+    object_id: ObjectId,
+    to: Zone,
+    events: &mut Vec<GameEvent>,
+) {
+    move_to_zone(state, object_id, to, events);
+}
+
 /// CR 603.10a: Record that every member of `group` left the battlefield in the
 /// SAME simultaneous event, so leaves-the-battlefield / dies observers that are
 /// themselves in the group observe each other via last-known information (the
@@ -1124,6 +1137,30 @@ fn capture_combat_status(state: &GameState, object_id: ObjectId) -> ZoneChangeCo
         blocking_alone: crate::game::combat::blocking_alone(state, object_id),
         defending_player: attacker.map(|attacker| attacker.defending_player),
     }
+}
+
+/// Reorder objects that remain in one player's library without performing a
+/// zone change. `ordered` is placed at `start_index` in the supplied order.
+pub(crate) fn reorder_within_library(
+    state: &mut GameState,
+    player: PlayerId,
+    ordered: &[ObjectId],
+    start_index: usize,
+) {
+    let player_state = state
+        .players
+        .iter_mut()
+        .find(|candidate| candidate.id == player)
+        .expect("player exists");
+    player_state.library.retain(|id| !ordered.contains(id));
+    for (offset, &object_id) in ordered.iter().enumerate() {
+        player_state.library.insert(start_index + offset, object_id);
+    }
+
+    // CR 401.5 + CR 611.3a: A library reorder can change its top card without
+    // creating a ZoneChanged event, so invalidate the dependent static directly
+    // (self-gated).
+    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
 }
 
 /// Move an object to a specific position in its owner's library (top or bottom), emitting a ZoneChanged event.
@@ -1300,6 +1337,18 @@ pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, 
     }
 }
 
+/// CR 704.5d + CR 704.5e: Remove a token or copy that ceases to exist.
+/// This is not a zone change and deliberately emits no event.
+pub(crate) fn cease_object(
+    state: &mut GameState,
+    object_id: ObjectId,
+    zone: Zone,
+    owner: PlayerId,
+) {
+    remove_from_zone(state, object_id, zone, owner);
+    state.objects.remove(&object_id);
+}
+
 /// Add an ObjectId to the appropriate zone collection.
 pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner: PlayerId) {
     match zone {
@@ -1349,6 +1398,58 @@ pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner
                 state.command_zone.push_back(object_id);
             }
         }
+    }
+}
+
+/// Absorb a component into a battlefield survivor without creating an
+/// independent zone-change event. `from` is `None` when the component's prior
+/// zone membership was already consumed (for example, by stack resolution).
+/// Callers that require zone-exit cleanup perform it before absorption.
+pub(crate) fn absorb_component(state: &mut GameState, component_id: ObjectId, from: Option<Zone>) {
+    let owner = state.objects.get(&component_id).map(|obj| obj.owner);
+    if let (Some(from), Some(owner)) = (from, owner) {
+        remove_from_zone(state, component_id, from, owner);
+    }
+    if let Some(component) = state.objects.get_mut(&component_id) {
+        component.zone = Zone::Battlefield;
+    }
+}
+
+/// CR 730.3: Route an absorbed merge component to its owner's destination as
+/// a new object, without representing it as an independent battlefield exit.
+/// The caller snapshots the component and emits its `ZoneChanged { from: None
+/// }` event around this delivery.
+pub(crate) fn route_component(state: &mut GameState, component_id: ObjectId, to: Zone) {
+    let Some(owner) = state.objects.get(&component_id).map(|obj| obj.owner) else {
+        return;
+    };
+
+    // CR 608.2h: no sever has run on this path, so the live attachment list is
+    // still intact when this component becomes a new object.
+    let attachments = state
+        .objects
+        .get(&component_id)
+        .map(|obj| capture_attachment_snapshot(state, obj))
+        .unwrap_or_default();
+    apply_zone_exit_cleanup(state, component_id, Zone::Battlefield, to, attachments);
+    // CR 730.2: the component is absorbed into the survivor and is not an
+    // independent member of the battlefield list; defensively ensure it is not
+    // left there (a no-op under the runtime invariant) before adding it to its
+    // OWN owner's destination zone.
+    remove_from_zone(state, component_id, Zone::Battlefield, owner);
+    add_to_zone(state, component_id, to, owner);
+    if let Some(component) = state.objects.get_mut(&component_id) {
+        component.zone = to;
+        // CR 730.3 + CR 400.7: the component becomes a new object in its
+        // owner's destination zone. Keep this beside the raw delivery so
+        // `apply_zone_exit_cleanup` cannot double-bump normal moves.
+        component.bump_incarnation();
+    }
+    // CR 700.11: a nontoken permanent card put into its owner's graveyard from
+    // anywhere counts as having descended this turn — shared single authority
+    // with `move_to_zone`.
+    if to == Zone::Graveyard {
+        record_descend_on_graveyard_arrival(state, component_id, owner);
     }
 }
 

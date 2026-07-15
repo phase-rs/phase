@@ -5075,19 +5075,7 @@ fn surveil_keep_on_top(
     player: crate::types::player::PlayerId,
     top_cards: &[ObjectId],
 ) {
-    let player_state = state
-        .players
-        .iter_mut()
-        .find(|candidate| candidate.id == player)
-        .expect("player exists");
-    player_state.library.retain(|id| !top_cards.contains(id));
-    for (index, &card_id) in top_cards.iter().enumerate() {
-        player_state.library.insert(index, card_id);
-    }
-    // CR 401.5 + CR 611.3a: Surveil keeps cards on top by editing the library
-    // directly (this shared helper backs every Surveil caller), so a
-    // `TopOfLibraryMatches` static must be re-evaluated — self-gated on liveness.
-    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+    zones::reorder_within_library(state, player, top_cards, 0);
 }
 
 fn resume_with_error_propagation(

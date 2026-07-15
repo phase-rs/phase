@@ -15961,7 +15961,7 @@ pub fn handle_cancel_cast(
             .get(object_id)
             .is_some_and(|obj| obj.zone == Zone::Exile)
         {
-            super::zones::move_to_zone(state, *object_id, Zone::Graveyard, _events);
+            super::zones::restore_after_rollback(state, *object_id, Zone::Graveyard, _events);
         }
     }
     if !delved_cards.is_empty() {
