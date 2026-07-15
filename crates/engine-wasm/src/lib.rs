@@ -1017,13 +1017,8 @@ fn handle_debug_create_card_inner(
             zone
         };
         let card_id = engine::types::identifiers::CardId(state.next_object_id);
-        let obj_id = engine::game::zones::create_object(
-            state,
-            card_id,
-            owner,
-            face.name.clone(),
-            staging_zone,
-        );
+        let obj_id =
+            engine::game::create_object(state, card_id, owner, face.name.clone(), staging_zone);
         let obj = state.objects.get_mut(&obj_id).expect("just created");
         engine::game::printed_cards::apply_card_face_to_object(obj, &face);
         state.layers_dirty.mark_full();
