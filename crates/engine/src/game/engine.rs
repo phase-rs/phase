@@ -5022,14 +5022,6 @@ fn apply_action(
                                 "Cannot pay life for shard — only mana available".to_string(),
                             ));
                         }
-                        (
-                            crate::types::game_state::ShardChoice::PayMana,
-                            crate::types::game_state::ShardOptions::LifeOnly,
-                        ) => {
-                            return Err(EngineError::ActionNotAllowed(
-                                "Cannot pay mana for shard — only life available".to_string(),
-                            ));
-                        }
                         _ => {}
                     }
                 }

@@ -5305,6 +5305,200 @@ fn x_phyrexian_composite_mana_tap_activation_keeps_source_untapped_until_choice_
     assert_eq!(state.stack.len(), 1);
 }
 
+/// CR 107.4f + CR 602.2: a `{W/P}, {T}` activation such as Skrelv's must
+/// preserve both payment routes when an untapped white source is available.
+/// Paying 2 life must not eagerly tap that source, while choosing mana must
+/// tap and spend it. Unrelated floating colorless mana remains in the pool.
+#[test]
+fn phyrexian_tap_activation_preserves_life_and_mana_routes_without_eager_tap() {
+    use super::super::engine::apply_as_current;
+    use crate::types::game_state::{ShardChoice, ShardOptions};
+
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(59),
+        PlayerId(0),
+        "Skrelv Stand-In".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&source).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.entered_battlefield_turn = Some(state.turn_number.saturating_sub(1));
+        object.summoning_sick = false;
+        Arc::make_mut(&mut object.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::PhyrexianWhite],
+                            generic: 0,
+                        },
+                    },
+                    AbilityCost::Tap,
+                ],
+            }),
+        );
+    }
+    let white_source = add_brushland_like_land(&mut state, CardId(60), "White Helper", false);
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+    let life_before = state.players[0].life;
+
+    apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        },
+    )
+    .expect("the Phyrexian activation should be legal");
+    match &state.waiting_for {
+        WaitingFor::PhyrexianPayment { shards, .. } => {
+            assert_eq!(shards.len(), 1);
+            assert!(matches!(shards[0].options, ShardOptions::ManaOrLife));
+        }
+        other => panic!("expected PhyrexianPayment, got {other:?}"),
+    }
+    assert!(
+        !state.objects[&white_source].tapped,
+        "opening the Phyrexian choice must not eagerly tap an available white source"
+    );
+    assert_eq!(state.players[0].mana_pool.total(), 1);
+
+    let legal = crate::ai_support::legal_actions_for_viewer(&state, PlayerId(0)).0;
+    assert!(legal.iter().any(|candidate| {
+        *candidate
+            == GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayLife],
+            }
+    }));
+    assert!(legal.iter().any(|candidate| {
+        *candidate
+            == GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayMana],
+            }
+    }));
+
+    let mut mana_route = state.clone();
+    apply_as_current(
+        &mut mana_route,
+        GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayMana],
+        },
+    )
+    .expect("the mana route should tap and spend the white source");
+    assert!(mana_route.objects[&white_source].tapped);
+    assert!(mana_route.objects[&source].tapped);
+    assert_eq!(mana_route.players[0].life, life_before);
+    assert_eq!(mana_route.players[0].mana_pool.total(), 1);
+
+    apply_as_current(
+        &mut state,
+        GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife],
+        },
+    )
+    .expect("the life route should preserve the white source");
+    assert!(
+        !state.objects[&white_source].tapped,
+        "paying life must not tap the unused white source"
+    );
+    assert!(state.objects[&source].tapped);
+    assert_eq!(state.players[0].life, life_before - 2);
+    assert_eq!(state.players[0].mana_pool.total(), 1);
+}
+
+/// CR 107.4f + CR 602.2: a life-only Phyrexian activation must not advertise
+/// an unavailable mana route, and a directly submitted `PayMana` action must
+/// be rejected before it taps the source, spends mana, or changes life.
+#[test]
+fn phyrexian_tap_activation_rejects_unavailable_mana_route_without_mutation() {
+    use super::super::engine::apply_as_current;
+    use crate::types::game_state::{ShardChoice, ShardOptions};
+
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(61),
+        PlayerId(0),
+        "Skrelv Life-Only Stand-In".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&source).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.entered_battlefield_turn = Some(state.turn_number.saturating_sub(1));
+        object.summoning_sick = false;
+        Arc::make_mut(&mut object.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::PhyrexianWhite],
+                            generic: 0,
+                        },
+                    },
+                    AbilityCost::Tap,
+                ],
+            }),
+        );
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+    let life_before = state.players[0].life;
+
+    apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        },
+    )
+    .expect("the life-only Phyrexian activation should be legal");
+    match &state.waiting_for {
+        WaitingFor::PhyrexianPayment { shards, .. } => {
+            assert_eq!(shards.len(), 1);
+            assert!(matches!(shards[0].options, ShardOptions::LifeOnly));
+        }
+        other => panic!("expected life-only PhyrexianPayment, got {other:?}"),
+    }
+    let pay_mana = GameAction::SubmitPhyrexianChoices {
+        choices: vec![ShardChoice::PayMana],
+    };
+    let legal = crate::ai_support::legal_actions_for_viewer(&state, PlayerId(0)).0;
+    assert!(
+        !legal.contains(&pay_mana),
+        "an unavailable white-mana route must not reach the policy action space"
+    );
+
+    assert!(
+        apply_as_current(&mut state, pay_mana).is_err(),
+        "directly submitted unavailable PayMana must be rejected"
+    );
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::PhyrexianPayment { .. }
+    ));
+    assert!(!state.objects[&source].tapped);
+    assert_eq!(state.players[0].life, life_before);
+    assert_eq!(state.players[0].mana_pool.total(), 1);
+    assert!(state.stack.is_empty());
+}
+
 #[test]
 fn spell_cast_from_hand_moves_to_stack() {
     let mut state = setup_game_at_main_phase();

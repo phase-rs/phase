@@ -11342,8 +11342,8 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
 /// Phyrexian payment choice, and construct the matching `WaitingFor::PhyrexianPayment`
 /// if so.
 ///
-/// Auto-taps mana sources first (idempotent: already-tapped lands are skipped) so the
-/// shard-options computation reflects the pool the caster will actually spend from.
+/// Previews available mana sources without tapping them so the shard-options
+/// computation exposes both routes while preserving the no-tap life route.
 /// Returns `Some(WaitingFor::PhyrexianPayment {...})` when at least one Phyrexian shard
 /// can deduct life; otherwise returns `None` so the caller proceeds with the existing
 /// auto-decision path.
@@ -11353,7 +11353,7 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     player: PlayerId,
     source_id: ObjectId,
     cost: &crate::types::mana::ManaCost,
-    events: &mut Vec<GameEvent>,
+    _events: &mut Vec<GameEvent>,
     payment_context: Option<&PaymentContext<'_>>,
     excluded_sources: &HashSet<ObjectId>,
     resume: Option<&ManaAbilityResume>,
@@ -11396,25 +11396,27 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
         _ => return None,
     }
 
-    // CR 601.2h + CR 605: Auto-tap mana sources before shard-options computation so
-    // the simulation reflects the actual post-tap pool.
-    let events_before = events.len();
+    // CR 601.2h + CR 605: Preview mana sources before shard-options
+    // computation. Tapping the live state here would make a later PayLife
+    // choice waste the source even though no mana was required.
+    let mut preview = state.clone();
+    let mut preview_events = Vec::new();
     if payment_context.is_none() && excluded_sources.is_empty() {
         auto_tap_mana_sources_with_context_and_resume(
-            state,
+            &mut preview,
             player,
             cost,
-            events,
+            &mut preview_events,
             Some(source_id),
             None,
             resume,
         );
     } else {
         auto_tap_mana_sources_with_context_excluding_and_resume(
-            state,
+            &mut preview,
             player,
             cost,
-            events,
+            &mut preview_events,
             Some(source_id),
             payment_context,
             excluded_sources,
@@ -11430,16 +11432,16 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     }
     // CR 605.4a: Resolve coupled `TapsForMana` triggered mana abilities inline so
     // the bonus mana is in the pool before Phyrexian shard options are computed.
-    super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
+    super::triggers::resolve_tap_mana_triggers_inline(&mut preview, &mut preview_events, 0);
 
     let spell_meta = payment_context
         .is_none()
-        .then(|| super::casting::build_spell_meta(state, player, source_id))
+        .then(|| super::casting::build_spell_meta(&preview, player, source_id))
         .flatten();
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     let effective_payment_context = payment_context.or(spell_ctx.as_ref());
     let any_color = super::casting::player_can_spend_as_any_color_for_payment(
-        state,
+        &preview,
         player,
         Some(source_id),
         effective_payment_context,
@@ -11448,10 +11450,10 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     // `life_colors` through to `compute_phyrexian_shards` so K'rrik-promoted
     // shards surface in the pause UI.
     let permissions =
-        super::static_abilities::build_cost_permission_context(state, player, any_color);
+        super::static_abilities::build_cost_permission_context(&preview, player, any_color);
 
     let (shards, payable) = {
-        let player_data = state.players.iter().find(|p| p.id == player)?;
+        let player_data = preview.players.iter().find(|p| p.id == player)?;
         let shards = mana_payment::compute_phyrexian_shards(
             &player_data.mana_pool,
             cost,

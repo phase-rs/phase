@@ -2009,8 +2009,38 @@ pub fn pending_phyrexian_route_is_payable(
         return false;
     }
 
-    let hand_demand = mana_payment::compute_hand_color_demand(state, player, spell_object);
-    let mut pool = player_data.mana_pool.clone();
+    // CR 601.2h: Preview only the mana actually required by this route.
+    // PayLife shards must not consume an untapped producer, while PayMana
+    // routes remain available when their source has not yet been tapped.
+    let tap_cost = mana_payment::mana_cost_for_phyrexian_choices(
+        &pending.cost,
+        choices,
+        permissions.life_colors,
+    );
+    let excluded_sources = pending
+        .activation_cost
+        .as_ref()
+        .map(|cost| ability_mana_payment_excluded_sources(cost, spell_object))
+        .unwrap_or_default();
+    let mut preview = state.clone();
+    let mut preview_events = Vec::new();
+    super::casting_costs::auto_tap_mana_sources_with_context_excluding(
+        &mut preview,
+        player,
+        &tap_cost,
+        &mut preview_events,
+        Some(spell_object),
+        payment_context.as_ref(),
+        &excluded_sources,
+    );
+    super::triggers::resolve_tap_mana_triggers_inline(&mut preview, &mut preview_events, 0);
+    let hand_demand = mana_payment::compute_hand_color_demand(&preview, player, spell_object);
+    let mut pool = preview
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .map(|candidate| candidate.mana_pool.clone())
+        .unwrap_or_else(|| player_data.mana_pool.clone());
     mana_payment::pay_cost_with_demand_and_choices(
         &mut pool,
         &pending.cost,
@@ -14327,10 +14357,15 @@ fn auto_tap_and_pay_cost_excluding(
     parent: Option<&ManaAbilityCostParent>,
 ) -> Result<Vec<crate::types::mana::ManaUnit>, EngineError> {
     let events_before = events.len();
+    let life_colors = super::static_abilities::player_life_payment_colors(state, player);
+    let tap_cost = phyrexian_choices.map_or_else(
+        || cost.clone(),
+        |choices| mana_payment::mana_cost_for_phyrexian_choices(cost, choices, life_colors),
+    );
     super::casting_costs::auto_tap_mana_sources_with_context_excluding_and_resume(
         state,
         player,
-        cost,
+        &tap_cost,
         events,
         Some(source_id),
         ctx,

@@ -568,6 +568,37 @@ fn is_phyrexian_requirement(req: &ShardRequirement) -> bool {
     )
 }
 
+/// CR 107.4f + CR 601.2h: Build the mana demand for auto-tapping after the
+/// player has chosen mana or life for each Phyrexian-shaped shard. A shard
+/// paid with life must not cause an otherwise-unused mana source to tap.
+pub(super) fn mana_cost_for_phyrexian_choices(
+    cost: &ManaCost,
+    choices: &[ShardChoice],
+    life_colors: crate::types::mana::LifePaymentColors,
+) -> ManaCost {
+    let ManaCost::Cost { shards, generic } = cost else {
+        return cost.clone();
+    };
+    let mut choice_index = 0usize;
+    let shards = shards
+        .iter()
+        .copied()
+        .filter(|shard| {
+            let requirement = effective_shard_requirement(shard_to_mana_type(*shard), life_colors);
+            if !is_phyrexian_requirement(&requirement) {
+                return true;
+            }
+            let keep = !matches!(choices.get(choice_index), Some(ShardChoice::PayLife));
+            choice_index += 1;
+            keep
+        })
+        .collect();
+    ManaCost::Cost {
+        shards,
+        generic: *generic,
+    }
+}
+
 /// CR 107.4f + CR 118.3: Order shard indices so every non-Phyrexian shard is
 /// resolved before any Phyrexian-shape shard, mirroring `can_pay_for_spell`'s
 /// deferral. Deciding a Phyrexian shard against the pool *after* strict
