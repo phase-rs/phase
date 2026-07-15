@@ -71,12 +71,21 @@ fn parse_until_body(input: &str) -> OracleResult<'_, Duration> {
             tag("the next end step"),
         ),
         // Host-lifetime expiry: "until ~ leaves the battlefield" /
-        // "until this creature leaves the battlefield".
+        // "until this creature leaves the battlefield". A card whose name
+        // normalizes to a plural subject (e.g. "Cloak and Dagger, Entwined")
+        // takes plural verb agreement in its own oracle text — "until Cloak
+        // and Dagger leave the battlefield" — so both "leaves"/"leave" must
+        // be accepted here, mirroring the same singular/plural alternation
+        // already handled by the LTB *trigger* parsers (the `leaves_tail`
+        // alt in `oracle_trigger.rs` and `oracle_effect/mod.rs`'s
+        // "leaves the battlefield"/"leave the battlefield" alt) — CR 603.2c
+        // notes the plural "leave" form is used with plural/batched subjects.
         value(
             Duration::UntilHostLeavesPlay,
             (
                 alt((tag("~"), tag("this creature"))),
-                tag(" leaves the battlefield"),
+                tag(" "),
+                alt((tag("leaves the battlefield"), tag("leave the battlefield"))),
             ),
         ),
         // CR 607.2a + CR 611.2a: source-linked impulse grants such as
