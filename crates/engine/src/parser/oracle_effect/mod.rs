@@ -297,28 +297,42 @@ fn if_you_do_object_anchor(
         })
 }
 
-/// CR 608.2c + CR 708.7: Reinterpret a generic "if you can't" rider for a
-/// preceding effect that performs no zone change.
+/// CR 608.2c + CR 708.7 + CR 118.1: Reinterpret a generic "if you can't" rider
+/// for a preceding effect that performs no zone change.
 ///
 /// `try_nom_condition_as_ability_condition` lowers "if you can't" to
 /// `Not { ZoneChangedThisWay { Any } }` — the right proxy for the common
 /// zone-changing parent ("search …. If you can't, draw"), where an absence of
 /// `last_zone_changed_ids` means the instruction did nothing. But that proxy is
-/// WRONG for an effect whose success produces no `ZoneChanged` event: a
-/// successful `Effect::TurnFaceUp` (Etrata, Deadly Fugitive's granted
-/// "{2}{U}{B}: Turn this creature face up. If you can't, exile it …") only
-/// clears `face_down`/restores `back_face` and emits `TurnedFaceUp`, so the
-/// zone-change ledger stays empty and `Not { ZoneChangedThisWay }` would be
-/// true even after the turn-up SUCCEEDED — firing the exile rider every time.
+/// WRONG for an effect whose success produces no `ZoneChanged` event:
+///
+///   - a successful `Effect::TurnFaceUp` (Etrata, Deadly Fugitive's granted
+///     "{2}{U}{B}: Turn this creature face up. If you can't, exile it …")
+///     only clears `face_down`/restores `back_face` and emits `TurnedFaceUp`.
+///   - a successful `Effect::PayCost` (Greenbelt Rampager's "When this
+///     creature enters, pay {E}{E}. If you can't, return this creature to its
+///     owner's hand and you get {E}." — issue #4955, and every other
+///     mandatory-cost-then-"if you can't" card: mana, life, energy, loyalty,
+///     speed) only deducts the paid resource and emits e.g.
+///     `EnergyChanged`/`LifeChanged`/`ManaSpent`, never `ZoneChanged`.
+///
+/// For both, the zone-change ledger stays empty and `Not { ZoneChangedThisWay }`
+/// would be true even after the instruction SUCCEEDED — firing the rider every
+/// time regardless of affordability.
 ///
 /// The correct general signal for "the preceding instruction couldn't be
 /// performed" is `Not { OptionalEffectPerformed }`: a mandatory parent whose
 /// action occurred seeds `optional_effect_performed` via
-/// `effects::mod::mandatory_parent_effect_performed`, which has a `TurnFaceUp`
-/// arm keyed on `GameEvent::TurnedFaceUp`. Rewrite the condition to that signal
-/// only when the immediately-preceding clause is exactly a `TurnFaceUp` — the
-/// one effect class in this position whose success is invisible to the
-/// zone-change ledger. Other effects keep the zone-change proxy unchanged.
+/// `effects::mod::mandatory_parent_effect_performed`. That function has no
+/// explicit `PayCost` arm, so it falls to its `_ => true` default — meaning
+/// the seed's own `!state.cost_payment_failed_flag` guard (set by
+/// `pay::resolve`/`resolve_ability_cost_payment` on an unpayable cost) is the
+/// sole gate for a `PayCost` parent, which is exactly CR 118.3's "can't pay
+/// without the resources" signal. Rewrite the condition to
+/// `Not { OptionalEffectPerformed }` when the immediately-preceding clause is
+/// one of these zone-change-ledger-invisible effect classes; other effects
+/// (Sacrifice, Exile, Discard, Mill, …) keep the zone-change proxy unchanged,
+/// since their success IS a `ZoneChanged`/`PermanentSacrificed` event.
 fn rewrite_cant_rider_for_non_zone_change_parent(
     condition: Option<AbilityCondition>,
     clauses: &[ClauseIr],
@@ -336,12 +350,17 @@ fn rewrite_cant_rider_for_non_zone_change_parent(
     if !is_generic_cant {
         return condition;
     }
-    let prev_is_turn_face_up = clauses
+    let prev_is_ledger_invisible = clauses
         .iter()
         .rev()
         .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
-        .is_some_and(|clause| matches!(clause.parsed.effect, Effect::TurnFaceUp { .. }));
-    if prev_is_turn_face_up {
+        .is_some_and(|clause| {
+            matches!(
+                clause.parsed.effect,
+                Effect::TurnFaceUp { .. } | Effect::PayCost { .. }
+            )
+        });
+    if prev_is_ledger_invisible {
         return Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::effect_performed()),
         });
