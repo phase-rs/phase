@@ -238,6 +238,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
