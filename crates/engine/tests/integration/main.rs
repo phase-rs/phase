@@ -30,6 +30,7 @@ mod balance_equalization;
 mod baleful_mastery_regression;
 mod banding_combat;
 mod batched_trigger_subject_count;
+mod battle_of_wits;
 mod belbe_thornbow_life_loss;
 mod betor_lifelink_counters_repro;
 mod bishop_of_binding_where_x_exiled_card_power;

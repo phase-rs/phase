@@ -3267,6 +3267,25 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     // "you have N or more [you-only quantity-suffix]"
     let (rest, n) = parse_number(rest)?;
 
+    // CR 401.1 + CR 603.4: An intervening-if library threshold counts cards in
+    // the trigger controller's library at both trigger detection and resolution.
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>(" or more cards in your library").parse(rest)
+    {
+        return Ok((
+            rest,
+            make_quantity_ge(
+                QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: Vec::new(),
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+                n,
+            ),
+        ));
+    }
+
     if let Ok((after_or_more, _)) = tag::<_, _, OracleError<'_>>(" or more ").parse(rest) {
         // CR 603.4 + CR 404.2: Oversold Cemetery's intervening-if predicate
         // counts face-up creature cards in its controller's graveyard.
@@ -10995,6 +11014,73 @@ mod tests {
             } => {}
             other => panic!("expected GraveyardSize GE 5, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_library_count_ge_200_exact_ast() {
+        let (rest, condition) =
+            parse_inner_condition("you have 200 or more cards in your library").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Library,
+                        card_types: Vec::new(),
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 200 },
+            }
+        );
+    }
+
+    #[test]
+    fn test_library_count_ge_is_generic_over_threshold() {
+        let (rest, condition) =
+            parse_inner_condition("you have 37 or more cards in your library").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Library,
+                        card_types: Vec::new(),
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 37 },
+            }
+        );
+    }
+
+    #[test]
+    fn test_library_count_ge_preserves_comma_remainder() {
+        let (rest, condition) =
+            parse_inner_condition("you have 200 or more cards in your library, you win the game")
+                .unwrap();
+        assert_eq!(rest, ", you win the game");
+        assert!(matches!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Library,
+                        card_types,
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 200 },
+            } if card_types.is_empty()
+        ));
     }
 
     #[test]

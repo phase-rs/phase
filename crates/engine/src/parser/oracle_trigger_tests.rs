@@ -14129,6 +14129,65 @@ fn phase_trigger_exactly_thirteen_cards_in_hand_win_the_game() {
     }
 }
 
+/// CR 401.1 + CR 603.4 + CR 104.2b: Battle of Wits' full Oracle text must
+/// preserve its controller-library threshold as an intervening-if on the upkeep
+/// trigger, then execute the ordinary controller-scoped win effect.
+#[test]
+fn battle_of_wits_full_oracle_parses_library_threshold_win_trigger() {
+    const ORACLE: &str = "At the beginning of your upkeep, if you have 200 or more cards in your library, you win the game.";
+
+    let parsed = parse_oracle_text(ORACLE, "Battle of Wits", &[], &[], &[]);
+    assert!(
+        parsed.abilities.is_empty(),
+        "trigger text must not leak into spell abilities"
+    );
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "expected exactly one upkeep trigger"
+    );
+
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringYourTurn)
+    );
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: Vec::new(),
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 200 },
+        })
+    );
+
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("win trigger must have an effect");
+    assert!(matches!(execute.effect.as_ref(), Effect::WinTheGame { .. }));
+
+    fn assert_no_unimplemented(ability: &AbilityDefinition) {
+        assert!(
+            !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. }),
+            "Battle of Wits must not contain Unimplemented effects: {ability:?}"
+        );
+        if let Some(sub_ability) = ability.sub_ability.as_deref() {
+            assert_no_unimplemented(sub_ability);
+        }
+    }
+    assert_no_unimplemented(execute);
+}
+
 /// CR 603.2b + CR 603.4 + CR 102.1: Ghirapur Orrery — the intervening-if
 /// "if that player has no cards in hand" must hoist onto the trigger
 /// definition as a `QuantityComparison` against `HandSize { ScopedPlayer }`,

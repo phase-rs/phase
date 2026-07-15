@@ -862,7 +862,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Barrowin of Clan Undurr
 - Battle Angels of Tyr
 - Battle Cry Goblin
-- Battle of Wits
 - Battlefield Improvisation
 - Bazaar of Wonders
 - Berserk
