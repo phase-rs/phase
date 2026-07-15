@@ -768,6 +768,7 @@ mod agency_coroner_suspected_cost_paid;
 mod alania_divergent_storm;
 mod angelic_field_marshal_lieutenant_2885;
 mod anointed_peacekeeper_chosen_opponent;
+mod another_target_imperative_subject_strip;
 mod archon_compound_target_2344;
 mod ashling_delayed_sacrifice_unless_pay;
 mod atarkas_command_sequential_mode_after_decline;
