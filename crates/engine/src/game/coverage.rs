@@ -943,8 +943,13 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 };
                 parts.push(format!("{prefix} {name}{suffix}"));
             }
-            FilterProp::WasDealtDamageThisTurn => parts.push("was dealt damage this turn".into()),
-            FilterProp::DealtDamageThisTurn => parts.push("dealt damage this turn".into()),
+            // Both damage-role filters share this human coverage label (the AST
+            // variant carries the source-vs-recipient distinction); keeping the
+            // passive label unchanged avoids a cosmetic coverage-diff on every
+            // existing "was dealt damage this turn" card.
+            FilterProp::WasDealtDamageThisTurn | FilterProp::DealtDamageThisTurn => {
+                parts.push("dealt damage this turn".into())
+            }
             FilterProp::EnteredThisTurn => parts.push("entered this turn".into()),
             FilterProp::ControlledContinuouslySinceTurnBegan => {
                 parts.push("controlled continuously since turn began".into())
