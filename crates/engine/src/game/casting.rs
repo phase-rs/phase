@@ -15331,9 +15331,11 @@ pub fn handle_activate_ability(
 
         if casting_costs::activation_cost_needs_x_choice(&resolved, cost) {
             // CR 602.2b + CR 601.2f: A non-mana activation cost that removes
-            // X counters still needs the same X announcement step before any
-            // mana or counter payment happens. Split fixed mana out so it
-            // flows through ManaPayment, then pay the concretized residual cost.
+            // X counters (or pays a variable-X resource, e.g. "Pay X {E}" —
+            // Chthonian Nightmare, issue #1092) still needs the same X
+            // announcement step before any mana or counter/resource payment
+            // happens. Split fixed mana out so it flows through ManaPayment,
+            // then pay the concretized residual cost.
             let (mana_cost, remaining) = split_alt_cost_components(cost);
             let mut pending_x = PendingCast::new(
                 source_id,
@@ -15343,6 +15345,23 @@ pub fn handle_activate_ability(
             );
             pending_x.activation_cost = remaining;
             pending_x.activation_ability_index = Some(ability_index);
+            // CR 601.2g + CR 601.2h: if a non-self battlefield-removal sub-cost
+            // (Sacrifice / battlefield Exile / ReturnToHand) is still
+            // outstanding in the residual after X-announcement, mark the
+            // `ManaLeg` residual so `push_activated_ability_to_stack`
+            // re-surfaces it interactively via its existing hand-rolled
+            // detour (issue #1092: Chthonian Nightmare's Composite[PayEnergy{X},
+            // Sacrifice, ReturnToHand] was otherwise silently dropped by the
+            // fall-through `pay_ability_cost_for_activation` no-op — the same
+            // class of bug the `XMana` residual gate already documents for
+            // the mana-{X} case).
+            if pending_x
+                .activation_cost
+                .as_ref()
+                .is_some_and(|c| find_non_self_battlefield_removal_cost(c).is_some())
+            {
+                pending_x.activation_residual = ActivationResidual::ManaLeg;
+            }
             state.pending_cast = Some(Box::new(pending_x));
             return casting_costs::enter_payment_step(state, player, None, events);
         }
