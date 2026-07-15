@@ -684,6 +684,7 @@
     "activated": "Activated",
     "triggered": "Triggered",
     "triggeredFrom": "Triggered — From {{source}}",
+    "selectedModes": "Selected modes",
     "controllerYou": "You",
     "controllerOpp": "Opp",
     "controllerInitialYou": "Y",

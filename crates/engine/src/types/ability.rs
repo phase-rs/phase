@@ -19919,6 +19919,12 @@ pub struct ResolvedAbility {
     /// Used by `OptionalEffectChoice` to tell the player what they're choosing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// CR 700.2a + CR 700.2b + CR 700.2d + CR 608.2c: The selected modal
+    /// descriptions, in the printed instruction order used to resolve them. This
+    /// belongs to the stack ability as a whole; sub-ability chains remain the
+    /// individual instructions selected from those modes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_mode_labels: Vec<String>,
     /// CR 608.2c: Repeat this ability N times (from "for each [X], [effect]").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_for: Option<QuantityExpr>,
@@ -20098,6 +20104,7 @@ impl ResolvedAbility {
             target_constraints: Vec::new(),
             target_choice_timing: TargetChoiceTiming::Stack,
             description: None,
+            selected_mode_labels: Vec::new(),
             repeat_for: None,
             min_x_value: 0,
             announced_x: None,
@@ -22182,6 +22189,34 @@ mod tests {
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
+    }
+
+    #[test]
+    fn selected_mode_labels_are_legacy_compatible_and_preserved_by_clone() {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let legacy_json = serde_json::to_string(&ability).expect("serialize empty ability");
+        assert!(
+            !legacy_json.contains("selected_mode_labels"),
+            "empty labels must not change saved-game or client wire shape",
+        );
+        let legacy: ResolvedAbility =
+            serde_json::from_str(&legacy_json).expect("legacy ability without labels deserializes");
+        assert!(legacy.selected_mode_labels.is_empty());
+
+        ability.selected_mode_labels = vec!["Draw a card.".to_string()];
+        let copied = ability.clone();
+        let json = serde_json::to_string(&ability).expect("serialize selected mode");
+        assert!(json.contains("selected_mode_labels"));
+        let deserialized: ResolvedAbility = serde_json::from_str(&json).expect("deserialize mode");
+        assert_eq!(copied, deserialized);
     }
 
     #[test]

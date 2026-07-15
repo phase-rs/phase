@@ -22511,6 +22511,22 @@ fn activated_modal_x_target_selection_carries_labels_and_pays_mana() {
         panic!("expected activated ability on stack");
     };
     assert_eq!(ability.chosen_x, Some(2));
+    assert_eq!(
+        ability.selected_mode_labels,
+        [
+            "Exile target creature with mana value X or less.",
+            "Return target creature with mana value X or less to its owner's hand.",
+        ],
+        "activated modal choice must bind its selected labels before the ability reaches the stack",
+    );
+    let second_mode = ability
+        .sub_ability
+        .as_deref()
+        .expect("two selected modes must produce a second chain node");
+    assert!(
+        second_mode.selected_mode_labels.is_empty(),
+        "selected labels belong only to the root stack ability, not each mode instruction",
+    );
 }
 
 #[test]

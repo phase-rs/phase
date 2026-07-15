@@ -61,6 +61,7 @@ mod tests {
             target_constraints: Vec::new(),
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
+            selected_mode_labels: Vec::new(),
             player_scope: None,
             starting_with: None,
             chosen_x: None,

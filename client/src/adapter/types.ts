@@ -1074,6 +1074,7 @@ export interface ResolvedAbility {
   sub_ability?: ResolvedAbility;
   else_ability?: ResolvedAbility;
   description?: string;
+  selected_mode_labels?: string[];
   /**
    * CR 400.7 identity latch + CR 704.5d token cessation: the source's card
    * identity snapshotted at trigger push, so an `AllCopies` priority yield can
@@ -1144,6 +1145,8 @@ export interface StackEntryDisplay {
   token_image_ref?: TokenImageRef | null;
   kind_label: string;
   ability_description?: string;
+  selected_mode_labels?: string[];
+  is_pending?: boolean;
   targets?: StackTargetDisplay[];
   paid?: StackPaidFactView[];
   trigger_context?: TriggerContextDisplay[];

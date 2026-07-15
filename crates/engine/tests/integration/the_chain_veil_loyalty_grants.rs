@@ -131,6 +131,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         target_constraints: Vec::new(),
         target_choice_timing: engine::types::ability::TargetChoiceTiming::Stack,
         description: None,
+        selected_mode_labels: Vec::new(),
         player_scope: None,
         starting_with: None,
         chosen_x: None,

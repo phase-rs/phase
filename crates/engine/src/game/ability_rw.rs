@@ -3612,7 +3612,8 @@ fn walk_ability(
         optional_for: _,
         target_choice_timing: _,
         description: _,
-        min_x_value: _, // u32, no read
+        selected_mode_labels: _, // display snapshots, no game-state read/write
+        min_x_value: _,          // u32, no read
         cant_be_copied: _,
         copy_count_status: _,
         forward_result: _,

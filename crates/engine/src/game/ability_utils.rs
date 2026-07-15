@@ -244,6 +244,22 @@ pub(crate) fn apply_instead_swap(
 /// sub_ability chain always resolves in printed order. Duplicate indices are
 /// preserved (CR 700.2d: "You may choose the same mode more than once"
 /// repeats the mode in sequence).
+pub fn ordered_selected_mode_indices(indices: &[usize]) -> Vec<usize> {
+    let mut ordered = indices.to_vec();
+    ordered.sort_unstable();
+    ordered
+}
+
+/// CR 700.2a + CR 700.2b + CR 700.2d + CR 608.2c: Return selected mode
+/// descriptions in the printed instruction order used to resolve them. Repeated
+/// indices remain repeated, while a missing legacy description is omitted.
+pub fn selected_mode_labels(mode_descriptions: &[String], indices: &[usize]) -> Vec<String> {
+    ordered_selected_mode_indices(indices)
+        .into_iter()
+        .filter_map(|index| mode_descriptions.get(index).cloned())
+        .collect()
+}
+
 pub fn build_chained_resolved(
     abilities: &[AbilityDefinition],
     indices: &[usize],
@@ -265,8 +281,7 @@ pub fn build_chained_resolved(
         ));
     }
 
-    let mut ordered: Vec<usize> = indices.to_vec();
-    ordered.sort();
+    let ordered = ordered_selected_mode_indices(indices);
 
     let mut result: Option<ResolvedAbility> = None;
     for &idx in ordered.iter().rev() {
@@ -446,8 +461,7 @@ pub fn build_target_slots_labelled(
     // BEFORE X is chosen (the common non-deferred modal path).
     chosen_x: Option<u32>,
 ) -> Result<(Vec<TargetSelectionSlot>, Vec<Option<String>>), EngineError> {
-    let mut ordered: Vec<usize> = indices.to_vec();
-    ordered.sort();
+    let ordered = ordered_selected_mode_indices(indices);
 
     let mut acc = SlotAccumulator::default();
     for idx in ordered {
@@ -7757,6 +7771,20 @@ mod tests {
         assert!(
             matches!(discard_node.effect, Effect::Discard { .. }),
             "Third link should be mode 2 (Discard) — printed last"
+        );
+    }
+
+    #[test]
+    fn selected_mode_labels_follow_printed_order_and_preserve_repeats() {
+        let labels = selected_mode_labels(
+            &["First mode.".to_string(), "Second mode.".to_string()],
+            &[1, 0, 1, 2],
+        );
+
+        assert_eq!(
+            labels,
+            ["First mode.", "Second mode.", "Second mode."],
+            "labels use printed order, retain repeat selections, and omit missing legacy descriptions",
         );
     }
 

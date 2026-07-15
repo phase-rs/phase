@@ -187,6 +187,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         optional_for: _,          // OpponentMayScope: AnyOpponent/AnyPlayer, no read
         target_choice_timing: _,  // Stack/Resolution tag
         description: _,           // display string
+        selected_mode_labels: _,  // display strings, no dynamic read
         min_x_value: _,           // u32
         cant_be_copied: _,        // bool
         copy_count_status: _,     // status tag
@@ -4711,6 +4712,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         kind: _,      // AbilityKind tag (no payload)
         context: _,   // SpellContext: cast-time fact snapshot, not a live choice
         description: _, // display string
+        selected_mode_labels: _, // display strings, no resolution-time choice
         min_x_value: _, // u32
         cant_be_copied: _, // bool
         copy_count_status: _, // status tag

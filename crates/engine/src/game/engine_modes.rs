@@ -7,8 +7,8 @@ use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_targets_in_chain,
     auto_select_targets_for_ability, begin_target_selection_for_ability, build_chained_resolved,
     build_target_slots_labelled, cap_distribution_target_slots, flatten_targets_in_chain,
-    random_select_targets_for_ability, record_modal_mode_choices, target_constraints_from_modal,
-    validate_modal_indices,
+    random_select_targets_for_ability, record_modal_mode_choices, selected_mode_labels,
+    target_constraints_from_modal, validate_modal_indices,
 };
 use super::engine::EngineError;
 use super::engine_stack;
@@ -41,7 +41,9 @@ pub(super) fn handle_ability_mode_choice(
     validate_modal_indices(&modal, &indices, &unavailable_modes)?;
     record_modal_mode_choices(state, source_id, &modal, &indices);
 
-    let resolved = build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
+    let mut resolved =
+        build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
+    resolved.selected_mode_labels = selected_mode_labels(&modal.mode_descriptions, &indices);
 
     if is_activated {
         handle_activated_mode_choice(
@@ -401,7 +403,9 @@ pub(super) fn resolve_random_modal_trigger(
     // CR 700.2: Track per-turn/per-game mode usage exactly as the interactive
     // path does, then build the chained resolved ability for the drawn modes.
     record_modal_mode_choices(state, source_id, &modal, &indices);
-    let resolved = build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
+    let mut resolved =
+        build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
+    resolved.selected_mode_labels = selected_mode_labels(&modal.mode_descriptions, &indices);
 
     handle_triggered_mode_choice(
         state,
