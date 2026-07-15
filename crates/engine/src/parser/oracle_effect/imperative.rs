@@ -529,16 +529,47 @@ pub(super) fn parse_earthbend_count_expr(
         return (target, QuantityExpr::Fixed { value: n as i32 });
     }
     if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("x").parse(lower_rest) {
-        // CR 122.1: "X, where X is the number of <kind> counters <possessor>".
-        if let Ok((rem2, qty)) = preceded(
-            tag::<_, _, OracleError<'_>>(", where x is "),
-            crate::parser::oracle_nom::quantity::parse_the_number_of_player_counters,
-        )
-        .parse(rem)
-        {
-            let target_text = rem2.trim_start();
-            let target = resolve_earthbend_target(text, target_text, true);
-            return (target, QuantityExpr::Ref { qty });
+        // CR 701.66a + CR 107.3: "X, where X is <dynamic quantity>" — the general
+        // where-clause binding. Earthbend N puts N +1/+1 counters on the land
+        // (CR 701.66a); the "where X is …" clause is the ability defining the
+        // value of X (CR 107.3), evaluated against live game state, so it must
+        // route through the shared quantity parsers rather than a single-shape
+        // special case:
+        //   - player-counter counts (Toph-style "the number of experience
+        //     counters you have"),
+        //   - object counts with restrictions (The Boulder: "the number of
+        //     creatures you control with power 4 or greater"; Rockalanche: "the
+        //     number of Forests you control") — handled by `parse_quantity_ref`,
+        //   - mana spent to cast the source (Toph, Greatest Earthbender: "the
+        //     amount of mana spent to cast her") — handled by
+        //     `parse_event_context_quantity`.
+        // Before this, only player-counter counts were recognized; every other
+        // shape fell through to the bare-X branch below, which bound X to
+        // `Variable{X}` (resolves to 0 for a triggered ability) AND mis-read the
+        // trailing "where X is …" text as an explicit target, degrading it to
+        // `TargetFilter::Any` (issue #4729). The where-clause is a quantity
+        // definition that consumes the entire tail — earthbend has no explicit
+        // target in templated text — so `default_earthbend_target` ("target land
+        // you control", CR 701.66a) is the correct, invariant target.
+        //
+        // A matched "where X is …" therefore ALWAYS resolves to the default
+        // target: recognized shapes bind their typed quantity, while an
+        // as-yet-unsupported shape falls back to the spell-cost X path
+        // (`Variable{X}`) WITHOUT re-entering the bare-X branch below — otherwise
+        // that branch would re-degrade the target to `TargetFilter::Any`, exactly
+        // the #4729 defect relocated to unsupported quantity shapes.
+        if let Ok((where_body, _)) = tag::<_, _, OracleError<'_>>(", where x is ").parse(rem) {
+            let count = crate::parser::oracle_quantity::parse_quantity_ref(where_body)
+                .map(|qty| QuantityExpr::Ref { qty })
+                .or_else(|| {
+                    crate::parser::oracle_quantity::parse_event_context_quantity(where_body)
+                })
+                .unwrap_or(QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                });
+            return (default_earthbend_target(), count);
         }
         // CR 107.3a + CR 601.2b: bare X resolves through the spell-cost path.
         let target_text = rem.trim_start();
@@ -14870,6 +14901,125 @@ mod tests {
                     name: "X".to_string(),
                 },
             }
+        );
+    }
+
+    /// CR 701.66a + CR 107.3: "earthbend X, where X is the number of creatures
+    /// you control with power 4 or greater" (The Boulder, Ready to Rumble —
+    /// issue #4729). The object-count where-clause must bind X to a typed
+    /// `ObjectCount` (preserving the "power 4 or greater" restriction) and the
+    /// earthbend target must stay "target land you control" — before the fix
+    /// this class fell through to the bare-X branch, degrading X to
+    /// `Variable{X}` (resolves to 0) and the target to `TargetFilter::Any`.
+    #[test]
+    fn earthbend_count_expr_object_count_with_power_restriction() {
+        use crate::types::ability::{
+            Comparator, ControllerRef, FilterProp, PtStat, TargetFilter, TypeFilter,
+        };
+        let tail = "x, where x is the number of creatures you control with power 4 or greater";
+        let (target, count) = parse_earthbend_count_expr(tail, tail);
+        assert_eq!(
+            target,
+            default_earthbend_target(),
+            "earthbend target must stay 'target land you control', not degrade to Any"
+        );
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = count
+        else {
+            panic!("expected an ObjectCount quantity, got {count:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected a Typed object-count filter, got {filter:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    comparator: Comparator::GE,
+                    ..
+                }
+            )),
+            "the 'power 4 or greater' restriction must be preserved: {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 701.66a + CR 107.3: "earthbend X, where X is the number of Forests you
+    /// control" (Rockalanche) binds X to a subtype-restricted `ObjectCount`,
+    /// exercising the same general where-clause path as The Boulder for a
+    /// land-subtype count rather than a P/T-restricted creature count.
+    #[test]
+    fn earthbend_count_expr_object_count_subtype() {
+        use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter};
+        let tail = "x, where x is the number of forests you control";
+        let (target, count) = parse_earthbend_count_expr(tail, tail);
+        assert_eq!(target, default_earthbend_target());
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = count
+        else {
+            panic!("expected an ObjectCount quantity, got {count:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected a Typed object-count filter, got {filter:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Subtype("Forest".to_string())]
+        );
+    }
+
+    /// CR 701.66a + CR 107.3: "earthbend X, where X is the amount of mana spent
+    /// to cast her" (Toph, Greatest Earthbender) binds X to a
+    /// `ManaSpentToCast` ref via the event-context quantity parser — the
+    /// non-object-count arm of the general where-clause handler. Before the fix
+    /// this fell through to the bare-X branch (Variable{X} → 0) with an Any
+    /// target.
+    #[test]
+    fn earthbend_count_expr_mana_spent_to_cast() {
+        let tail = "x, where x is the amount of mana spent to cast her";
+        let (target, count) = parse_earthbend_count_expr(tail, tail);
+        assert_eq!(target, default_earthbend_target());
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast { .. }
+                }
+            ),
+            "expected a ManaSpentToCast quantity, got {count:?}"
+        );
+    }
+
+    /// CR 701.66a + CR 107.3: an "earthbend X, where X is …" clause whose
+    /// quantity shape is not yet recognized must STILL keep the earthbend target
+    /// at "target land you control" — it must not fall through to the bare-X
+    /// branch, which would re-read the "where X is …" tail as an explicit target
+    /// and degrade it to `TargetFilter::Any` (the #4729 defect relocated to
+    /// unsupported shapes). The count degrades gracefully to the spell-cost
+    /// `Variable{X}` path.
+    #[test]
+    fn earthbend_count_expr_unrecognized_where_clause_keeps_default_target() {
+        let tail = "x, where x is the number of glorbs you frobnicate";
+        let (target, count) = parse_earthbend_count_expr(tail, tail);
+        assert_eq!(
+            target,
+            default_earthbend_target(),
+            "an unrecognized where-clause must not degrade the target to Any"
+        );
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            "an unrecognized where-clause count degrades to the spell-cost X path"
         );
     }
 
