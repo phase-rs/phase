@@ -746,7 +746,10 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // by the "create <spec> instead" one-for-one swap tail (no "plus" / "one of
     // each"); the Manufactor block above already claimed the "instead create one
     // of each" variant.
-    if nom_primitives::scan_contains(&lower, "you would create a ")
+    // "you would create a" is a prefix of both the "a " and "an " articles (and of
+    // "another …", which the parser's exact frame then rejects), so the guard
+    // covers vowel-starting subtypes ("an Elf token") too.
+    if nom_primitives::scan_contains(&lower, "you would create a")
         && nom_primitives::scan_contains(&lower, "instead")
     {
         if let Some(def) = parse_subtype_token_substitution(&lower, &text) {
@@ -7807,10 +7810,13 @@ fn parse_subtype_token_substitution(
     // CR 109.5: require the first-person "you would create" antecedent so the
     // hardcoded `token_owner_scope(You)` below is provably correct -- an
     // "if an effect / an opponent would create a <subtype> token ... instead"
-    // line is a different scope and must not be captured here.
+    // line is a different scope and must not be captured here. The subtype's
+    // article is "a" or "an" (a vowel-starting subtype -- Elf, Insect, Octopus --
+    // reads "create an Elf token"), so accept either.
     let ((subtype, descriptor), _) = nom_on_lower(lower, lower, |i| {
-        let (i, _) = take_until::<_, _, OracleError<'_>>("you would create a ").parse(i)?;
-        let (i, _) = tag("you would create a ").parse(i)?;
+        let (i, _) = take_until::<_, _, OracleError<'_>>("you would create ").parse(i)?;
+        let (i, _) = tag("you would create ").parse(i)?;
+        let (i, _) = alt((tag("a "), tag("an "))).parse(i)?;
         let (i, subtype) = take_until::<_, _, OracleError<'_>>(" token, ").parse(i)?;
         let (i, _) = tag(" token, create ").parse(i)?;
         let (i, descriptor) = take_until::<_, _, OracleError<'_>>(" instead").parse(i)?;
@@ -16456,6 +16462,23 @@ mod tests {
             )
             .is_none(),
             "must not capture a non-substitution 'instead' effect"
+        );
+
+        // L2 sibling coverage: a vowel-starting subtype takes the "an" article and
+        // must parse identically to the "a" form (Elf/Insect/Octopus, etc.).
+        let an = parse_subtype_token_substitution(
+            "if you would create an elf token, create a 1/1 white soldier creature token instead.",
+            "vowel-subtype substitution",
+        )
+        .expect("an <vowel-subtype> token antecedent must parse via the \"an\" article");
+        assert!(
+            matches!(
+                an.condition,
+                Some(ReplacementCondition::TokenSubtypeMatches { ref subtypes })
+                    if subtypes == &vec!["Elf".to_string()]
+            ),
+            "expected TokenSubtypeMatches([Elf]) for the \"an Elf\" antecedent, got {:?}",
+            an.condition
         );
     }
 
