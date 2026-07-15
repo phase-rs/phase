@@ -522,11 +522,11 @@ pub(super) fn parse_earthbend_params(text: &str, lower_rest: &str) -> (TargetFil
 pub(super) fn parse_earthbend_count_expr(
     text: &str,
     lower_rest: &str,
-) -> (TargetFilter, QuantityExpr) {
+) -> Option<(TargetFilter, QuantityExpr)> {
     if let Ok((rem, n)) = nom_primitives::parse_number.parse(lower_rest) {
         let target_text = rem.trim_start();
         let target = resolve_earthbend_target(text, target_text, true);
-        return (target, QuantityExpr::Fixed { value: n as i32 });
+        return Some((target, QuantityExpr::Fixed { value: n as i32 }));
     }
     if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("x").parse(lower_rest) {
         // CR 701.66a + CR 107.3: "X, where X is <dynamic quantity>" — the general
@@ -552,38 +552,37 @@ pub(super) fn parse_earthbend_count_expr(
         // target in templated text — so `default_earthbend_target` ("target land
         // you control", CR 701.66a) is the correct, invariant target.
         //
-        // A matched "where X is …" therefore ALWAYS resolves to the default
-        // target: recognized shapes bind their typed quantity, while an
-        // as-yet-unsupported shape falls back to the spell-cost X path
-        // (`Variable{X}`) WITHOUT re-entering the bare-X branch below — otherwise
-        // that branch would re-degrade the target to `TargetFilter::Any`, exactly
-        // the #4729 defect relocated to unsupported quantity shapes.
+        // A recognized where-body binds its typed quantity against the default
+        // target. An UNRECOGNIZED where-body returns `None` (strict failure):
+        // accepting the clause with a fabricated `Variable{X}` (→ 0 for a
+        // triggered ability) would report the card as supported while applying
+        // the wrong counter count — a well-typed lie. The caller
+        // (`try_parse_earthbend_clause`) turns that `None` into an honest
+        // `Effect::unimplemented` gap so coverage counts the card as unsupported.
+        // (matthewevans review, PR #5881.)
         if let Ok((where_body, _)) = tag::<_, _, OracleError<'_>>(", where x is ").parse(rem) {
             let count = crate::parser::oracle_quantity::parse_quantity_ref(where_body)
                 .map(|qty| QuantityExpr::Ref { qty })
                 .or_else(|| {
                     crate::parser::oracle_quantity::parse_event_context_quantity(where_body)
-                })
-                .unwrap_or(QuantityExpr::Ref {
-                    qty: QuantityRef::Variable {
-                        name: "X".to_string(),
-                    },
-                });
-            return (default_earthbend_target(), count);
+                })?;
+            return Some((default_earthbend_target(), count));
         }
-        // CR 107.3a + CR 601.2b: bare X resolves through the spell-cost path.
+        // CR 107.3a + CR 601.2b: bare X (no where-clause) resolves through the
+        // spell-cost path — this is a genuine `{X}` announced at cast time, not an
+        // ability-defined value, so `Variable{X}` is correct here.
         let target_text = rem.trim_start();
         let target = resolve_earthbend_target(text, target_text, true);
-        return (
+        return Some((
             target,
             QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
                     name: "X".to_string(),
                 },
             },
-        );
+        ));
     }
-    (default_earthbend_target(), QuantityExpr::Fixed { value: 0 })
+    Some((default_earthbend_target(), QuantityExpr::Fixed { value: 0 }))
 }
 
 /// Shared target-text reduction for earthbend parsing. Distinguishes between
@@ -14867,7 +14866,8 @@ mod tests {
     /// CR 122.1: literal-N earthbend keeps the `Fixed` count path intact.
     #[test]
     fn earthbend_count_expr_literal_n() {
-        let (target, count) = parse_earthbend_count_expr("2", "2");
+        let (target, count) =
+            parse_earthbend_count_expr("2", "2").expect("literal-N earthbend parses");
         assert_eq!(count, QuantityExpr::Fixed { value: 2 });
         assert_eq!(target, default_earthbend_target());
     }
@@ -14877,7 +14877,8 @@ mod tests {
     #[test]
     fn earthbend_count_expr_x_with_player_counter_tail() {
         let tail = "x, where x is the number of experience counters you have";
-        let (_, count) = parse_earthbend_count_expr(tail, tail);
+        let (_, count) =
+            parse_earthbend_count_expr(tail, tail).expect("player-counter where-clause parses");
         assert_eq!(
             count,
             QuantityExpr::Ref {
@@ -14893,7 +14894,7 @@ mod tests {
     /// to the spell-cost X resolution path (Variable("X")), not Fixed 0.
     #[test]
     fn earthbend_count_expr_bare_x_falls_through_to_variable() {
-        let (_, count) = parse_earthbend_count_expr("x", "x");
+        let (_, count) = parse_earthbend_count_expr("x", "x").expect("bare earthbend X parses");
         assert_eq!(
             count,
             QuantityExpr::Ref {
@@ -14917,7 +14918,8 @@ mod tests {
             Comparator, ControllerRef, FilterProp, PtStat, TargetFilter, TypeFilter,
         };
         let tail = "x, where x is the number of creatures you control with power 4 or greater";
-        let (target, count) = parse_earthbend_count_expr(tail, tail);
+        let (target, count) =
+            parse_earthbend_count_expr(tail, tail).expect("object-count where-clause parses");
         assert_eq!(
             target,
             default_earthbend_target(),
@@ -14956,7 +14958,8 @@ mod tests {
     fn earthbend_count_expr_object_count_subtype() {
         use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter};
         let tail = "x, where x is the number of forests you control";
-        let (target, count) = parse_earthbend_count_expr(tail, tail);
+        let (target, count) =
+            parse_earthbend_count_expr(tail, tail).expect("subtype-count where-clause parses");
         assert_eq!(target, default_earthbend_target());
         let QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
@@ -14983,7 +14986,8 @@ mod tests {
     #[test]
     fn earthbend_count_expr_mana_spent_to_cast() {
         let tail = "x, where x is the amount of mana spent to cast her";
-        let (target, count) = parse_earthbend_count_expr(tail, tail);
+        let (target, count) =
+            parse_earthbend_count_expr(tail, tail).expect("mana-spent where-clause parses");
         assert_eq!(target, default_earthbend_target());
         assert!(
             matches!(
@@ -14996,30 +15000,21 @@ mod tests {
         );
     }
 
-    /// CR 701.66a + CR 107.3: an "earthbend X, where X is …" clause whose
-    /// quantity shape is not yet recognized must STILL keep the earthbend target
-    /// at "target land you control" — it must not fall through to the bare-X
-    /// branch, which would re-read the "where X is …" tail as an explicit target
-    /// and degrade it to `TargetFilter::Any` (the #4729 defect relocated to
-    /// unsupported shapes). The count degrades gracefully to the spell-cost
-    /// `Variable{X}` path.
+    /// CR 107.3: an "earthbend X, where X is …" clause whose quantity shape is
+    /// not yet recognized must be a STRICT FAILURE (`None`), not a silent
+    /// acceptance. Binding X to `Variable{X}` (→ 0 for a triggered ability) would
+    /// report the card as supported while applying the wrong counter count — a
+    /// well-typed lie. The caller turns this `None` into an honest
+    /// `Effect::unimplemented` gap so coverage counts the card as unsupported.
+    /// (matthewevans review, PR #5881.) The genuine bare-`earthbend X` spell-cost
+    /// path is unaffected — see `earthbend_count_expr_bare_x_falls_through_to_variable`.
     #[test]
-    fn earthbend_count_expr_unrecognized_where_clause_keeps_default_target() {
+    fn earthbend_count_expr_unrecognized_where_clause_is_strict_failure() {
         let tail = "x, where x is the number of glorbs you frobnicate";
-        let (target, count) = parse_earthbend_count_expr(tail, tail);
         assert_eq!(
-            target,
-            default_earthbend_target(),
-            "an unrecognized where-clause must not degrade the target to Any"
-        );
-        assert_eq!(
-            count,
-            QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
-                },
-            },
-            "an unrecognized where-clause count degrades to the spell-cost X path"
+            parse_earthbend_count_expr(tail, tail),
+            None,
+            "an unrecognized where-clause quantity must fail strictly, not bind a fake Variable{{X}}"
         );
     }
 

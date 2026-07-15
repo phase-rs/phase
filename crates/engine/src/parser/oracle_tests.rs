@@ -13450,6 +13450,27 @@ fn earthbend_x_where_x_is_object_count_with_power_restriction() {
     }
 }
 
+/// CR 107.3: an earthbend "where X is …" clause naming a quantity the shared
+/// parsers don't recognize yet must surface as a strict-failure
+/// `Effect::Unimplemented` gap — NOT the Animate + PutCounter chain with a
+/// fabricated `Variable{X}` (→ 0 for a triggered ability), which would report
+/// the card as supported while applying the wrong counter count.
+/// (matthewevans review, PR #5881.)
+#[test]
+fn earthbend_x_where_x_is_unrecognized_quantity_is_unimplemented() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+
+    let def = parse_effect_chain(
+        "Earthbend X, where X is the number of glorbs you frobnicate.",
+        crate::types::ability::AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "an unrecognized earthbend where-clause must be an honest unimplemented gap, got {:?}",
+        def.effect
+    );
+}
+
 #[test]
 fn search_put_onto_battlefield_tapped() {
     use crate::parser::oracle_effect::parse_effect_chain;
