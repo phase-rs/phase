@@ -1747,6 +1747,40 @@ fn reset_remote_type_layer_recipients(
 pub fn evaluate_layers(state: &mut GameState) {
     #[cfg(test)]
     FULL_EVALUATE_LAYERS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // CR 611.2b + CR 301.5: an attachment-bound effect expires permanently
+    // when its source leaves the recipient. Merely suppressing it while the
+    // Equipment is unattached would illegally revive the old effect if that
+    // Equipment were later reattached to the same creature.
+    let lapsed_attachment_effects: Vec<u64> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|effect| {
+            let Duration::ForAsLongAs {
+                condition:
+                    StaticCondition::RecipientMatchesFilter {
+                        filter: TargetFilter::AttachedTo,
+                    },
+            } = &effect.duration
+            else {
+                return false;
+            };
+            let TargetFilter::SpecificObject { id: recipient } = &effect.affected else {
+                return false;
+            };
+            state
+                .objects
+                .get(&effect.source_id)
+                .and_then(|source| source.attached_to)
+                .and_then(|host| host.as_object())
+                != Some(*recipient)
+        })
+        .map(|effect| effect.id)
+        .collect();
+    if !lapsed_attachment_effects.is_empty() {
+        state
+            .transient_continuous_effects
+            .retain(|effect| !lapsed_attachment_effects.contains(&effect.id));
+    }
     // CR 302.6 + CR 613.1b + CR 702.26b: Snapshot effective controllers for
     // phased-in permanents BEFORE the Step 1 reset below wipes them. The
     // post-pass diff at the end of this function compares against this

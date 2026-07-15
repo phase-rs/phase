@@ -2026,6 +2026,105 @@ mod tests {
         );
     }
 
+    #[test]
+    fn assimilation_aegis_copy_follows_attached_host_and_ends_on_detach() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::attach::{attach_to, unattach};
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::filter::{matches_target_filter, FilterContext};
+        use crate::parser::oracle_trigger::parse_trigger_line;
+
+        let mut state = GameState::new_two_player(17);
+        let donor = create_creature(&mut state, 1, PlayerId(1), "Exiled Beast", 5, 4);
+        let mut events = Vec::new();
+        let first_host = create_creature(&mut state, 2, PlayerId(0), "First Host", 1, 1);
+        let second_host = create_creature(&mut state, 3, PlayerId(0), "Second Host", 2, 2);
+        let equipment = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Assimilation Aegis".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aegis = state.objects.get_mut(&equipment).unwrap();
+            aegis.base_name = "Assimilation Aegis".to_string();
+            aegis.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Equipment".to_string()],
+            };
+            aegis.card_types = aegis.base_card_types.clone();
+        }
+
+        let etb = parse_trigger_line(
+            "When ~ enters, exile up to one target creature until ~ leaves the battlefield.",
+            "Assimilation Aegis",
+        );
+        let etb_ability = build_resolved_from_def_with_targets(
+            etb.execute.as_ref().expect("ETB must execute"),
+            equipment,
+            PlayerId(0),
+            vec![TargetRef::Object(donor)],
+        );
+        resolve_ability_chain(&mut state, &etb_ability, &mut events, 0).unwrap();
+        assert_eq!(state.objects[&donor].zone, Zone::Exile);
+        assert!(state
+            .exile_links
+            .iter()
+            .any(|link| link.source_id == equipment && link.exiled_id == donor));
+
+        attach_to(&mut state, equipment, first_host);
+        let attached = parse_trigger_line(
+            "Whenever ~ becomes attached to a creature, for as long as ~ remains attached to it, that creature becomes a copy of a creature card exiled with ~.",
+            "Assimilation Aegis",
+        );
+        let execute = attached
+            .execute
+            .as_ref()
+            .expect("attached trigger must execute");
+        let Effect::BecomeCopy { target, .. } = &*execute.effect else {
+            panic!("attached trigger must resolve BecomeCopy");
+        };
+        let context = FilterContext::from_source(&state, equipment);
+        assert!(matches_target_filter(&state, donor, target, &context));
+        assert!(!matches_target_filter(&state, first_host, target, &context));
+        let ability = build_resolved_from_def_with_targets(
+            execute,
+            equipment,
+            PlayerId(0),
+            vec![TargetRef::Object(donor)],
+        );
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&first_host].name, "Exiled Beast");
+        assert_eq!(state.objects[&first_host].power, Some(5));
+        assert_eq!(state.objects[&equipment].name, "Assimilation Aegis");
+        assert_eq!(state.objects[&equipment].power, None);
+
+        unattach(&mut state, equipment);
+        assert_eq!(state.objects[&first_host].name, "First Host");
+        assert_eq!(state.objects[&first_host].power, Some(1));
+
+        attach_to(&mut state, equipment, first_host);
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&first_host].name, "First Host");
+        assert_eq!(state.objects[&first_host].power, Some(1));
+
+        attach_to(&mut state, equipment, second_host);
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&first_host].name, "First Host");
+        assert_eq!(state.objects[&second_host].name, "Second Host");
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&first_host].name, "First Host");
+        assert_eq!(state.objects[&second_host].name, "Exiled Beast");
+        assert_eq!(state.objects[&second_host].power, Some(5));
+        assert_eq!(state.objects[&equipment].name, "Assimilation Aegis");
+    }
+
     /// CR 707.2: Keyword abilities such as Persist are copiable values. When
     /// the copied object carries the keyword but its printed trigger list was
     /// not populated (or was stripped before the copy snapshot), the copy must
