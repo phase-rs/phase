@@ -5035,12 +5035,14 @@ mod tests {
         let mut attack_state = setup_multiplayer_combat(3);
         attack_state.active_player = PlayerId(1);
         let storm = create_creature(&mut attack_state, PlayerId(0), "Storm, Windrider", 3, 3);
-        attack_state
+        let storm_definitions = &mut attack_state
             .objects
             .get_mut(&storm)
             .unwrap()
-            .static_definitions
-            .extend(defs.clone());
+            .static_definitions;
+        for definition in defs.clone() {
+            storm_definitions.push(definition);
+        }
         let flyer = create_creature(&mut attack_state, PlayerId(1), "Sky Drake", 2, 2);
         attack_state
             .objects
@@ -5070,12 +5072,14 @@ mod tests {
 
         let mut block_state = setup_multiplayer_combat(3);
         let storm = create_creature(&mut block_state, PlayerId(0), "Storm, Windrider", 3, 3);
-        block_state
+        let storm_definitions = &mut block_state
             .objects
             .get_mut(&storm)
             .unwrap()
-            .static_definitions
-            .extend(defs);
+            .static_definitions;
+        for definition in defs {
+            storm_definitions.push(definition);
+        }
         let flyer = create_creature(&mut block_state, PlayerId(1), "Sky Drake", 2, 2);
         block_state
             .objects
