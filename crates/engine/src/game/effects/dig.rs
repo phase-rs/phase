@@ -1,7 +1,8 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    DigSource, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+    DigSource, Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility,
+    TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -88,7 +89,7 @@ pub fn resolve(
     // relays to this Dig's immediate sub_ability. Reset here; the two "found
     // nothing" returns below (and in `resolve_from_prior_look`) set it back
     // to `true`.
-    state.last_dig_found_nothing = false;
+    state.last_parent_target_missing_reason = None;
 
     // CR 701.20e + CR 608.2c: PriorLook means the card set was already populated
     // by a preceding look-only Dig (e.g. Birthing Ritual: sacrifice sits between
@@ -123,7 +124,7 @@ pub fn resolve(
         // ("put up to one of them on top … the rest on the bottom") has no
         // cards to act on and must not fall back to acting on this ability's
         // own source (issue #1365).
-        state.last_dig_found_nothing = true;
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -279,7 +280,7 @@ fn resolve_from_prior_look(
         // CR 608.2c: mirrors the empty-library branch in `resolve` (issue
         // #1365) — no cards were looked at, so a chained `ParentTarget`
         // consumer must not self-fallback.
-        state.last_dig_found_nothing = true;
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Dig,
             source_id: ability.source_id,
@@ -557,7 +558,7 @@ mod tests {
         assert!(result.is_ok());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(
-            state.last_dig_found_nothing,
+            state.last_parent_target_missing_reason == Some(ParentTargetMissingReason::Dig),
             "an empty-library Dig must flag that it found nothing, so a chained \
              ParentTarget consumer does not self-fallback (issue #1365)"
         );

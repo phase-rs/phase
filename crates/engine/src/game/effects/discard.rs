@@ -6,7 +6,8 @@ use crate::game::effects::change_zone;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -225,18 +226,19 @@ pub fn resolve(
     // that ALSO sent Thoughtseize's empty-reveal case there, force-discarding
     // an unrelated card whenever hand size happened to equal the discard
     // count. The one bit those four PLAYER-scoped shapes never carry, and
-    // that Thoughtseize's empty-reveal case DOES, is
-    // `reveal_choice_found_nothing_for_parent_target` — stamped ONLY by
+    // that Thoughtseize's empty-reveal case DOES, is a
+    // `parent_target_missing_reason` of `RevealHandChoice` — stamped ONLY by
     // `apply_parent_chain_context` immediately after a `RevealHand`
     // reveal-choice whose eligible set was empty (see
-    // `GameState::last_reveal_choice_found_nothing`). So: enter the specific-
+    // `GameState::last_parent_target_missing_reason`). So: enter the specific-
     // targets loop (a no-op when `specific_targets` is empty, which IS the
     // desired Thoughtseize behavior) whenever either the original condition
     // holds, OR the parent reveal-choice explicitly found nothing to choose.
     // Any OTHER empty-`specific_targets`, declared/object-bound discard falls
     // through to the generic hand-choice/random path below, exactly as
     // before #4950's broken fix.
-    let parent_reveal_choice_found_nothing = ability.reveal_choice_found_nothing_for_parent_target;
+    let parent_reveal_choice_found_nothing =
+        ability.parent_target_missing_reason == Some(ParentTargetMissingReason::RevealHandChoice);
     if (!specific_targets.is_empty() && (declared_target_discard || object_bound_discard))
         || (object_bound_discard && parent_reveal_choice_found_nothing)
     {

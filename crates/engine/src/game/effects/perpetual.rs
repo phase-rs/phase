@@ -12,7 +12,9 @@
 //! (Stationed/VehicleCrewed events, chain propagation) bind the correct object;
 //! `Any` falls back to the source when no referent is available.
 
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility, TargetFilter,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntryKind};
 
@@ -82,7 +84,7 @@ fn perpetual_target_object_ids(
     // unresolved ParentTarget source fallback intact for other effect shapes.
     if matches!(target, TargetFilter::ParentTarget)
         && ability.targets.is_empty()
-        && ability.choose_from_zone_found_nothing_for_parent_target
+        && ability.parent_target_missing_reason == Some(ParentTargetMissingReason::ChooseFromZone)
     {
         return Vec::new();
     }

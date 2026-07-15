@@ -3,7 +3,8 @@ use rand::seq::SliceRandom;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -162,8 +163,8 @@ pub fn resolve(
         // `DiscardCard{target: ParentTarget}`) can resolve to a hard no-op
         // instead of falling back to a whole-hand action. Consumed by
         // `apply_parent_chain_context` at the very next parent->child
-        // hand-off — see `GameState::last_reveal_choice_found_nothing`.
-        state.last_reveal_choice_found_nothing = true;
+        // hand-off — see `GameState::last_parent_target_missing_reason`.
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::RevealHandChoice);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id: ability.source_id,
