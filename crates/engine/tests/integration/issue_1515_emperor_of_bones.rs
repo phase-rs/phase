@@ -4,14 +4,13 @@
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameScenario, P0};
-use engine::game::zones::create_object;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
     AbilityKind, ContinuousModification, DelayedTriggerCondition, Effect, TargetFilter,
 };
 use engine::types::counter::CounterType;
 use engine::types::game_state::{ExileLink, ExileLinkKind, WaitingFor};
-use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -42,37 +41,16 @@ fn issue_1515_emperor_of_bones_binds_haste_and_delayed_sacrifice_to_returned_cre
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let emperor = scenario.add_creature(P0, "Emperor of Bones", 2, 2).id();
+    let returned = scenario
+        .add_creature_to_exile(P0, "Linked Gravebeast", 3, 3)
+        .id();
 
     let mut runner = scenario.build();
-    let returned = {
-        let state = runner.state_mut();
-        let returned = create_object(
-            state,
-            CardId(900),
-            P0,
-            "Linked Gravebeast".to_string(),
-            Zone::Exile,
-        );
-        let object = state
-            .objects
-            .get_mut(&returned)
-            .expect("exiled card exists");
-        object
-            .card_types
-            .core_types
-            .push(engine::types::card_type::CoreType::Creature);
-        object.base_card_types = object.card_types.clone();
-        object.power = Some(3);
-        object.toughness = Some(3);
-        object.base_power = Some(3);
-        object.base_toughness = Some(3);
-        state.exile_links.push(ExileLink {
-            exiled_id: returned,
-            source_id: emperor,
-            kind: ExileLinkKind::TrackedBySource,
-        });
-        returned
-    };
+    runner.state_mut().exile_links.push(ExileLink {
+        exiled_id: returned,
+        source_id: emperor,
+        kind: ExileLinkKind::TrackedBySource,
+    });
 
     let def = parse_effect_chain(EMPEROR_COUNTER_TRIGGER_EFFECT, AbilityKind::Spell);
     let ability = build_resolved_from_def(&def, emperor, P0);
