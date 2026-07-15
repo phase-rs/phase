@@ -2,8 +2,9 @@ use engine::database::synthesis::synthesize_plot;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::parser::oracle_cost::parse_oracle_cost;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CastingPermission, Effect, ModalChoice,
-    QuantityExpr, ReplacementDefinition, ReplacementMode, SpellCastingOption, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Effect,
+    ModalChoice, QuantityExpr, ReplacementDefinition, ReplacementMode, SpellCastingOption,
+    TargetFilter, TargetSelectionMode,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -41,6 +42,335 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
                 enters_modified_if: None,
             },
         ))
+}
+
+fn prompt_after_moved_to_exile() -> ReplacementDefinition {
+    redirect_moved_to_with_post_effect(Zone::Exile, Zone::Exile)
+}
+
+fn redirect_moved_to_with_post_effect(
+    destination: Zone,
+    redirected_to: Zone,
+) -> ReplacementDefinition {
+    let mut replacement = redirect_moved_to(destination, redirected_to);
+    replacement
+        .execute
+        .as_mut()
+        .expect("redirect helper always provides its replacement effect")
+        .sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Choose {
+            choice_type: ChoiceType::Labeled {
+                options: vec!["first".to_string(), "second".to_string()],
+            },
+            persist: false,
+            selection: TargetSelectionMode::Chosen,
+        },
+    )));
+    replacement
+}
+
+#[test]
+fn foretell_cost_honors_moved_redirect_and_completes_exactly_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let foretell_cost = ManaCost::generic(5);
+    let foretold = scenario
+        .add_spell_to_hand(P0, "Foretell Cost Redirect Witness", false)
+        .with_mana_cost(ManaCost::generic(7))
+        .with_keyword(Keyword::Foretell(foretell_cost.clone()))
+        .id();
+    for name in ["First Foretell Redirect", "Second Foretell Redirect"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Graveyard));
+    }
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    scenario.add_basic_land(P0, ManaColor::Blue);
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&foretold].card_id;
+    let result = runner
+        .act(GameAction::Foretell {
+            object_id: foretold,
+            card_id,
+        })
+        .expect("foretell special action should pay its cost and consult Moved replacements");
+
+    assert!(
+        matches!(result.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the foretell cost move must consult competing Moved redirects"
+    );
+
+    let turn_foretold = runner.state().turn_number;
+    let json = serde_json::to_string(runner.state()).expect("paused foretell serializes");
+    let restored: GameState = serde_json::from_str(&json).expect("paused foretell deserializes");
+    assert!(matches!(
+        restored.pending_cost_move_resume.as_ref(),
+        Some(&PendingCostMoveResume::Foretell {
+            player,
+            object_id,
+            ref cost,
+            turn_foretold: stamped_turn,
+        }) if player == P0 && object_id == foretold && cost == &foretell_cost && stamped_turn == turn_foretold
+    ));
+    let mut runner = GameRunner::from_state(restored);
+
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("redirect the foretell exile");
+    let obj = &runner.state().objects[&foretold];
+    assert_eq!(obj.zone, Zone::Graveyard);
+    assert!(!obj.foretold, "only a card delivered to exile was foretold");
+    assert!(
+        !obj.face_down,
+        "a redirected card must not gain foretell concealment"
+    );
+    assert!(obj.casting_permissions.is_empty());
+    assert!(
+        !result.events.iter().any(
+            |event| matches!(event, GameEvent::Foretold { object_id, .. } if *object_id == foretold)
+        ),
+        "a redirected card must not emit Foretold"
+    );
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::ReplacementApplied { .. }))
+            .count(),
+        1,
+        "the selected redirect must apply exactly once"
+    );
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
+}
+
+#[test]
+fn foretell_delivery_finalizes_before_a_post_replacement_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let foretell_cost = ManaCost::generic(5);
+    let foretold = scenario
+        .add_spell_to_hand(P0, "Foretell Post-Effect Witness", false)
+        .with_mana_cost(ManaCost::generic(7))
+        .with_keyword(Keyword::Foretell(foretell_cost.clone()))
+        .id();
+    scenario
+        .add_creature(P0, "Foretell Post-Effect", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(prompt_after_moved_to_exile());
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    scenario.add_basic_land(P0, ManaColor::Blue);
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&foretold].card_id;
+    let turn_foretold = runner.state().turn_number;
+    let result = runner
+        .act(GameAction::Foretell {
+            object_id: foretold,
+            card_id,
+        })
+        .expect("foretell should deliver before the replacement post-effect prompts");
+
+    assert!(
+        matches!(
+            result.waiting_for,
+            WaitingFor::NamedChoice { ref options, .. }
+                if options == &vec!["first".to_string(), "second".to_string()]
+        ),
+        "the delivered Foretell move must preserve the replacement prompt"
+    );
+    let object = &runner.state().objects[&foretold];
+    assert_eq!(object.zone, Zone::Exile);
+    assert!(object.foretold);
+    assert!(object.face_down);
+    assert!(matches!(
+        object.casting_permissions.as_slice(),
+        [CastingPermission::Foretold { cost, turn_foretold: stamped_turn }]
+            if cost == &foretell_cost && *stamped_turn == turn_foretold
+    ));
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::Foretold { object_id, .. } if *object_id == foretold))
+            .count(),
+        1,
+        "delivery must emit exactly one Foretold event before the prompt pauses"
+    );
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::ReplacementApplied { .. }))
+            .count(),
+        1,
+        "the identity redirect must apply before its post-effect prompts"
+    );
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+
+    let paused_waiting_for = runner.state().waiting_for.clone();
+    let json =
+        serde_json::to_string(runner.state()).expect("post-delivery foretell pause serializes");
+    let restored: GameState =
+        serde_json::from_str(&json).expect("post-delivery foretell pause deserializes");
+    assert_eq!(restored.waiting_for, paused_waiting_for);
+    assert!(restored.pending_cost_move_resume.is_none());
+    let mut runner = GameRunner::from_state(restored);
+
+    let resumed = runner
+        .act(GameAction::ChooseOption {
+            choice: "first".to_string(),
+        })
+        .expect("post-replacement choice should remain actionable after serialization");
+    let object = &runner.state().objects[&foretold];
+    assert_eq!(object.zone, Zone::Exile);
+    assert!(object.foretold);
+    assert!(object.face_down);
+    assert_eq!(object.casting_permissions.len(), 1);
+    assert!(
+        !resumed.events.iter().any(
+            |event| matches!(event, GameEvent::Foretold { object_id, .. } if *object_id == foretold)
+        ),
+        "resolving the post-effect must not re-finalize Foretell"
+    );
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
+}
+
+#[test]
+fn foretell_replacement_pause_then_post_effect_prompt_finalizes_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let foretell_cost = ManaCost::generic(5);
+    let foretold = scenario
+        .add_spell_to_hand(P0, "Foretell Replacement Resume Witness", false)
+        .with_mana_cost(ManaCost::generic(7))
+        .with_keyword(Keyword::Foretell(foretell_cost.clone()))
+        .id();
+    let exile_to_graveyard = scenario
+        .add_creature(P0, "Foretell Exile to Graveyard", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Graveyard))
+        .id();
+    scenario
+        .add_creature(P0, "Foretell Exile to Exile", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Exile));
+    let graveyard_to_exile = scenario
+        .add_creature(P0, "Foretell Graveyard to Exile", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(redirect_moved_to_with_post_effect(
+            Zone::Graveyard,
+            Zone::Exile,
+        ))
+        .id();
+    scenario
+        .add_creature(P0, "Foretell Graveyard to Hand", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Hand));
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    scenario.add_basic_land(P0, ManaColor::Blue);
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&foretold].card_id;
+    let turn_foretold = runner.state().turn_number;
+    let initial = runner
+        .act(GameAction::Foretell {
+            object_id: foretold,
+            card_id,
+        })
+        .expect("competing Moved replacements should pause the Foretell cost move");
+    assert!(matches!(
+        initial.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+
+    let json =
+        serde_json::to_string(runner.state()).expect("pre-delivery foretell pause serializes");
+    let restored: GameState =
+        serde_json::from_str(&json).expect("pre-delivery foretell pause deserializes");
+    assert!(matches!(
+        restored.pending_cost_move_resume.as_ref(),
+        Some(&PendingCostMoveResume::Foretell {
+            player,
+            object_id,
+            ref cost,
+            turn_foretold: stamped_turn,
+        }) if player == P0 && object_id == foretold && cost == &foretell_cost && stamped_turn == turn_foretold
+    ));
+    let mut runner = GameRunner::from_state(restored);
+
+    let mut replacement_prompts = 0;
+    let mut delivered = None;
+    while let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    {
+        let expected_source = match replacement_prompts {
+            0 => exile_to_graveyard,
+            1 => graveyard_to_exile,
+            _ => panic!("unexpected additional Foretell replacement prompt"),
+        };
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == expected_source)
+            .expect("the chosen redirect must appear in its CR 616.1 ordering prompt");
+        delivered = Some(
+            runner
+                .act(GameAction::ChooseReplacement { index })
+                .expect("apply the selected Foretell redirect"),
+        );
+        replacement_prompts += 1;
+    }
+    assert_eq!(
+        replacement_prompts, 2,
+        "both material Moved replacement collisions must be ordered before delivery"
+    );
+    let delivered = delivered.expect("the selected graveyard-to-exile redirect must deliver");
+    assert!(matches!(
+        delivered.waiting_for,
+        WaitingFor::NamedChoice { .. }
+    ));
+    let object = &runner.state().objects[&foretold];
+    assert_eq!(object.zone, Zone::Exile);
+    assert!(object.foretold);
+    assert!(object.face_down);
+    assert!(matches!(
+        object.casting_permissions.as_slice(),
+        [CastingPermission::Foretold { cost, turn_foretold: stamped_turn }]
+            if cost == &foretell_cost && *stamped_turn == turn_foretold
+    ));
+    assert_eq!(
+        delivered
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::Foretold { object_id, .. } if *object_id == foretold))
+            .count(),
+        1
+    );
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+
+    let resumed = runner
+        .act(GameAction::ChooseOption {
+            choice: "first".to_string(),
+        })
+        .expect("the post-effect prompt remains actionable after Foretell completes");
+    assert!(!resumed.events.iter().any(
+        |event| matches!(event, GameEvent::Foretold { object_id, .. } if *object_id == foretold)
+    ));
+    assert_eq!(
+        runner.state().objects[&foretold].casting_permissions.len(),
+        1
+    );
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
 }
 
 #[test]

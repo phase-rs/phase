@@ -445,6 +445,7 @@ mod issue_4564_captain_america_team_leader;
 mod issue_4566_jocasta;
 mod issue_4663_chosen_x_ptcomparison_targets;
 mod issue_4752_blood_artist_each_player_sacrifice;
+mod issue_4772_too_evil_to_stay_dead;
 mod issue_4786_wrenn_realmbreaker;
 mod issue_4792_isochron_scepter;
 mod issue_4824_light_paws_aura_attach;

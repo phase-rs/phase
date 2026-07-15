@@ -1280,14 +1280,16 @@ pub(crate) fn apply_zone_delivery_tail(
         if let Some(source_id) = cause.or(source_id) {
             let kind = match duration {
                 Some(Duration::UntilHostLeavesPlay) => {
-                    ExileLinkKind::UntilSourceLeaves { return_zone: from }
+                    Some(ExileLinkKind::UntilSourceLeaves { return_zone: from })
                 }
                 _ if matches!(exile_tracking, ZoneDeliveryExileTracking::TrackBySource) => {
-                    ExileLinkKind::TrackedBySource
+                    Some(ExileLinkKind::TrackedBySource)
                 }
-                _ => return ZoneDeliveryResult::Done,
+                _ => None,
             };
-            crate::game::exile_links::push_with_kind(state, object_id, source_id, kind);
+            if let Some(kind) = kind {
+                crate::game::exile_links::push_with_kind(state, object_id, source_id, kind);
+            }
         }
     }
     // CR 614.12a: Drain mandatory replacement post-effects after the zone
