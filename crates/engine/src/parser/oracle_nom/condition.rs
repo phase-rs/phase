@@ -4175,8 +4175,7 @@ fn parse_source_is_only_type_in_zone(input: &str) -> OracleResult<'_, StaticCond
         },
         _ => quantity,
     };
-    let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
-    Ok((&input[consumed..], condition))
+    Ok((remainder, condition))
 }
 
 /// Graveyard-presence sibling of `parse_creature_has_keyword`: instead of a "has
