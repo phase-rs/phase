@@ -4175,13 +4175,13 @@ mod protocol_wire_tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 16);
+        assert_eq!(capabilities.len(), 18);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 16, "capability codes must be unique");
+        assert_eq!(codes.len(), 18, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(

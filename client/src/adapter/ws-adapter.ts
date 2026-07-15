@@ -37,13 +37,13 @@ export interface DeckData {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 15 — Meld pair/attacking-entry choices and mana-payment preview variants.
+ * 16 — Meld pair/attacking-entry choices after the mana-payment preview variants.
  * 14 — PrecastCopyShortcut action and its two WaitingFor variants.
  * 13 — WaitingFor::MulliganBottomCards removed; mulligan bottoming folded
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 15;
+export const PROTOCOL_VERSION = 16;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
