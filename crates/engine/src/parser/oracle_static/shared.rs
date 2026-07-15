@@ -1325,7 +1325,7 @@ fn parse_cant_attack_you_or_block_predicate(
     // CR 509.1b: the block target ("creatures you control") is parsed by the
     // full type-phrase grammar so the class covers any "block <filter>" object.
     let (block_filter, rest) = parse_type_phrase(input);
-    if rest.len() >= input.len() {
+    if rest.len() >= input.len() || matches!(block_filter, TargetFilter::Any) {
         return Err(super::oracle_nom::error::oracle_err(input));
     }
     Ok((rest, (defended, block_filter)))
