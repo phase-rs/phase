@@ -224,6 +224,7 @@ mod issue_1354_coveted_jewel;
 mod issue_1374_atraxa_grand_unifier;
 mod issue_1499_arabella;
 mod issue_1509_sorcery_main_phase_cast;
+mod issue_1515_emperor_of_bones;
 mod issue_1524_serpents_soul_jar;
 mod issue_1526_harvest_season;
 mod issue_1535_braids;
