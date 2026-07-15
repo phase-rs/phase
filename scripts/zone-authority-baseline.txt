@@ -44,7 +44,6 @@ crates/engine/src/game/effects/cast_from_zone.rs	grant_lingering_permissions	mov
 crates/engine/src/game/effects/choose_from_zone.rs	drain_pending_per_category_zone_choice	mover	1
 crates/engine/src/game/effects/cloak.rs	resolve	mover	1
 crates/engine/src/game/effects/collect_evidence.rs	handle_choice	mover	1
-crates/engine/src/game/effects/connive.rs	resolve_connive_effect	mover	1
 crates/engine/src/game/effects/copy_spell.rs	resolve	zone-assign	1
 crates/engine/src/game/effects/dig.rs	resolve_mass_put_all	mover	1
 crates/engine/src/game/effects/discover.rs	shuffle_to_bottom	mover	1
