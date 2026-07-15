@@ -54,3 +54,5 @@ path = "src/bin/legal_actions_bench.rs"
 test = false
 
 [dev-dependencies]
+# cfg(test) modules place objects with the raw zone API (sealed in production builds).
+engine = { path = "../engine", features = ["test-support"] }

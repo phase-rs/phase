@@ -46,7 +46,9 @@ use crate::types::ability::{
     AbilityCost, EffectKind, TargetFilter, TypedFilter, REMOVE_COUNTER_COST_ALL,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{
+    GameState, PendingCostMoveCompletion, PendingCostMoveResume, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
@@ -62,6 +64,7 @@ use super::filter::FilterContext;
 use super::life_costs::can_pay_life_cost;
 use super::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use super::speed::{effective_speed, set_speed};
+use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::ResolvedAbility;
 
 /// Helper to find eligible cards for exile cost payment at resolution.
@@ -181,6 +184,7 @@ pub(crate) enum PaymentScope<'a> {
         /// spend restrictions (Quinjet → power-up) gate eligible mana. Resolution
         /// scope never carries a tag (resolution-time costs aren't activations).
         ability_tag: Option<crate::types::ability::AbilityTag>,
+        cost_move_handling: ActivationCostMoveHandling,
     },
     /// `ability` is normally the PAYER-ADJUSTED `ResolvedAbility` clone
     /// (controller swapped to the resolved payer, per `effects/pay.rs`). All
@@ -194,7 +198,29 @@ pub(crate) enum PaymentScope<'a> {
     /// separately (`player`), so the right player's resources are deducted; only
     /// the `QuantityExpr` resolution reads the un-swapped controller. See the
     /// per-arm comments at those call sites.
-    Resolution { ability: &'a ResolvedAbility },
+    Resolution {
+        ability: &'a ResolvedAbility,
+        cost_move_root: ResolutionCostMoveRoot,
+    },
+}
+
+/// Whether an activation root retains the typed continuation for a self-move
+/// cost replacement. Only mana abilities use the synchronous path because they
+/// have no stack-root continuation until the dedicated ManaAbilityPayment unit.
+#[derive(Clone, Copy)]
+pub(crate) enum ActivationCostMoveHandling {
+    OutcomeAware,
+    ManaAbilitySynchronous,
+}
+
+/// The owner of a resolution-time non-self cost move. Only an accepted
+/// replacement MayCost has an outer replacement to re-enter after an inner
+/// `Moved` replacement choice; ordinary `Effect::PayCost` remains on its
+/// established choice-driven path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolutionCostMoveRoot {
+    EffectPayCost,
+    ReplacementMayCost,
 }
 
 /// A cost payment could not be completed. The reason string is the human-
@@ -202,7 +228,7 @@ pub(crate) enum PaymentScope<'a> {
 /// the activation adapter re-wraps it as `EngineError::ActionNotAllowed`, the
 /// resolution adapter discards it and sets `cost_payment_failed_flag`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PaymentFailure {
+pub struct PaymentFailure {
     pub reason: String,
 }
 
@@ -222,7 +248,7 @@ fn payment_failed(reason: impl Into<String>) -> PaymentOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PaymentOutcome {
+pub enum PaymentOutcome {
     /// The cost was paid in full.
     Paid,
     /// CR 616.1: a replacement-effect choice interrupted payment. Reserved
@@ -262,7 +288,9 @@ fn resolve_cost_quantity(
 ) -> i32 {
     match scope {
         PaymentScope::Activation { .. } => resolve_quantity(state, expr, player, source_id),
-        PaymentScope::Resolution { ability } => resolve_quantity_with_targets(state, expr, ability),
+        PaymentScope::Resolution { ability, .. } => {
+            resolve_quantity_with_targets(state, expr, ability)
+        }
     }
 }
 
@@ -274,25 +302,156 @@ pub(crate) fn pause_cost_payment_for_replacement_choice(
     state.waiting_for = super::replacement::replacement_choice_waiting_for(choice_player, state);
 }
 
-/// Pay an activated ability's cost. Handles auto-payable cost components
-/// (`Tap`, `Mana`, `PayLife`, `Composite`, and self-referential zone costs)
-/// and passes through cost types that require interactive resolution.
-pub fn pay_ability_cost(
+/// CR 601.2h + CR 602.2b + CR 616.1: Move a self-referential activation cost
+/// through the zone-change pipeline. The continuation has no `PendingCast`
+/// until the activation caller attaches it after this payment function returns.
+fn move_self_activation_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    destination: Zone,
+    events: &mut Vec<GameEvent>,
+) -> Option<PaymentOutcome> {
+    match zone_pipeline::move_object(
+        state,
+        ZoneMoveRequest::cost(source_id, destination, source_id),
+        events,
+    ) {
+        ZoneMoveResult::Done => None,
+        ZoneMoveResult::NeedsChoice(choice_player) => {
+            state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
+                player,
+                pending: None,
+                chosen: vec![source_id],
+                paused_at_index: 0,
+                destination,
+                completion: PendingCostMoveCompletion::FinishPending,
+            });
+            pause_cost_payment_for_replacement_choice(state, choice_player);
+            Some(PaymentOutcome::Paused {
+                remaining_cost: None,
+            })
+        }
+        ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            unreachable!("a cost move to Hand or Exile cannot require Aura attachment")
+        }
+    }
+}
+
+/// CR 406.6: Record an "exiled with [source] this turn" relation only for a
+/// cost object that actually arrived in exile after replacements applied.
+fn record_delivered_cost_exile(state: &mut GameState, exiled_id: ObjectId, source_id: ObjectId) {
+    if state
+        .objects
+        .get(&exiled_id)
+        .is_some_and(|object| object.zone == Zone::Exile)
+    {
+        super::exile_links::push_exiled_with_source_this_turn(state, exiled_id, source_id);
+    }
+}
+
+/// CR 614.12a + CR 616.1: Continue a forced MayCost exile after the inner
+/// replacement choice delivered or prevented its current object. The outer
+/// optional replacement resumes only after the whole cost has finished.
+pub(crate) fn resume_replacement_may_cost_move(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(PendingCostMoveResume::ReplacementMayCost {
+        source_id,
+        current,
+        remaining,
+        paid_count,
+        outer_replacement,
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("replacement MayCost resume requires its typed continuation")
+    };
+
+    record_delivered_cost_exile(state, current, source_id);
+
+    for (index, &object_id) in remaining.iter().enumerate() {
+        match zone_pipeline::move_object(
+            state,
+            ZoneMoveRequest::cost(object_id, Zone::Exile, source_id),
+            events,
+        ) {
+            ZoneMoveResult::Done => record_delivered_cost_exile(state, object_id, source_id),
+            ZoneMoveResult::NeedsChoice(choice_player) => {
+                state.pending_cost_move_resume = Some(PendingCostMoveResume::ReplacementMayCost {
+                    source_id,
+                    current: object_id,
+                    remaining: remaining[index + 1..].to_vec(),
+                    paid_count,
+                    outer_replacement,
+                });
+                pause_cost_payment_for_replacement_choice(state, choice_player);
+                return Ok(state.waiting_for.clone());
+            }
+            ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                unreachable!("a cost move to Exile cannot require Aura attachment")
+            }
+        }
+    }
+
+    let Some(outer_replacement) = outer_replacement else {
+        return Err(EngineError::InvalidAction(
+            "replacement MayCost cost-move resume is missing its outer replacement".to_string(),
+        ));
+    };
+    state.last_effect_count = Some(paid_count);
+    state.pending_replacement = Some(*outer_replacement);
+    super::engine_replacement::handle_replacement_choice(state, 0, events)
+}
+
+/// Pays a mana ability's synchronous auto-payable cost components. This is the
+/// only activation root that may bypass the zone-move pipeline until it owns a
+/// dedicated typed continuation.
+pub(crate) fn pay_mana_ability_cost_synchronously(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    pay_ability_cost_for_activation(state, player, source_id, cost, None, events).map(|_| ())
+    pay_ability_cost_for_activation_with_cost_move_replacement(
+        state,
+        player,
+        source_id,
+        cost,
+        None,
+        ActivationCostMoveHandling::ManaAbilitySynchronous,
+        events,
+    )
+    .map(|_| ())
 }
 
-pub(crate) fn pay_ability_cost_for_activation(
+pub fn pay_ability_cost_for_activation(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
     ability_tag: Option<crate::types::ability::AbilityTag>,
+    events: &mut Vec<GameEvent>,
+) -> Result<PaymentOutcome, EngineError> {
+    pay_ability_cost_for_activation_with_cost_move_replacement(
+        state,
+        player,
+        source_id,
+        cost,
+        ability_tag,
+        ActivationCostMoveHandling::OutcomeAware,
+        events,
+    )
+}
+
+fn pay_ability_cost_for_activation_with_cost_move_replacement(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
+    cost_move_handling: ActivationCostMoveHandling,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
@@ -305,6 +464,7 @@ pub(crate) fn pay_ability_cost_for_activation(
         &PaymentScope::Activation {
             excluded_sources: &excluded_sources,
             ability_tag,
+            cost_move_handling,
         },
     )?;
     // CR 601.2h: "Unpayable costs can't be paid." Activation scope maps a
@@ -327,13 +487,53 @@ pub(crate) fn pay_ability_cost_for_resolution(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
+    pay_ability_cost_for_resolution_with_cost_move_root(
+        state,
+        payer,
+        cost,
+        ability,
+        ResolutionCostMoveRoot::EffectPayCost,
+        events,
+    )
+}
+
+/// Pays a replacement's MayCost. Its dedicated root owns the outer
+/// replacement state required by [`PendingCostMoveResume::ReplacementMayCost`].
+pub(crate) fn pay_ability_cost_for_replacement_may_cost(
+    state: &mut GameState,
+    payer: PlayerId,
+    cost: &AbilityCost,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<PaymentOutcome, EngineError> {
+    pay_ability_cost_for_resolution_with_cost_move_root(
+        state,
+        payer,
+        cost,
+        ability,
+        ResolutionCostMoveRoot::ReplacementMayCost,
+        events,
+    )
+}
+
+fn pay_ability_cost_for_resolution_with_cost_move_root(
+    state: &mut GameState,
+    payer: PlayerId,
+    cost: &AbilityCost,
+    ability: &ResolvedAbility,
+    cost_move_root: ResolutionCostMoveRoot,
+    events: &mut Vec<GameEvent>,
+) -> Result<PaymentOutcome, EngineError> {
     pay_ability_cost_inner(
         state,
         payer,
         ability.source_id,
         cost,
         events,
-        &PaymentScope::Resolution { ability },
+        &PaymentScope::Resolution {
+            ability,
+            cost_move_root,
+        },
     )
 }
 
@@ -413,6 +613,7 @@ fn pay_ability_cost_inner(
             PaymentScope::Activation {
                 excluded_sources,
                 ability_tag,
+                ..
             } => {
                 if excluded_sources.is_empty() {
                     pay_ability_mana_cost(state, player, source_id, cost, *ability_tag, events)?;
@@ -639,7 +840,29 @@ fn pay_ability_cost_inner(
                     )));
                 }
             }
-            super::zones::move_to_zone(state, source_id, Zone::Exile, events);
+            let PaymentScope::Activation {
+                cost_move_handling,
+                ..
+            } = scope
+            else {
+                unreachable!("self-referential exile costs are not payable at resolution")
+            };
+            match cost_move_handling {
+                ActivationCostMoveHandling::OutcomeAware => {
+                    if let Some(outcome) = move_self_activation_cost(
+                        state,
+                        player,
+                        source_id,
+                        Zone::Exile,
+                        events,
+                    ) {
+                        return Ok(outcome);
+                    }
+                }
+                ActivationCostMoveHandling::ManaAbilitySynchronous => {
+                    super::zones::move_to_zone(state, source_id, Zone::Exile, events);
+                }
+            }
         }
         // CR 406.6: Non-self exile cost at resolution time (e.g., The Mimeoplasm's
         // "exile two creature cards from graveyards"). The interactive choice is
@@ -672,12 +895,42 @@ fn pay_ability_cost_inner(
             // Forced-choice fast path: when the eligible set exactly
             // fills the requirement there is no choice to surface, so the
             // exile executes immediately.
-            if eligible.len() == count {
-                for card_id in eligible {
-                    super::zones::move_to_zone(state, card_id, Zone::Exile, events);
-                    super::exile_links::push_exiled_with_source_this_turn(
-                        state, card_id, source_id,
-                    );
+            if eligible.len() == count
+                && matches!(
+                    scope,
+                    PaymentScope::Resolution {
+                        cost_move_root: ResolutionCostMoveRoot::ReplacementMayCost,
+                        ..
+                    }
+                )
+            {
+                for (index, &card_id) in eligible.iter().enumerate() {
+                    match zone_pipeline::move_object(
+                        state,
+                        ZoneMoveRequest::cost(card_id, Zone::Exile, source_id),
+                        events,
+                    ) {
+                        ZoneMoveResult::Done => {
+                            record_delivered_cost_exile(state, card_id, source_id);
+                        }
+                        ZoneMoveResult::NeedsChoice(choice_player) => {
+                            state.pending_cost_move_resume =
+                                Some(PendingCostMoveResume::ReplacementMayCost {
+                                    source_id,
+                                    current: card_id,
+                                    remaining: eligible[index + 1..].to_vec(),
+                                    paid_count: count as i32,
+                                    outer_replacement: None,
+                                });
+                            pause_cost_payment_for_replacement_choice(state, choice_player);
+                            return Ok(PaymentOutcome::Paused {
+                                remaining_cost: None,
+                            });
+                        }
+                        ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                            unreachable!("a cost move to Exile cannot require Aura attachment")
+                        }
+                    }
                 }
                 state.last_effect_count = Some(count as i32);
             } else {
@@ -993,7 +1246,29 @@ fn pay_ability_cost_inner(
                     "cannot return source to hand: source is not in the required zone",
                 ));
             }
-            super::zones::move_to_zone(state, source_id, Zone::Hand, events);
+            let PaymentScope::Activation {
+                cost_move_handling,
+                ..
+            } = scope
+            else {
+                unreachable!("self-referential return costs are not payable at resolution")
+            };
+            match cost_move_handling {
+                ActivationCostMoveHandling::OutcomeAware => {
+                    if let Some(outcome) = move_self_activation_cost(
+                        state,
+                        player,
+                        source_id,
+                        Zone::Hand,
+                        events,
+                    ) {
+                        return Ok(outcome);
+                    }
+                }
+                ActivationCostMoveHandling::ManaAbilitySynchronous => {
+                    super::zones::move_to_zone(state, source_id, Zone::Hand, events);
+                }
+            }
         }
         // Other cost types require interactive resolution and are intercepted
         // before reaching pay_ability_cost, or are not yet auto-payable.
@@ -1133,7 +1408,7 @@ pub(crate) fn can_pay(
             // is now the correct verdict.
             true
         }
-        PaymentScope::Resolution { ability } => can_pay_resolution(state, payer, cost, ability),
+        PaymentScope::Resolution { ability, .. } => can_pay_resolution(state, payer, cost, ability),
     }
 }
 
@@ -1664,6 +1939,7 @@ mod tests {
             let scope = PaymentScope::Activation {
                 excluded_sources: &excluded,
                 ability_tag: None,
+                cost_move_handling: ActivationCostMoveHandling::OutcomeAware,
             };
             assert!(
                 can_pay(&scenario.state, P0, src, &cost, &scope),
@@ -1692,6 +1968,7 @@ mod tests {
         let scope = PaymentScope::Activation {
             excluded_sources: &excluded,
             ability_tag: None,
+            cost_move_handling: ActivationCostMoveHandling::OutcomeAware,
         };
         let mut events = Vec::new();
         let outcome =
@@ -1764,6 +2041,7 @@ mod tests {
             &PaymentScope::Activation {
                 excluded_sources: &excluded,
                 ability_tag: None,
+                cost_move_handling: ActivationCostMoveHandling::OutcomeAware,
             },
         )
     }
@@ -2340,7 +2618,10 @@ mod tests {
             src,
             P0,
         );
-        let scope = PaymentScope::Resolution { ability: &ability };
+        let scope = PaymentScope::Resolution {
+            ability: &ability,
+            cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+        };
 
         // (i) Waterbend at Resolution → Failed (was a silent no-op `Paid`).
         let waterbend = AbilityCost::Waterbend {

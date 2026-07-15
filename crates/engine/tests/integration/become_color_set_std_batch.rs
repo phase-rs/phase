@@ -278,7 +278,7 @@ fn generic_effect_has_chosen_color(effect: &Effect) -> bool {
             if static_abilities.iter().any(|s| s
                 .modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::AddChosenColor)))
+                .any(|m| matches!(m, ContinuousModification::AddChosenColor { .. })))
     )
 }
 
@@ -527,7 +527,7 @@ fn shimmerwilds_growth_makes_enchanted_land_the_chosen_color() {
         .find(|s| {
             s.modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::AddChosenColor))
+                .any(|m| matches!(m, ContinuousModification::AddChosenColor { .. }))
         })
         .expect("Shimmerwilds Growth must produce an AddChosenColor static")
         .clone();

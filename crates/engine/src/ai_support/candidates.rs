@@ -355,6 +355,33 @@ fn permute_into(
 /// constructing `GameAction::Concede { player_id }` directly.
 pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
     match &state.waiting_for {
+        WaitingFor::MeldPairChoice { player, choices } => choices
+            .iter()
+            .map(|choice| {
+                candidate(
+                    GameAction::ChooseMeldPair {
+                        source_id: choice.source_id,
+                        partner_id: choice.partner_id,
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
+        WaitingFor::MeldAttackTargetChoice {
+            player,
+            valid_targets,
+            ..
+        } => valid_targets
+            .iter()
+            .map(|target| {
+                candidate(
+                    GameAction::ChooseEntryAttackTarget { target: *target },
+                    TacticalClass::Attack,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ReplacementChoice {
             candidate_count,
             player,
@@ -744,6 +771,9 @@ pub fn candidate_actions_broad_with_probe(
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let actions = match &state.waiting_for {
+        WaitingFor::MeldPairChoice { .. } | WaitingFor::MeldAttackTargetChoice { .. } => {
+            candidate_actions_exact(state)
+        }
         WaitingFor::Priority { player } => priority_actions_with_probe(state, *player, probe),
         WaitingFor::ManaPayment {
             player,
@@ -1382,6 +1412,22 @@ pub fn candidate_actions_broad_with_probe(
                     )
                 })
                 .collect()
+        }
+        WaitingFor::KeepExactPermanentsChoice {
+            player,
+            eligible,
+            required_count,
+            ..
+        } => {
+            // CR 101.4 + CR 701.21a: any distinct exact-size subset is legal.
+            // Enumerate a compact deterministic baseline and leave richer board
+            // evaluation to the tactical policy layer.
+            let kept = eligible.iter().copied().take(*required_count).collect();
+            vec![candidate(
+                GameAction::ChooseKeptPermanents { kept },
+                TacticalClass::Selection,
+                Some(*player),
+            )]
         }
         WaitingFor::BetweenGamesSideboard { player, .. } => sideboard_actions(state, *player),
         WaitingFor::NamedChoice {

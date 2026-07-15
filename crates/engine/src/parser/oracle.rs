@@ -28,7 +28,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
-use super::oracle_nom::condition::{parse_graveyard_keyword_grant_sentence, parse_inner_condition};
+use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
 use super::oracle_nom::primitives::{parse_number as nom_parse_number, scan_contains};
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
@@ -68,8 +68,8 @@ use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
-    extract_keyword_line, is_keyword_cost_line, parse_keyword_from_oracle,
-    parse_kicker_additional_cost_line,
+    is_keyword_cost_line, is_kicker_family_line, parse_kicker_additional_cost_line,
+    parse_router_keyword_fragment, parse_router_keyword_line, parse_router_keyword_list,
 };
 use super::oracle_level::parse_level_blocks;
 use super::oracle_modal::{
@@ -90,12 +90,11 @@ use super::oracle_special::{
 };
 use super::oracle_static::{
     is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
-    parse_cast_spells_alternative_cost_multi, parse_chosen_creature_type_static_prefix,
-    parse_collect_evidence_alt_cost, parse_compound_you_control_chosen_type_static_prefix,
-    parse_every_creature_type_static_prefix, parse_flashback_trailing_self_spell_cost_reduction,
-    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
-    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
-    try_parse_top_of_library_cast_permission, GrantedCastKeywordKind,
+    parse_cast_spells_alternative_cost_multi, parse_collect_evidence_alt_cost,
+    parse_flashback_trailing_self_spell_cost_reduction, parse_spells_alternative_cost,
+    parse_static_line, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
+    try_parse_graveyard_keyword_grant_static, try_parse_top_of_library_cast_permission,
+    GrantedCastKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -1818,31 +1817,6 @@ fn is_self_chosen_type_description(description: &str) -> bool {
     parsed.is_ok()
 }
 
-fn push_same_is_true_static_tail<F>(
-    emitter: &mut DocEmitter<'_>,
-    item_line: usize,
-    line: &str,
-    lower: &str,
-    parse_modeled_sentence: F,
-) -> bool
-where
-    F: for<'i> FnMut(&'i str) -> OracleResult<'i, ()>,
-{
-    if let Some((modeled_sentence, unmodeled_tail)) =
-        split_same_is_true_static_tail(line, lower, parse_modeled_sentence)
-    {
-        for __item in
-            parse_static_line_with_graveyard_keyword_continuation(modeled_sentence, None, None)
-        {
-            emitter.static_at(item_line, __item);
-        }
-        emitter.ability_at(item_line, make_unimplemented(unmodeled_tail));
-        return true;
-    }
-
-    false
-}
-
 /// CR 611.3a + CR 702: Distribute a "The same is true for <keyword list>"
 /// continuation across a graveyard-keyword-gated static grant (Cairn Wanderer).
 ///
@@ -1943,9 +1917,14 @@ use crate::parser::oracle_ir::ast::ActivatedConstraintAst;
 /// 2. "[effect] instead if [condition]" — mid-line "instead", condition AFTER
 /// 3. "[effect] instead" — trailing "instead"
 ///
-/// Any extracted "if [condition]" clause is parsed through the shared condition
-/// grammar (`parse_inner_condition`) and composed with any ability-word condition
-/// at the caller.
+/// Any extracted "if [condition]" clause is lowered through
+/// `conditions::lower_instead_condition` — the SINGLE AUTHORITY shared with the
+/// intra-chain override path (`build_instead_def`) — and composed with any
+/// ability-word condition at the caller. This path previously ran only the nom
+/// `StaticCondition` grammar, a strictly narrower vocabulary that cannot express
+/// a target-relative predicate; conditions the chain path lowers fine ("its
+/// controller has three or more poison counters") were silently dropped here, and
+/// the override was then published as an UNCONDITIONAL sibling ability.
 fn strip_instead_clause(
     text: &str,
     ctx: &mut ParseContext,
@@ -1961,10 +1940,11 @@ fn strip_instead_clause(
         if let Ok((cond_text, ())) =
             value::<_, _, OracleError<'_>, _>((), tag("if ")).parse(before.lower.trim_start())
         {
-            if let Some(condition) = parse_inner_condition(cond_text.trim())
-                .ok()
-                .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition))
-                .and_then(|condition| ability_word_to_ability_condition(&Some(condition), ctx))
+            if let Some(condition) =
+                crate::parser::oracle_effect::conditions::lower_instead_condition(
+                    cond_text.trim(),
+                    ctx,
+                )
             {
                 return (after.original.trim().to_string(), Some(condition), true);
             }
@@ -2008,10 +1988,8 @@ fn strip_instead_clause(
             // allow-noncombinator: structural sentence-boundary split, not parsing dispatch
             return (text.to_string(), None, false);
         }
-        let condition = parse_inner_condition(condition_text)
-            .ok()
-            .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition))
-            .and_then(|condition| ability_word_to_ability_condition(&Some(condition), ctx));
+        let condition =
+            crate::parser::oracle_effect::conditions::lower_instead_condition(condition_text, ctx);
         return (before.original.trim().to_string(), condition, true);
     }
 
@@ -2144,6 +2122,11 @@ fn is_standalone_spell_keyword_action_line(line: &str) -> bool {
     parsed
 }
 
+/// A classifier MAY probe with the STRICT parser; it may NOT probe with a helper
+/// that discards the remainder. This one gates a routing decision (priority 0 and
+/// the spell-resolution guard), so a permissive probe would report "this whole line
+/// is keywords" about a line carrying an unparsed semantic clause — and the router
+/// would then consume it.
 fn is_semicolon_keyword_line(line: &str, mtgjson_keyword_names: &[String]) -> bool {
     let mut saw_multiple_parts = false;
     let mut parts = line
@@ -2154,13 +2137,13 @@ fn is_semicolon_keyword_line(line: &str, mtgjson_keyword_names: &[String]) -> bo
         return false;
     };
 
-    if extract_keyword_line(first, mtgjson_keyword_names).is_none() {
+    if parse_router_keyword_list(first, mtgjson_keyword_names).is_none() {
         return false;
     }
 
     for part in parts {
         saw_multiple_parts = true;
-        if extract_keyword_line(part, mtgjson_keyword_names).is_none() {
+        if parse_router_keyword_list(part, mtgjson_keyword_names).is_none() {
             return false;
         }
     }
@@ -2197,8 +2180,12 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
+    // Strict probe: a line is only "not a spell resolution instruction, it's a
+    // keyword line" when it parses COMPLETELY as keywords. A permissive probe here
+    // reports true for "Cycling {2} if you control an artifact" and the conditional
+    // tail is never parsed by anything.
     if !is_ability_activate_cost_static(&lower)
-        && extract_keyword_line(line, mtgjson_keyword_names).is_some()
+        && parse_router_keyword_list(line, mtgjson_keyword_names).is_some()
     {
         return false;
     }
@@ -2916,28 +2903,18 @@ fn sub_ability_is_continuity_exemption(sub: Option<&AbilityDefinition>) -> bool 
     parse_continuity_exemption_clause(text.trim()).is_ok_and(|(rest, ())| rest.trim().is_empty())
 }
 
-// KNOWN GAP (Total War, tracked as a separate follow-up): this recognizer
-// covers only Siren's Call's "ignore this effect for each creature ... didn't
-// control continuously since the beginning of the turn" phrasing. Total War
-// carries the SAME CR 302.6 + CR 508.1a continuity exemption, but through a
-// DIFFERENT shape:
-//   - it is a triggered ability ("Whenever a player attacks with one or more
-//     creatures ..."), NOT an `ActivePlayerPunisher` delayed trigger, so it
-//     never reaches `apply_active_player_punisher`, the only caller of
-//     `sub_ability_is_continuity_exemption` above; and
-//   - it phrases the exemption as "except for creatures the player hasn't
-//     controlled continuously ...", which the "ignore this effect for each
-//     creature ..." tag below does not match.
-// As a result Total War's continuity exemption is currently silently dropped —
-// its DestroyAll filter parses only as [Untapped, Not(AttackedThisTurn)] with
-// no `ControlledContinuouslySinceTurnBegan` restriction and no `Unimplemented`
-// marker. This is a distinct dropped-modifier root cause (NOT the player-scope
-// bug fixed alongside it in `condition_introduces_attacking_player`) and is
-// intentionally left unfixed here. Fixing it means recognizing the "except for
-// <continuity>" clause on the triggered-ability DestroyAll effect body and
-// attaching `FilterProp::ControlledContinuouslySinceTurnBegan` — either by
-// generalizing this recognizer's phrasing or adding a sibling on the effect
-// parse path.
+// CR 302.6 + CR 508.1a: this recognizer covers only Siren's Call's "ignore this
+// effect for each creature ... didn't control continuously since the beginning
+// of the turn" phrasing, reached via `apply_active_player_punisher` (the only
+// caller of `sub_ability_is_continuity_exemption` above). Total War carries the
+// SAME continuity exemption but through a DIFFERENT shape — a triggered ability
+// ("Whenever a player attacks with one or more creatures ...") whose exemption
+// is phrased "except for creatures the player hasn't controlled continuously
+// ..." trailing the target population. That form is now handled at the target
+// filter parse path by `oracle_target::parse_except_continuity_exemption_suffix`
+// (attaching the same `FilterProp::ControlledContinuouslySinceTurnBegan`), so
+// this `ignore this effect ...` recognizer stays deliberately narrow to Siren's
+// Call's ActivePlayerPunisher shape.
 fn parse_continuity_exemption_clause(i: &str) -> OracleResult<'_, ()> {
     let (i, _) = tag::<_, _, OracleError<'_>>("ignore this effect for each creature").parse(i)?;
     // Optional subject anaphor: " the player" / " that player" / "".
@@ -3711,17 +3688,18 @@ pub(crate) fn parse_oracle_ir(
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .collect();
+            // Consume-on-success: EVERY part must parse completely as keywords. The
+            // permissive form accepted a part carrying a semantic clause ("cycling
+            // {2} if you control an artifact"), consumed the whole line, and dropped
+            // that clause with no keyword and no diagnostic.
             if parts.len() > 1 {
-                let all_keywords = parts
+                let routed: Option<Vec<Vec<Keyword>>> = parts
                     .iter()
-                    .all(|part| extract_keyword_line(part, mtgjson_keyword_names).is_some());
-                if all_keywords {
-                    for part in &parts {
-                        if let Some(extracted) = extract_keyword_line(part, mtgjson_keyword_names) {
-                            for __item in extracted {
-                                emitter.keyword_at(item_line, __item);
-                            }
-                        }
+                    .map(|part| parse_router_keyword_list(part, mtgjson_keyword_names))
+                    .collect();
+                if let Some(routed) = routed {
+                    for keyword in routed.into_iter().flatten() {
+                        emitter.keyword_at(item_line, keyword);
                     }
                     i += 1;
                     continue;
@@ -3765,8 +3743,10 @@ pub(crate) fn parse_oracle_ir(
 
         // CR 702.122 + CR 602.5b: Crew with a trailing "Activate only once each
         // turn." cadence sentence. Must run before the generic keyword-only
-        // extraction below — that path parses "Crew N" via `parse_keyword_from_oracle`
-        // and would consume the line, dropping the cadence sentence.
+        // extraction below: that path would emit a bare `Crew N` and leave the cadence
+        // sentence to be re-parsed as its own unit. This intercept models both in one
+        // keyword. (Both surfaces are strict about the tail — `parse_crew_keyword` ends
+        // in `all_consuming`, and priority 1b now routes through the strict list.)
         if lower_starts_with(&lower, "crew ") {
             if let Some(crew_kw) = parse_crew_keyword(&lower) {
                 emitter.keyword_at(item_line, crew_kw);
@@ -3778,9 +3758,17 @@ pub(crate) fn parse_oracle_ir(
         // Priority 1b: keyword-only line — extract any keywords for the union set
         // Guard: "{Keyword} abilities you activate cost {N} less" is a static ability,
         // not a keyword line. Don't let keyword extraction consume it.
+        // Consume-on-success. This slot runs LONG before the strict routers at
+        // priority 9 / 13, so whenever MTGJSON names the keyword — the common case —
+        // it is THIS slot, not those, that decides the line. On the permissive
+        // surface it consumed "Cycling {2} if you control an artifact" as a bare
+        // Cycling and dropped the condition, which made the strict wiring downstream
+        // unreachable for exactly the cards MTGJSON knows about. Only a completely
+        // parsed keyword list may consume the line now; anything else falls through
+        // and becomes an honest, exact-unit `Effect::Unimplemented`.
         let is_ability_cost_static = is_ability_activate_cost_static(&lower);
         if !is_ability_cost_static {
-            if let Some(extracted) = extract_keyword_line(&line, mtgjson_keyword_names) {
+            if let Some(extracted) = parse_router_keyword_list(&line, mtgjson_keyword_names) {
                 if let Some(cost) = parse_kicker_additional_cost_line(&line, &lower) {
                     merge_kicker_additional_cost(&mut result.additional_cost, cost);
                     additional_cost_line.get_or_insert(item_line);
@@ -3806,41 +3794,6 @@ pub(crate) fn parse_oracle_ir(
             item_line,
             &static_line,
             &static_line_lower,
-        ) {
-            i += 1;
-            continue;
-        }
-        if push_same_is_true_static_tail(
-            &mut emitter,
-            item_line,
-            &static_line,
-            &static_line_lower,
-            parse_chosen_creature_type_static_prefix,
-        ) {
-            i += 1;
-            continue;
-        }
-        if push_same_is_true_static_tail(
-            &mut emitter,
-            item_line,
-            &static_line,
-            &static_line_lower,
-            parse_every_creature_type_static_prefix,
-        ) {
-            i += 1;
-            continue;
-        }
-        // CR 611.3 + CR 607.2d: compound-subject chosen-type static with a
-        // "The same is true for ..." tail (Rukarumel, Biologist). Models the
-        // "X you control and Y you control are the chosen type ..." sentence and
-        // leaves the non-battlefield-zone tail as an `Unimplemented` residual,
-        // mirroring Arcane Adaptation / Maskwood Nexus.
-        if push_same_is_true_static_tail(
-            &mut emitter,
-            item_line,
-            &static_line,
-            &static_line_lower,
-            parse_compound_you_control_chosen_type_static_prefix,
         ) {
             i += 1;
             continue;
@@ -4664,7 +4617,7 @@ pub(crate) fn parse_oracle_ir(
         if lower_starts_with(&lower, "flashback") {
             if line.contains('\u{2014}') {
                 let lower_clean = lower.trim_end_matches('.').trim();
-                if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
+                if let Some(kw) = parse_router_keyword_fragment(lower_clean) {
                     emitter.keyword_at(item_line, kw);
                     i += 1;
                     continue;
@@ -4672,17 +4625,21 @@ pub(crate) fn parse_oracle_ir(
             } else if let Some((flashback_part, reduction_part)) =
                 split_flashback_trailing_self_spell_cost_reduction(&line, &lower)
             {
+                // ATOMIC + consume-on-success. The split PROMISES two semantic halves.
+                // The previous form advanced `i` unconditionally, so a line whose
+                // keyword half parsed but whose cost-reduction half did not (or vice
+                // versa) was consumed with the other half silently dropped. Both must
+                // parse, or the line falls through and stays honestly red.
                 let flashback_lower = flashback_part.to_lowercase();
-                if let Some(kw) = parse_keyword_from_oracle(&flashback_lower) {
+                if let (Some(kw), Some(def)) = (
+                    parse_router_keyword_fragment(&flashback_lower),
+                    parse_flashback_trailing_self_spell_cost_reduction(reduction_part),
+                ) {
                     emitter.keyword_at(item_line, kw);
-                }
-                if let Some(def) =
-                    parse_flashback_trailing_self_spell_cost_reduction(reduction_part)
-                {
                     emitter.static_at(item_line, def);
+                    i += 1;
+                    continue;
                 }
-                i += 1;
-                continue;
             }
         }
 
@@ -5083,7 +5040,7 @@ pub(crate) fn parse_oracle_ir(
         // Spells (instants/sorceries) with Suspend would otherwise be caught by
         // the is_spell branch and produce an Unimplemented effect.
         if lower_starts_with(&lower, "suspend ") {
-            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+            if let Some(kw) = parse_router_keyword_fragment(&lower) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5093,7 +5050,7 @@ pub(crate) fn parse_oracle_ir(
         // Digital-only Specialize: "specialize {cost}" — MTGJSON may omit the keyword
         // when it appears as a standalone rules line; intercept before dispatch fallback.
         if lower_starts_with(&lower, "specialize ") {
-            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+            if let Some(kw) = parse_router_keyword_fragment(&lower) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5105,7 +5062,7 @@ pub(crate) fn parse_oracle_ir(
         // is intercepted as a keyword, not parsed as an effect.
         // MTGJSON keywords array only says "Harmonize" (no cost), so we extract cost here.
         // Format: "Harmonize {cost} (reminder text)" — space-separated.
-        // Note: When MTGJSON provides "Harmonize" in keywords, extract_keyword_line at
+        // Note: When MTGJSON provides "Harmonize" in keywords, the strict keyword list at
         // priority 1b already handles this. This is a fallback for test/edge cases.
         if lower_starts_with(&lower, "harmonize ") {
             if let Some(harmonize_kw) = parse_harmonize_keyword(&line) {
@@ -5127,41 +5084,53 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
-        // Priority 8f: Kicker / Multikicker / Replicate cost lines — must run BEFORE Priority 9
-        // (spell catch-all) so these keyword declarations on spell cards don't become Unimplemented.
+        // Priority 8f: CR 702.33 Kicker / CR 702.33c Multikicker / CR 702.56 Replicate /
+        // CR 702.187 Mayhem cost lines — must run BEFORE Priority 9 (spell catch-all) so
+        // these keyword declarations on spell cards don't become Unimplemented.
         // We cannot use is_keyword_cost_line here because it would also catch "flashback"
         // etc. whose specific em-dash parsers run between Priority 9 and Priority 13.
         // Note: "mayhem" IS in is_keyword_cost_line and is handled at Priority 1b via MTGJSON
         // keywords when present; this guard catches it when keywords[] is empty.
-        if alt((
-            tag::<_, _, OracleError<'_>>("kicker"),
-            tag("multikicker"),
-            tag("replicate"),
-            tag("mayhem"),
-        ))
-        .parse(lower.as_str())
-        .is_ok()
-        {
+        //
+        // Two defects fixed here (task #123), both of which made this the worst site:
+        //  (a) CLASS-A SILENT SWALLOW. `i += 1; continue;` used to sit OUTSIDE both
+        //      `if let Some` blocks, so a candidate line that NEITHER parser could
+        //      parse was consumed with no keyword, no additional cost, and no
+        //      diagnostic — it vanished and the card rendered as fully supported.
+        //      The line is now consumed only if something was actually recorded.
+        //  (b) NO WORD BOUNDARY. The dispatch was a bare `alt((tag("kicker"), …))`,
+        //      so it matched any line merely STARTING with those letters —
+        //      "Kickerfoo {2}" was accepted and then vanished via (a).
+        //      `is_kicker_family_line` shares `is_keyword_cost_line`'s boundary rule.
+        if is_kicker_family_line(&lower) {
+            let mut recorded = false;
             if let Some(cost) = parse_kicker_additional_cost_line(&line, &lower) {
                 merge_kicker_additional_cost(&mut result.additional_cost, cost);
+                additional_cost_line.get_or_insert(item_line);
+                recorded = true;
             }
-            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+            if let Some(kw) = parse_router_keyword_fragment(&lower) {
                 emitter.keyword_at(item_line, kw);
+                recorded = true;
             }
-            i += 1;
-            continue;
+            if recorded {
+                i += 1;
+                continue;
+            }
+            // Nothing parsed: fall through to the spell catch-all / priority 15 so the
+            // line becomes an honest, exact-unit `Effect::Unimplemented`.
         }
 
         // CR 702.27a: Buyback em-dash form — "Buyback—Sacrifice a land." (Constant
         // Mists) etc. MTGJSON omits the Buyback keyword when the cost is non-mana,
-        // so `extract_keyword_line` bails and the line would otherwise fall through
+        // so the priority-1b keyword list bails and the line would otherwise fall through
         // to the spell-effect catch-all and produce `Unimplemented`. Intercept here
         // before the spell catch-all, mirroring the Flashback em-dash intercept above.
         // structural: not dispatch — em-dash char presence gates the cost sub-parser,
         // which uses nom combinators in `parse_buyback_cost` / `parse_oracle_cost`.
         if lower_starts_with(&lower, "buyback") && line.contains('\u{2014}') {
             let lower_clean = lower.trim_end_matches('.').trim();
-            if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
+            if let Some(kw) = parse_router_keyword_fragment(lower_clean) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5177,7 +5146,7 @@ pub(crate) fn parse_oracle_ir(
             .is_ok()
         {
             let lower_clean = lower.trim_end_matches('.').trim();
-            if let Some(kw) = parse_keyword_from_oracle(lower_clean) {
+            if let Some(kw) = parse_router_keyword_fragment(lower_clean) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5195,12 +5164,18 @@ pub(crate) fn parse_oracle_ir(
             // for `synthesize_cycling`. Continuation-line protection already
             // lives in `is_spell_resolution_instruction_line`; this covers the
             // case where the keyword-cost line is its own main-loop iteration.
-            if is_keyword_cost_line(&lower) {
-                if let Some(kw) = parse_keyword_from_oracle(&lower) {
-                    emitter.keyword_at(item_line, kw);
-                    i += 1;
-                    continue;
+            // Consume-on-success: the candidate recognizer is a filter, not
+            // evidence. Only a complete strict parse (keyword + permitted P/R/M
+            // tail) licenses advancing past the line. A candidate we cannot
+            // strictly parse — "Cycling {2} if you control an artifact" — falls
+            // through to spell-effect parsing and becomes an honest, exact-unit
+            // `Effect::Unimplemented` rather than vanishing.
+            if let Some(routed) = parse_router_keyword_line(&line) {
+                if let Some(keyword) = routed.keyword {
+                    emitter.keyword_at(item_line, keyword);
                 }
+                i += 1;
+                continue;
             }
 
             // B7: Strip ability-word prefix and attach condition for spell effects.
@@ -5304,6 +5279,43 @@ pub(crate) fn parse_oracle_ir(
             } else {
                 parse_effect_chain_with_context(parse_line, AbilityKind::Spell, &mut ctx)
             };
+
+            // CR 614.15 + CR 608.2c: a PARTIAL cross-line self-replacement whose
+            // antecedent is a `Dig` ("Reveal the top five cards of your library. You
+            // may put a creature card from among them into your hand. Put the rest
+            // into your graveyard." / "Spell mastery — If <cond>, put up to TWO
+            // creature cards from among the revealed cards into your hand INSTEAD OF
+            // ONE.").
+            //
+            // The override's body cannot stand on its own: parsed in isolation it
+            // lowers to a bare `ChangeZone`, dropping the reveal, the library source
+            // and the rest-to-graveyard rider that the printed Dig carries. Binding
+            // THAT as the replacement would trade the double-execution for an effect
+            // LOSS. `try_parse_dig_instead_alternative` is the existing
+            // antecedent-parameterized handler for exactly this: it rebuilds the
+            // alternative as a full `Dig` that reuses the preceding Dig's source and
+            // reveal-mode and swaps only what the override actually changes
+            // (keep_count / up_to / filter / destination). It is reached intra-chain
+            // via the chunk ladder; here we hand it the previous LINE's def as the
+            // antecedent, which is the same relationship across a line boundary.
+            //
+            // The resulting alternative carries its own condition, so it flows into
+            // the ability-word merge and the cross-line binder below exactly like any
+            // other override — the binder wraps it in `ConditionInstead` and parks the
+            // printed Dig as the `else_ability` fallback.
+            let dig_alt = emitter.builder.peek_last_spell().and_then(|previous| {
+                crate::parser::oracle_effect::conditions::try_parse_dig_instead_alternative(
+                    &effect_line,
+                    Some(previous),
+                    AbilityKind::Spell,
+                    &mut ctx,
+                )
+            });
+            let is_cross_line_dig_alt = dig_alt.is_some();
+            if let Some(alt) = dig_alt {
+                def = alt;
+            }
+
             def.min_x_value = spell_min_x_value;
             def.description = Some(description);
             // CR 608.2c: Compose ability word condition with chain-extracted condition.
@@ -5336,11 +5348,36 @@ pub(crate) fn parse_oracle_ir(
             if has_roll_die_pattern(&lower) {
                 i = attach_die_result_branches_to_chain(&mut def, &lines, i);
             }
-            // CR 608.2c: Cross-line "instead" replacement — when a conditional line
-            // replaces the entire preceding ability, compose them so the engine resolves
-            // the binary choice correctly. The "instead" sub has the condition; the base
-            // ability becomes the fallback when the condition is not met.
-            if is_instead || is_instead_replacement_line(&effect_line) {
+            // CR 608.2c + CR 614.15: Cross-line "instead" self-replacement — a
+            // separate printed line (usually an ability word, per CR 614.15)
+            // replaces the preceding ability's effect. Compose them so the engine
+            // resolves the binary choice: the "instead" sub carries the condition;
+            // the base ability becomes the fallback when it is not met.
+            // CR 614.15: the residual self-replacement printings. The three gates above
+            // recognize the shapes we can BIND: the whole-clause forms (bare trailing
+            // "instead", ", instead <effect>", "<effect> instead if <cond>") and the
+            // partial quantity form with a Dig antecedent. Everything else that is
+            // still a self-replacement override reaches here — e.g. a partial override
+            // whose antecedent is NOT a Dig ("search your library for up to three basic
+            // Forest cards instead of two"), or one that replaces a NON-first clause of
+            // the base chain ("You may put that card onto the battlefield instead of
+            // putting it into your hand").
+            //
+            // Those need a clause-level antecedent selection and a tail that survives in
+            // BOTH branches, which the FirstEmitted binder cannot express. We do NOT
+            // guess at them — but neither may they be published as independent abilities,
+            // which is what happened before and made the engine run the base effect AND
+            // the replacement (CR 614.6). They fall to the honest-failure floor below.
+            //
+            // The "would" exclusion is CR 614.1: a replacement effect watches for an
+            // event that WOULD happen. A "would" clause names an EVENT (CR 614.1a) and is
+            // owned by the replacement machinery, not by this self-replacement binder —
+            // claiming it here would replace a working rider encoding with an honest red.
+            let effect_line_lower = effect_line.to_lowercase();
+            let is_unbindable_self_replacement = scan_contains(&effect_line_lower, "instead")
+                && !scan_contains(&effect_line_lower, "would");
+
+            if is_instead || is_cross_line_dig_alt || is_instead_replacement_line(&effect_line) {
                 if let Some(condition) = def.condition.take() {
                     if let Some(base_item) = emitter.pop_last_spell() {
                         // Re-emit the merged ability at the BASE item's ORIGINAL
@@ -5367,7 +5404,54 @@ pub(crate) fn parse_oracle_ir(
                     }
                     // No previous ability to compose with — restore condition and push standalone.
                     def.condition = Some(condition);
+                } else if emitter.builder.peek_last_spell().is_some() {
+                    // CR 614.6: "If an event is replaced, it never happens."
+                    //
+                    // The line IS a self-replacement override of the preceding
+                    // ability, but no condition lowered for it (from the clause, the
+                    // trailing "instead if <cond>", or an ability word), so there is
+                    // nothing to branch on and the override CANNOT be bound.
+                    //
+                    // Publishing it as an independent ability — which is what used to
+                    // happen — is the one thing we must never do: the engine then
+                    // performs the base effect AND the replacement, unconditionally.
+                    // Anoint with Affliction ("Corrupted — Exile that creature instead
+                    // if its controller has three or more poison counters") published a
+                    // second, condition-less `ChangeZone -> Exile` and exiled the target
+                    // even when the printed "mana value 3 or less" gate had already
+                    // refused to, and even with zero poison counters in play.
+                    //
+                    // Fail honestly instead: the base ability stands as printed and the
+                    // unbindable override is reported as unimplemented. This mirrors the
+                    // intra-chain `InsteadLowering::ConditionUnlowerable` floor.
+                    def.effect = Box::new(Effect::unimplemented("instead_override", &effect_line));
+                    def.sub_ability = None;
+                    def.else_ability = None;
                 }
+            } else if is_unbindable_self_replacement && emitter.builder.peek_last_spell().is_some()
+            {
+                // CR 614.6 + CR 614.15: the residual self-replacement printings — a
+                // PARTIAL override whose antecedent is not a Dig ("search your library
+                // for up to three basic Forest cards instead of two"), or one that
+                // replaces a NON-FIRST clause of the base chain ("You may put that card
+                // onto the battlefield instead of putting it into your hand").
+                //
+                // These have a perfectly good condition, so it is tempting to hand them to
+                // the binder above. That would be WRONG, and silently so: the binder binds
+                // the FIRST emitted clause and parks the base's tail in `else_ability`,
+                // which the runtime walks ONLY when the swap does not fire. Nissa's
+                // Pilgrimage would search for three basic Forests and then never reveal
+                // them, put one onto the battlefield, or shuffle. That trades a
+                // double-execution for an effect LOSS — a different silent wrong.
+                //
+                // A faithful bind needs clause-level antecedent selection plus a tail that
+                // survives in BOTH branches. Until that exists, fail honestly: the base
+                // ability stands exactly as printed and the override is reported
+                // unimplemented. Never an independent ability.
+                def.effect = Box::new(Effect::unimplemented("instead_override", &effect_line));
+                def.condition = None;
+                def.sub_ability = None;
+                def.else_ability = None;
             }
             emitter.ability_at(item_line, def);
             continue;
@@ -5397,7 +5481,7 @@ pub(crate) fn parse_oracle_ir(
 
         // CR 702.49d: Commander ninjutsu is not in MTGJSON keywords — extract explicitly.
         if lower_starts_with(&lower, "commander ninjutsu ") {
-            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+            if let Some(kw) = parse_router_keyword_fragment(&lower) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5407,7 +5491,7 @@ pub(crate) fn parse_oracle_ir(
         // CR 702.138a: Escape is extracted by the generic keyword-cost guards —
         // the `is_spell` guard above (Priority 9) for instants/sorceries and the
         // `is_keyword_cost_line` guard below (Priority 13) for permanents — via the
-        // `escape—` branch registered in `parse_keyword_from_oracle`, alongside its
+        // `escape—` branch registered in `parse_keyword_line_core`, alongside its
         // evoke/embalm/eternalize/escalate em-dash siblings. No dedicated intercept
         // is needed here.
 
@@ -5429,22 +5513,29 @@ pub(crate) fn parse_oracle_ir(
             if let Some((flashback_part, reduction_part)) =
                 split_flashback_trailing_self_spell_cost_reduction(&line, &lower)
             {
+                // ATOMIC + consume-on-success — see the identical split above (priority 7
+                // guard). Both halves must parse or the line is not consumed.
                 let flashback_lower = flashback_part.to_lowercase();
-                if let Some(kw) = parse_keyword_from_oracle(&flashback_lower) {
+                if let (Some(kw), Some(def)) = (
+                    parse_router_keyword_fragment(&flashback_lower),
+                    parse_flashback_trailing_self_spell_cost_reduction(reduction_part),
+                ) {
                     emitter.keyword_at(item_line, kw);
-                }
-                if let Some(def) =
-                    parse_flashback_trailing_self_spell_cost_reduction(reduction_part)
-                {
                     emitter.static_at(item_line, def);
+                    i += 1;
+                    continue;
                 }
-                i += 1;
-                continue;
             }
         }
-        if is_keyword_cost_line(&lower) {
-            if let Some(kw) = parse_keyword_from_oracle(&lower) {
-                emitter.keyword_at(item_line, kw);
+        // Consume-on-success. The previous form advanced `i` OUTSIDE the
+        // `if let Some(kw)`, so a permanent line the candidate recognizer
+        // accepted but the parser could not parse was skipped with NO keyword
+        // and NO `Unimplemented` — a silent swallow that rendered as full
+        // support. A strict parse is now the only licence to advance; anything
+        // else falls through to priority 14a/15 and stays honestly red.
+        if let Some(routed) = parse_router_keyword_line(&line) {
+            if let Some(keyword) = routed.keyword {
+                emitter.keyword_at(item_line, keyword);
             }
             i += 1;
             continue;
@@ -5515,8 +5606,11 @@ pub(crate) fn parse_oracle_ir(
             }
             // Try as keyword — the ability-word prefix ("Void Shields —") was
             // stripped, so the remainder may be a keyword line that Priority 1b
-            // missed because it ran on the unprefixed original line.
-            if let Some(kw) = parse_keyword_from_oracle(&effect_lower) {
+            // missed because it ran on the unprefixed original line. Strict: the
+            // stripped remainder must be a COMPLETE keyword declaration, or the line
+            // continues to the static/effect paths and ultimately an honest
+            // `Effect::Unimplemented`.
+            if let Some(kw) = parse_router_keyword_fragment(&effect_lower) {
                 if !matches!(kw, Keyword::Unknown(_)) {
                     emitter.keyword_at(item_line, kw);
                     i += 1;
@@ -6441,16 +6535,34 @@ fn parse_activation_during_role_gate(i: &str) -> OracleResult<'_, ActivationRest
     .parse(i)
 }
 
-/// CR 508.1 + CR 509.1: the combat-window half of a compound activation-timing
-/// gate — "before combat" / "before attackers are declared" both map to the
-/// EXISTING `BeforeAttackersDeclared` variant (enforced via
-/// `is_before_attackers_declared` = `PreCombatMain | BeginCombat`), so no new
-/// variant is introduced.
+/// CR 508.1 + CR 509.1 + CR 510: the combat-window half of an activation-timing
+/// gate. Each phrasing maps to an EXISTING enforced variant, so no new variant is
+/// introduced:
+/// - "before the combat damage step" / "before combat damage [has been dealt]"
+///   → `BeforeCombatDamage` (CR 510; enforced = `BeginCombat | DeclareAttackers
+///   | DeclareBlockers`) — Angus Mackenzie, Save Point.
+/// - "before attackers are declared" / "before combat" → `BeforeAttackersDeclared`
+///   (CR 508.1; enforced = `PreCombatMain | BeginCombat`) — Arcum's Whistle.
+///
+/// The combat-damage arm is tried BEFORE the `before combat` arm, which is a
+/// prefix of "before combat damage" and would otherwise shadow it; within that
+/// arm the longest phrasing is first so it consumes fully rather than leaving a
+/// "has been dealt" / "step" residual for the caller's whole-consumption check.
 fn parse_activation_before_window_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
-    value(
-        ActivationRestriction::BeforeAttackersDeclared,
-        alt((tag("before combat"), tag("before attackers are declared"))),
-    )
+    alt((
+        value(
+            ActivationRestriction::BeforeCombatDamage,
+            alt((
+                tag("before combat damage has been dealt"),
+                tag("before the combat damage step"),
+                tag("before combat damage"),
+            )),
+        ),
+        value(
+            ActivationRestriction::BeforeAttackersDeclared,
+            alt((tag("before attackers are declared"), tag("before combat"))),
+        ),
+    ))
     .parse(i)
 }
 
@@ -6480,6 +6592,32 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         if let Ok((tail, (_sep, window))) = compound {
             if tail.trim().is_empty() {
                 return Some(vec![restr, window]);
+            }
+        }
+    }
+    // CR 508.1: a STANDALONE combat-window gate with no "during <role>" first
+    // half — "Activate only before attackers are declared" / "before combat"
+    // (Arcum's Whistle, Arcum's Sleigh). Reuses the same enforced
+    // `BeforeAttackersDeclared` variant as the compound form above; it only fires
+    // when the whole phrase is a bare before-window that would otherwise fall
+    // through to `Effect::Unimplemented`.
+    if let Ok((tail, window)) = parse_activation_before_window_gate(lower.as_str()) {
+        if tail.trim().is_empty() {
+            return Some(vec![window]);
+        }
+    }
+    // CR 509.1 + CR 510: "during combat, before <window>" — the leading half is the
+    // combat phase itself (not a turn-role), so it pairs `DuringCombat` with the
+    // before-window gate. Save Point: "during combat before combat damage has been
+    // dealt" → [DuringCombat, BeforeCombatDamage]. Replaces the former verbatim
+    // strip_suffix special case; bare "during combat" (no trailing window) is left
+    // to its own single-restriction branch because `tag` requires the space.
+    if let Ok((rest, ())) =
+        value((), tag::<_, _, OracleError<'_>>("during combat ")).parse(lower.as_str())
+    {
+        if let Ok((tail, window)) = parse_activation_before_window_gate(rest) {
+            if tail.trim().is_empty() {
+                return Some(vec![ActivationRestriction::DuringCombat, window]);
             }
         }
     }
@@ -6771,32 +6909,14 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             continue;
         }
 
-        // CR 602.5b + CR 102.1 + CR 509.1: The former verbatim-string hack for
-        // "activate only during your turn, before attackers are declared" is
-        // subsumed by the compound `parse_activation_timing_restriction` grammar,
-        // which the `activate only ` routing arm above reaches BEFORE this point
-        // (it emits `[DuringYourTurn, BeforeAttackersDeclared]` via the
-        // during-role + before-window sub-combinators). Pinned by Test 10c.
-
-        if let Some(prefix) =
-            lower.strip_suffix("activate only during combat before combat damage has been dealt")
-        {
-            let end = remaining.len()
-                - "activate only during combat before combat damage has been dealt".len();
-            remaining = remaining[..end]
-                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                .to_string();
-            constraints
-                .restrictions
-                .push(ActivationRestriction::DuringCombat);
-            constraints
-                .restrictions
-                .push(ActivationRestriction::BeforeCombatDamage);
-            if prefix.trim().is_empty() {
-                break;
-            }
-            continue;
-        }
+        // CR 602.5b + CR 102.1 + CR 509.1 + CR 510: The former verbatim-string
+        // hacks for "activate only during your turn, before attackers are declared"
+        // and "activate only during combat before combat damage has been dealt" are
+        // both subsumed by the `parse_activation_timing_restriction` grammar, which
+        // the `activate only ` routing arm above reaches BEFORE this point (it emits
+        // `[DuringYourTurn, BeforeAttackersDeclared]` / `[DuringCombat,
+        // BeforeCombatDamage]` via the during-role + before-window sub-combinators).
+        // Pinned by Test 10c and the combat-damage building-block tests.
 
         if let Some(prefix) = lower.strip_suffix("activate only once each turn") {
             let end = remaining.len() - "activate only once each turn".len();

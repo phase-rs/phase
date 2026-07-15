@@ -11,6 +11,7 @@ use super::oracle_effect::{
     condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
     try_parse_each_player_copy_chosen, try_parse_exile_top_each_library_with_collection_counter,
     try_parse_grant_graveyard_keyword_to_target, try_parse_reanimator_aura_etb_effect,
+    try_parse_reanimator_aura_grant_etb_effect,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
@@ -475,21 +476,172 @@ fn rewrite_cost_x_in_effect(effect: &mut crate::types::ability::Effect) {
 ///
 /// Rewrite an `AbilityCondition`'s quantity operands. Mirrors
 /// `apply_where_x_ability_condition` (`oracle_effect/lower.rs`).
+/// CR 107.3i: bind every `X` an intervening-if condition can carry.
+///
+/// EXHAUSTIVE BY CONSTRUCTION — no `_` arm. A trigger's condition is checked when the trigger
+/// would go on the stack (CR 603.4), which is BEFORE `current_trigger_event` is set, so the
+/// `resolve_ref` fallback that rescues `effect` quantities is dead here: an unbound `X` in a
+/// condition silently compares against **0** and the intervening-if takes the wrong branch.
+/// The previous `_ => {}` wildcard therefore had real teeth, and it was dropping three things:
+/// `PreviousEffectAmount`'s `rhs`, and any `X` nested inside `ConditionInstead` / `Not`.
+/// Listing every variant is deliberate: when a new condition gains a `QuantityExpr`, the
+/// compiler makes someone decide, instead of the value silently fabricating a zero.
 fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityCondition) {
     use super::oracle_replacement::rewrite_variable_x_to_cost_x_paid;
     use crate::types::ability::AbilityCondition;
     match cond {
+        // Quantity-carrying: bind the X.
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             rewrite_variable_x_to_cost_x_paid(lhs);
             rewrite_variable_x_to_cost_x_paid(rhs);
         }
+        AbilityCondition::PreviousEffectAmount { rhs, .. } => {
+            rewrite_variable_x_to_cost_x_paid(rhs);
+        }
+        // Nested conditions: recurse, or an X inside them is never reached.
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             for c in conditions.iter_mut() {
                 rewrite_cost_x_in_condition(c);
             }
         }
-        _ => {}
+        AbilityCondition::ConditionInstead { inner } => rewrite_cost_x_in_condition(inner),
+        AbilityCondition::Not { condition } => rewrite_cost_x_in_condition(condition),
+        // Carry no `QuantityExpr` and nest no condition — nothing to bind.
+        AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::WhenYouDo
+        | AbilityCondition::WasCast { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CurrentPhaseIs { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::ObjectsShareQuality { .. }
+        | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+        | AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::IsRingBearer
+        | AbilityCondition::CompletedDungeon { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::HasObjectTarget
+        | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+        | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+        | AbilityCondition::ControllerControlsMatching { .. }
+        | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+        | AbilityCondition::IsYourTurn
+        | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::NthResolutionThisTurn { .. }
+        | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::ScopedPlayerMatches { .. } => {}
     }
+}
+
+/// CR 107.3i TOTALITY GUARD — does a bare `X` still survive in a slot that FABRICATES?
+///
+/// Keyed on the fabricating slots ONLY, and that scoping is the whole design. These four are
+/// consumed during TARGET SELECTION / intervening-if checking, i.e. before the trigger resolves
+/// and before `current_trigger_event` is set — so `resolve_ref`'s
+/// `Variable{"X"} -> current_trigger_event -> cost_x_paid` fallback is DEAD for them and an
+/// unbound X silently resolves to **0**: "distribute 0 counters", "up to 0 targets". The card
+/// still renders as fully supported. That is the lying green.
+///
+/// It deliberately does NOT look at (each verdict MEASURED end-to-end, not assumed):
+///  * the `effect` subtree's own quantities — a residual X there IS bound at resolution by the
+///    `cost_x_paid` fallback (Hugs, Grisly Guardian exiles X cards correctly);
+///  * filter mana-value bounds inside an effect — also bound at runtime (Kinetic Ooze destroys
+///    an MV-3 artifact for X=3, and CANNOT target it for X=1);
+///  * ungated triggers — the walk never runs there. Their X is a cast-X read through the trigger
+///    event (Hydroid Krasis), or an activated ability's announced X (Shark Typhoon), which
+///    `GameState::announced_source_x` now carries;
+///  * pay-any-amount sentinels (CR 107.3f) — a bare X in a `PayLife`/`PayEnergy` amount is the
+///    engine's "pay any amount" marker, not a fabrication.
+///
+/// Redding any of those would manufacture honest-looking reds out of cards that work — the
+/// mirror image of the lying green, and just as dishonest.
+fn cost_x_sibling_slot_still_unbound(def: &crate::types::ability::AbilityDefinition) -> bool {
+    use crate::types::ability::AbilityCondition;
+    use crate::types::game_state::TargetSelectionConstraint;
+
+    fn condition_has_bare_x(cond: &AbilityCondition) -> bool {
+        match cond {
+            AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+                lhs.contains_x() || rhs.contains_x()
+            }
+            AbilityCondition::PreviousEffectAmount { rhs, .. } => rhs.contains_x(),
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions.iter().any(condition_has_bare_x)
+            }
+            AbilityCondition::ConditionInstead { inner } => condition_has_bare_x(inner),
+            AbilityCondition::Not { condition } => condition_has_bare_x(condition),
+            _ => false,
+        }
+    }
+
+    if def.condition.as_ref().is_some_and(condition_has_bare_x) {
+        return true;
+    }
+    if def
+        .repeat_for
+        .as_ref()
+        .is_some_and(crate::types::ability::QuantityExpr::contains_x)
+    {
+        return true;
+    }
+    if let Some(spec) = def.multi_target.as_ref() {
+        if spec.min.contains_x()
+            || spec
+                .max
+                .as_ref()
+                .is_some_and(crate::types::ability::QuantityExpr::contains_x)
+        {
+            return true;
+        }
+    }
+    for constraint in &def.target_constraints {
+        match constraint {
+            TargetSelectionConstraint::TotalManaValue { value, .. } => {
+                if value.contains_x() {
+                    return true;
+                }
+            }
+            // Carry no `QuantityExpr`. Exhaustive on purpose: a future constraint that carries
+            // one must be handled here or the build breaks — it cannot silently fabricate.
+            TargetSelectionConstraint::DifferentTargetPlayers
+            | TargetSelectionConstraint::DifferentObjectControllers
+            | TargetSelectionConstraint::SameZoneOwner { .. } => {}
+        }
+    }
+    def.sub_ability
+        .as_deref()
+        .is_some_and(cost_x_sibling_slot_still_unbound)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(cost_x_sibling_slot_still_unbound)
+        || def
+            .mode_abilities
+            .iter()
+            .any(cost_x_sibling_slot_still_unbound)
 }
 
 /// Walk an `AbilityDefinition` tree and rewrite Variable("X") → CostXPaid.
@@ -1313,7 +1465,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
             })
             .or_else(|| {
-                // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.17a: whole-body
+                // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: whole-body
                 // reanimator-Aura ETB effect (Animate Dead / Dance of the Dead) —
                 // "it loses ... and gains ...", return/put the enchanted creature
                 // card to the battlefield under your control, attach the Aura to
@@ -1321,6 +1473,18 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 // declines unless the entire body matches, so a deviating card
                 // stays an honest Unimplemented rather than misparsing.
                 try_parse_reanimator_aura_etb_effect(&effect_for_parse, AbilityKind::Spell)
+                    .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
+            })
+            .or_else(|| {
+                // CR 603.3d + CR 608.2c + CR 613.1d + CR 613.1f + CR 701.3a + CR 701.21a:
+                // whole-body reanimator-Aura GRANT-shape ETB effect (Necromancy) — a plain
+                // (non-Aura) enchantment whose ETB ability becomes an Aura AND targets the
+                // graveyard creature to reanimate itself (unlike the swap shape above,
+                // which targets at CAST time via its printed Enchant restriction and
+                // refers back to `TargetFilter::AttachedTo` here). Fail-closed: declines
+                // unless the entire body matches, so a deviating card stays an honest
+                // Unimplemented rather than misparsing.
+                try_parse_reanimator_aura_grant_etb_effect(&effect_for_parse, AbilityKind::Spell)
                     .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
             })
             .or_else(|| {
@@ -1461,7 +1625,16 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             }
             Some(Box::new(ability))
         }
-        Some(TriggerBody::PreLowered(ability)) => Some(ability.clone()),
+        Some(TriggerBody::PreLowered(ability)) => {
+            // CR 603.5: Pre-lowered bodies (inline modals, vote blocks, etc.)
+            // may not have stamped `optional` during extraction even when the
+            // trigger effect began with "you may".
+            let mut ability = ability.clone();
+            if modifiers.optional {
+                ability.optional = true;
+            }
+            Some(ability)
+        }
         None => None,
     };
 
@@ -1727,6 +1900,19 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     if trigger_should_rewrite_cost_x(&def) {
         if let Some(execute) = def.execute.as_deref_mut() {
             rewrite_cost_x_in_ability(execute);
+            // CR 107.3i TOTALITY GUARD. If the walk above left a bare `X` in a slot consumed at
+            // TARGET-SELECTION time, that X has no runtime fallback and resolves to 0 — the card
+            // would keep rendering as fully supported while distributing zero counters or
+            // offering "up to 0" targets. Fail LOUDLY as an honest red instead of shipping the
+            // silent zero. This is a REGRESSION RATCHET: it flips 0 cards in the current pool
+            // (measured, 35,396 faces / 5,129 gated-ETB faces), because the walk now binds every
+            // such slot. Its job is to make the fabrication un-reintroducible.
+            if cost_x_sibling_slot_still_unbound(execute) {
+                *execute.effect = Effect::unimplemented(
+                    "cost_x_sibling_slot",
+                    "X in a target-selection slot was left unbound by the cost-X rewrite",
+                );
+            }
         }
     }
 
@@ -12667,17 +12853,26 @@ fn build_controlled_subtype_filters(
 // Category parsers
 // ---------------------------------------------------------------------------
 
-/// CR 303.4e: nom combinator for the "enchanted [creature|permanent]'s controller"
-/// possessive that scopes an Aura phase trigger to the controller of the permanent
-/// the source is attached to. Composed along its grammar axes — the fixed
-/// `enchanted ` lead, the object-kind alternation (`creature`/`permanent`), the
-/// possessive apostrophe (ASCII `'s` or curly `’s`), and the `controller` head —
-/// rather than enumerating the cartesian product of literals, so a new object-kind
-/// sibling is a single `alt()` arm. Matched at any word boundary by the caller
-/// because the phrase trails the phase noun ("the upkeep of …").
+/// CR 303.4e: nom combinator for the "enchanted <type>'s controller" possessive
+/// that scopes an Aura phase trigger to the controller of the permanent the
+/// source is attached to. Composed along its grammar axes — the fixed
+/// `enchanted ` lead, the object-kind leg, the possessive apostrophe (ASCII `'s`
+/// or curly `’s`), and the `controller` head — rather than enumerating the
+/// cartesian product of literals, so a new object-kind sibling is free.
+///
+/// CR 702.5a: the object-kind leg delegates to `parse_enchant_type_leg` — the
+/// same shared combinator that defines an Aura's legal enchant-target noun set
+/// (creature / artifact(+subtypes) / land(+basic-land-subtypes) / enchantment /
+/// planeswalker / permanent / instant / sorcery). Reusing it means this trigger
+/// phrase's noun set can never drift from the Aura's own enchant-target noun set
+/// (fixes the previous 2-noun `creature`/`permanent` gap that left "enchanted
+/// enchantment's controller" — Power Leak — and artifact/land Auras unscoped).
+///
+/// Matched at any word boundary by the caller because the phrase trails the
+/// phase noun ("the upkeep of …").
 fn parse_enchanted_controller_phrase(input: &str) -> OracleResult<'_, ()> {
     let (input, _) = tag("enchanted ").parse(input)?;
-    let (input, _) = alt((tag("creature"), tag("permanent"))).parse(input)?;
+    let (input, _) = crate::parser::oracle_nom::enchant::parse_enchant_type_leg(input)?;
     let (input, _) = alt((tag("'s"), tag("\u{2019}s"))).parse(input)?;
     let (input, _) = tag(" controller").parse(input)?;
     Ok((input, ()))
@@ -14515,6 +14710,33 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
             return Some(TargetFilter::Typed(
                 TypedFilter::default().properties(vec![prop]),
             ));
+        }
+    }
+
+    // CR 702.8a + CR 603.2: "that has <keyword>" / "with <keyword>" — the spell
+    // must possess the named keyword ability (Slitherwisp: "another spell that
+    // has flash"). Without this the keyword clause is dropped and the trigger
+    // over-fires on every spell (e.g. a non-flash counterspell). Gated on a
+    // recognized keyword whose text is fully consumed by `parse_keyword_line_core`
+    // so the numeric/colored "with mana value …" / "with … mana symbol" qualifiers
+    // handled above keep their arms and a non-keyword tail ("with power 3 …")
+    // still declines here. Emits `FilterProp::WithKeyword`, which the object
+    // matcher honors via `obj.has_keyword` (filter.rs).
+    if let Ok((keyword_text, ())) = alt((
+        value((), tag::<_, _, OracleError<'_>>("that has ")),
+        value((), tag("with ")),
+    ))
+    .parse(modifier)
+    {
+        if let Some((keyword, remainder)) =
+            super::oracle_keyword::parse_keyword_line_core(keyword_text.trim())
+        {
+            if remainder.trim().is_empty() {
+                return Some(TargetFilter::Typed(
+                    TypedFilter::default()
+                        .properties(vec![FilterProp::WithKeyword { value: keyword }]),
+                ));
+            }
         }
     }
 
@@ -16625,6 +16847,131 @@ mod ood_sphere_tests {
         assert!(
             has_unimplemented,
             "a non-attacker 'unless' rider must fail closed to Unimplemented, not be silently dropped"
+        );
+    }
+}
+
+/// CR 107.3i totality guard (`cost_x_sibling_slot_still_unbound`) — is it real, and is it
+/// SCOPED? A guard that cannot fire is not a guard; a guard that reds working cards is worse
+/// than none, because it manufactures honest-looking reds out of cards that play correctly.
+#[cfg(test)]
+mod cost_x_totality_guard_tests {
+    use super::{cost_x_sibling_slot_still_unbound, rewrite_cost_x_in_ability};
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, MultiTargetSpec, QuantityExpr, QuantityRef,
+        TargetFilter,
+    };
+    use crate::types::TriggerMode;
+
+    fn bare_x() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+    }
+
+    /// A def whose `multi_target.max` is a bare X — Broodlord's exact shape ("distribute X
+    /// +1/+1 counters among any number of other target creatures"), the slot t96 MEASURED
+    /// fabricating a silent 0.
+    fn broodlord_shaped_def() -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        def.multi_target = Some(MultiTargetSpec {
+            min: QuantityExpr::Fixed { value: 0 },
+            max: Some(bare_x()),
+        });
+        def
+    }
+
+    /// NON-VACUITY. The guard must FIRE on an unbound sibling slot. If this ever passes with the
+    /// detector returning `false`, the guard has become decorative and the silent zero is back.
+    #[test]
+    fn guard_fires_on_an_unbound_target_selection_slot() {
+        assert!(
+            cost_x_sibling_slot_still_unbound(&broodlord_shaped_def()),
+            "the guard must DETECT a bare X in multi_target.max — that slot is consumed at target \
+             selection, where the cost_x_paid fallback is dead, so it silently resolves to 0"
+        );
+    }
+
+    /// ...and must FALL SILENT once the rewrite has bound that same slot. Together with the test
+    /// above this shows the guard discriminates (rather than always firing or never firing), and
+    /// that `rewrite_cost_x_in_ability` is what makes it fall silent.
+    #[test]
+    fn guard_falls_silent_once_the_rewrite_binds_the_slot() {
+        let mut def = broodlord_shaped_def();
+        assert!(
+            cost_x_sibling_slot_still_unbound(&def),
+            "red-first: unbound before the rewrite"
+        );
+        rewrite_cost_x_in_ability(&mut def);
+        assert!(
+            !cost_x_sibling_slot_still_unbound(&def),
+            "after the cost-X rewrite the slot is CostXPaid, not a bare X — the guard must not \
+             red a card the rewrite already fixed"
+        );
+    }
+
+    /// GREEN CONTROL — the one that matters most. Kinetic Ooze is a GATED self-ETB face that
+    /// still carries a bare `Variable{X}` in its effect's TARGET FILTER mana-value bound. A
+    /// guard keyed on tree-PRESENCE of an X would red it. It must not: measured end-to-end, that
+    /// filter binds correctly at runtime (X=3 destroys an MV-3 artifact; X=1 cannot target it).
+    /// See `cost_x_carrier_runtime`. Redding this face would be a manufactured red.
+    #[test]
+    fn guard_does_not_red_the_filter_mana_value_class() {
+        let parsed = parse_oracle_text(
+            "This creature enters with X +1/+1 counters on it.\nWhen this creature enters, \
+             destroy up to one target artifact or enchantment with mana value X or less.",
+            "Kinetic Ooze",
+            &[],
+            &["Creature".into()],
+            &["Ooze".into()],
+        );
+        let etb = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::ChangesZone)
+            .expect("the self-ETB trigger must parse");
+        let execute = etb.execute.as_ref().expect("execute");
+        assert!(
+            !matches!(*execute.effect, Effect::Unimplemented { .. }),
+            "the filter-mana-value class must stay GREEN — its X binds at runtime. Redding it \
+             would manufacture an honest-looking red out of a card that plays correctly. Got: {:?}",
+            execute.effect
+        );
+    }
+
+    /// GREEN CONTROL — an UNGATED trigger (the walk never runs on it). Shark Typhoon's cycle
+    /// trigger keeps a bare X by design: it is the ACTIVATED ability's announced X, carried at
+    /// runtime by `GameState::announced_source_x` (CR 107.3k — it is NOT the cast-X, so the
+    /// parser must not rewrite it to `CostXPaid`). The guard must not reach it.
+    #[test]
+    fn guard_does_not_red_an_ungated_activated_ability_x() {
+        let parsed = parse_oracle_text(
+            "Cycling {X}{1}{U} ({X}{1}{U}, Discard this card: Draw a card.)\nWhen you cycle this \
+             card, create an X/X blue Shark creature token with flying.",
+            "Shark Typhoon",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        let cycled = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::Cycled)
+            .expect("the Cycled trigger must parse");
+        let execute = cycled.execute.as_ref().expect("execute");
+        assert!(
+            !matches!(*execute.effect, Effect::Unimplemented { .. }),
+            "an ungated activated-ability X must stay GREEN — the engine carrier binds it. Got: {:?}",
+            execute.effect
         );
     }
 }

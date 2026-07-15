@@ -348,8 +348,18 @@ fn parse_pt_infix_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityExp
     let rest = rest.trim_start();
     let (rest, includes_equal) = map(opt(tag("or equal to")), |e| e.is_some()).parse(rest)?;
     let rest = rest.trim_start();
-    let (rest, qty) = parse_quantity_ref(rest)?;
-    let value = QuantityExpr::Ref { qty };
+    // CR 208.1: Power and toughness are creature characteristics, so this
+    // grammar preserves their comparison threshold as a typed quantity.
+    // The threshold may be a dynamic quantity ("less than the number of …") OR a
+    // literal number / X ("power less than 3", Wasp, Shrinking Savior). The
+    // postfix form ("3 or less") already accepts literals via
+    // `parse_quantity_expr_number`; the infix form must too, so try the dynamic
+    // ref first (unchanged behavior) and fall back to the literal/X parser.
+    let (rest, value) = alt((
+        map(parse_quantity_ref, |qty| QuantityExpr::Ref { qty }),
+        parse_quantity_expr_number,
+    ))
+    .parse(rest)?;
     // Strict `<`/`>` lower to LE/GE by shifting the threshold by ∓1 (CR 107.1:
     // integers only, so "less than N" ≡ "≤ N-1").
     let (comparator, value) = match (base_cmp, includes_equal) {
@@ -719,6 +729,145 @@ mod tests {
                 comparator: Comparator::LE,
                 value: QuantityExpr::Fixed { value: 2 },
             }
+        );
+    }
+
+    #[test]
+    fn test_parse_pt_comparison_infix_less_than_literal() {
+        // CR 208.1 + CR 107.1: "power less than 3" (infix form with a LITERAL
+        // threshold) must parse, not just the postfix "3 or less" form. Wasp,
+        // Shrinking Savior: "for each creature with power less than 0". Strict
+        // "less than N" lowers to LE (N-1).
+        let (rest, p) = parse_pt_comparison("power less than 3").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Fixed { value: 3 }),
+                    offset: -1,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_pt_comparison_infix_greater_than_literal() {
+        // "toughness greater than 4" → GE (4+1) with a literal threshold.
+        let (rest, p) = parse_pt_comparison("toughness greater than 4").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Fixed { value: 4 }),
+                    offset: 1,
+                },
+            }
+        );
+    }
+
+    /// CR 208.1 + CR 107.1: inclusive-literal boundary — "power less than or equal
+    /// to 0" keeps the LITERAL threshold with NO offset (the "or equal to" clause
+    /// makes it a non-strict `LE 0`), proving the `0` boundary and the optional
+    /// equal clause on the newly-admitted literal axis.
+    #[test]
+    fn test_parse_pt_comparison_infix_less_than_or_equal_literal() {
+        let (rest, p) = parse_pt_comparison("power less than or equal to 0").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 0 },
+            }
+        );
+    }
+
+    /// CR 107.3a: the newly-admitted `X` threshold on the infix form — "power less
+    /// than X" lowers to `LE` of `Offset(Variable("X"), -1)`, proving the literal/X
+    /// parser (not only `parse_quantity_ref`) feeds the infix tail.
+    #[test]
+    fn test_parse_pt_comparison_infix_less_than_x() {
+        let (rest, p) = parse_pt_comparison("power less than x").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    }),
+                    offset: -1,
+                },
+            }
+        );
+    }
+
+    /// CR 208.1 + CR 107.1 — production-path regression (Wasp, Shrinking Savior).
+    /// Parsing the FULL card through `parse_oracle_text` must retain the
+    /// `power < 0` filter on the draw count: "draw a card for each creature with
+    /// power less than 0" lowers to a Draw whose count is an `ObjectCount` over
+    /// creatures carrying a `PtComparison(Power, …)`, not a flat draw of one.
+    /// Reverting the infix-literal parser fix collapses the count to `Fixed(1)`,
+    /// which makes this assertion fail — proving the whole card-conversion path,
+    /// not just the isolated grammar branch, depends on the change.
+    #[test]
+    fn wasp_shrinking_savior_draw_count_retains_power_filter() {
+        use crate::types::ability::{
+            AbilityDefinition, Effect, FilterProp, PtStat, QuantityRef, TargetFilter,
+        };
+        fn find_draw_count(def: &AbilityDefinition) -> Option<QuantityExpr> {
+            if let Effect::Draw { count, .. } = &*def.effect {
+                return Some(count.clone());
+            }
+            def.sub_ability.as_deref().and_then(find_draw_count)
+        }
+        let parsed = crate::parser::parse_oracle_text(
+            "Whenever Wasp attacks, up to one other target creature gets -3/-0 until your next turn. Then draw a card for each creature with power less than 0 on the battlefield.",
+            "Wasp, Shrinking Savior",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let count = parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .find_map(find_draw_count)
+            .expect("Wasp's attack trigger must contain a Draw effect");
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = &count
+        else {
+            panic!("draw count must be a dynamic ObjectCount, got {count:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("ObjectCount filter must be a Typed creature filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    ..
+                }
+            )),
+            "the draw-count filter must retain the power comparison, got {:?}",
+            tf.properties
         );
     }
 

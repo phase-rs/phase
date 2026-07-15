@@ -1763,7 +1763,7 @@ fn parse_cant_have_or_gain_keyword(lower: &str) -> Option<Keyword> {
         } else {
             return None;
         };
-    crate::parser::oracle_keyword::parse_keyword_from_oracle(tail.trim().trim_end_matches('.'))
+    crate::parser::oracle_keyword::parse_granted_keyword_fragment(tail.trim().trim_end_matches('.'))
 }
 
 pub(crate) fn push_or_filter_branch(filters: &mut Vec<TargetFilter>, filter: TargetFilter) {

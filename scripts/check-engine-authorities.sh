@@ -179,4 +179,15 @@ if ! python3 "$(dirname "$0")/draw_replacement_census.py" --producers --check; t
     FAIL=1
 fi
 
+# (D) Post-replacement continuation producer/consumer surface — full-tree
+# ratchet against the frozen baseline. Plan 03's CR 121.2 draw state machine
+# reaches this surface through delayed replacement work, and CR 616.1g requires
+# that work to run only after the replacement's modified event is handled. A
+# `Template` or `Resolved` continuation can hold arbitrary ability work, so this
+# freezes every syntactic construction, installation, stash, and dispatch site
+# rather than pretending source inspection can prove a site cannot reach Draw.
+if ! python3 "$(dirname "$0")/post_replacement_continuation_census.py" --check; then
+    FAIL=1
+fi
+
 exit "$FAIL"

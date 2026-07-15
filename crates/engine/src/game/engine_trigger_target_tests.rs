@@ -368,6 +368,20 @@ fn triggered_modal_modes_with_targets_wait_for_target_selection() {
     assert_eq!(state.stack.len(), 1);
     assert!(state.pending_trigger.is_some());
     assert!(state.pending_trigger_entry.is_some());
+    assert_eq!(
+        state
+            .stack
+            .back()
+            .unwrap()
+            .ability()
+            .unwrap()
+            .selected_mode_labels,
+        [
+            "Deal 1 damage to target player.",
+            "Deal 1 damage to target player.",
+        ],
+        "triggered modal choice retains repeated selected labels while target selection is pending",
+    );
 }
 
 fn vindictive_lich_modal() -> ModalChoice {

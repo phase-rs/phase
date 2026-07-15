@@ -838,6 +838,42 @@ fn trigger_card_leaves_your_graveyard_during_your_turn_once_each_turn() {
     assert!(def.execute.is_some());
 }
 
+/// CR 603.4 + CR 113.6b: Nether Spirit's intervening-if
+/// ("if this card is the only creature card in your graveyard") must be hoisted
+/// into `def.condition`. The `{SourceInZone, Graveyard}` conjunct then drives
+/// `trigger_condition_source_zones` to derive `trigger_zones == [Graveyard]`
+/// (so the trigger is even detectable while the card sits in the graveyard) and
+/// `stamp_self_return_origin_from_trigger_condition` to stamp the return
+/// effect's `ChangeZone.origin == Graveyard` — the same auto-derivation Jocasta,
+/// Automaton Avenger (issue #4566) already relies on. SHAPE TEST — the end-to-end
+/// runtime behavior is covered by the
+/// `nether_spirit_only_creature_card_intervening_if` integration suite.
+#[test]
+fn nether_spirit_intervening_if_hoists_condition_zone_and_origin() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if this card is the only creature card \
+             in your graveyard, you may return this card to the battlefield.",
+        "Nether Spirit",
+    );
+    // The intervening-if is hoisted out of the effect text into the trigger.
+    assert!(
+        def.condition.is_some(),
+        "intervening-if must be hoisted to def.condition, got None"
+    );
+    // The off-battlefield zone is derived so the trigger is detectable from the
+    // graveyard, not stuck at the structural [Battlefield] default.
+    assert_eq!(def.trigger_zones, vec![Zone::Graveyard]);
+    // The return effect's origin is stamped from the derived source zone.
+    let execute = def.execute.expect("execute");
+    let Effect::ChangeZone { origin, .. } = execute.effect.as_ref() else {
+        panic!(
+            "expected ChangeZone return effect, got {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(*origin, Some(Zone::Graveyard));
+}
+
 /// CR 603.2b + CR 103.8: "at the beginning of the first upkeep of the game"
 /// names the one unique step that occurs exactly once per game (the starting
 /// player's first upkeep), so the trigger must carry `OncePerGame` — NOT fire
@@ -8107,6 +8143,37 @@ fn trigger_you_cast_another_spell_keeps_another_filter() {
     assert!(
         tf.properties.contains(&FilterProp::Another),
         "expected Another in {:?}",
+        tf.properties
+    );
+}
+
+/// CR 702.8a + CR 603.2 (issue #4754): Slitherwisp — "Whenever you cast another
+/// spell that has flash" must scope the trigger to flash spells. The "that has
+/// flash" keyword clause was dropped by `parse_type_phrase`, leaving only the
+/// `Another` prop, so the trigger over-fired on every non-first spell (a
+/// counterspell without flash wrongly triggered it). The spell filter must now
+/// carry BOTH `WithKeyword(Flash)` and `Another`.
+#[test]
+fn slitherwisp_cast_another_flash_spell_scopes_to_flash() {
+    let def = parse_trigger_line(
+        "Whenever you cast another spell that has flash, you draw a card and each opponent loses 1 life.",
+        "Slitherwisp",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    let Some(TargetFilter::Typed(tf)) = &def.valid_card else {
+        panic!("expected Typed valid_card, got {:?}", def.valid_card);
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::WithKeyword {
+            value: Keyword::Flash
+        }),
+        "expected WithKeyword(Flash) in {:?}",
+        tf.properties
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::Another),
+        "expected Another retained in {:?}",
         tf.properties
     );
 }
@@ -23556,6 +23623,187 @@ fn dance_of_the_dead_etb_lowers_to_reanimator_chain_tapped_4767() {
         DANCE_OF_THE_DEAD_ORACLE,
         "Dance of the Dead",
         /* expect_tapped */ true,
+    );
+}
+
+// --- issue #640: reanimator-Aura GRANT-shape ETB whole-body recognizer (Necromancy) ---
+
+/// Verbatim Necromancy Oracle text (Scryfall, 2026-07). Unlike Animate Dead,
+/// Necromancy is a plain (non-Aura) Enchantment whose ETB ability BOTH becomes
+/// an Aura AND targets the graveyard creature to reanimate ("Put target creature
+/// card from a graveyard onto the battlefield ...").
+const NECROMANCY_ORACLE: &str = "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.\nWhen this enchantment enters, if it's on the battlefield, it becomes an Aura with \"enchant creature put onto the battlefield with Necromancy.\" Put target creature card from a graveyard onto the battlefield under your control and attach this enchantment to it. When this enchantment leaves the battlefield, that creature's controller sacrifices it.";
+
+/// SHAPE test — assert Necromancy's ETB trigger lowers to the 4-node
+/// reanimator-Aura chain with the GRANT shape: the root `ChangeZone` targets a
+/// genuinely-parsed creature-card-in-a-graveyard `Typed` filter (NOT
+/// `AttachedTo`, unlike the swap shape — this is the #640 fix), and the
+/// `GenericEffect` grants the Aura subtype and the Enchant keyword for the first
+/// time (`AddSubtype` + `AddKeyword`, with NO `RemoveKeyword`). Runtime behavior
+/// is exercised separately in `casting_tests.rs`.
+#[test]
+fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
+    use crate::types::zones::Zone;
+
+    let parsed = parse_oracle_text(
+        NECROMANCY_ORACLE,
+        "Necromancy",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    // Necromancy has TWO enters-battlefield triggers: its first ability (the
+    // cleanup-step sacrifice for flash-casts) and this reanimator ETB. Select
+    // the reanimator one by its root `Effect::ChangeZone` body.
+    let root = parsed
+        .triggers
+        .iter()
+        .filter(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
+        .filter_map(|t| t.execute.as_deref())
+        .find(|def| matches!(def.effect.as_ref(), Effect::ChangeZone { .. }))
+        .unwrap_or_else(|| {
+            panic!(
+                "Necromancy: expected a reanimator ETB trigger with a root ChangeZone, got {:?}",
+                parsed.triggers
+            )
+        });
+
+    // Node 1: ChangeZone at the root, forward_result set, targeting a real
+    // graveyard-creature-card filter (NOT AttachedTo).
+    assert!(
+        root.forward_result,
+        "Necromancy: root ChangeZone must set forward_result"
+    );
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        enters_under,
+        enter_tapped,
+        ..
+    } = root.effect.as_ref()
+    else {
+        panic!(
+            "Necromancy: expected root Effect::ChangeZone, got {:?}",
+            root.effect
+        );
+    };
+    assert_eq!(*origin, Some(Zone::Graveyard), "Necromancy: origin");
+    assert_eq!(*destination, Zone::Battlefield, "Necromancy: destination");
+    assert_eq!(
+        *enters_under,
+        Some(ControllerRef::You),
+        "Necromancy: enters_under"
+    );
+    // Untapped: "onto the battlefield" with no trailing " tapped".
+    assert!(
+        !enter_tapped.is_tapped(),
+        "Necromancy: creature enters untapped ({enter_tapped:?})"
+    );
+    // The #640 fix: the target is a genuinely-parsed creature-card-in-a-graveyard
+    // filter (owner-agnostic — "a graveyard"), NOT `TargetFilter::AttachedTo`.
+    assert_ne!(
+        *target,
+        TargetFilter::AttachedTo,
+        "Necromancy: ETB must target the graveyard creature itself, not AttachedTo"
+    );
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+            zone: Zone::Graveyard
+        }])),
+        "Necromancy: ETB ChangeZone target"
+    );
+
+    // Node 2: GenericEffect grants (not swaps) — AddSubtype{Aura} + AddKeyword,
+    // referencing OriginalSource, no duration.
+    let generic = root
+        .sub_ability
+        .as_deref()
+        .expect("Necromancy: ChangeZone has no GenericEffect sub");
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = generic.effect.as_ref()
+    else {
+        panic!(
+            "Necromancy: expected GenericEffect, got {:?}",
+            generic.effect
+        );
+    };
+    assert_eq!(*duration, None, "Necromancy: grant has no stated duration");
+    assert_eq!(static_abilities.len(), 1, "Necromancy: one grant static");
+    let sd = &static_abilities[0];
+    assert_eq!(
+        sd.affected,
+        Some(TargetFilter::OriginalSource),
+        "Necromancy: grant must target OriginalSource (the enchantment), not SelfRef"
+    );
+    assert_eq!(
+        sd.modifications,
+        vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Aura".to_string(),
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Enchant(TargetFilter::ParentTarget),
+            },
+        ],
+        "Necromancy: grant modifications (AddSubtype + AddKeyword, no RemoveKeyword)"
+    );
+
+    // Node 3: Attach — SelfRef (the enchantment) onto ParentTarget (the creature).
+    let attach = generic
+        .sub_ability
+        .as_deref()
+        .expect("Necromancy: GenericEffect has no Attach sub");
+    let Effect::Attach { attachment, target } = attach.effect.as_ref() else {
+        panic!("Necromancy: expected Attach, got {:?}", attach.effect);
+    };
+    assert_eq!(
+        *attachment,
+        TargetFilter::SelfRef,
+        "Necromancy: attach attachment"
+    );
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTarget,
+        "Necromancy: attach host"
+    );
+
+    // Node 4: CreateDelayedTrigger — WhenLeavesPlayFiltered{SelfRef} -> Sacrifice{ParentTarget}.
+    let delayed = attach
+        .sub_ability
+        .as_deref()
+        .expect("Necromancy: Attach has no CreateDelayedTrigger sub");
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = delayed.effect.as_ref()
+    else {
+        panic!(
+            "Necromancy: expected CreateDelayedTrigger, got {:?}",
+            delayed.effect
+        );
+    };
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::WhenLeavesPlayFiltered {
+            filter: TargetFilter::SelfRef,
+        },
+        "Necromancy: delayed leaves-battlefield condition on the enchantment (SelfRef)"
+    );
+    let Effect::Sacrifice { target, .. } = effect.effect.as_ref() else {
+        panic!("Necromancy: expected Sacrifice, got {:?}", effect.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTarget,
+        "Necromancy: sacrifice targets the reanimated creature"
+    );
+    assert!(
+        delayed.sub_ability.is_none(),
+        "Necromancy: chain ends at the delayed trigger"
     );
 }
 

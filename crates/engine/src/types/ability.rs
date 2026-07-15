@@ -220,6 +220,22 @@ pub enum CategoryChooserScope {
     ControllerForAll,
 }
 
+/// CR 101.4 + CR 701.21a: Constraint on the permanents a player protects from
+/// a "choose … and sacrifice the rest" instruction.
+///
+/// This is deliberately separate from the legacy category and total-power
+/// fields on [`Effect::ChooseAndSacrificeRest`]. Those fields remain readable
+/// for existing card data and saved games; new cardinality-only wordings use a
+/// typed constraint rather than a one-off boolean or card-name branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum KeeperConstraint {
+    /// The chooser must protect exactly this many eligible permanents. If fewer
+    /// are eligible, the instruction does as much as possible and protects all
+    /// of them (CR 609.3).
+    ExactCount { count: QuantityExpr },
+}
+
 /// Additional selection constraints for tracked-set card picks during resolution.
 ///
 /// Internally tagged (`{ "type": "DistinctCardTypes", "categories": [...] }`) to
@@ -1351,6 +1367,21 @@ impl ChoiceValue {
 pub enum ChosenSubtypeKind {
     CreatureType,
     BasicLandType,
+}
+
+/// CR 105.3: set-versus-add axis for chosen-color continuous modifications —
+/// the typed counterpart of the fixed-color `SetColor` / `AddColor` pair.
+/// Parameterizes [`ContinuousModification::AddChosenColor`] so bare
+/// "…is/are the chosen color" (set / replace) and "…in addition to their other
+/// colors" (add / retain) share one primitive instead of a boolean flag or a
+/// sibling-variant cluster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ColorChangeMode {
+    /// CR 105.3 default: the new color replaces all previous colors.
+    #[default]
+    Set,
+    /// CR 105.3 "in addition": retain prior colors and gain the chosen color.
+    Add,
 }
 
 /// Which players' zones to count across for zone-based quantity references.
@@ -3350,6 +3381,10 @@ pub enum FilterProp {
     Token,
     /// CR 111.1: Matches objects that are not tokens.
     NonToken,
+    /// CR 108.2 + CR 108.2b: Matches an object represented by a Magic card,
+    /// excluding tokens and object copies. This is distinct from `NonToken`:
+    /// a non-token copy is not represented by a card.
+    RepresentedByCard,
     /// CR 607.2d / CR 607.2m (by analogy) + CR 611.2c: matches objects whose
     /// CONTROLLER's durable per-player choice records the anchor `label`
     /// ("creatures controlled by players who last chose red waterfall …", Two
@@ -8793,6 +8828,17 @@ pub enum LibraryPosition {
     BeneathTop {
         depth: QuantityExpr,
     },
+    /// Digital-only Alchemy (no CR entry — Alchemy is a digital-only format):
+    /// "into the top N cards of [a] library at random". The object is inserted at
+    /// a uniformly random 0-based index in `[0, min(n, library_len))`, so it lands
+    /// somewhere among the top N cards and is drawn within roughly N draws. `n` is
+    /// resolved at resolution time. Produced only by the Alchemy conjure arm
+    /// ("conjure a duplicate of that creature into the top five cards of your
+    /// library at random" — Goblin Morale Sergeant, Jessie Zane, Fangbringer,
+    /// Mine Security, Sheoldred's Assimilator, Sliver Weftwinder).
+    RandomWithinTop {
+        n: QuantityExpr,
+    },
 }
 
 /// CR 701.20a + CR 608.2c: How the *set* of matching cards found by an
@@ -9329,6 +9375,74 @@ pub enum ControlWindow {
     /// (Secret of Bloodbending). CR 723.2's enumerated-card list (Word of Command,
     /// Opposition Agent) predates this card and is non-exhaustive.
     NextCombatPhase,
+}
+
+/// CR 508.4: How a permanent put onto the battlefield by an effect enters
+/// combat. This is a typed axis because attacking entry has a destination
+/// choice and validation contract that ordinary entry does not.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum PermanentEntryMode {
+    #[default]
+    Normal,
+    /// The permanent enters tapped and attacking a destination chosen under
+    /// CR 508.4. It was not declared as an attacker.
+    TappedAndAttacking {
+        #[serde(default)]
+        destination: EntryAttackDestination,
+    },
+}
+
+/// CR 508.4a: Domain from which an attacking-entry destination is selected.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EntryAttackDestination {
+    /// Any defending player, planeswalker they control, or battle they protect.
+    #[default]
+    AnyDefender,
+    /// A defending player or planeswalker they control (battle excluded).
+    PlayerOrPlaneswalker,
+    /// The instruction fixes a single destination.
+    Exact {
+        target: crate::game::combat::AttackTarget,
+    },
+}
+
+/// CR 603.7a + CR 702.170c: the "If you do, ..." consequence of the
+/// "exile [the resolving spell] instead of putting it into a graveyard as it
+/// resolves" replacement (`Effect::ExileResolvingSpellInsteadOfGraveyard`),
+/// applied ONLY at the moment the replacement is actually applied — i.e. when
+/// the spell lands in exile during its own stack resolution. A spell countered
+/// or fizzled in response never reaches the exile-instead move, so it never
+/// takes the rider (CR 603.7a: a consequence created "as the result of a
+/// replacement effect being applied" exists only once the replacement applies).
+///
+/// `None` on the carrier = plain exile with no consequence (Rod of Absorption).
+/// The two members are distinct post-application actions on the exiled card, so
+/// they are a sum type, not a struct with more fields — but both live within the
+/// same CR 603.7a application moment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExiledSpellRider {
+    /// CR 603.7a + CR 603.7b: Feather, the Redeemed — "return it to your hand
+    /// at the beginning of the next end step". Arms a one-shot delayed trigger
+    /// returning the exiled card to `destination` at `timing`. The two axes are
+    /// typed so a future class member ("return it to the battlefield" / "at the
+    /// beginning of the next upkeep") is a parameter value, not a new variant.
+    ReturnTo {
+        /// CR 603.7a: zone the exiled card is returned to when the delayed
+        /// trigger fires (Feather: its owner's hand).
+        destination: Zone,
+        /// CR 603.7b: when the one-shot return trigger fires (Feather: at the
+        /// beginning of the next end step).
+        timing: DelayedTriggerCondition,
+    },
+    /// CR 702.170c: Lilah, Undefeated Slickshot — "it becomes plotted". Grants
+    /// the Plotted casting permission to the exiled card's owner and emits
+    /// `BecomesPlotted`, so the card is castable from exile without paying its
+    /// mana cost on a later turn (CR 702.170d). Because plotting requires the
+    /// card to already be in exile (CR 702.170c), this too must run only at
+    /// replacement-application time — never when the trigger resolves.
+    BecomePlotted,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -10318,17 +10432,28 @@ pub enum Effect {
         filter: Box<TargetFilter>,
         host: Box<TargetFilter>,
     },
-    /// CR 701.42a / CR 712.4a: Meld — exile both the real meld instigator
-    /// (`source`) and a battlefield object named `partner` that the controller
-    /// both owns and controls, then put a single melded permanent onto the
-    /// battlefield whose characteristics are the `result` card (the combined back
-    /// faces, exposed in card-data as the named result). No player-selectable
-    /// target — the partner is found by name + ownership at resolution. Resolver:
-    /// `game/meld.rs`.
+    /// CR 701.42: Meld the chosen pair after both objects are exiled.
+    ///
+    /// The string fields retain the stable card-data representation and identify
+    /// the canonical physical pair/result. The filters describe the live Oracle
+    /// referents used before exile: copies, tokens, and name-changing effects can
+    /// therefore affect which objects are offered without changing which printed
+    /// cards can actually meld after exile (CR 701.42b).
     Meld {
         source: String,
         partner: String,
         result: String,
+        /// Live characteristics required of the instigator at resolution.
+        #[serde(default = "default_target_filter_self_ref")]
+        source_filter: TargetFilter,
+        /// Live characteristics required of a possible partner at resolution.
+        /// `Any` is the legacy serialized shape; the resolver derives the named,
+        /// owned, and controlled filter from `partner` in that case.
+        #[serde(default = "default_target_filter_any")]
+        partner_filter: TargetFilter,
+        /// Entry modifiers printed after the meld instruction.
+        #[serde(default)]
+        entry: PermanentEntryMode,
     },
     /// CR 702.55a: Haunt — exile the source card (currently in a graveyard, put
     /// there by dying or by resolving) from the graveyard, *haunting* the target
@@ -11257,7 +11382,22 @@ pub enum Effect {
     /// (which stamps the same rider on a spell *cast during resolution*, with no
     /// linked-exile payoff). This effect is the trigger-driven, link-establishing
     /// form for the resolving spell itself.
-    ExileResolvingSpellInsteadOfGraveyard,
+    ExileResolvingSpellInsteadOfGraveyard {
+        /// CR 614.1a + CR 603.7a + CR 702.170c: the "If you do, ..."
+        /// consequence of the exile-instead replacement (Feather, the
+        /// Redeemed's "return it to your hand at the beginning of the next end
+        /// step"; Lilah, Undefeated Slickshot's "it becomes plotted"). When
+        /// `Some`, the stamped rider also marks the spell so that — at the
+        /// moment the replacement is actually applied and the spell lands in
+        /// exile — the stack router applies the rider (arming Feather's return
+        /// delayed trigger, or granting Lilah's plotted permission). The
+        /// consequence is applied when the replacement is APPLIED (CR 603.7a),
+        /// not when this effect resolves, so a spell countered or fizzled in
+        /// response never takes it. `None` = plain exile, no consequence
+        /// (Rod of Absorption).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_exile: Option<ExiledSpellRider>,
+    },
     /// CR 615: Prevent damage to a target.
     PreventDamage {
         amount: PreventionAmount,
@@ -11682,6 +11822,11 @@ pub enum Effect {
         /// entry. `categories` is empty in this mode.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         total_power_cap: Option<QuantityExpr>,
+        /// CR 101.4 + CR 701.21a: Explicit keeper-cardinality mode (Natural
+        /// Balance class). `None` preserves the pre-existing category and
+        /// total-power modes on the wire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keeper_constraint: Option<KeeperConstraint>,
     },
     /// CR 101.4 + CR 707.2 + CR 122.1: Each player, in APNAP order, chooses an
     /// ordered `min..=max` selection of objects they control matching
@@ -12360,6 +12505,25 @@ pub enum Effect {
         destination: Zone,
         #[serde(default)]
         tapped: bool,
+        /// When `destination` is `Zone::Library`, an optional slot override.
+        /// Mirrors `Effect::ChangeZone`'s `library_position`. `None` = the default
+        /// bottom-of-library placement `zones::create_object` performs. `Some`
+        /// carries the Alchemy "into the top N cards … at random" positional
+        /// constraint (`LibraryPosition::RandomWithinTop`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_position: Option<LibraryPosition>,
+        /// Which players' libraries receive the conjured cards, when the
+        /// destination is a positional library slot. `None` = the controller's
+        /// library only ("into the top N cards of *your* library at random", and
+        /// every non-library conjure). `Some(PlayerFilter::All)` fans the conjure
+        /// out to *each player's* library — one independent copy per affected
+        /// player, owned by and placed in that player's own library (Sandcloud
+        /// Harbinger: "conjure three cards named Sunscorched Desert into the top
+        /// ten cards of each player's library at random"). Separate from
+        /// `library_position` because "which libraries" (player axis) and "where
+        /// within a library" (position axis) are independent concerns.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_players: Option<PlayerFilter>,
     },
     /// Digital-only Alchemy keyword action (no CR entry): "perpetually" applies a
     /// modification to the matched cards that persists for the rest of the game
@@ -13790,7 +13954,7 @@ impl Effect {
             | Effect::FreeCastFromZones { .. }
             // CR 614.1a: acts on the triggering spell (the trigger source), not a
             // player-declared target.
-            | Effect::ExileResolvingSpellInsteadOfGraveyard
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
             | Effect::Manifest { .. }
             | Effect::ManifestDread
             | Effect::Cloak { .. }
@@ -14136,7 +14300,7 @@ impl Effect {
             | Effect::ExchangeLifeWithStat { .. }
             | Effect::ExchangeLifeTotals { .. }
             | Effect::ExileFromTopUntil { .. }
-            | Effect::ExileResolvingSpellInsteadOfGraveyard
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
             | Effect::FlipCoin { .. }
             | Effect::FlipCoinUntilLose { .. }
             | Effect::Forage
@@ -14388,7 +14552,7 @@ impl Effect {
             | Effect::ExchangeLifeWithStat { .. }
             | Effect::ExchangeLifeTotals { .. }
             | Effect::ExileFromTopUntil { .. }
-            | Effect::ExileResolvingSpellInsteadOfGraveyard
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
             | Effect::FlipCoin { .. }
             | Effect::FlipCoinUntilLose { .. }
             | Effect::Forage
@@ -14576,7 +14740,9 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PayCost { .. } => "PayCost",
         Effect::CastFromZone { .. } => "CastFromZone",
         Effect::FreeCastFromZones { .. } => "FreeCastFromZones",
-        Effect::ExileResolvingSpellInsteadOfGraveyard => "ExileResolvingSpellInsteadOfGraveyard",
+        Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => {
+            "ExileResolvingSpellInsteadOfGraveyard"
+        }
         Effect::PreventDamage { .. } => "PreventDamage",
         Effect::CreateDamageReplacement { .. } => "CreateDamageReplacement",
         Effect::CreateDrawReplacement { .. } => "CreateDrawReplacement",
@@ -15077,7 +15243,7 @@ impl From<&Effect> for EffectKind {
             Effect::PayCost { .. } => EffectKind::PayCost,
             Effect::CastFromZone { .. } => EffectKind::CastFromZone,
             Effect::FreeCastFromZones { .. } => EffectKind::FreeCastFromZones,
-            Effect::ExileResolvingSpellInsteadOfGraveyard => {
+            Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => {
                 EffectKind::ExileResolvingSpellInsteadOfGraveyard
             }
             Effect::PreventDamage { .. } => EffectKind::PreventDamage,
@@ -15653,6 +15819,25 @@ pub struct AbilityDefinition {
     /// Minimum legal announced value for X. Defaults to zero; set to one by
     /// "X can't be 0" annotations.
     pub min_x_value: u32,
+    /// CR 601.2b + CR 602.2b: X for this spell/ability is DEFINED BY ITS TEXT and
+    /// MEASURED AT ANNOUNCEMENT — the count behind a "where X is <expression> as
+    /// you cast this spell" / "... as you activate this ability" clause (Jaws of
+    /// Stone, Monstrous Onslaught, Agility Bobblehead, Lukka's [-4]).
+    ///
+    /// The printed qualifier is not decoration. CR 107.3c makes a text-defined X a
+    /// LIVE value by default — "Note that the value of X may change while that
+    /// spell or ability is on the stack" — and the qualifier is the card text that
+    /// OVERRIDES that default, pinning the count to the announcement step (CR
+    /// 601.2a-b; CR 602.2b makes 601.2b-i apply identically to an activated
+    /// ability, so one field serves both surfaces).
+    ///
+    /// The engine evaluates this ONCE at announcement and publishes the result
+    /// through the object's single X channel (`chosen_x`, CR 107.3i), which every
+    /// `QuantityRef::Variable("X")` on the ability already reads. Binding the
+    /// expression directly into the X slots instead would re-evaluate it at
+    /// whatever moment each slot happens to be read — which is exactly the
+    /// resolution-time behaviour the qualifier exists to forbid.
+    pub announced_x: Option<QuantityExpr>,
     /// Stack-copy restriction from "This ability can't be copied."
     pub cant_be_copied: bool,
     /// CR 601.2f: Self-referential cost reduction applied before activation.
@@ -15756,6 +15941,8 @@ struct AbilityDefinitionRepr<'a> {
     repeat_for: &'a Option<QuantityExpr>,
     #[serde(skip_serializing_if = "is_zero_u32")]
     min_x_value: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    announced_x: &'a Option<QuantityExpr>,
     #[serde(skip_serializing_if = "is_false")]
     cant_be_copied: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -15808,6 +15995,7 @@ impl Serialize for AbilityDefinition {
             mode_abilities,
             repeat_for,
             min_x_value,
+            announced_x,
             cant_be_copied,
             cost_reduction,
             forward_result,
@@ -15846,6 +16034,7 @@ impl Serialize for AbilityDefinition {
             mode_abilities,
             repeat_for,
             min_x_value: *min_x_value,
+            announced_x,
             cant_be_copied: *cant_be_copied,
             cost_reduction,
             forward_result: *forward_result,
@@ -15943,6 +16132,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     min_x_value: u32,
     #[serde(default)]
+    announced_x: Option<QuantityExpr>,
+    #[serde(default)]
     cant_be_copied: bool,
     #[serde(default)]
     cost_reduction: Option<CostReduction>,
@@ -16000,6 +16191,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             mode_abilities: de.mode_abilities,
             repeat_for: de.repeat_for,
             min_x_value: de.min_x_value,
+            announced_x: de.announced_x,
             cant_be_copied: de.cant_be_copied,
             cost_reduction: de.cost_reduction,
             forward_result: de.forward_result,
@@ -16153,6 +16345,7 @@ impl AbilityDefinition {
             mode_abilities: Vec::new(),
             repeat_for: None,
             min_x_value: 0,
+            announced_x: None,
             cant_be_copied: false,
             cost_reduction: None,
             forward_result: false,
@@ -19495,9 +19688,16 @@ pub enum ContinuousModification {
     AddChosenSubtype {
         kind: ChosenSubtypeKind,
     },
-    /// CR 105.3: Set the object's color to the chosen color.
-    /// Reads from `chosen_attributes` at layer evaluation time.
-    AddChosenColor,
+    /// CR 105.3 + CR 613.1e: Apply the source's chosen color to the affected
+    /// object. Reads from `chosen_attributes` at layer evaluation time.
+    /// `mode` selects set-versus-add along the same axis as `SetColor` /
+    /// `AddColor` (not a boolean): bare "the chosen color" uses [`ColorChangeMode::Set`];
+    /// Painter's Servant–class "in addition to their other colors" uses
+    /// [`ColorChangeMode::Add`].
+    AddChosenColor {
+        #[serde(default)]
+        mode: ColorChangeMode,
+    },
     /// CR 608.2d + CR 613.1f: Strip the chosen keyword (read from the granting
     /// source's `chosen_attributes`) from the affected object. Mirrors
     /// `RemoveKeyword`'s discriminant-based stripping so parameterized
@@ -19823,6 +20023,12 @@ pub struct ResolvedAbility {
     /// Used by `OptionalEffectChoice` to tell the player what they're choosing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// CR 700.2a + CR 700.2b + CR 700.2d + CR 608.2c: The selected modal
+    /// descriptions, in the printed instruction order used to resolve them. This
+    /// belongs to the stack ability as a whole; sub-ability chains remain the
+    /// individual instructions selected from those modes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_mode_labels: Vec<String>,
     /// CR 608.2c: Repeat this ability N times (from "for each [X], [effect]").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_for: Option<QuantityExpr>,
@@ -19830,6 +20036,11 @@ pub struct ResolvedAbility {
     /// "X can't be 0" annotations.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub min_x_value: u32,
+    /// CR 601.2b + CR 602.2b: the announce-time-locked definition of X, carried
+    /// from `AbilityDefinition::announced_x`. Resolved ONCE at announcement into
+    /// `chosen_x` (the CR 107.3i single-X-per-object channel); never re-read after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_x: Option<QuantityExpr>,
     /// Stack-copy restriction from "This ability can't be copied."
     #[serde(default, skip_serializing_if = "is_false")]
     pub cant_be_copied: bool,
@@ -19997,8 +20208,10 @@ impl ResolvedAbility {
             target_constraints: Vec::new(),
             target_choice_timing: TargetChoiceTiming::Stack,
             description: None,
+            selected_mode_labels: Vec::new(),
             repeat_for: None,
             min_x_value: 0,
+            announced_x: None,
             cant_be_copied: false,
             copy_count_status: CopyCountStatus::Pending,
             forward_result: false,
@@ -21959,6 +22172,7 @@ mod tests {
     fn filter_prop_roundtrip() {
         let props = vec![
             FilterProp::Token,
+            FilterProp::RepresentedByCard,
             FilterProp::Attacking { defender: None },
             FilterProp::Attacking {
                 defender: Some(ControllerRef::You),
@@ -22079,6 +22293,34 @@ mod tests {
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
+    }
+
+    #[test]
+    fn selected_mode_labels_are_legacy_compatible_and_preserved_by_clone() {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let legacy_json = serde_json::to_string(&ability).expect("serialize empty ability");
+        assert!(
+            !legacy_json.contains("selected_mode_labels"),
+            "empty labels must not change saved-game or client wire shape",
+        );
+        let legacy: ResolvedAbility =
+            serde_json::from_str(&legacy_json).expect("legacy ability without labels deserializes");
+        assert!(legacy.selected_mode_labels.is_empty());
+
+        ability.selected_mode_labels = vec!["Draw a card.".to_string()];
+        let copied = ability.clone();
+        let json = serde_json::to_string(&ability).expect("serialize selected mode");
+        assert!(json.contains("selected_mode_labels"));
+        let deserialized: ResolvedAbility = serde_json::from_str(&json).expect("deserialize mode");
+        assert_eq!(copied, deserialized);
     }
 
     #[test]

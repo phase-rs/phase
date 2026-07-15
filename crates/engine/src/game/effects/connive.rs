@@ -2,7 +2,6 @@ use std::collections::HashSet;
 
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
-use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -126,79 +125,42 @@ pub(crate) fn resolve_connive_effect(
         .map(|obj| obj.controller)
         .unwrap_or(PlayerId(0));
 
-    // Step 1: Draw `count` cards for the controller.
-    // CR 614.1a + CR 614.6 + CR 704.3: Route through the single-authority
-    // helper so post-replacement continuations drain in the same step.
-    let result = super::draw::draw_through_replacement(
+    // Step 1: Draw `count` cards for the controller. The frame retains the
+    // connive tail through any per-unit replacement pause.
+    match super::draw::start_draw_sequence_with_origin(
         state,
         controller,
         count,
-        events,
-        |state, event, events| {
-            let ProposedEvent::Draw {
-                player_id,
-                count: draw_count,
-                ..
-            } = event
-            else {
-                return;
-            };
-            // CR 121.1 + CR 613.11: route card selection through the single
-            // `select_cards_to_draw` authority so a `DrawFromBottom` static is
-            // honored on the connive draw too.
-            let cards_to_draw =
-                super::draw::select_cards_to_draw(state, player_id, draw_count as usize);
-
-            if draw_count > 0 && cards_to_draw.len() < draw_count as usize {
-                if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
-                    p.drew_from_empty_library = true;
-                }
-            }
-
-            for obj_id in cards_to_draw {
-                zones::move_to_zone(state, obj_id, Zone::Hand, events);
-                // CR 121.1 + CR 504.1: Increment counters first; embed the
-                // resulting per-step ordinal into the event.
-                let (nth_in_turn, nth_in_step) =
-                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
-                        p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
-                        p.cards_drawn_this_step = p.cards_drawn_this_step.saturating_add(1);
-                        (p.cards_drawn_this_turn, p.cards_drawn_this_step)
-                    } else {
-                        (1, 1)
-                    };
-                events.push(GameEvent::CardDrawn {
-                    player_id,
-                    object_id: obj_id,
-                    nth_in_turn,
-                    nth_in_step,
-                });
-                super::drawn_this_turn_choice::record_drawn_card(state, player_id, obj_id);
-                // CR 702.94a: Connive draws count as draws for miracle tracking.
-                super::draw::record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
-            }
+        HashSet::new(),
+        crate::types::game_state::DrawSequenceOrigin::ConniveTail {
+            conniver: conniver_id,
+            count,
         },
-    );
-    match result {
-        ReplacementResult::Execute(_) => {}
-        ReplacementResult::Prevented => {
-            // Draw was prevented — skip the discard step
-            // CR 701.50f + CR 701.50b: the EffectResolved carries the CONNIVER's
-            // id (LKI if it left the battlefield) so "whenever a creature you
-            // control connives" matches the conniving permanent, not the source.
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::Connive,
-                source_id: conniver_id,
-                subject: None,
-            });
-            return Ok(());
-        }
-        ReplacementResult::NeedsChoice(_) => {
-            return Ok(());
-        }
+        events,
+    ) {
+        ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}
+        ReplacementResult::NeedsChoice(_) => return Ok(()),
     }
 
-    // Step 2: Discard `count` cards.
+    Ok(())
+}
+
+/// CR 701.50a/701.50d: Complete a connive after its draw instruction settles.
+///
+/// `count` is the original resolved connive count, not the number of cards
+/// actually drawn; a partial or replaced draw still discards up to that count.
+pub(crate) fn apply_connive_tail(
+    state: &mut GameState,
+    conniver_id: ObjectId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    let controller = state
+        .objects
+        .get(&conniver_id)
+        .map(|obj| obj.controller)
+        .unwrap_or(PlayerId(0));
+
     let hand_cards: Vec<ObjectId> = state
         .players
         .iter()
@@ -216,7 +178,7 @@ pub(crate) fn resolve_connive_effect(
             discard_all_and_count_nonlands(state, &hand_cards, controller, events)
         else {
             // Replacement choice interrupted the discard loop — waiting_for already set.
-            return Ok(());
+            return;
         };
         add_connive_counters(state, conniver_id, nonland_count, events);
     } else {
@@ -231,7 +193,7 @@ pub(crate) fn resolve_connive_effect(
             count: discard_count,
         };
         // Don't emit EffectResolved yet — it will be emitted when the choice is made
-        return Ok(());
+        return;
     }
 
     // CR 701.50f + CR 701.50b: the EffectResolved carries the CONNIVER's id (LKI
@@ -242,7 +204,6 @@ pub(crate) fn resolve_connive_effect(
         source_id: conniver_id,
         subject: None,
     });
-    Ok(())
 }
 
 /// Discard all given cards and return how many were nonland.

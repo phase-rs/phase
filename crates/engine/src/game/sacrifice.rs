@@ -6,7 +6,7 @@ use crate::game::zone_pipeline::{
     self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingSacrificeProvenance};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -137,7 +137,15 @@ pub(crate) fn apply_sacrifice_after_replacement(
                 ReplacementResult::Prevented => {}
                 ReplacementResult::NeedsChoice(player) => {
                     // CR 616.1: an ordered/optional Moved replacement needs a
-                    // choice — pause and let the caller resume.
+                    // choice — pause and let the caller resume. The pending
+                    // replacement now owns the inner ZoneChange, so retain the
+                    // enclosing sacrifice's identity until that move resumes.
+                    if let Some(pending) = state.pending_replacement.as_mut() {
+                        pending.sacrifice_provenance = Some(PendingSacrificeProvenance {
+                            object_id: oid,
+                            player_id: pid,
+                        });
+                    }
                     state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                     return SacrificeApply::NeedsChoice(player);
                 }

@@ -226,6 +226,7 @@ fn prompt_resolution_attachment_choice(
             // by the parent chain walker) with this exact attach instruction.
             state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
                 Box::new(ability.clone()),
+                state,
             ));
             state.waiting_for = WaitingFor::EffectZoneChoice {
                 player: ability.controller,

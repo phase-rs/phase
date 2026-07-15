@@ -66,7 +66,7 @@ fn build_face_from_oracle(
     let subtype_strings: Vec<String> = obj.card_types.subtypes.clone();
 
     // Build keyword name hints if the caller didn't provide them.
-    // The parser's `extract_keyword_line` requires keyword name hints to identify
+    // The parser's `extract_granted_keyword_list` requires keyword name hints to identify
     // keyword-only lines (returns None when hints are empty). Pre-scan each line
     // through Keyword::from_str to detect bare keywords like "Flying", "Haste".
     //
@@ -1522,6 +1522,8 @@ impl GameRunner {
     pub fn waiting_for_kind(&self) -> &'static str {
         match &self.state.waiting_for {
             WaitingFor::Priority { .. } => "Priority",
+            WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
+            WaitingFor::MeldAttackTargetChoice { .. } => "MeldAttackTargetChoice",
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
             WaitingFor::ManaPayment { .. } => "ManaPayment",
@@ -1703,6 +1705,7 @@ impl GameRunner {
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
             WaitingFor::EachPlayerCopyChosenSelection { .. } => "EachPlayerCopyChosenSelection",
             WaitingFor::KeepWithinTotalPowerChoice { .. } => "KeepWithinTotalPowerChoice",
+            WaitingFor::KeepExactPermanentsChoice { .. } => "KeepExactPermanentsChoice",
             WaitingFor::ChooseXValue { .. } => "ChooseXValue",
             WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
             WaitingFor::PhyrexianPayment { .. } => "PhyrexianPayment",
@@ -2355,6 +2358,18 @@ impl<'a> CastCommit<'a> {
     /// Read the current pre-resolution state.
     pub fn state(&self) -> &GameState {
         &self.runner.state
+    }
+
+    /// Mutate the board WHILE the committed spell is still on the stack.
+    ///
+    /// The spell has been announced (CR 601.2a-i) but not resolved (CR 608.2), which
+    /// is the only window in which "did this value LOCK at announcement, or is it
+    /// re-read at resolution?" is answerable. A test that merely casts and resolves
+    /// against a static board cannot tell a locked snapshot from a live re-read —
+    /// both produce the same number. Changing the board here and then resolving is
+    /// what discriminates them.
+    pub fn state_mut(&mut self) -> &mut GameState {
+        &mut self.runner.state
     }
 
     /// The cast variant option selected during `CastingVariantChoice`, if the

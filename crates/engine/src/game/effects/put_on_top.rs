@@ -326,6 +326,10 @@ pub fn resolve(
         LibraryPosition::BeneathTop { depth } => {
             Some(resolve_quantity_with_targets(state, depth, ability).max(0) as usize)
         }
+        // Digital-only Alchemy: `RandomWithinTop` is produced only for the Conjure
+        // keyword action (`conjure.rs`), never for `PutAtLibraryPosition`.
+        // Exhaustiveness arm: default (bottom) placement.
+        LibraryPosition::RandomWithinTop { .. } => None,
     };
     match position {
         LibraryPosition::Top => {
@@ -335,7 +339,8 @@ pub fn resolve(
         }
         LibraryPosition::Bottom
         | LibraryPosition::NthFromTop { .. }
-        | LibraryPosition::BeneathTop { .. } => {
+        | LibraryPosition::BeneathTop { .. }
+        | LibraryPosition::RandomWithinTop { .. } => {
             for object_id in to_place {
                 zones::move_to_library_at_index(state, *object_id, index, events);
             }

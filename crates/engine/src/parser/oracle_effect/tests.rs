@@ -1,3 +1,4 @@
+use super::lower::rewrite_parent_target_to_last_created;
 use super::*;
 use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
@@ -34079,6 +34080,7 @@ fn conjure_basic_battlefield() {
             cards,
             destination,
             tapped,
+            ..
         } => {
             assert_eq!(cards.len(), 1);
             assert_eq!(cards[0].named_name(), Some("Regal Force"));
@@ -34098,6 +34100,7 @@ fn conjure_quantity_graveyard() {
             cards,
             destination,
             tapped,
+            ..
         } => {
             assert_eq!(cards.len(), 1);
             assert_eq!(cards[0].named_name(), Some("Reassembling Skeleton"));
@@ -34217,10 +34220,15 @@ fn conjure_named_into_top_n_library_at_random() {
     );
     match e {
         Effect::Conjure {
-            destination, cards, ..
+            destination,
+            cards,
+            library_players,
+            ..
         } => {
             assert_eq!(destination, Zone::Library);
             assert_eq!(cards.len(), 1);
+            // "your library" targets the controller only — no per-player fan-out.
+            assert_eq!(library_players, None);
         }
         other => panic!("expected Conjure, got: {other:?}"),
     }
@@ -34228,12 +34236,32 @@ fn conjure_named_into_top_n_library_at_random() {
 
 #[test]
 fn conjure_named_into_top_n_each_players_library_at_random() {
-    // "each player's library" (a shared-library slot) also maps to the Library zone.
+    // "each player's library" maps to the Library zone AND carries the per-player
+    // fan-out scope (`PlayerFilter::All`) so the resolver conjures into every
+    // player's own library, not just the controller's (Sandcloud Harbinger,
+    // issue #5614 re-review). The count threads into the `RandomWithinTop` slot.
     let e = parse_effect(
         "conjure three cards named Sunscorched Desert into the top ten cards of each player's library at random",
     );
     match e {
-        Effect::Conjure { destination, .. } => assert_eq!(destination, Zone::Library),
+        Effect::Conjure {
+            destination,
+            library_position,
+            library_players,
+            ..
+        } => {
+            assert_eq!(destination, Zone::Library);
+            assert_eq!(
+                library_position,
+                Some(LibraryPosition::RandomWithinTop {
+                    n: QuantityExpr::Fixed { value: 10 }
+                })
+            );
+            assert_eq!(
+                library_players,
+                Some(crate::types::ability::PlayerFilter::All)
+            );
+        }
         other => panic!("expected Conjure, got: {other:?}"),
     }
 }
@@ -34260,12 +34288,26 @@ fn conjure_random_from_spellbook_into_top_n_library_at_random() {
 
 #[test]
 fn conjure_duplicate_into_top_n_library_at_random() {
-    // The top-N-library destination composes with the "conjure a duplicate of <ref>" wording.
+    // The top-N-library destination composes with the "conjure a duplicate of <ref>"
+    // wording and threads the count into a `RandomWithinTop` library position rather
+    // than discarding it (issue #5614).
     let e = parse_effect(
         "conjure a duplicate of that card into the top five cards of your library at random",
     );
     match e {
-        Effect::Conjure { destination, .. } => assert_eq!(destination, Zone::Library),
+        Effect::Conjure {
+            destination,
+            library_position,
+            ..
+        } => {
+            assert_eq!(destination, Zone::Library);
+            assert_eq!(
+                library_position,
+                Some(LibraryPosition::RandomWithinTop {
+                    n: QuantityExpr::Fixed { value: 5 }
+                })
+            );
+        }
         other => panic!("expected Conjure, got: {other:?}"),
     }
 }
@@ -34292,6 +34334,7 @@ fn conjure_battlefield_tapped() {
             cards,
             destination,
             tapped,
+            ..
         } => {
             assert_eq!(cards.len(), 1);
             assert_eq!(cards[0].named_name(), Some("Forest"));
@@ -34312,6 +34355,7 @@ fn conjure_multi_card_hand() {
             cards,
             destination,
             tapped,
+            ..
         } => {
             assert_eq!(cards.len(), 2);
             assert_eq!(cards[0].named_name(), Some("Darksteel Ingot"));
@@ -34333,6 +34377,7 @@ fn conjure_into_library() {
             cards,
             destination,
             tapped,
+            ..
         } => {
             assert_eq!(cards.len(), 1);
             assert_eq!(cards[0].named_name(), Some("Lightning Bolt"));
@@ -34352,6 +34397,7 @@ fn conjure_two_battlefield_tapped() {
             cards,
             destination,
             tapped,
+            ..
         } => {
             assert_eq!(cards.len(), 1);
             assert_eq!(cards[0].named_name(), Some("Mishra's Foundry"));
@@ -34373,6 +34419,7 @@ fn conjure_duplicate_anaphoric_into_hand() {
             cards,
             destination,
             tapped,
+            ..
         } => {
             assert_eq!(cards.len(), 1);
             assert!(
@@ -41853,6 +41900,282 @@ fn non_join_forces_x_mana_payment_remains_optional() {
     );
 }
 
+// ---------------------------------------------------------------------
+// Power Leak / Errant Minion / Liege of the Hollows — the paid-mana
+// where-X generalization (Fix 1), the deal-then-prevent fold (Fix 2),
+// and the Enchant-noun trigger-scope generalization (Fix 3).
+// CR 601.2h / CR 608.2c / CR 615.1a / CR 615.4 / CR 702.5a.
+// ---------------------------------------------------------------------
+
+// Verbatim Oracle text (MTGJSON AtomicCards).
+const POWER_LEAK_ORACLE: &str = "Enchant enchantment\nAt the beginning of the upkeep of enchanted enchantment's controller, that player may pay any amount of mana. This Aura deals 2 damage to that player. Prevent X of that damage, where X is the amount of mana that player paid this way.";
+const ERRANT_MINION_ORACLE: &str = "Enchant creature\nAt the beginning of the upkeep of enchanted creature's controller, that player may pay any amount of mana. This Aura deals 2 damage to that player. Prevent X of that damage, where X is the amount of mana that player paid this way.";
+const LIEGE_OF_THE_HOLLOWS_ORACLE: &str = "When this creature dies, each player may pay any amount of mana. Then each player creates a number of 1/1 green Squirrel creature tokens equal to the amount of mana they paid this way.";
+
+/// The folded net-damage amount for a "deal 2 damage, prevent X" card:
+/// `max(2 - X, 0)` = `ClampMin { Offset { Multiply(-1, X), 2 }, 0 }`.
+fn max_two_minus_x() -> QuantityExpr {
+    QuantityExpr::ClampMin {
+        inner: Box::new(QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Multiply {
+                factor: -1,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                }),
+            }),
+            offset: 2,
+        }),
+        minimum: 0,
+    }
+}
+
+/// Fix 1: the "amount of mana … paid this way" where-X binding must generalize
+/// across every payer-subject surface variant (Power Leak/Errant Minion "that
+/// player", Liege of the Hollows "they", the bare Join Forces form) — all
+/// binding to `Variable("X")` — while the existing "total amount …" literal
+/// (the 5 must-not-regress Join Forces cards) still matches. Kept mana-scoped
+/// so a non-mana resource phrase does NOT bind to the mana X (CR 106 vs 122).
+#[test]
+fn where_x_amount_of_mana_paid_generalizes_across_payer_subjects() {
+    let x = QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    };
+    for phrase in [
+        "the amount of mana that player paid this way", // Power Leak / Errant Minion
+        "the amount of mana they paid this way",        // Liege of the Hollows
+        "the amount of mana paid this way",             // bare payer
+        "the total amount of mana paid this way",       // must-not-regress literal
+    ] {
+        assert_eq!(
+            parse_where_x_quantity_expression(phrase).as_ref(),
+            Some(&x),
+            "'{phrase}' must bind X"
+        );
+    }
+    // Mana-scoped: an energy "paid this way" phrase must NOT bind to the mana X
+    // (the tag is deliberately "amount of mana", never resource-generic).
+    assert_ne!(
+        parse_where_x_quantity_expression("the amount of {e} paid this way"),
+        Some(x),
+    );
+}
+
+/// Fix 1 regression: the shared Join Forces binding literal still resolves for
+/// the must-not-regress cards, driven through the real card body parser.
+#[test]
+fn join_forces_total_amount_paid_still_binds_after_generalization() {
+    let is_variable_x = |q: &QuantityExpr| matches!(q, QuantityExpr::Ref { qty: QuantityRef::Variable { name } } if name == "X");
+    // Alliance of Arms — token body.
+    let alliance = parse_effect_chain(
+        "Starting with you, each player may pay any amount of mana. Each player creates X 1/1 white Soldier creature tokens, where X is the total amount of mana paid this way.",
+        AbilityKind::Spell,
+    );
+    let alliance_sub = alliance.sub_ability.as_ref().expect("token sub");
+    match &*alliance_sub.effect {
+        Effect::Token { count, .. } => assert!(
+            is_variable_x(count),
+            "Alliance of Arms token count must stay Variable(X), got {count:?}"
+        ),
+        other => panic!("expected Token, got {other:?}"),
+    }
+    // Minds Aglow — draw body.
+    let minds = parse_effect_chain(
+        "Starting with you, each player may pay any amount of mana. Each player draws X cards, where X is the total amount of mana paid this way.",
+        AbilityKind::Spell,
+    );
+    let minds_sub = minds.sub_ability.as_ref().expect("draw sub");
+    match &*minds_sub.effect {
+        Effect::Draw { count, .. } => assert!(
+            is_variable_x(count),
+            "Minds Aglow draw count must stay Variable(X), got {count:?}"
+        ),
+        other => panic!("expected Draw, got {other:?}"),
+    }
+    // Shared Trauma — mill body.
+    let trauma = parse_effect_chain(
+        "Starting with you, each player may pay any amount of mana. Each player mills X cards, where X is the total amount of mana paid this way.",
+        AbilityKind::Spell,
+    );
+    let trauma_sub = trauma.sub_ability.as_ref().expect("mill sub");
+    match &*trauma_sub.effect {
+        Effect::Mill { count, .. } => assert!(
+            is_variable_x(count),
+            "Shared Trauma mill count must stay Variable(X), got {count:?}"
+        ),
+        other => panic!("expected Mill, got {other:?}"),
+    }
+}
+
+/// Fix 2 + Fix 3 (Power Leak): the upkeep trigger scopes to the enchanted
+/// enchantment's controller (`ParentTargetController`, not every player), and
+/// the "deal 2 damage / prevent X" pair folds into ONE `DealDamage` with the
+/// `max(2 - X, 0)` amount — no `PreventDamage` node survives.
+#[test]
+fn power_leak_folds_deal_prevent_and_scopes_trigger_to_enchanted_controller() {
+    let parsed = parse_oracle_text(
+        POWER_LEAK_ORACLE,
+        "Power Leak",
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    let trigger = parsed.triggers.first().expect("upkeep trigger");
+    // Fix 3: without the generalized enchant-noun leg this stays `None` (fires
+    // for every player's upkeep).
+    assert_eq!(
+        trigger.valid_target.as_ref(),
+        Some(&TargetFilter::ParentTargetController),
+        "Power Leak upkeep trigger must scope to the enchanted enchantment's controller"
+    );
+
+    let execute = trigger.execute.as_ref().expect("trigger execute");
+    let effects = collect_chain_effects(execute);
+    // Reach guard: the chain parsed to real effects (no Unimplemented), so the
+    // negative "no PreventDamage" assertion below is not vacuous.
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "Power Leak trigger must parse to supported effects, got {effects:?}"
+    );
+    let deal = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::DealDamage { amount, .. } => Some(amount.clone()),
+            _ => None,
+        })
+        .expect("a DealDamage node must exist in the folded chain");
+    assert_eq!(
+        deal,
+        max_two_minus_x(),
+        "Fix 2: DealDamage must fold to max(2 - X, 0)"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PreventDamage { .. })),
+        "Fix 2: no PreventDamage node may survive the fold, got {effects:?}"
+    );
+}
+
+/// Fix 2 (Errant Minion): the "Enchant creature" sibling of Power Leak folds
+/// identically, and its trigger already scopes to `ParentTargetController`.
+#[test]
+fn errant_minion_folds_deal_prevent_into_computed_amount() {
+    let parsed = parse_oracle_text(
+        ERRANT_MINION_ORACLE,
+        "Errant Minion",
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    let trigger = parsed.triggers.first().expect("upkeep trigger");
+    assert_eq!(
+        trigger.valid_target.as_ref(),
+        Some(&TargetFilter::ParentTargetController),
+        "Errant Minion upkeep trigger scopes to the enchanted creature's controller"
+    );
+    let execute = trigger.execute.as_ref().expect("trigger execute");
+    let effects = collect_chain_effects(execute);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "Errant Minion trigger must parse to supported effects, got {effects:?}"
+    );
+    let deal = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::DealDamage { amount, .. } => Some(amount.clone()),
+            _ => None,
+        })
+        .expect("a DealDamage node must exist");
+    assert_eq!(
+        deal,
+        max_two_minus_x(),
+        "DealDamage must fold to max(2 - X, 0)"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PreventDamage { .. })),
+        "no PreventDamage node may survive the fold, got {effects:?}"
+    );
+}
+
+/// Fix 1 (Liege of the Hollows): the "creates a number of … tokens equal to the
+/// amount of mana they paid this way" count binds to `Variable("X")` (so the
+/// upstream PayCost loop's accumulated total flows in), not the dead raw-string
+/// variable that resolved to 0.
+#[test]
+fn liege_of_the_hollows_token_count_binds_variable_x() {
+    let parsed = parse_oracle_text(
+        LIEGE_OF_THE_HOLLOWS_ORACLE,
+        "Liege of the Hollows",
+        &[],
+        &["Creature".to_string()],
+        &["Treefolk".to_string()],
+    );
+    let trigger = parsed.triggers.first().expect("dies trigger");
+    let execute = trigger.execute.as_ref().expect("trigger execute");
+    let effects = collect_chain_effects(execute);
+    let count = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::Token { count, .. } => Some(count.clone()),
+            _ => None,
+        })
+        .expect("a Token node must exist");
+    assert!(
+        matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { name } } if name == "X"),
+        "Liege token count must bind Variable(X), got {count:?}"
+    );
+}
+
+/// Fix 3: the generalized Enchant-noun leg scopes the upkeep trigger for the
+/// artifact / land / enchantment Aura cousins (previously left unscoped because
+/// the phrase recognizer only matched creature/permanent). Spot-checks one Aura
+/// per new noun class.
+#[test]
+fn enchant_noun_trigger_scope_generalizes_across_aura_types() {
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "Warp Artifact",
+            "artifact",
+            "Enchant artifact\nAt the beginning of the upkeep of enchanted artifact's controller, this Aura deals 1 damage to that player.",
+        ),
+        (
+            "Cursed Land",
+            "land",
+            "Enchant land\nAt the beginning of the upkeep of enchanted land's controller, this Aura deals 1 damage to that player.",
+        ),
+        (
+            "Feedback",
+            "enchantment",
+            "Enchant enchantment\nAt the beginning of the upkeep of enchanted enchantment's controller, this Aura deals 1 damage to that player.",
+        ),
+    ];
+    for (name, noun, oracle) in cases {
+        let parsed = parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &["Enchantment".to_string()],
+            &["Aura".to_string()],
+        );
+        let trigger = parsed.triggers.first().expect("upkeep trigger");
+        assert_eq!(
+            trigger.valid_target.as_ref(),
+            Some(&TargetFilter::ParentTargetController),
+            "'{name}' (enchant {noun}) upkeep trigger must scope to the enchanted permanent's controller"
+        );
+    }
+}
+
 // --- compound-subject-each object axis (CR 109.5 / 115.1 / 611.2c) ---
 
 /// Collect every link's recipient filter by walking the parent -> sub_ability
@@ -45780,5 +46103,247 @@ fn investigate_subject_lifts_parent_target_controller_to_player_scope() {
     assert_eq!(
         press_inv.repeat_for, None,
         "a bare \"investigate\" must not gain a repeat count"
+    );
+}
+
+/// Natural Balance's threshold grammar must lower through the generic exact
+/// keeper/search/delivery/shuffle building blocks, not a card-name special case.
+/// The alternate numerals prove every numeric axis is parsed independently.
+#[test]
+fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
+    let def = parse_effect_chain(
+        "Each player who controls 7 or more lands chooses 4 lands they control and sacrifices the rest. Each player who controls 3 or fewer lands may search their library for up to X basic land cards and put them onto the battlefield, where X is 6 minus the number of lands they control. Then each player who searched their library this way shuffles.",
+        AbilityKind::Spell,
+    );
+
+    assert!(matches!(
+        def.player_scope,
+        Some(PlayerFilter::ControlsCount {
+            comparator: Comparator::GE,
+            count,
+            ..
+        }) if matches!(count.as_ref(), QuantityExpr::Fixed { value: 7 })
+    ));
+    let Effect::ChooseAndSacrificeRest {
+        keeper_constraint: Some(KeeperConstraint::ExactCount { count }),
+        choose_filter,
+        sacrifice_filter,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected exact keeper sacrifice root, got {:?}", def.effect);
+    };
+    assert_eq!(choose_filter, sacrifice_filter);
+    assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+
+    let search = def
+        .sub_ability
+        .as_deref()
+        .expect("exact keeper must continue to the scoped search");
+    assert!(search.optional);
+    assert!(matches!(
+        &search.player_scope,
+        Some(PlayerFilter::ControlsCount {
+            comparator: Comparator::LE,
+            count,
+            ..
+        }) if matches!(count.as_ref(), QuantityExpr::Fixed { value: 3 })
+    ));
+    assert!(matches!(
+        search.effect.as_ref(),
+        Effect::SearchLibrary {
+            count: QuantityExpr::UpTo { max },
+            target_player: None,
+            source_zones,
+            ..
+        } if source_zones == &vec![Zone::Library]
+            && matches!(
+                max.as_ref(),
+                QuantityExpr::Sum { exprs }
+                    if matches!(exprs.as_slice(), [
+                        QuantityExpr::Fixed { value: 6 },
+                        QuantityExpr::Multiply { factor: -1, inner },
+                    ] if matches!(
+                        inner.as_ref(),
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter }
+                        } if matches!(filter, TargetFilter::Typed(tf)
+                            if tf.controller == Some(ControllerRef::ScopedPlayer))
+                    ))
+            )
+    ));
+
+    let delivery = search
+        .sub_ability
+        .as_deref()
+        .expect("search must carry a result-delivery continuation");
+    assert!(matches!(
+        delivery.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Battlefield,
+            target: TargetFilter::ParentTarget,
+            enter_tapped: crate::types::zones::EtbTapState::Tapped,
+            ..
+        }
+    ));
+    let shuffle = delivery
+        .sub_ability
+        .as_deref()
+        .expect("delivery must retain the final scoped shuffle");
+    assert!(matches!(
+        shuffle.effect.as_ref(),
+        Effect::Shuffle {
+            target: TargetFilter::Controller
+        }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::PerformedActionThisWay {
+            relation: PlayerRelation::All,
+            action: crate::types::events::PlayerActionKind::SearchedLibrary,
+        })
+    ));
+}
+
+/// The dedicated whole-line grammar must fail closed when the independently
+/// parsed axes no longer describe the same threshold-land instruction class.
+#[test]
+fn threshold_land_balance_rejects_nonbasic_search_variant() {
+    let def = parse_effect_chain(
+        "Each player who controls 6 or more lands chooses 5 lands they control and sacrifices the rest. Each player who controls 4 or fewer lands may search their library for up to X land cards and put them onto the battlefield, where X is 5 minus the number of lands they control. Then each player who searched their library this way shuffles.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(def.effect.as_ref(), Effect::Unimplemented { .. }));
+}
+
+/// Issue #5760: U.S.Agent, John Walker creates an Equipment token, then
+/// "Attach it to ~" in a following sentence. "It" is the just-created
+/// Equipment (`LastCreated`); "~" is U.S.Agent itself (`SelfRef`). Before the
+/// fix, the post-token anaphor rewrite unconditionally treated the `Attach`'s
+/// `target` slot as the ambiguous anaphor (correct for Fractal Harness-style
+/// "attach this Equipment to it", where the *source* is the Equipment being
+/// attached and the created token is the host) — which swapped the roles
+/// here, since U.S.Agent's created token IS the Equipment and the attachment
+/// slot carries the anaphor.
+#[test]
+fn us_agent_attaches_created_equipment_token_to_self() {
+    let parsed = parse_oracle_text(
+        "When U.S.Agent enters, create a colorless Equipment artifact token named Sturdy Shield with \"Equipped creature gets +1/+2\" and equip {2}. Attach it to U.S.Agent.",
+        "U.S.Agent, John Walker",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Human".to_string(), "Soldier".to_string(), "Hero".to_string()],
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("ETB trigger must have an execute chain");
+    assert!(
+        matches!(*execute.effect, Effect::Token { .. }),
+        "expected the ETB root to create the Equipment token, got {:?}",
+        execute.effect
+    );
+    let attach = execute
+        .sub_ability
+        .as_ref()
+        .expect("Attach must follow the token creation");
+    let Effect::Attach { attachment, target } = attach.effect.as_ref() else {
+        panic!("expected Attach sub-ability, got {:?}", attach.effect);
+    };
+    assert_eq!(
+        *attachment,
+        TargetFilter::LastCreated,
+        "the created Equipment token must be the attachment, not U.S.Agent"
+    );
+    assert_eq!(
+        *target,
+        TargetFilter::SelfRef,
+        "U.S.Agent must remain the attachment's host"
+    );
+}
+
+/// An attachable created token prefers an anaphor in the attachment slot, but
+/// must not suppress the target-side rewrite when that slot is explicit.
+#[test]
+fn attachable_token_creator_still_rewrites_target_side_anaphor() {
+    let mut effect = Effect::Attach {
+        attachment: TargetFilter::SelfRef,
+        target: TargetFilter::ParentTarget,
+    };
+
+    rewrite_parent_target_to_last_created(&mut effect, true);
+
+    let Effect::Attach { attachment, target } = effect else {
+        panic!("expected Attach effect");
+    };
+    assert_eq!(attachment, TargetFilter::SelfRef);
+    assert_eq!(target, TargetFilter::LastCreated);
+}
+
+/// CR 402.1 + CR 121.1 (issue #5637) — production-path regression for Bandit's
+/// Talent. The level-3 trigger "At the beginning of your draw step, draw an
+/// additional card for each opponent who has one or fewer cards in hand" must
+/// lower to a Draw whose count is a `PlayerCount` over opponents with hand size
+/// `<= 1` — not a flat `Fixed(1)`. Before the fix the "for each opponent who has
+/// one or fewer cards in hand" clause was swallowed (a `DynamicQty`
+/// `SwallowedClause` warning fired) and the draw collapsed to one card regardless
+/// of how many opponents were hellbent.
+#[test]
+fn bandits_talent_level3_draw_counts_hellbent_opponents() {
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::types::ability::{
+        AbilityDefinition, Effect, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr,
+        QuantityRef,
+    };
+
+    fn find_draw_count(def: &AbilityDefinition) -> Option<QuantityExpr> {
+        if let Effect::Draw { count, .. } = &*def.effect {
+            return Some(count.clone());
+        }
+        def.sub_ability.as_deref().and_then(find_draw_count)
+    }
+
+    let parsed = parse_oracle_text(
+        "When this Class enters, each opponent discards two cards unless they discard a nonland card.\n{B}: Level 2\nAt the beginning of each opponent's upkeep, if that player has one or fewer cards in hand, they lose 2 life.\n{3}{B}: Level 3\nAt the beginning of your draw step, draw an additional card for each opponent who has one or fewer cards in hand.",
+        "Bandit's Talent",
+        &[],
+        &["Enchantment".to_string()],
+        &["Class".to_string()],
+    );
+
+    let count = parsed
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .find_map(find_draw_count)
+        .expect("Bandit's Talent must lower a draw-step Draw effect");
+
+    assert_eq!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: crate::types::ability::Comparator::LE,
+                    value: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+            },
+        },
+        "the draw count must be the number of opponents with <= 1 card in hand, not Fixed(1)"
+    );
+
+    // The DynamicQty swallow warning for the draw-step line must be gone.
+    assert!(
+        !parsed.parse_warnings.iter().any(|w| matches!(
+            w,
+            OracleDiagnostic::SwallowedClause { detector, description, .. }
+                if detector == "DynamicQty" && description.contains("draw an additional card for each opponent")
+        )),
+        "the DynamicQty swallow warning must be cleared: {:?}",
+        parsed.parse_warnings
     );
 }

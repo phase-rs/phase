@@ -138,6 +138,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         ? entry.kind.data.description && renderDescription(entry.kind.data.description, sourceName)
         : undefined;
   const targetLabels = details?.targets?.map((target) => target.label) ?? [];
+  const selectedModeLabels = isSpell ? details?.selected_mode_labels ?? [] : [];
   // The chosen {X} is a resolved value (like a chosen color), not just a cost —
   // pull it out for a dedicated, always-visible badge and drop it from the
   // capped paid-chip row so it isn't shown twice.
@@ -286,6 +287,22 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
             />
           )}
         </div>
+      )}
+
+      {selectedModeLabels.length > 0 && (
+        <section
+          aria-label={t("stack.selectedModes")}
+          className="absolute inset-x-0 bottom-0 rounded-b-lg border-t border-white/10 bg-gray-900/95 px-1.5 py-1 backdrop-blur-sm"
+        >
+          <span className="block text-[9px] font-semibold uppercase tracking-wide text-purple-300">
+            {t("stack.selectedModes")}
+          </span>
+          <ul className="mt-0.5 list-inside list-disc text-[8px] leading-tight text-gray-300">
+            {selectedModeLabels.map((label, index) => (
+              <li key={`${index}-${label}`}>{renderDescription(label, sourceName)}</li>
+            ))}
+          </ul>
+        </section>
       )}
 
       {(targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (

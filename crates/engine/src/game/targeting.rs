@@ -3160,7 +3160,7 @@ mod tests {
     fn protection_from_each_color_blocks_every_color_source() {
         // CR 702.16b + CR 105.2: "Protection from each color" — Akroma's Will
         // / Iridescent Angel scenario. End-to-end: parse the Oracle text via
-        // `extract_keyword_line` (which routes through `expand_protection_parts`
+        // `extract_granted_keyword_list` (which routes through `expand_protection_parts`
         // and emits 5 typed `Protection(Color(X))` keywords), attach the
         // parsed keywords to a creature, and verify every monocolored source
         // is rejected by `find_legal_targets`. Regression test for the bug
@@ -3169,7 +3169,7 @@ mod tests {
         // like Dark Impostor target a creature buffed by Akroma's Will.
         use crate::types::mana::ManaColor;
 
-        let keywords = crate::parser::oracle_keyword::extract_keyword_line(
+        let keywords = crate::parser::oracle_keyword::extract_granted_keyword_list(
             "protection from each color",
             &["protection".to_string()],
         )
