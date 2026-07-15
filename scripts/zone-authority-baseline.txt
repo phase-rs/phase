@@ -24,7 +24,7 @@ crates/engine/src/game/casting.rs	handle_foretell	mover	1
 crates/engine/src/game/casting_costs.rs	handle_resolution_cast_rejection	mover	1
 crates/engine/src/game/conspiracy.rs	start_with_conspiracy	container	1
 crates/engine/src/game/conspiracy.rs	start_with_conspiracy	zone-assign	1
-crates/engine/src/game/costs.rs	pay_ability_cost_inner	mover	3
+crates/engine/src/game/costs.rs	pay_ability_cost_inner	mover	2
 crates/engine/src/game/deck_loading.rs	create_attraction_deck_card	container	1
 crates/engine/src/game/deck_loading.rs	create_contraption_deck_card	container	1
 crates/engine/src/game/deck_loading.rs	create_planar_deck_card	container	1

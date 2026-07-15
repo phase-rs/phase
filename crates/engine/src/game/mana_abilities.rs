@@ -2437,13 +2437,17 @@ where
                                 amount: amount.clone(),
                             },
                         };
-                        super::costs::pay_ability_cost(state, player, source_id, &cost, events)?;
+                        super::costs::pay_mana_ability_cost_synchronously(
+                            state, player, source_id, &cost, events,
+                        )?;
                     }
                     // Self-contained components (Untap {Q}, Exert, PayEnergy,
                     // self-ReturnToHand, EffectCost) delegate to the
                     // single-authority cost payer alongside the tap.
                     c if is_self_contained_mana_subcost(c) => {
-                        super::costs::pay_ability_cost(state, player, source_id, c, events)?;
+                        super::costs::pay_mana_ability_cost_synchronously(
+                            state, player, source_id, c, events,
+                        )?;
                     }
                     other => {
                         return Err(EngineError::InvalidAction(format!(
@@ -2469,12 +2473,14 @@ where
                     amount: amount.clone(),
                 },
             };
-            super::costs::pay_ability_cost(state, player, source_id, &cost, events)?;
+            super::costs::pay_mana_ability_cost_synchronously(
+                state, player, source_id, &cost, events,
+            )?;
         }
         // Self-contained components (Untap, Exert, PayEnergy, self-ReturnToHand,
         // EffectCost) delegate to the single-authority cost payer.
         Some(c) if is_self_contained_mana_subcost(c) => {
-            super::costs::pay_ability_cost(state, player, source_id, c, events)?;
+            super::costs::pay_mana_ability_cost_synchronously(state, player, source_id, c, events)?;
         }
         // CR 122.1 + CR 601.2b: Standalone RemoveCounter-on-self mana-ability
         // cost (Pentad Prism, Crystalline Crawler, Druids' Repository class).

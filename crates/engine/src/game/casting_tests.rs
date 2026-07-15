@@ -28271,7 +28271,7 @@ fn composite_activated_pay_life_cost_deducts_life() {
     let life_before = state.players[0].life;
     let mut events = Vec::new();
 
-    pay_ability_cost(&mut state, PlayerId(0), fetch, &cost, &mut events)
+    pay_ability_cost_for_activation(&mut state, PlayerId(0), fetch, &cost, None, &mut events)
         .expect("fetchland-style composite cost should be payable");
 
     assert_eq!(state.players[0].life, life_before - 1);
@@ -30275,7 +30275,7 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         let mut events = Vec::new();
-        pay_ability_cost(&mut state, PlayerId(0), source, &cost, &mut events)
+        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, None, &mut events)
             .expect("cost should pay with 2 +1/+1 counters available");
         let remaining = state
             .objects
@@ -30354,7 +30354,8 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         let mut events = Vec::new();
-        pay_ability_cost(&mut state, PlayerId(0), source, &cost, &mut events).unwrap();
+        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, None, &mut events)
+            .unwrap();
         let removed_count = events
             .iter()
             .filter_map(|e| match e {
@@ -31797,8 +31798,15 @@ mod unattach_cost {
         let cost = AbilityCost::Unattach;
 
         assert!(cost.is_payable(&state, PlayerId(0), equipment));
-        pay_ability_cost(&mut state, PlayerId(0), equipment, &cost, &mut Vec::new())
-            .expect("attached Equipment should be able to unattach as a cost");
+        pay_ability_cost_for_activation(
+            &mut state,
+            PlayerId(0),
+            equipment,
+            &cost,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("attached Equipment should be able to unattach as a cost");
 
         assert_eq!(state.objects[&equipment].zone, Zone::Battlefield);
         assert!(state.objects[&equipment].attached_to.is_none());
@@ -33505,11 +33513,12 @@ mod exert_cost {
         state.objects.get_mut(&id).unwrap().tapped = true;
 
         let mut events = Vec::new();
-        pay_ability_cost(
+        pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         )
         .expect("exert cost pays");
@@ -33564,19 +33573,21 @@ mod exert_cost {
         let id = make_battlefield_permanent(&mut state);
 
         let mut events = Vec::new();
-        pay_ability_cost(
+        pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         )
         .expect("first exert");
-        pay_ability_cost(
+        pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         )
         .expect("second exert");
@@ -33619,11 +33630,12 @@ mod exert_cost {
         );
 
         let mut events = Vec::new();
-        let result = pay_ability_cost(
+        let result = pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         );
         assert!(matches!(result, Err(EngineError::ActionNotAllowed(_))));
@@ -33638,11 +33650,12 @@ mod exert_cost {
         let id = make_battlefield_permanent(&mut state);
 
         let mut events = Vec::new();
-        pay_ability_cost(
+        pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         )
         .expect("exert cost pays");

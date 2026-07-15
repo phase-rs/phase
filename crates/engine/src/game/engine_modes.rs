@@ -242,7 +242,34 @@ fn handle_activated_mode_choice(
             assign_targets_in_chain(state, &mut resolved, &targets)?;
 
             if let Some(cost) = &ability_cost {
-                casting::pay_ability_cost(state, player, source_id, cost, events)?;
+                let ability_tag = ability_index
+                    .and_then(|index| casting::activation_ability_tag(state, source_id, index));
+                match casting::pay_ability_cost_for_activation(
+                    state,
+                    player,
+                    source_id,
+                    cost,
+                    ability_tag,
+                    events,
+                )? {
+                    casting::PaymentOutcome::Paid => {}
+                    casting::PaymentOutcome::Paused { remaining_cost } => {
+                        let mut pending =
+                            PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                        pending.activation_cost = remaining_cost;
+                        pending.activation_ability_index = ability_index;
+                        if let Some(pending) = casting_costs::attach_pending_cast_to_cost_move(
+                            state,
+                            Box::new(pending),
+                        ) {
+                            state.pending_cast = Some(pending);
+                        }
+                        return Ok(state.waiting_for.clone());
+                    }
+                    casting::PaymentOutcome::Failed { reason } => {
+                        return Err(EngineError::ActionNotAllowed(reason.reason));
+                    }
+                }
             }
             casting::emit_targeting_events(
                 state,
@@ -299,7 +326,33 @@ fn handle_activated_mode_choice(
         }
     } else {
         if let Some(cost) = &ability_cost {
-            casting::pay_ability_cost(state, player, source_id, cost, events)?;
+            let ability_tag = ability_index
+                .and_then(|index| casting::activation_ability_tag(state, source_id, index));
+            match casting::pay_ability_cost_for_activation(
+                state,
+                player,
+                source_id,
+                cost,
+                ability_tag,
+                events,
+            )? {
+                casting::PaymentOutcome::Paid => {}
+                casting::PaymentOutcome::Paused { remaining_cost } => {
+                    let mut pending =
+                        PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                    pending.activation_cost = remaining_cost;
+                    pending.activation_ability_index = ability_index;
+                    if let Some(pending) =
+                        casting_costs::attach_pending_cast_to_cost_move(state, Box::new(pending))
+                    {
+                        state.pending_cast = Some(pending);
+                    }
+                    return Ok(state.waiting_for.clone());
+                }
+                casting::PaymentOutcome::Failed { reason } => {
+                    return Err(EngineError::ActionNotAllowed(reason.reason));
+                }
+            }
         }
         let entry_id = ObjectId(state.next_object_id);
         state.next_object_id += 1;

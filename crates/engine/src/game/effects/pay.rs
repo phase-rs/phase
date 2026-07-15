@@ -231,7 +231,10 @@ fn resolve_ability_cost_payment(
             payer,
             ability.source_id,
             cost,
-            &costs::PaymentScope::Resolution { ability },
+            &costs::PaymentScope::Resolution {
+                ability,
+                cost_move_root: costs::ResolutionCostMoveRoot::EffectPayCost,
+            },
         )
     {
         state.cost_payment_failed_flag = true;

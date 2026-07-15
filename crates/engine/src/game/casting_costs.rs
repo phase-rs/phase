@@ -14,7 +14,7 @@ use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActivationResidual, AssistState, CastPaymentMode, CastingVariant, ConvokeMode, CostResume,
     CounterCostChoice, CounterRemoveChoice, DeferredSacrificeSelection, DistributionUnit,
-    GameState, PayCostKind, PendingCast, PendingCostMoveCompletion, PendingCostPaymentResume,
+    GameState, PayCostKind, PendingCast, PendingCostMoveCompletion, PendingCostMoveResume,
     PendingDiscardForCostResume, SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot,
     WaitingFor,
 };
@@ -1378,7 +1378,6 @@ pub(crate) fn handle_discard_for_cost(
                     pending: pending.clone(),
                     chosen: chosen.to_vec(),
                     paused_at_index: index,
-                    resume: PendingCostPaymentResume::Discard,
                 });
                 super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                 // CR 603.2 + CR 603.3b: Earlier cards in a count>1 discard cost may
@@ -1470,15 +1469,13 @@ fn finish_cost_object_moves(
         ) {
             ZoneMoveResult::Done => {}
             ZoneMoveResult::NeedsChoice(choice_player) => {
-                state.pending_discard_for_cost = Some(PendingDiscardForCostResume {
+                state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
                     player,
-                    pending,
+                    pending: Some(Box::new(pending)),
                     chosen,
                     paused_at_index: index,
-                    resume: PendingCostPaymentResume::Move {
-                        destination,
-                        completion,
-                    },
+                    destination,
+                    completion,
                 });
                 super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                 let waiting_for = state.waiting_for.clone();
@@ -1501,6 +1498,19 @@ fn finish_cost_object_moves(
         PendingCostMoveCompletion::FinishPending => {
             finish_pending_cost_or_cast(state, player, pending, events)?
         }
+        PendingCostMoveCompletion::CompleteSelectedReturnToHand {
+            selected,
+            automatic_remaining,
+        } => finish_selected_return_to_hand_after_automatic(
+            state,
+            player,
+            pending,
+            selected,
+            automatic_remaining,
+            cost_event_start,
+            park_events_after_completion,
+            events,
+        )?,
         PendingCostMoveCompletion::PublishExileTrackedSet => {
             // CR 614: a replacement may deliver a card elsewhere; the set must reflect
             // what actually arrived in exile.
@@ -1577,6 +1587,94 @@ fn finish_cost_object_moves(
     Ok(waiting_for)
 }
 
+/// CR 601.2h + CR 602.2b + CR 616.1: A replacement can interrupt an automatic
+/// activation-cost leg before the chosen return-to-hand leg is delivered. Resume
+/// that automatic suffix first, then deliver the already selected return, so each
+/// cost leg is paid exactly once before later return legs re-surface.
+#[allow(clippy::too_many_arguments)]
+fn finish_selected_return_to_hand_after_automatic(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    selected: Vec<ObjectId>,
+    automatic_remaining: Option<AbilityCost>,
+    cost_event_start: usize,
+    park_events_after_completion: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if let Some(cost) = automatic_remaining {
+        let ability_index = pending.activation_ability_index.ok_or_else(|| {
+            EngineError::InvalidAction(
+                "return-cost continuation missing an activation ability index".to_string(),
+            )
+        })?;
+        match super::casting::pay_ability_cost_for_activation(
+            state,
+            player,
+            pending.object_id,
+            &cost,
+            super::casting::activation_ability_tag(state, pending.object_id, ability_index),
+            events,
+        )? {
+            super::casting::PaymentOutcome::Paid => {}
+            super::casting::PaymentOutcome::Paused { remaining_cost } => {
+                let Some(PendingCostMoveResume::Cast {
+                    pending: slot @ None,
+                    completion,
+                    ..
+                }) = state.pending_cost_move_resume.as_mut()
+                else {
+                    return Err(EngineError::InvalidAction(
+                        "automatic return-cost suffix paused without a cost-move continuation"
+                            .to_string(),
+                    ));
+                };
+                *slot = Some(Box::new(pending));
+                *completion = PendingCostMoveCompletion::CompleteSelectedReturnToHand {
+                    selected,
+                    automatic_remaining: remaining_cost,
+                };
+                return Ok(state.waiting_for.clone());
+            }
+            super::casting::PaymentOutcome::Failed { reason } => {
+                return Err(EngineError::ActionNotAllowed(reason.reason));
+            }
+        }
+    }
+
+    finish_cost_object_moves(
+        state,
+        player,
+        pending,
+        selected,
+        0,
+        Zone::Hand,
+        PendingCostMoveCompletion::FinishPending,
+        cost_event_start,
+        park_events_after_completion,
+        events,
+    )
+}
+
+/// CR 601.2h + CR 602.2b: An activation that paused while paying a self-move
+/// cost keeps its continuation with the typed cost-move resume, rather than in
+/// `GameState::pending_cast`. Returns the payload unchanged for every other
+/// kind of pause.
+pub(crate) fn attach_pending_cast_to_cost_move(
+    state: &mut GameState,
+    pending: Box<PendingCast>,
+) -> Option<Box<PendingCast>> {
+    let Some(PendingCostMoveResume::Cast {
+        pending: slot @ None,
+        ..
+    }) = state.pending_cost_move_resume.as_mut()
+    else {
+        return Some(pending);
+    };
+    *slot = Some(pending);
+    None
+}
+
 /// CR 601.2h + CR 616.1: After a replacement choice during sequential cost payment, finish
 /// the remaining cost moves and continue the cast/activation pipeline.
 ///
@@ -1588,25 +1686,41 @@ pub(crate) fn resume_interrupted_cost_payment(
     events: &mut Vec<GameEvent>,
     replacement_action_cost_event_start: Option<usize>,
 ) -> Result<WaitingFor, EngineError> {
-    if let Some(resume) = state.pending_discard_for_cost.take() {
-        if let PendingCostPaymentResume::Move {
+    if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::Cast { .. })
+    ) {
+        let Some(PendingCostMoveResume::Cast {
+            player,
+            pending,
+            chosen,
+            paused_at_index,
             destination,
             completion,
-        } = resume.resume
-        {
-            return finish_cost_object_moves(
-                state,
-                resume.player,
-                resume.pending,
-                resume.chosen,
-                resume.paused_at_index + 1,
-                destination,
-                completion,
-                replacement_action_cost_event_start.unwrap_or(events.len()),
-                true,
-                events,
-            );
-        }
+        }) = state.pending_cost_move_resume.take()
+        else {
+            unreachable!("matched a cast cost-move continuation")
+        };
+        let Some(pending) = pending else {
+            return Ok(WaitingFor::Priority {
+                player: state.active_player,
+            });
+        };
+        return finish_cost_object_moves(
+            state,
+            player,
+            *pending,
+            chosen,
+            paused_at_index + 1,
+            destination,
+            completion,
+            replacement_action_cost_event_start.unwrap_or(events.len()),
+            true,
+            events,
+        );
+    }
+
+    if let Some(resume) = state.pending_discard_for_cost.take() {
         let player = resume.player;
         let pending = resume.pending;
         let cost_event_start = replacement_action_cost_event_start.unwrap_or(events.len());
@@ -1624,7 +1738,6 @@ pub(crate) fn resume_interrupted_cost_payment(
                         pending: pending.clone(),
                         chosen: resume.chosen.clone(),
                         paused_at_index,
-                        resume: PendingCostPaymentResume::Discard,
                     });
                     super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                     // CR 603.2 + CR 603.3b: Same mid-loop replacement pause as
@@ -2347,13 +2460,55 @@ pub(crate) fn handle_return_to_hand_for_cost(
         }
     }
 
-    if pending.activation_ability_index.is_some() {
+    if let Some(ability_index) = pending.activation_ability_index {
         if let Some(cost) = pending.activation_cost.take() {
             // CR 118.3 + CR 601.2h + CR 602.2b: A player pays an activated ability's total
             // cost before that ability becomes activated. For self-bounce costs
             // such as Maze's End, pay automatic components like {T} while the
             // source is still on the battlefield, then perform the chosen return.
-            super::casting::pay_ability_cost(state, player, pending.object_id, &cost, events)?;
+            // This handler pays exactly the selected return below. Keep later
+            // return legs in the pending activation so they re-surface as their
+            // own choices after this move completes.
+            let residual = super::casting::remove_selected_return_to_hand_cost(cost);
+            let (automatic_cost, deferred_return_cost) = residual
+                .map(super::casting::split_return_to_hand_cost_legs)
+                .unwrap_or((None, None));
+            pending.activation_cost = deferred_return_cost;
+
+            if let Some(cost) = automatic_cost {
+                match super::casting::pay_ability_cost_for_activation(
+                    state,
+                    player,
+                    pending.object_id,
+                    &cost,
+                    super::casting::activation_ability_tag(state, pending.object_id, ability_index),
+                    events,
+                )? {
+                    super::casting::PaymentOutcome::Paid => {}
+                    super::casting::PaymentOutcome::Paused { remaining_cost } => {
+                        let Some(PendingCostMoveResume::Cast {
+                            pending: slot @ None,
+                            completion,
+                            ..
+                        }) = state.pending_cost_move_resume.as_mut()
+                        else {
+                            return Err(EngineError::InvalidAction(
+                                "automatic return-cost leg paused without a cost-move continuation"
+                                    .to_string(),
+                            ));
+                        };
+                        *slot = Some(Box::new(pending));
+                        *completion = PendingCostMoveCompletion::CompleteSelectedReturnToHand {
+                            selected: chosen.to_vec(),
+                            automatic_remaining: remaining_cost,
+                        };
+                        return Ok(state.waiting_for.clone());
+                    }
+                    super::casting::PaymentOutcome::Failed { reason } => {
+                        return Err(EngineError::ActionNotAllowed(reason.reason));
+                    }
+                }
+            }
         }
     }
 
@@ -2428,16 +2583,6 @@ pub(crate) fn handle_remove_counter_for_cost(
         ));
     }
 
-    if pending.activation_ability_index.is_some() {
-        if let Some(cost) = pending.activation_cost.take() {
-            // CR 601.2h + CR 602.2b: Pay automatic activation-cost components such as
-            // {T} before removing the chosen counter and putting the ability
-            // on the stack. The targeted RemoveCounter sub-cost no-ops in
-            // `pay_ability_cost` because this handler pays that choice.
-            super::casting::pay_ability_cost(state, player, pending.object_id, &cost, events)?;
-        }
-    }
-
     let mut remaining = count;
     for &object_id in chosen {
         if remaining == 0 {
@@ -2481,6 +2626,39 @@ pub(crate) fn handle_remove_counter_for_cost(
                 object_id: obj.0,
                 lki: obj.1.snapshot_for_mana_spent(),
             });
+    }
+
+    if let Some(ability_index) = pending.activation_ability_index {
+        if let Some(cost) = pending.activation_cost.take() {
+            // CR 601.2h + CR 602.2b: Counter selection is already committed, so
+            // pay the automatic residual through the outcome-aware authority.
+            // If a self-move pauses, the typed continuation resumes this pending
+            // activation only after the selected counter was paid exactly once.
+            let ability_tag =
+                super::casting::activation_ability_tag(state, pending.object_id, ability_index);
+            match super::casting::pay_ability_cost_for_activation(
+                state,
+                player,
+                pending.object_id,
+                &cost,
+                ability_tag,
+                events,
+            )? {
+                super::casting::PaymentOutcome::Paid => {}
+                super::casting::PaymentOutcome::Paused { remaining_cost } => {
+                    pending.activation_cost = remaining_cost;
+                    if let Some(pending) =
+                        attach_pending_cast_to_cost_move(state, Box::new(pending))
+                    {
+                        state.pending_cast = Some(pending);
+                    }
+                    return Ok(state.waiting_for.clone());
+                }
+                super::casting::PaymentOutcome::Failed { reason } => {
+                    return Err(EngineError::ActionNotAllowed(reason.reason));
+                }
+            }
+        }
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
@@ -2593,15 +2771,6 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
     super::effects::counters::validate_counter_selection(&available_by_type, &per_type)
         .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
 
-    if pending.activation_ability_index.is_some() {
-        if let Some(cost) = pending.activation_cost.take() {
-            // CR 601.2h + CR 602.2b: Pay automatic activation-cost components
-            // such as {T} before removing the assigned counters and putting
-            // the ability on the stack.
-            super::casting::pay_ability_cost(state, player, pending.object_id, &cost, events)?;
-        }
-    }
-
     for choice in distribution {
         let removable = state
             .objects
@@ -2631,6 +2800,38 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
                     object_id: choice.object_id,
                     lki: obj.snapshot_for_mana_spent(),
                 });
+        }
+    }
+
+    if let Some(ability_index) = pending.activation_ability_index {
+        if let Some(cost) = pending.activation_cost.take() {
+            // CR 601.2h + CR 602.2b: The assigned counter payment is complete
+            // before an automatic residual can pause on a self-move replacement,
+            // so its typed continuation cannot replay the selected distribution.
+            let ability_tag =
+                super::casting::activation_ability_tag(state, pending.object_id, ability_index);
+            match super::casting::pay_ability_cost_for_activation(
+                state,
+                player,
+                pending.object_id,
+                &cost,
+                ability_tag,
+                events,
+            )? {
+                super::casting::PaymentOutcome::Paid => {}
+                super::casting::PaymentOutcome::Paused { remaining_cost } => {
+                    pending.activation_cost = remaining_cost;
+                    if let Some(pending) =
+                        attach_pending_cast_to_cost_move(state, Box::new(pending))
+                    {
+                        state.pending_cast = Some(pending);
+                    }
+                    return Ok(state.waiting_for.clone());
+                }
+                super::casting::PaymentOutcome::Failed { reason } => {
+                    return Err(EngineError::ActionNotAllowed(reason.reason));
+                }
+            }
         }
     }
 
@@ -3255,21 +3456,52 @@ pub(super) fn push_activated_ability_to_stack(
     activation_residual: ActivationResidual,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // CR 702.170b: plot is a special action that never uses the stack — it is
-    // intercepted in `handle_activate_ability` before any stack push. No current
-    // plot cost can pause (mana auto-pays, the self-exile auto-moves), so this
-    // cost-pause resume path is unreachable for plot. If a future plot variant
-    // carries a pausing sub-cost it would reach here — relocate the special-action
-    // guard to this chokepoint then.
-    debug_assert!(
-        !super::casting::effect_is_plot_grant(&resolved.effect),
-        "plot special action reached the cost-pause resume path; relocate the CR 702.170b intercept to this chokepoint"
-    );
+    // CR 702.170b: Plot is a special action that never uses the stack. A Moved
+    // replacement can now pause its self-exile cost, so resume it here rather
+    // than falling through to the activated-ability stack path.
+    if super::casting::effect_is_plot_grant(&resolved.effect) {
+        super::effects::grant_permission::resolve(state, &resolved, events).map_err(|error| {
+            EngineError::ActionNotAllowed(format!("plot special action failed: {error}"))
+        })?;
+        priority::clear_priority_passes(state);
+        return Ok(WaitingFor::Priority { player });
+    }
 
     // Pay any activation-cost tail still outstanding. Cost-selection flows may
     // pass the original full cost; choice-based sub-costs already paid by a
     // WaitingFor handler are no-ops here.
     if let Some(cost) = remaining_cost {
+        // A residual return-to-hand leg is not auto-payable: it needs the same
+        // card-selection round-trip as the first leg. This also covers a second
+        // return in a composite after `handle_return_to_hand_for_cost` paid the
+        // first one.
+        if super::casting::has_only_return_to_hand_cost_legs(cost) {
+            if let Some((count, filter)) = super::casting::find_return_to_hand_cost(cost) {
+                let eligible = super::casting::find_eligible_return_to_hand_targets(
+                    state, player, source_id, filter,
+                );
+                if eligible.len() < count as usize {
+                    return Err(EngineError::ActionNotAllowed(
+                        "No eligible permanents to return".into(),
+                    ));
+                }
+                let mut pending_return =
+                    PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                pending_return.activation_cost = Some(cost.clone());
+                pending_return.activation_ability_index = Some(ability_index);
+                return Ok(WaitingFor::PayCost {
+                    player,
+                    kind: PayCostKind::ReturnToHand,
+                    choices: eligible,
+                    count: count as usize,
+                    min_count: 0,
+                    resume: CostResume::Spell {
+                        spell: Box::new(pending_return),
+                    },
+                });
+            }
+        }
+
         // CR 601.2f + CR 601.2h + CR 701.9a: When the X-mana detour ran first
         // (e.g. the Momir Basic emblem's `{X}, Discard a card` cost), the non-self
         // "discard a card" sub-cost is still OUTSTANDING here AFTER mana payment,
@@ -3514,7 +3746,9 @@ pub(super) fn push_activated_ability_to_stack(
             let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending.activation_cost = remaining_cost;
             pending.activation_ability_index = Some(ability_index);
-            state.pending_cast = Some(Box::new(pending));
+            if let Some(pending) = attach_pending_cast_to_cost_move(state, Box::new(pending)) {
+                state.pending_cast = Some(pending);
+            }
             return Ok(state.waiting_for.clone());
         }
         if should_record_loyalty {

@@ -2432,9 +2432,20 @@ fn default_origin_zone() -> Zone {
 
 /// CR 601.2h + CR 616.1: Tail behavior for a sequential cost move that paused
 /// on a replacement choice.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingCostMoveCompletion {
     FinishPending,
+    /// The automatic prefix of an activation cost paused before its already
+    /// selected return-to-hand leg could move. Finish that selected leg before
+    /// the activation resumes and surfaces any later return costs.
+    CompleteSelectedReturnToHand {
+        selected: Vec<ObjectId>,
+        /// The automatic suffix left unpaid when its preceding self-move paused
+        /// for a replacement choice. It must finish before the selected return
+        /// move and any later return-to-hand chooser resume.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        automatic_remaining: Option<AbilityCost>,
+    },
     PublishExileTrackedSet,
     FinalizeCast {
         phyrexian_choices: Option<Vec<ShardChoice>>,
@@ -2445,14 +2456,32 @@ pub enum PendingCostMoveCompletion {
     },
 }
 
-/// CR 601.2h + CR 616.1: Resumption kind for a cost payment that paused on a
-/// replacement choice.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PendingCostPaymentResume {
-    Discard,
-    Move {
+/// CR 601.2h + CR 614.12a + CR 616.1: A cost move paused for a replacement
+/// choice. `Cast` resumes a cast or activation after its next object is
+/// delivered. `ReplacementMayCost` keeps the outer optional replacement parked
+/// while an inner MayCost move finishes through the replacement pipeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PendingCostMoveResume {
+    Cast {
+        player: PlayerId,
+        pending: Option<Box<PendingCast>>,
+        chosen: Vec<ObjectId>,
+        /// Index into `chosen` whose move completes during
+        /// `handle_replacement_choice`; resumption starts with the next object.
+        paused_at_index: usize,
         destination: Zone,
         completion: PendingCostMoveCompletion,
+    },
+    ReplacementMayCost {
+        source_id: ObjectId,
+        /// The object whose delivery is currently waiting on a replacement
+        /// choice. It is indexed only if it actually arrives in exile.
+        current: ObjectId,
+        remaining: Vec<ObjectId>,
+        paid_count: i32,
+        /// The outer optional replacement is restored only after every inner
+        /// cost move is delivered or prevented.
+        outer_replacement: Option<Box<PendingReplacement>>,
     },
 }
 
@@ -2467,7 +2496,6 @@ pub struct PendingDiscardForCostResume {
     /// Index into `chosen` whose move was paused; that move completes during
     /// `handle_replacement_choice` before this resume runs.
     pub paused_at_index: usize,
-    pub resume: PendingCostPaymentResume,
 }
 
 impl PendingCast {
@@ -9024,10 +9052,15 @@ pub struct GameState {
     #[serde(skip)]
     pub current_triggered_mana_override: Option<ProductionOverride>,
 
-    /// CR 601.2h + CR 616.1: Resume state when a sequential cost move pauses
-    /// mid-loop for a replacement choice. The object at `paused_at_index` is
-    /// completed by `handle_replacement_choice`; resume continues at the next
-    /// object through the existing cost-payment seam.
+    /// CR 601.2h + CR 614.12a + CR 616.1: Typed continuation for a sequential
+    /// cost move paused by a replacement choice. This remains serialized with
+    /// the matching `WaitingFor::ReplacementChoice`, so a host checkpoint can
+    /// resume the same cost-payment action after the player answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_cost_move_resume: Option<PendingCostMoveResume>,
+
+    /// CR 601.2h + CR 616.1: Resume a sequential discard cost after a
+    /// replacement choice. Cost moves use `pending_cost_move_resume` above.
     #[serde(skip)]
     pub pending_discard_for_cost: Option<PendingDiscardForCostResume>,
 
@@ -10381,6 +10414,7 @@ impl GameState {
             cost_payment_failed_flag: false,
             pending_taps_for_mana_overrides: std::collections::HashMap::new(),
             current_triggered_mana_override: None,
+            pending_cost_move_resume: None,
             pending_discard_for_cost: None,
             pending_cast: None,
             ring_level: HashMap::new(),
@@ -11380,6 +11414,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         cost_payment_failed_flag: _,
         pending_taps_for_mana_overrides: _,
         current_triggered_mana_override: _,
+        pending_cost_move_resume: _,
         pending_discard_for_cost: _,
         pending_cast: _,
         ring_level: _,
@@ -11642,6 +11677,7 @@ impl PartialEq for GameState {
             && self.pending_batch_deliveries == other.pending_batch_deliveries
             && self.pending_counter_additions == other.pending_counter_additions
             && self.pending_proliferate_actions == other.pending_proliferate_actions
+            && self.pending_cost_move_resume == other.pending_cost_move_resume
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.decision_templates == other.decision_templates
             && self.priority_yields == other.priority_yields
