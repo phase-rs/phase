@@ -4335,6 +4335,156 @@ fn life_and_limb_real_text_dual_subject_animation() {
     }
 }
 
+// #5814 + CR 611.3 + CR 205.1b + CR 305.7: Dune Chanter's compound-subject
+// additive land-type static — "Lands you control and land cards you own that
+// aren't on the battlefield are Deserts in addition to their other types." — must
+// affect BOTH conjuncts, not just the battlefield one: an `Or` of the "Lands you
+// control" filter (battlefield) and the off-battlefield-owned "land cards you own"
+// filter, both adding subtype Desert (CR 305.6: Desert is not a basic land type,
+// so it cannot route through the basic-land-type machinery).
+#[test]
+fn dune_chanter_compound_offbattlefield_land_type_static() {
+    let defs = parse_static_line_multi(
+        "Lands you control and land cards you own that aren't on the battlefield \
+         are Deserts in addition to their other types.",
+    );
+    assert_eq!(defs.len(), 1, "one compound additive-type static: {defs:?}");
+    let def = &defs[0];
+
+    // TEMP DIAG (#5814): dump the splitter's DIRECT return + the resolver layers to
+    // pinpoint why the compound collapses to Typed instead of Or.
+    let compound = "Lands you control and land cards you own that aren't on the battlefield";
+    let compound_l = compound.to_lowercase();
+    let split = parse_controlled_compound_continuous_subject_filter(
+        &crate::parser::oracle_util::TextPair::new(compound, &compound_l),
+    );
+    let whole = super::shared::parse_continuous_subject_filter(compound);
+    let left = super::shared::parse_continuous_subject_filter("Lands you control");
+    let right = super::shared::parse_continuous_subject_filter(
+        "land cards you own that aren't on the battlefield",
+    );
+    panic!("DIAG5814 split={split:?} ||| whole={whole:?} ||| left={left:?} ||| right={right:?}");
+    #[allow(unreachable_code)]
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!(
+            "affected must be an Or of both conjuncts: {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filters.len(), 2, "one disjunct per conjunct: {filters:?}");
+
+    // Conjunct 1: "Lands you control" — battlefield, no off-battlefield zone prop.
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Land)
+                && tf.controller == Some(ControllerRef::You)
+                && !tf.properties.iter().any(|p| matches!(p, FilterProp::InAnyZone { .. })))),
+        "missing battlefield 'lands you control' conjunct: {:?}",
+        def.affected
+    );
+    // Conjunct 2: "land cards you own that aren't on the battlefield" — owner-scoped,
+    // restricted to the four non-battlefield zones.
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.type_filters.contains(&TypeFilter::Land)
+                && tf.controller == Some(ControllerRef::You)
+                && tf.properties.iter().any(|p| matches!(p, FilterProp::InAnyZone { zones }
+                    if zones.contains(&Zone::Hand)
+                        && zones.contains(&Zone::Graveyard)
+                        && zones.contains(&Zone::Exile)
+                        && zones.contains(&Zone::Command)
+                        && !zones.contains(&Zone::Battlefield))))),
+        "missing off-battlefield 'land cards you own' conjunct: {:?}",
+        def.affected
+    );
+
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddSubtype {
+                subtype: "Desert".to_string()
+            }),
+        "must add subtype Desert to both conjuncts: {:?}",
+        def.modifications
+    );
+}
+
+// #5814 no-regression: a SINGLE-subject additive land-type line must stay a plain
+// `Typed` filter — the new off-battlefield branch must not widen it into an `Or`.
+#[test]
+fn single_subject_additive_land_type_stays_typed() {
+    let defs =
+        parse_static_line_multi("Lands you control are Deserts in addition to their other types.");
+    assert_eq!(defs.len(), 1, "one static: {defs:?}");
+    assert!(
+        matches!(defs[0].affected, Some(TargetFilter::Typed(_))),
+        "single subject must remain a Typed filter, not an Or: {:?}",
+        defs[0].affected
+    );
+}
+
+// #5814: the extracted `parse_owned_off_battlefield_subject_filter` helper is the
+// single grammar for "<type> cards you own that aren't on the battlefield". It must
+// scope to the owner (CR 109.5) across exactly the four non-battlefield zones, and
+// decline a leading token that names no type.
+#[test]
+fn owned_off_battlefield_subject_filter_shape() {
+    use super::shared::parse_owned_off_battlefield_subject_filter;
+
+    let subject = "creature cards you own that aren't on the battlefield";
+    let filter = parse_owned_off_battlefield_subject_filter(subject, subject)
+        .expect("off-battlefield-owned creature subject must resolve");
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected Typed filter, got {filter:?}");
+    };
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InAnyZone { zones }
+            if zones == &vec![Zone::Hand, Zone::Graveyard, Zone::Exile, Zone::Command])),
+        "must restrict to the four non-battlefield zones: {:?}",
+        tf.properties
+    );
+    // A leading token that is not a type declines (no unscoped `Any`).
+    assert!(
+        parse_owned_off_battlefield_subject_filter("lands you control", "lands you control")
+            .is_none(),
+        "a subject without the off-battlefield-ownership phrase must decline",
+    );
+}
+
+// #5814 extraction guard: `parse_spells_have_keyword`'s Pattern 2 (Leyline of
+// Anticipation class) must be unchanged after moving its subject grammar into the
+// shared helper — "Creature cards you own that aren't on the battlefield have
+// flash." still lowers to a `CastWithKeyword { Flash }` static scoped to the
+// owner's off-battlefield creature cards.
+#[test]
+fn leyline_off_battlefield_flash_grant_unchanged() {
+    let def =
+        parse_static_line("Creature cards you own that aren't on the battlefield have flash.")
+            .expect("Leyline-class off-battlefield flash grant must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("affected must be a Typed filter, got {:?}", def.affected);
+    };
+    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InAnyZone { zones }
+            if zones == &vec![Zone::Hand, Zone::Graveyard, Zone::Exile, Zone::Command])),
+        "off-battlefield zone scoping must be preserved: {:?}",
+        tf.properties
+    );
+}
+
 // CR 205.1a vs CR 205.1b: compound-subject animation splits across two handlers.
 // Additive predicates ("in addition to their other types") route to
 // `parse_compound_all_subjects_type_change`; bare "are <P/T> <type> creatures"

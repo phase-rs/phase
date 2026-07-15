@@ -3237,6 +3237,56 @@ fn parse_bare_compound_subtype_subject_filter(subject: &TextPair<'_>) -> Option<
     Some(TargetFilter::Or { filters })
 }
 
+/// CR 109.4 + CR 109.5 + CR 400.3: "`<type>` cards you own that aren't on the
+/// battlefield" — an owner-scoped subject naming cards in every zone EXCEPT the
+/// battlefield. Off the battlefield an object has no controller (CR 109.4), so
+/// "you own" reads the owner (CR 109.5); `FilterProp::InAnyZone` enumerates the
+/// non-battlefield zones (hand, graveyard, exile, command).
+///
+/// Shared by `parse_spells_have_keyword`'s casting-keyword Pattern 2 (Leyline of
+/// Anticipation: "Creature cards you own that aren't on the battlefield have
+/// flash.") and the generic continuous-subject resolver (Dune Chanter's additive
+/// land-type static, whose second conjunct is "land cards you own that aren't on
+/// the battlefield"). Returns `None` unless the phrase is present and the leading
+/// type phrase resolves to a `Typed` filter — a leading token that does not name a
+/// type is not a valid subject here, so it declines rather than widen to `Any`.
+///
+/// `subject_lower` and `subject_original` must share byte offsets (the lowercase
+/// and original-case views of the same slice).
+pub(crate) fn parse_owned_off_battlefield_subject_filter(
+    subject_lower: &str,
+    subject_original: &str,
+) -> Option<TargetFilter> {
+    if !nom_primitives::scan_contains(
+        subject_lower,
+        "cards you own that aren't on the battlefield",
+    ) {
+        return None;
+    }
+    let (prefix, _) =
+        nom_primitives::scan_split_at_phrase(subject_lower, |i| tag("cards").parse(i))?;
+    let type_part = &subject_original[..prefix.len()];
+    let (base_filter, type_rest) = parse_type_phrase(type_part);
+    // The text before "cards" must be EXACTLY a type phrase ("land ", "creature ").
+    // A non-empty remainder means this is a compound-subject prefix ("lands you
+    // control and land"), not a bare off-battlefield-owned subject — decline so the
+    // compound splitter handles it conjunct-by-conjunct instead.
+    if !type_rest.trim().is_empty() {
+        return None;
+    }
+    match base_filter {
+        TargetFilter::Typed(mut typed) => {
+            typed = typed.controller(ControllerRef::You);
+            // "aren't on the battlefield" = any zone except the battlefield.
+            typed.properties.push(FilterProp::InAnyZone {
+                zones: vec![Zone::Hand, Zone::Graveyard, Zone::Exile, Zone::Command],
+            });
+            Some(TargetFilter::Typed(typed))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();
@@ -3369,6 +3419,20 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
     }
 
     if let Some(filter) = parse_modified_creature_subject_filter(trimmed) {
+        return Some(filter);
+    }
+
+    // CR 109.4 + CR 109.5 + CR 205.1b: "<type> cards you own that aren't on the
+    // battlefield" — the off-battlefield-owned conjunct of a compound subject
+    // (Dune Chanter: "Lands you control and land cards you own that aren't on the
+    // battlefield are Deserts ..."). Tried BEFORE the lenient `you control` /
+    // creature / `parse_type_phrase` matchers below, which would otherwise consume
+    // only the leading type word and drop the ownership clause. The helper is
+    // precise (it requires the text before "cards" to be exactly a type phrase), so
+    // it never intercepts a compound subject — those are split by
+    // `parse_controlled_compound_continuous_subject_filter` above, which recurses
+    // here per conjunct. Reuses the same grammar as casting-keyword Pattern 2.
+    if let Some(filter) = parse_owned_off_battlefield_subject_filter(&lower, trimmed) {
         return Some(filter);
     }
 
