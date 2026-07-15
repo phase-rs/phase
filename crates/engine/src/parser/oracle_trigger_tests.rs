@@ -838,6 +838,42 @@ fn trigger_card_leaves_your_graveyard_during_your_turn_once_each_turn() {
     assert!(def.execute.is_some());
 }
 
+/// CR 603.4 + CR 113.6b: Nether Spirit's intervening-if
+/// ("if this card is the only creature card in your graveyard") must be hoisted
+/// into `def.condition`. The `{SourceInZone, Graveyard}` conjunct then drives
+/// `trigger_condition_source_zones` to derive `trigger_zones == [Graveyard]`
+/// (so the trigger is even detectable while the card sits in the graveyard) and
+/// `stamp_self_return_origin_from_trigger_condition` to stamp the return
+/// effect's `ChangeZone.origin == Graveyard` — the same auto-derivation Jocasta,
+/// Automaton Avenger (issue #4566) already relies on. SHAPE TEST — the end-to-end
+/// runtime behavior is covered by the
+/// `nether_spirit_only_creature_card_intervening_if` integration suite.
+#[test]
+fn nether_spirit_intervening_if_hoists_condition_zone_and_origin() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if this card is the only creature card \
+             in your graveyard, you may return this card to the battlefield.",
+        "Nether Spirit",
+    );
+    // The intervening-if is hoisted out of the effect text into the trigger.
+    assert!(
+        def.condition.is_some(),
+        "intervening-if must be hoisted to def.condition, got None"
+    );
+    // The off-battlefield zone is derived so the trigger is detectable from the
+    // graveyard, not stuck at the structural [Battlefield] default.
+    assert_eq!(def.trigger_zones, vec![Zone::Graveyard]);
+    // The return effect's origin is stamped from the derived source zone.
+    let execute = def.execute.expect("execute");
+    let Effect::ChangeZone { origin, .. } = execute.effect.as_ref() else {
+        panic!(
+            "expected ChangeZone return effect, got {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(*origin, Some(Zone::Graveyard));
+}
+
 /// CR 603.2b + CR 103.8: "at the beginning of the first upkeep of the game"
 /// names the one unique step that occurs exactly once per game (the starting
 /// player's first upkeep), so the trigger must carry `OncePerGame` — NOT fire
