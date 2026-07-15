@@ -1299,6 +1299,85 @@ fn parse_keyword_grant_from_exiled_object_static(text: &str) -> Option<Vec<Stati
     Some(defs)
 }
 
+/// CR 613.1f (Layer 6) + CR 105.2: a per-recipient COLOR-qualified keyword grant —
+/// "[subject] has <K0> if it's <C0>, <K1> if it's <C1>, …, and <Kn> if it's <Cn>."
+/// (Scion of Draco: "Each creature you control has vigilance if it's white, hexproof
+/// if it's blue, lifelink if it's black, first strike if it's red, and trample if
+/// it's green.").
+///
+/// Each `if it's <color>` qualifies ONLY the creature its own keyword lands on, so the
+/// color folds into that branch's AFFECTED FILTER as `FilterProp::HasColor` — the same
+/// fold [`parse_continuous_subject_filter`] already applies to a color-named subject
+/// ("White creatures you control") — and never becomes a `StaticCondition`, which
+/// would gate every listed keyword on one shared board check. One `StaticDefinition`
+/// per listed pair, mirroring the per-keyword expansion
+/// [`parse_keyword_grant_from_exiled_object_static`] emits for the Rayami class.
+///
+/// Declines (returns `None`) unless the predicate is ENTIRELY such a list, so a plain
+/// keyword grant ("Creatures you control have flying") is left to its own path.
+fn parse_color_conditional_keyword_grants(text: &str) -> Option<Vec<StaticDefinition>> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let (subject_tp, predicate_tp) = tp
+        .split_around(" has ")
+        .or_else(|| tp.split_around(" have "))?;
+    let base = parse_continuous_subject_filter(subject_tp.original.trim())?;
+    let predicate = predicate_tp.lower.trim().trim_end_matches('.').trim();
+    let (rest, grants) = parse_color_conditional_keyword_list(predicate).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(
+        grants
+            .into_iter()
+            .map(|(keyword, color)| {
+                StaticDefinition::continuous()
+                    .affected(add_property(base.clone(), FilterProp::HasColor { color }))
+                    .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                    .description(text.to_string())
+            })
+            .collect(),
+    )
+}
+
+/// The `"<keyword> if it's <color>"` enumeration, one or more items joined by the
+/// ordinary list connectors. Ordered longest-first so an Oxford `", and "` wins over a
+/// bare `", "` and never leaves a dangling comma on an item.
+fn parse_color_conditional_keyword_list(
+    input: &str,
+) -> OracleResult<'_, Vec<(Keyword, ManaColor)>> {
+    separated_list1(
+        color_conditional_keyword_separator,
+        parse_color_conditional_keyword_grant,
+    )
+    .parse(input)
+}
+
+fn color_conditional_keyword_separator(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>(", and "),
+            tag(", "),
+            tag(" and "),
+        )),
+    )
+    .parse(input)
+}
+
+/// One `<keyword> if it's <color>` pair. The keyword is read by the shared
+/// `parse_keyword_name` atom (so every keyword the engine knows is accepted) and the
+/// color by the shared `parse_color` atom — no bespoke vocabulary here.
+fn parse_color_conditional_keyword_grant(input: &str) -> OracleResult<'_, (Keyword, ManaColor)> {
+    let (i, name) = nom_primitives::parse_keyword_name(input)?;
+    let keyword: Keyword = name
+        .parse()
+        .map_err(|_| nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::Tag)))?;
+    let (i, _) = alt((tag(" if it's "), tag(" if it\u{2019}s "))).parse(i)?;
+    let (i, color) = nom_primitives::parse_color(i)?;
+    Ok((i, (keyword, color)))
+}
+
 fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
@@ -1342,6 +1421,16 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     // the shared condition on the first keyword only (the observed bug: the grant
     // applies unconditionally to every keyword).
     if let Some(defs) = parse_keyword_grant_from_exiled_object_static(&stripped) {
+        return defs;
+    }
+
+    // CR 613.1f + CR 105.2 (Scion of Draco): "<subject> has <K0> if it's <C0>, …, and
+    // <Kn> if it's <Cn>." — the COLOR-qualified sibling of the exiled-object grant
+    // above: one independent grant per listed pair, each color folded into its own
+    // branch's affected filter. Must precede the single-sentence pipeline, which reads
+    // only the first keyword and drops the "if it's <color>" qualifier — the observed
+    // bug (the whole static vanished, so the card did nothing).
+    if let Some(defs) = parse_color_conditional_keyword_grants(&stripped) {
         return defs;
     }
 
