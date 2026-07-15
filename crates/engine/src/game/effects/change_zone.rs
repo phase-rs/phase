@@ -598,6 +598,23 @@ pub fn resolve(
             eligible
         };
 
+        let (choice_count, min_count, choice_up_to) =
+            resolution_choice_cardinality(state, ability, eligible.len(), up_to);
+
+        // CR 115.6 + CR 107.3: an exact-X zone choice with X = 0 affects no
+        // cards and must complete without surfacing a one-card choice (Shigeki,
+        // Jukai Visionary channel). Zero is a successful resolution, including
+        // when the source zone is empty.
+        if choice_count == 0 {
+            state.last_effect_count = Some(0);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        }
+
         if eligible.is_empty() {
             if !up_to {
                 state.cost_payment_failed_flag = true;
@@ -609,9 +626,6 @@ pub fn resolve(
             });
             return Ok(());
         }
-
-        let (choice_count, min_count, choice_up_to) =
-            resolution_choice_cardinality(state, ability, eligible.len(), up_to);
 
         if matches!(ability.target_selection_mode, TargetSelectionMode::Random)
             && !choice_up_to
@@ -4657,6 +4671,60 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.cost_payment_failed_flag);
+    }
+
+    #[test]
+    fn exact_zero_graveyard_return_completes_without_effect_zone_choice() {
+        let mut state = GameState::new_two_player(42);
+        let rage = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Worldsoul's Rage".to_string(),
+            Zone::Graveyard,
+        );
+        let overlook = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Riveteers Overlook".to_string(),
+            Zone::Graveyard,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        ability.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 0 }));
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::EffectZoneChoice { .. }
+        ));
+        assert!(state.players[0].graveyard.contains(&rage));
+        assert!(state.players[0].graveyard.contains(&overlook));
+        assert!(state.players[0].hand.is_empty());
+        assert_eq!(state.last_effect_count, Some(0));
+        assert!(!state.cost_payment_failed_flag);
     }
 
     #[test]
