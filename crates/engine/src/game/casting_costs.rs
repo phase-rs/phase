@@ -3754,6 +3754,9 @@ pub(super) fn push_activated_ability_to_stack(
             let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending.activation_cost = remaining_cost;
             pending.activation_ability_index = Some(ability_index);
+            pending.pending_loyalty_activation_player = should_record_loyalty
+                .then_some(player)
+                .or(pending_loyalty_activation_player);
             if let Some(pending) = attach_pending_cast_to_cost_move(state, Box::new(pending)) {
                 state.pending_cast = Some(pending);
             }
