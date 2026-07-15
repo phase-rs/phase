@@ -7040,6 +7040,7 @@ impl ResolvingTriggerContext {
     /// to preserve).
     pub(crate) fn capture(state: &GameState) -> Option<Self> {
         (state.current_trigger_event.is_some()
+            || !state.current_trigger_events.is_empty()
             || state.current_trigger_match_count.is_some()
             || state.die_result_this_resolution.is_some())
         .then(|| Self {
@@ -11926,6 +11927,21 @@ mod tests {
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
         ResolvedAbility, TargetFilter,
     };
+
+    #[test]
+    fn resolving_trigger_context_captures_plural_events_without_singular_event() {
+        let mut state = GameState::new_two_player(42);
+        let event = GameEvent::LifeChanged {
+            player_id: PlayerId(1),
+            amount: -2,
+        };
+        state.current_trigger_events = vec![event.clone()];
+
+        let context = ResolvingTriggerContext::capture(&state)
+            .expect("a plural trigger event list is live resolution context");
+        assert_eq!(context.event, None);
+        assert_eq!(context.events, vec![event]);
+    }
 
     #[test]
     fn pending_liminal_entry_resume_accepts_legacy_token_struct_shape() {

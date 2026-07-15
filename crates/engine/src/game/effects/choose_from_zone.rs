@@ -100,20 +100,10 @@ pub fn resolve(
     // `EventContextAmount` ("that many") sub_ability continuation resolves the
     // triggering event's amount after the pause (Amy Pond). Restored by the
     // `ChooseFromZoneChoice` handler around the continuation drain. Set
-    // unconditionally on every single-pool raise: the `.then` yields `None` for a
+    // unconditionally on every single-pool raise: `capture` yields `None` for a
     // non-trigger ChooseFromZone (activated/spell), so a stale value from a prior
     // resolution can never carry over; consumed by `.take()` in the handler.
-    state.pending_choose_zone_trigger_context = (state.current_trigger_event.is_some()
-        || state.current_trigger_match_count.is_some()
-        || state.die_result_this_resolution.is_some())
-    .then(|| ResolvingTriggerContext {
-        event: state.current_trigger_event.clone(),
-        // Forced field-threading for the new plural-event list (CR 603.2c);
-        // mechanism-B behavior is otherwise unchanged.
-        events: state.current_trigger_events.clone(),
-        match_count: state.current_trigger_match_count,
-        die_result: state.die_result_this_resolution,
-    });
+    state.pending_choose_zone_trigger_context = ResolvingTriggerContext::capture(state);
 
     state.waiting_for = WaitingFor::ChooseFromZoneChoice {
         player: choosing_player,
