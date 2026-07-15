@@ -36,7 +36,8 @@ pub(crate) fn migrate_legacy_turn_controller_latch(state: &mut GameState) {
 
     // Legacy saves have no creation timestamp. Zero is the deterministic oldest
     // timestamp; insertion at the front makes any other timestamp-zero legacy
-    // schedule later in vector order win the stable max-by-key tie.
+    // schedule later in vector order win because Iterator::max_by_key returns
+    // the last element among equal maxima.
     state.scheduled_turn_controls.insert(
         0,
         ScheduledTurnControl {
@@ -135,6 +136,8 @@ fn recompute_active_turn_controller(state: &mut GameState) {
         newest_active_scheduled_control(state).map(|effect| effect.controller);
 }
 
+/// CR 723.1a + CR 723.5: Of the functioning effects that control decisions made
+/// during this player's library search, return the newest effect's controller.
 fn library_search_control_effect(
     state: &GameState,
     searcher: PlayerId,
@@ -374,5 +377,35 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize trusted legacy state");
 
         assert_legacy_control_reappears_after_overlay(persisted.into_game_state());
+    }
+
+    #[test]
+    fn materialized_legacy_latch_loses_timestamp_zero_tie_to_existing_schedule() {
+        let mut state = GameState::new_two_player(42);
+        let affected = state.active_player;
+        let legacy_controller = PlayerId(1);
+        let existing_controller = PlayerId(0);
+        state.turn_decision_controller = Some(legacy_controller);
+        state.scheduled_turn_controls.push(ScheduledTurnControl {
+            target_player: affected,
+            controller: existing_controller,
+            timestamp: 0,
+            lifecycle: ScheduledTurnControlLifecycle::Active,
+            grant_extra_turn_after: false,
+            window: ControlWindow::NextTurn,
+        });
+
+        migrate_legacy_turn_controller_latch(&mut state);
+
+        assert_eq!(
+            state.scheduled_turn_controls[0].controller,
+            legacy_controller
+        );
+        recompute_active_turn_controller(&mut state);
+        assert_eq!(
+            state.turn_decision_controller,
+            Some(existing_controller),
+            "max_by_key must select the later existing schedule on an equal timestamp"
+        );
     }
 }

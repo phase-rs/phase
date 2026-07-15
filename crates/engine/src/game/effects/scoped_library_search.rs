@@ -293,6 +293,8 @@ fn advance_to_next_player(
     begin_accepted_search(state, events)
 }
 
+/// CR 701.23a + CR 614.6: Record the cards whose original found events survived
+/// replacement, then resume the exact scoped-search continuation.
 pub(crate) fn complete_replaced_selection(
     state: &mut GameState,
     player: PlayerId,

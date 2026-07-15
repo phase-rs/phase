@@ -48,7 +48,7 @@ pub(crate) fn apply_search_found_replacements(
         remaining: chosen.to_vec(),
         survivors: Vec::with_capacity(chosen.len()),
         continuation,
-        reveal,
+        visibility: reveal.into(),
     };
     let batch = process_search_found_batch(state, batch, events)?;
     reveal_search_found_survivors(state, &batch, events);
@@ -64,7 +64,7 @@ fn reveal_search_found_survivors(
     batch: &crate::types::game_state::PendingSearchFoundBatch,
     events: &mut Vec<GameEvent>,
 ) {
-    if !batch.reveal {
+    if !batch.visibility.is_public() {
         state.last_revealed_ids.clear();
         return;
     }
@@ -191,12 +191,8 @@ fn grant_search_found_play_permission(
     object_id: ObjectId,
     modifier: &crate::types::proposed_event::BoundSearchFoundModifier,
 ) {
-    if state
-        .objects
-        .get(&object_id)
-        .is_some_and(|object| object.zone == Zone::Exile)
-    {
-        if let Some(object) = state.objects.get_mut(&object_id) {
+    if let Some(object) = state.objects.get_mut(&object_id) {
+        if object.zone == Zone::Exile {
             object
                 .casting_permissions
                 .push(CastingPermission::PlayFromExile {
@@ -255,7 +251,8 @@ fn resume_search_found_after_zone_delivery(
         return;
     };
     if let Ok(batch) = process_search_found_batch(state, batch, events) {
-        let _ = finish_search_found_batch(state, batch, events);
+        finish_search_found_batch(state, batch, events)
+            .expect("SearchFound batch completion must resolve");
     }
 }
 

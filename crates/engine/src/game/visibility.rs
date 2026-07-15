@@ -1666,7 +1666,7 @@ mod tests {
             continuation: crate::types::game_state::PendingSearchFoundContinuation::Standard {
                 split: None,
             },
-            reveal: false,
+            visibility: crate::types::game_state::SearchFoundVisibility::Private,
         });
 
         for viewer in [PlayerId(0), PlayerId(1)] {

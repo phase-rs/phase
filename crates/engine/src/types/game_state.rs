@@ -1558,6 +1558,40 @@ pub struct PendingScopedLibrarySearch {
     pub after_scope: Option<Box<ResolvedAbility>>,
 }
 
+/// CR 701.23e: Whether cards surviving a SearchFound replacement batch are
+/// publicly revealed by the containing search instruction. The enum remains
+/// boolean on the wire so persisted in-flight searches from before the typed
+/// migration continue to round-trip unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "bool", into = "bool")]
+pub enum SearchFoundVisibility {
+    #[default]
+    Private,
+    Public,
+}
+
+impl SearchFoundVisibility {
+    pub fn is_public(self) -> bool {
+        matches!(self, Self::Public)
+    }
+}
+
+impl From<bool> for SearchFoundVisibility {
+    fn from(reveal: bool) -> Self {
+        if reveal {
+            Self::Public
+        } else {
+            Self::Private
+        }
+    }
+}
+
+impl From<SearchFoundVisibility> for bool {
+    fn from(visibility: SearchFoundVisibility) -> Self {
+        visibility.is_public()
+    }
+}
+
 /// CR 616.1 + CR 701.23a: A per-card found-event batch parked while the
 /// affected card's owner orders multiple applicable replacement effects. The
 /// current event itself lives in `pending_replacement`; this record preserves
@@ -1573,8 +1607,8 @@ pub struct PendingSearchFoundBatch {
     pub remaining: Vec<ObjectId>,
     pub survivors: Vec<ObjectId>,
     pub continuation: PendingSearchFoundContinuation,
-    #[serde(default)]
-    pub reveal: bool,
+    #[serde(default, rename = "reveal")]
+    pub visibility: SearchFoundVisibility,
 }
 
 /// The mutually exclusive continuation protocols available after every
@@ -12065,6 +12099,45 @@ mod tests {
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
         ResolvedAbility, TargetFilter,
     };
+
+    #[test]
+    fn search_found_visibility_preserves_legacy_boolean_wire_shape() {
+        let batch = PendingSearchFoundBatch {
+            searcher: PlayerId(1),
+            library_owner: Some(PlayerId(1)),
+            remaining: vec![ObjectId(7)],
+            survivors: vec![ObjectId(8)],
+            continuation: PendingSearchFoundContinuation::Standard { split: None },
+            visibility: SearchFoundVisibility::Public,
+        };
+
+        let mut json = serde_json::to_value(&batch).expect("serialize SearchFound batch");
+        assert_eq!(json["reveal"], serde_json::Value::Bool(true));
+        assert_eq!(
+            serde_json::from_value::<PendingSearchFoundBatch>(json.clone())
+                .expect("deserialize current SearchFound batch")
+                .visibility,
+            SearchFoundVisibility::Public
+        );
+
+        json["reveal"] = serde_json::Value::Bool(false);
+        assert_eq!(
+            serde_json::from_value::<PendingSearchFoundBatch>(json.clone())
+                .expect("deserialize legacy private SearchFound batch")
+                .visibility,
+            SearchFoundVisibility::Private
+        );
+
+        json.as_object_mut()
+            .expect("batch serializes as an object")
+            .remove("reveal");
+        assert_eq!(
+            serde_json::from_value::<PendingSearchFoundBatch>(json)
+                .expect("deserialize pre-field SearchFound batch")
+                .visibility,
+            SearchFoundVisibility::Private
+        );
+    }
 
     #[test]
     fn resolving_trigger_context_captures_plural_events_without_singular_event() {
