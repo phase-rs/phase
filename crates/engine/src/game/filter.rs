@@ -5823,6 +5823,112 @@ mod tests {
         id
     }
 
+    /// CR 208.1 + CR 107.1 + CR 122.1 — production-path RESOLUTION proof for the
+    /// infix literal-threshold parser fix (#5874), across the full grammar axis.
+    /// Each case parses a real `... draw a card for each creature with <comparison>
+    /// on the battlefield` clause through `parse_oracle_text`, extracts the Draw's
+    /// `ObjectCount`, and resolves it through `resolve_quantity` — the same shared
+    /// authority the Draw effect consults in the production resolution pipeline —
+    /// against one fixed battlefield. It spans the axis the leaf grammar tests
+    /// cannot reach on their own: power AND toughness, `less than` AND `greater
+    /// than`, strict AND `or equal to`. Case 1 is the reported card, Wasp,
+    /// Shrinking Savior, through its exact printed text. Remove the infix-literal
+    /// fallback and every `<stat> less/greater than <N>` filter is dropped, so each
+    /// count collapses to `Fixed(1)` (no `ObjectCount` to extract) and the
+    /// `expect` below fails — this regression is tied to the parser change.
+    #[test]
+    fn pt_infix_literal_threshold_resolves_through_production_path_full_axis() {
+        use crate::game::quantity::resolve_quantity;
+        use crate::types::ability::{AbilityDefinition, Effect, QuantityExpr, QuantityRef};
+
+        fn draw_object_count(def: &AbilityDefinition) -> Option<QuantityExpr> {
+            if let Effect::Draw { count, .. } = &*def.effect {
+                if matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. }
+                    }
+                ) {
+                    return Some(count.clone());
+                }
+            }
+            def.sub_ability
+                .as_deref()
+                .and_then(draw_object_count)
+                .or_else(|| def.else_ability.as_deref().and_then(draw_object_count))
+        }
+
+        // Fixed battlefield: (power, toughness) chosen so every axis case has a
+        // discriminating boundary. Object 0 doubles as the resolution `source`
+        // (an `ObjectCount` over "creature with <stat> …" references no source).
+        let mut state = setup();
+        let specs = [
+            ("A", -1, 3),
+            ("B", 0, 5),
+            ("C", 1, 4),
+            ("D", 2, 5),
+            ("E", 3, 2),
+        ];
+        let mut ids = Vec::new();
+        for (name, power, toughness) in specs {
+            let id = add_creature(&mut state, PlayerId(0), name);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.power = Some(power);
+            obj.toughness = Some(toughness);
+            ids.push(id);
+        }
+        let source = ids[0];
+
+        let resolve = |oracle: &str, name: &str, state: &GameState| -> i32 {
+            let parsed =
+                crate::parser::parse_oracle_text(oracle, name, &[], &["Creature".to_string()], &[]);
+            let count = parsed
+                .triggers
+                .iter()
+                .filter_map(|t| t.execute.as_deref())
+                .find_map(draw_object_count)
+                .unwrap_or_else(|| {
+                    panic!("no Draw ObjectCount for {name:?} — filter dropped?\n  {oracle}")
+                });
+            resolve_quantity(state, &count, PlayerId(0), source)
+        };
+
+        // (oracle text, card name, expected count) across the full grammar axis.
+        let cases: &[(&str, &str, i32)] = &[
+            // Case 1 — the reported card, exact printed text: strict `<` power, only A(-1).
+            (
+                "Whenever Wasp attacks, up to one other target creature gets -3/-0 until your next turn. Then draw a card for each creature with power less than 0 on the battlefield.",
+                "Wasp, Shrinking Savior",
+                1,
+            ),
+            // `<=` power: A(-1), B(0), C(1).
+            (
+                "Whenever Weaver attacks, draw a card for each creature with power less than or equal to 1 on the battlefield.",
+                "Weaver",
+                3,
+            ),
+            // strict `>` toughness: B(5), D(5).
+            (
+                "Whenever Warden attacks, draw a card for each creature with toughness greater than 4 on the battlefield.",
+                "Warden",
+                2,
+            ),
+            // `>=` toughness: B(5), C(4), D(5).
+            (
+                "Whenever Watcher attacks, draw a card for each creature with toughness greater than or equal to 4 on the battlefield.",
+                "Watcher",
+                3,
+            ),
+        ];
+        for (oracle, name, expected) in cases {
+            assert_eq!(
+                resolve(oracle, name, &state),
+                *expected,
+                "production resolver miscounted `{name}`"
+            );
+        }
+    }
+
     #[test]
     fn cmc_filter_treats_retained_x_as_zero_off_stack() {
         let mut state = setup();

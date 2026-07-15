@@ -338,6 +338,23 @@ fn parse_pt_comparison_tail(input: &str) -> OracleResult<'_, (Comparator, Quanti
     .parse(input)
 }
 
+/// The threshold value on the right of a P/T comparison — the axis orthogonal to
+/// the comparison *form* (infix / postfix / exact). It is a dynamic game quantity
+/// ("the number of cards in your hand") or a literal / X ("3", "X"). The postfix
+/// and exact tails accept the literal / X grammar directly via
+/// `parse_quantity_expr_number`; this combinator unions that with the dynamic ref
+/// so the infix tail accepts either, letting "power less than 3" parse like the
+/// postfix "power 3 or less". The
+/// dynamic ref is tried first to preserve the infix tail's prior behaviour on a
+/// dynamic threshold ("less than the number of …").
+fn parse_pt_threshold(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        map(parse_quantity_ref, |qty| QuantityExpr::Ref { qty }),
+        parse_quantity_expr_number,
+    ))
+    .parse(input)
+}
+
 /// Infix form: "less than [or equal to] <qty>" / "greater than [or equal to] <qty>".
 fn parse_pt_infix_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityExpr)> {
     let (rest, base_cmp) = alt((
@@ -348,8 +365,12 @@ fn parse_pt_infix_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityExp
     let rest = rest.trim_start();
     let (rest, includes_equal) = map(opt(tag("or equal to")), |e| e.is_some()).parse(rest)?;
     let rest = rest.trim_start();
-    let (rest, qty) = parse_quantity_ref(rest)?;
-    let value = QuantityExpr::Ref { qty };
+    // The threshold is an axis independent of the comparison form: it may be a
+    // dynamic game quantity ("less than the number of cards in your hand") OR a
+    // literal / X ("power less than 3", Wasp, Shrinking Savior). Previously the
+    // infix tail read only `parse_quantity_ref`, so a bare-number threshold
+    // failed and the whole comparison (and any count built on it) was dropped.
+    let (rest, value) = parse_pt_threshold(rest)?;
     // Strict `<`/`>` lower to LE/GE by shifting the threshold by ∓1 (CR 107.1:
     // integers only, so "less than N" ≡ "≤ N-1").
     let (comparator, value) = match (base_cmp, includes_equal) {
@@ -719,6 +740,91 @@ mod tests {
                 comparator: Comparator::LE,
                 value: QuantityExpr::Fixed { value: 2 },
             }
+        );
+    }
+
+    #[test]
+    fn test_pt_infix_literal_threshold_full_grammar_axis() {
+        // #5874: the INFIX P/T comparison with a LITERAL threshold must parse
+        // across the full grammar axis -- {power, toughness} x {less than,
+        // greater than} x {strict, or equal to} -- not just the postfix
+        // "N or less" form. Strict "< N" / "> N" lower to LE/GE via a -+1 offset
+        // (CR 107.1: P/T are integers, so "less than N" == "<= N-1"); the
+        // "or equal to" forms keep N. Wasp, Shrinking Savior's "power less than 0"
+        // is one point on this axis.
+        let fixed = |v| QuantityExpr::Fixed { value: v };
+        let off = |v, o| QuantityExpr::Offset {
+            inner: Box::new(fixed(v)),
+            offset: o,
+        };
+        let cases: &[(&str, PtStat, Comparator, QuantityExpr)] = &[
+            (
+                "power less than 3",
+                PtStat::Power,
+                Comparator::LE,
+                off(3, -1),
+            ),
+            (
+                "power greater than 4",
+                PtStat::Power,
+                Comparator::GE,
+                off(4, 1),
+            ),
+            (
+                "toughness less than or equal to 2",
+                PtStat::Toughness,
+                Comparator::LE,
+                fixed(2),
+            ),
+            (
+                "toughness greater than or equal to 5",
+                PtStat::Toughness,
+                Comparator::GE,
+                fixed(5),
+            ),
+            // The exact Wasp, Shrinking Savior threshold.
+            (
+                "power less than 0",
+                PtStat::Power,
+                Comparator::LE,
+                off(0, -1),
+            ),
+        ];
+        for (text, stat, comparator, value) in cases {
+            let (rest, p) = parse_pt_comparison(text).unwrap_or_else(|e| panic!("{text:?}: {e:?}"));
+            assert_eq!(rest, "", "leftover input for {text:?}");
+            assert_eq!(
+                p,
+                FilterProp::PtComparison {
+                    stat: *stat,
+                    scope: PtValueScope::Current,
+                    comparator: *comparator,
+                    value: value.clone(),
+                },
+                "text: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pt_infix_dynamic_threshold_still_parses() {
+        // The literal fallback must not regress the pre-existing infix behaviour:
+        // a dynamic (game-quantity) threshold still parses -- the dynamic ref is
+        // tried first. Strict "less than <dynamic>" still lowers to LE + Offset(-1).
+        let (rest, p) =
+            parse_pt_comparison("power less than the number of cards in your hand").unwrap();
+        assert_eq!(rest, "");
+        assert!(
+            matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Offset { .. },
+                    ..
+                }
+            ),
+            "dynamic infix threshold must still parse to LE + Offset, got {p:?}"
         );
     }
 
