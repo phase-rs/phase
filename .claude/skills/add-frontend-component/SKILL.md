@@ -268,6 +268,40 @@ If your overlay is a card choice type, integrate into the existing `CardChoiceMo
 
 - [ ] **State filtering** — If the component displays hidden information (opponent's hand, library cards), ensure the server-side filter in `crates/server-core/src/filter.rs` correctly hides/reveals cards. The frontend should display whatever the filtered state contains — don't add client-side visibility logic.
 
+### Phase 7 — Component Tests
+
+- [ ] **Colocate the test**: `client/src/components/modal/__tests__/YourOverlay.test.tsx` — every component directory keeps its tests in a sibling `__tests__/`.
+
+- [ ] **Build state with factory convenience methods** from `client/src/test/factories/`. Chain methods instead of passing raw override objects — this is the required pattern:
+  ```typescript
+  const bear = gameObjectFactory.creature(2, 2).onBattlefield().withId(3).build();
+  const bolt = gameObjectFactory.instant().inHand().withId(9).named("Lightning Bolt").build();
+
+  const state = gameStateFactory
+    .withPlayers(0, 1)
+    .withObjects(bear, bolt)          // derives objects map, battlefield, next_object_id
+    .targetSelection({ player: 0 })   // replaces waiting_for exactly
+    .build();
+  ```
+  Available: `gameObjectFactory` (card types, zones, `tapped()`, `named()`, `withId()`, `commander()`…), `gameStateFactory` (`withPlayers`, `withObjects`, `withStack`, `inPhase`, `commander()`, one method per `WaitingFor` variant), `waitingForFactory` (standalone `WaitingFor` builder), `playerFactory`, `buildEngineAdapterMock`. If your new `WaitingFor` variant or field has no convenience method, **add one to the factory class** — don't hand-roll object literals in tests; literals drift from the serde contract as types evolve.
+  Object, player, and stack-entry ids auto-increment via fishery `sequence`, so builds never collide — only chain `.withId()` when the test asserts on a specific id. Field values are otherwise deterministic (no faker): the engine contract is exact.
+
+- [ ] **Seed the store, don't mount providers.** Components read Zustand directly, so tests arrange by setting store state. Use `setGameStoreForTest` from `test/helpers/gameStoreHelpers.ts` (wraps `setState` in `act()` and returns a stubbed `dispatch`), and `cleanup` + reset in `afterEach`.
+
+- [ ] **Assert the dispatch contract.** The highest-value assertion for an interactive overlay is that the interaction produces the exact `GameAction` the engine expects:
+  ```typescript
+  expect(dispatch).toHaveBeenCalledWith({ type: "SelectCards", data: { cards: [9] } });
+  ```
+  This is the serde boundary — a misspelled field deserializes to nothing in prod.
+
+- [ ] **Test the player gate.** Seed `waitingFor` with the *other* player's ID (e.g. `gameStateFactory.targetSelection({ player: 1 })` while rendering as player 0) and assert the overlay does not render.
+
+- [ ] **Assert real English strings.** `src/test-setup.ts` initializes i18next with the real `en/*.json` locales, so `screen.getByText(/confirm/i)` works. A string that won't resolve usually means the key is missing from `en/<ns>.json` (Phase 2.5).
+
+- [ ] **Queries and interaction**: prefer semantic queries (`getByRole`, `getByText`); `fireEvent` is the suite's prevailing convention. Use `await screen.findBy*` for async appearance instead of single-assertion `waitFor`.
+
+- [ ] **Run via Tilt**: check the `test-frontend` resource (`tilt logs test-frontend` / `./scripts/tilt-wait.sh test-frontend check-frontend`) — do not run `pnpm test` directly while Tilt is up.
+
 ---
 
 ## Component Directory Reference
@@ -314,6 +348,9 @@ If your overlay is a card choice type, integrate into the existing `CardChoiceMo
 | Hardcoded user-facing string in JSX | Untranslatable; breaks 6-locale support | Route frontend-authored text through `t()` (Phase 2.5) |
 | Wrapping card/Oracle/enum text in `t()` | Double-localizes engine data; key never resolves | Leave engine pass-through raw; only `t()` frontend-authored text |
 | Hand-rolled `count === 1 ? "x" : "xs"` pluralization | Wrong for non-English CLDR rules | `key_one`/`key_other` + `t(key, { count })` |
+| Hand-rolled `GameState`/`GameObject` literals in tests | Silently drifts from serde contract as types evolve | Chain factory convenience methods; extend the factory class when one is missing |
+| No dispatch-shape assertion in overlay tests | Wrong `GameAction` field names pass tests, fail in prod | Assert the exact action object on the `dispatch` mock |
+| No player-gate test | Multiplayer choice-leak regressions ship silently | Assert overlay absent when `waitingFor.data.player !== playerId` |
 
 ---
 
@@ -338,6 +375,12 @@ test -f client/src/animation/eventNormalizer.ts && \
 test -f client/src/components/modal/CardChoiceModal.tsx && \
 test -f client/src/i18n/README.md && \
 test -d client/src/i18n/locales/en && \
+test -f client/src/test/factories/gameStateFactory.ts && \
+test -f client/src/test/factories/gameObjectFactory.ts && \
+test -f client/src/test/helpers/gameStoreHelpers.ts && \
+test -f client/src/test-setup.ts && \
+rg -q "class GameStateFactory" client/src/test/factories/gameStateFactory.ts && \
+rg -q "class GameObjectFactory" client/src/test/factories/gameObjectFactory.ts && \
 rg -q "type WaitingFor" client/src/adapter/types.ts && \
 rg -q "type GameAction" client/src/adapter/types.ts && \
 rg -q "type GameEvent" client/src/adapter/types.ts && \

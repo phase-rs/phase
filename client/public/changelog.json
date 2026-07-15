@@ -1,6 +1,19 @@
 {
   "entries": [
     {
+      "id": 173,
+      "date": "2026-07-14",
+      "title": "X values stay where they matter",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Values defined as X \"as you cast\" or \"as you activate\" now stay locked in at the right moment, bringing online Jaws of Stone, Monstrous Onslaught, Aether Burst, Lukka, Bound to Ruin, the Bobbleheads, and more\n• Turning a Morph or Disguise creature face up now asks for, charges, and carries X through its triggers (Warbreak Trumpeter, Bane of the Living, Aurelia's Vindicator)\n• \"The same is true\" type-changing effects now reach spells and cards outside the battlefield (Maskwood Nexus, Arcane Adaptation, Biotransference, Encroaching Mycosynth, and more)\n• Witherbloom Apprentice + Chain of Smog now offers an engine-verified finite copy shortcut, with opponents able to accept it or stop at a meaningful breakpoint\n• Alchemy conjures that enter the top N cards of a library now land randomly within that window for every affected player (Goblin Morale Sergeant, Sandcloud Harbinger, and more)\n\n🛠️ Cards That Now Work Right\n• \"Where X is …\" clauses now bind X everywhere the ability needs it instead of silently using zero (Arboreal Alliance, Tivash, G'raha Tia, Maester Seymour, Broodlord, and more)\n• A source that leaves the battlefield can still supply its last known information to its trigger: conditional triggers, attachments, and attack history now resolve correctly (Dreampod Druid, Delta Bloodflies, Whiplash, Taigam, Ojutai Master)\n• Self-replacement lines now replace their own effect instead of being cast as an extra effect (Anoint with Affliction, Bring the Ending, Gather the Pack); unsupported variants are clearly marked instead of misresolving\n• Necromancy now reanimates its chosen graveyard creature, Ill-Gotten Gains returns up to three cards rather than an entire graveyard, and Total War respects creatures gained this turn\n• Ketramose, the New Dawn now triggers only for cards exiled from the printed zones during your turn; Onakke Catacomb now makes creatures black as well as granting deathtouch\n• Embalmed and eternalized copy tokens no longer crash when copying a creature (Vizier of Many Faces), and stack-based grants now work (Taigam's rebound)\n\n⚔️ Combat & Gameplay\n• A failed mana payment now leaves the full mana pool intact instead of spending a partial payment\n• Flashback is offered only when its complete cost can be paid, including nonmana costs such as tapping creatures (Group Project)\n• Blocker prompts are now stable, and activation windows such as \"before combat damage\" are enforced consistently\n\n🖥️ Interface\n• Planeswalkers have clearer loyalty badges, attack targets show a live damage estimate, and card-choice dialogs better explain exile and mana-combination decisions\n• Attachment fans are easier to open for both one and many attached cards",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1526679630826835988"
+    },
+    {
       "id": 172,
       "date": "2026-07-13",
       "title": "Loop shortcuts enter the game",

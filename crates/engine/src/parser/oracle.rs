@@ -90,12 +90,11 @@ use super::oracle_special::{
 };
 use super::oracle_static::{
     is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
-    parse_cast_spells_alternative_cost_multi, parse_chosen_creature_type_static_prefix,
-    parse_collect_evidence_alt_cost, parse_compound_you_control_chosen_type_static_prefix,
-    parse_every_creature_type_static_prefix, parse_flashback_trailing_self_spell_cost_reduction,
-    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
-    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
-    try_parse_top_of_library_cast_permission, GrantedCastKeywordKind,
+    parse_cast_spells_alternative_cost_multi, parse_collect_evidence_alt_cost,
+    parse_flashback_trailing_self_spell_cost_reduction, parse_spells_alternative_cost,
+    parse_static_line, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
+    try_parse_graveyard_keyword_grant_static, try_parse_top_of_library_cast_permission,
+    GrantedCastKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -1816,31 +1815,6 @@ fn is_self_chosen_type_description(description: &str) -> bool {
     .parse(lower.as_str())
     .and_then(|(rest, _)| tag(" the chosen type").parse(rest));
     parsed.is_ok()
-}
-
-fn push_same_is_true_static_tail<F>(
-    emitter: &mut DocEmitter<'_>,
-    item_line: usize,
-    line: &str,
-    lower: &str,
-    parse_modeled_sentence: F,
-) -> bool
-where
-    F: for<'i> FnMut(&'i str) -> OracleResult<'i, ()>,
-{
-    if let Some((modeled_sentence, unmodeled_tail)) =
-        split_same_is_true_static_tail(line, lower, parse_modeled_sentence)
-    {
-        for __item in
-            parse_static_line_with_graveyard_keyword_continuation(modeled_sentence, None, None)
-        {
-            emitter.static_at(item_line, __item);
-        }
-        emitter.ability_at(item_line, make_unimplemented(unmodeled_tail));
-        return true;
-    }
-
-    false
 }
 
 /// CR 611.3a + CR 702: Distribute a "The same is true for <keyword list>"
@@ -3820,41 +3794,6 @@ pub(crate) fn parse_oracle_ir(
             item_line,
             &static_line,
             &static_line_lower,
-        ) {
-            i += 1;
-            continue;
-        }
-        if push_same_is_true_static_tail(
-            &mut emitter,
-            item_line,
-            &static_line,
-            &static_line_lower,
-            parse_chosen_creature_type_static_prefix,
-        ) {
-            i += 1;
-            continue;
-        }
-        if push_same_is_true_static_tail(
-            &mut emitter,
-            item_line,
-            &static_line,
-            &static_line_lower,
-            parse_every_creature_type_static_prefix,
-        ) {
-            i += 1;
-            continue;
-        }
-        // CR 611.3 + CR 607.2d: compound-subject chosen-type static with a
-        // "The same is true for ..." tail (Rukarumel, Biologist). Models the
-        // "X you control and Y you control are the chosen type ..." sentence and
-        // leaves the non-battlefield-zone tail as an `Unimplemented` residual,
-        // mirroring Arcane Adaptation / Maskwood Nexus.
-        if push_same_is_true_static_tail(
-            &mut emitter,
-            item_line,
-            &static_line,
-            &static_line_lower,
-            parse_compound_you_control_chosen_type_static_prefix,
         ) {
             i += 1;
             continue;
@@ -6596,16 +6535,34 @@ fn parse_activation_during_role_gate(i: &str) -> OracleResult<'_, ActivationRest
     .parse(i)
 }
 
-/// CR 508.1 + CR 509.1: the combat-window half of a compound activation-timing
-/// gate — "before combat" / "before attackers are declared" both map to the
-/// EXISTING `BeforeAttackersDeclared` variant (enforced via
-/// `is_before_attackers_declared` = `PreCombatMain | BeginCombat`), so no new
-/// variant is introduced.
+/// CR 508.1 + CR 509.1 + CR 510: the combat-window half of an activation-timing
+/// gate. Each phrasing maps to an EXISTING enforced variant, so no new variant is
+/// introduced:
+/// - "before the combat damage step" / "before combat damage [has been dealt]"
+///   → `BeforeCombatDamage` (CR 510; enforced = `BeginCombat | DeclareAttackers
+///   | DeclareBlockers`) — Angus Mackenzie, Save Point.
+/// - "before attackers are declared" / "before combat" → `BeforeAttackersDeclared`
+///   (CR 508.1; enforced = `PreCombatMain | BeginCombat`) — Arcum's Whistle.
+///
+/// The combat-damage arm is tried BEFORE the `before combat` arm, which is a
+/// prefix of "before combat damage" and would otherwise shadow it; within that
+/// arm the longest phrasing is first so it consumes fully rather than leaving a
+/// "has been dealt" / "step" residual for the caller's whole-consumption check.
 fn parse_activation_before_window_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
-    value(
-        ActivationRestriction::BeforeAttackersDeclared,
-        alt((tag("before combat"), tag("before attackers are declared"))),
-    )
+    alt((
+        value(
+            ActivationRestriction::BeforeCombatDamage,
+            alt((
+                tag("before combat damage has been dealt"),
+                tag("before the combat damage step"),
+                tag("before combat damage"),
+            )),
+        ),
+        value(
+            ActivationRestriction::BeforeAttackersDeclared,
+            alt((tag("before attackers are declared"), tag("before combat"))),
+        ),
+    ))
     .parse(i)
 }
 
@@ -6635,6 +6592,32 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         if let Ok((tail, (_sep, window))) = compound {
             if tail.trim().is_empty() {
                 return Some(vec![restr, window]);
+            }
+        }
+    }
+    // CR 508.1: a STANDALONE combat-window gate with no "during <role>" first
+    // half — "Activate only before attackers are declared" / "before combat"
+    // (Arcum's Whistle, Arcum's Sleigh). Reuses the same enforced
+    // `BeforeAttackersDeclared` variant as the compound form above; it only fires
+    // when the whole phrase is a bare before-window that would otherwise fall
+    // through to `Effect::Unimplemented`.
+    if let Ok((tail, window)) = parse_activation_before_window_gate(lower.as_str()) {
+        if tail.trim().is_empty() {
+            return Some(vec![window]);
+        }
+    }
+    // CR 509.1 + CR 510: "during combat, before <window>" — the leading half is the
+    // combat phase itself (not a turn-role), so it pairs `DuringCombat` with the
+    // before-window gate. Save Point: "during combat before combat damage has been
+    // dealt" → [DuringCombat, BeforeCombatDamage]. Replaces the former verbatim
+    // strip_suffix special case; bare "during combat" (no trailing window) is left
+    // to its own single-restriction branch because `tag` requires the space.
+    if let Ok((rest, ())) =
+        value((), tag::<_, _, OracleError<'_>>("during combat ")).parse(lower.as_str())
+    {
+        if let Ok((tail, window)) = parse_activation_before_window_gate(rest) {
+            if tail.trim().is_empty() {
+                return Some(vec![ActivationRestriction::DuringCombat, window]);
             }
         }
     }
@@ -6926,32 +6909,14 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             continue;
         }
 
-        // CR 602.5b + CR 102.1 + CR 509.1: The former verbatim-string hack for
-        // "activate only during your turn, before attackers are declared" is
-        // subsumed by the compound `parse_activation_timing_restriction` grammar,
-        // which the `activate only ` routing arm above reaches BEFORE this point
-        // (it emits `[DuringYourTurn, BeforeAttackersDeclared]` via the
-        // during-role + before-window sub-combinators). Pinned by Test 10c.
-
-        if let Some(prefix) =
-            lower.strip_suffix("activate only during combat before combat damage has been dealt")
-        {
-            let end = remaining.len()
-                - "activate only during combat before combat damage has been dealt".len();
-            remaining = remaining[..end]
-                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                .to_string();
-            constraints
-                .restrictions
-                .push(ActivationRestriction::DuringCombat);
-            constraints
-                .restrictions
-                .push(ActivationRestriction::BeforeCombatDamage);
-            if prefix.trim().is_empty() {
-                break;
-            }
-            continue;
-        }
+        // CR 602.5b + CR 102.1 + CR 509.1 + CR 510: The former verbatim-string
+        // hacks for "activate only during your turn, before attackers are declared"
+        // and "activate only during combat before combat damage has been dealt" are
+        // both subsumed by the `parse_activation_timing_restriction` grammar, which
+        // the `activate only ` routing arm above reaches BEFORE this point (it emits
+        // `[DuringYourTurn, BeforeAttackersDeclared]` / `[DuringCombat,
+        // BeforeCombatDamage]` via the during-role + before-window sub-combinators).
+        // Pinned by Test 10c and the combat-damage building-block tests.
 
         if let Some(prefix) = lower.strip_suffix("activate only once each turn") {
             let end = remaining.len() - "activate only once each turn".len();

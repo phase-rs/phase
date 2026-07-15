@@ -1395,6 +1395,85 @@ fn legal_aura_attachment_targets(
     targets
 }
 
+/// Disposition of an object that has just become an Aura while already on the
+/// battlefield (the copy path — see [`resolve_entering_aura_attachment`]).
+pub(crate) enum EnteringAuraAttachment {
+    /// The object is not an Aura needing attachment (not an Aura, an Aura that's
+    /// also a creature per CR 303.4d, or already attached).
+    NotApplicable,
+    /// Attachment resolved without a player choice — either auto-attached to the
+    /// sole legal host, or deliberately left unattached because there is no legal
+    /// host (CR 303.4g; the CR 704.5m unattached-Aura SBA will handle it).
+    Resolved,
+    /// CR 303.4f: multiple legal hosts, so the controller must choose one.
+    NeedsChoice {
+        controller: PlayerId,
+        legal_targets: Vec<TargetRef>,
+    },
+}
+
+/// CR 303.4f + CR 303.4g: Resolve the enter-time attachment for an object that
+/// has BECOME an Aura while already on the battlefield.
+///
+/// The normal aura entry attaches during `move_object`, before the permanent is
+/// on the battlefield, via the entry event's `attach_to` slot (see the
+/// `aura_enchant_filter` consult in `consult_and_deliver_zone_change`). A
+/// permanent that enters as a plain enchantment and only becomes an Aura when
+/// its `BecomeCopy` replacement resolves (Copy Enchantment, Estrid's Invocation)
+/// never passed through that slot — `BecomeCopy` is realized post-entry — so its
+/// attachment is resolved here, once the copy is realized and layers are
+/// flushed.
+///
+/// CR 303.4f: because the Aura is entering by a means other than resolving as an
+/// Aura spell and the effect doesn't specify a host, its controller chooses what
+/// it enchants. CR 303.4g: with no legal host the Aura would not enter at all;
+/// the engine's post-entry equivalent is to leave it unattached so the
+/// unattached-Aura SBA (CR 704.5m) moves it to the graveyard on the next check.
+pub(crate) fn resolve_entering_aura_attachment(
+    state: &mut GameState,
+    object_id: ObjectId,
+) -> EnteringAuraAttachment {
+    let Some(enchant_filter) = aura_enchant_filter(state, object_id) else {
+        return EnteringAuraAttachment::NotApplicable;
+    };
+    let Some(obj) = state.objects.get(&object_id) else {
+        return EnteringAuraAttachment::NotApplicable;
+    };
+    // CR 303.4 + CR 704.5m: entry-time attachment only applies to an Aura that is
+    // actually on the battlefield. Defensive guard — if an intermediate entry
+    // trigger or replacement moved the realized copy off the battlefield before
+    // this runs (it is the LAST step of `finish_copy_target_choice_entry`),
+    // attaching it or prompting for a host of a non-battlefield Aura would be
+    // invalid state; do nothing and let it resolve wherever it now lives.
+    if obj.zone != Zone::Battlefield {
+        return EnteringAuraAttachment::NotApplicable;
+    }
+    // Only resolve entry attachment for an as-yet-unattached Aura; a copy that
+    // was already attached by some other effect must not be re-homed here.
+    if obj.attached_to.is_some() {
+        return EnteringAuraAttachment::NotApplicable;
+    }
+    let controller = obj.controller;
+    let legal_targets =
+        legal_aura_attachment_targets(state, object_id, controller, &enchant_filter);
+    match legal_targets.as_slice() {
+        // CR 303.4g: no legal host — leave unattached for the CR 704.5m SBA.
+        [] => EnteringAuraAttachment::Resolved,
+        [TargetRef::Object(id)] => {
+            crate::game::effects::attach::attach_to(state, object_id, *id);
+            EnteringAuraAttachment::Resolved
+        }
+        [TargetRef::Player(id)] => {
+            crate::game::effects::attach::attach_to_player(state, object_id, *id);
+            EnteringAuraAttachment::Resolved
+        }
+        _ => EnteringAuraAttachment::NeedsChoice {
+            controller,
+            legal_targets,
+        },
+    }
+}
+
 /// CR 708.3 + CR 708.2a: Turn an object face down as part of its battlefield
 /// entry — snapshot the real face into `back_face`, then overwrite the live
 /// characteristics with the face-down profile (the morph/manifest vanilla 2/2

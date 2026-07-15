@@ -16,10 +16,10 @@ use super::lower::BOUNDED_TARGET_CARDINALITIES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-    Duration, EachDamageRecipient, Effect, FilterProp, MultiTargetSpec, PlayerFilter, PlayerScope,
-    PtValue, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
-    TypedFilter,
+    AbilityDefinition, AbilityKind, ChosenSubtypeKind, ColorChangeMode, ContinuousModification,
+    ControllerRef, Duration, EachDamageRecipient, Effect, FilterProp, MultiTargetSpec,
+    PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, StaticCondition,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -4407,8 +4407,9 @@ fn try_parse_set_day_night(become_text: &str) -> Option<ParsedEffectClause> {
 ///   This creature becomes that color", Foraging Wickermaw) — the mana producer
 ///   records it as `ChosenAttribute::Color` on the source
 ///   (`produce_mana_from_ability`), and this `AddChosenColor` reads it live at
-///   Layer 5. Despite the additive-sounding `Add` prefix, `AddChosenColor` SETS
-///   the color at Layer 5 (CR 105.3 / CR 613.1e) — see its definition.
+///   Layer 5 with [`ColorChangeMode::Set`] (CR 105.3 / CR 613.1e) — "becomes
+///   that color" replaces prior colors unless an "in addition" retain-suffix
+///   selected [`ColorChangeMode::Add`].
 ///
 /// Returns `None` for any other predicate so the caller falls through to the
 /// fixed-color animation path (which already handles single named colors) and to
@@ -4434,7 +4435,9 @@ fn try_parse_become_color_modification(become_text: &str) -> Option<ContinuousMo
     .parse(lower.as_str())
     .is_ok()
     {
-        return Some(ContinuousModification::AddChosenColor);
+        return Some(ContinuousModification::AddChosenColor {
+            mode: ColorChangeMode::Set,
+        });
     }
     None
 }
@@ -4509,7 +4512,12 @@ fn try_parse_become_choice(
         )
     } else if lower.contains("color") {
         // CR 105.3: "become the color of your choice" — player chooses a color.
-        (ChoiceType::color(), ContinuousModification::AddChosenColor)
+        (
+            ChoiceType::color(),
+            ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Set,
+            },
+        )
     } else {
         return None;
     };
@@ -6038,11 +6046,15 @@ mod tests {
     fn become_that_color_maps_to_add_chosen_color() {
         assert!(matches!(
             try_parse_become_color_modification("that color"),
-            Some(ContinuousModification::AddChosenColor)
+            Some(ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Set
+            })
         ));
         assert!(matches!(
             try_parse_become_color_modification("the chosen color"),
-            Some(ContinuousModification::AddChosenColor)
+            Some(ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Set
+            })
         ));
         assert!(matches!(
             try_parse_become_color_modification("all colors"),

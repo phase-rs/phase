@@ -106,6 +106,12 @@ pub enum ClientMessage {
     Action {
         action: GameAction,
     },
+    /// Read-only simulation of an exact automatic spell-cast action. The
+    /// authenticated session, rather than the client, determines the actor.
+    PreviewManaPayment {
+        request_id: u64,
+        action: GameAction,
+    },
     Reconnect {
         game_code: String,
         player_token: String,
@@ -340,6 +346,16 @@ pub enum ServerMessage {
     ActionRejected {
         reason: String,
     },
+    /// Mana sources the engine's automatic payment path would use for one
+    /// `PreviewManaPayment` request. Sent only to the requesting player.
+    ManaPaymentPreview {
+        request_id: u64,
+        source_ids: Vec<ObjectId>,
+    },
+    ManaPaymentPreviewRejected {
+        request_id: u64,
+        reason: String,
+    },
     OpponentDisconnected {
         grace_seconds: u32,
         #[serde(default)]
@@ -548,6 +564,43 @@ mod tests {
         match parsed {
             ClientMessage::Action { action } => {
                 assert_eq!(action, GameAction::PassPriority);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_mana_payment_preview_roundtrips() {
+        let msg = ClientMessage::PreviewManaPayment {
+            request_id: 7,
+            action: GameAction::PassPriority,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::PreviewManaPayment { request_id, action } => {
+                assert_eq!(request_id, 7);
+                assert_eq!(action, GameAction::PassPriority);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_mana_payment_preview_roundtrips() {
+        let msg = ServerMessage::ManaPaymentPreview {
+            request_id: 7,
+            source_ids: vec![ObjectId(12)],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::ManaPaymentPreview {
+                request_id,
+                source_ids,
+            } => {
+                assert_eq!(request_id, 7);
+                assert_eq!(source_ids, vec![ObjectId(12)]);
             }
             _ => panic!("wrong variant"),
         }
@@ -1806,8 +1859,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_14() {
-        assert_eq!(PROTOCOL_VERSION, 14);
+    fn protocol_version_is_15() {
+        assert_eq!(PROTOCOL_VERSION, 15);
     }
 
     #[test]

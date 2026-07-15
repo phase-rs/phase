@@ -5,9 +5,9 @@ import { Trans, useTranslation } from "react-i18next";
 import type { AttackTarget, CombatRequirement, GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
-import { useGameStore } from "../../stores/gameStore.ts";
-import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
+import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { type AttackerStack, evenSplit, groupAttackers } from "../../utils/combat.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
@@ -76,10 +76,10 @@ export function AttackTargetPicker({
   const shouldReduceMotion = useReducedMotion();
 
   const gameState = useGameStore((s) => s.gameState);
+  const playerNames = useMultiplayerStore((s) => s.playerNames);
   const myId = usePlayerId();
   const hoverProps = useInspectHoverProps();
   const seatOrder = gameState?.seat_order;
-
   const teamBased = gameState?.format_config?.team_based ?? false;
 
   const sortedTargets = useMemo(() => {
@@ -103,6 +103,20 @@ export function AttackTargetPicker({
     [selectedAttackers, gameState],
   );
 
+  // The board state supplies each creature's current evaluated power. This is
+  // intentionally only an unblocked, at-this-moment life estimate: blockers
+  // and later game actions still determine the actual combat result.
+  const assignedDamageByPlayer = useMemo(() => {
+    const damageByPlayer = new Map<PlayerId, number>();
+    for (const attackerId of selectedAttackers) {
+      const target = assignments.get(attackerId);
+      if (target?.type !== "Player") continue;
+      const damage = Math.max(0, gameState?.objects[attackerId]?.power ?? 0);
+      damageByPlayer.set(target.data, (damageByPlayer.get(target.data) ?? 0) + damage);
+    }
+    return damageByPlayer;
+  }, [assignments, gameState, selectedAttackers]);
+
   // Total attackers still in the Unassigned bucket — gates Confirm.
   const unassignedTotal = useMemo(
     () => selectedAttackers.reduce((n, id) => n + (assignments.get(id) == null ? 1 : 0), 0),
@@ -124,17 +138,51 @@ export function AttackTargetPicker({
       gameState?.objects[misaim.objectId]?.name ??
       t("attackTargetPicker.creatureFallback", { id: misaim.objectId });
     const player = misaim.players
-      .map((pid) => getPlayerLabel(t, pid, myId, teamBased))
+      .map((playerId) => getTargetLabel({ type: "Player", data: playerId }))
       .join(", ");
     return t("attackTargetPicker.mustAttackPlayer", { creature, player });
   }
 
-  function getTargetLabel(target: AttackTarget): string {
+  function getTargetLabel(target: AttackTarget, showProjectedLife = false): string {
     if (target.type === "Player") {
-      return getPlayerLabel(t, target.data, myId, teamBased);
+      const life = gameState?.players.find((player) => player.id === target.data)?.life;
+      const name = target.data === myId
+        ? t("attackTargetPicker.you")
+        : teamBased && Math.floor(target.data / 2) === Math.floor(myId / 2)
+          ? t("attackTargetPicker.ally")
+          : playerNames.get(target.data) ?? `Opp ${target.data + 1}`;
+      const currentLife = life ?? 0;
+      const assignedDamage = showProjectedLife
+        ? (assignedDamageByPlayer.get(target.data) ?? 0)
+        : 0;
+      if (assignedDamage > 0) {
+        const projectedLife = Math.max(0, currentLife - assignedDamage);
+        return projectedLife === 0
+          ? t("attackTargetPicker.playerTargetLethal", {
+            name,
+            life: currentLife,
+            projectedLife,
+          })
+          : t("attackTargetPicker.playerTargetProjected", {
+            name,
+            life: currentLife,
+            projectedLife,
+          });
+      }
+      return t("attackTargetPicker.playerTarget", {
+        name,
+        life: currentLife,
+      });
     }
     const obj = gameState?.objects[target.data];
-    return obj?.name ?? t("attackTargetPicker.objectFallback", { id: target.data });
+    const name = obj?.name ?? t("attackTargetPicker.objectFallback", { id: target.data });
+    if (target.type === "Planeswalker") {
+      return t("attackTargetPicker.planeswalkerTarget", { name });
+    }
+    if (target.type === "Battle") {
+      return t("attackTargetPicker.battleTarget", { name });
+    }
+    return name;
   }
 
   function getTargetSeatColor(target: AttackTarget): string | undefined {
@@ -385,7 +433,7 @@ export function AttackTargetPicker({
                                     style={color ? { color } : undefined}
                                   >
                                     <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: color ?? "#6b7280" }} />
-                                    <span className="max-w-[7rem] truncate">{getTargetLabel(target)}</span>
+                                    <span className="max-w-[7rem] truncate">{getTargetLabel(target, true)}</span>
                                   </span>
                                   <button
                                     type="button"
@@ -430,7 +478,7 @@ export function AttackTargetPicker({
                               </td>
                               {sortedTargets.map((target) => {
                                 const count = countOnTarget(stack, target);
-                                const label = getTargetLabel(target);
+                                const label = getTargetLabel(target, true);
                                 return (
                                   <td key={attackTargetKey(target)} className="px-2 py-1.5">
                                     <StepperCell
@@ -510,7 +558,7 @@ export function AttackTargetPicker({
                               {sortedTargets.map((target) => {
                                 const color = getTargetSeatColor(target);
                                 const count = countOnTarget(stack, target);
-                                const label = getTargetLabel(target);
+                                const label = getTargetLabel(target, true);
                                 return (
                                   <div key={attackTargetKey(target)} className="flex items-center justify-between gap-2 rounded px-1 py-1">
                                     <span className="inline-flex min-w-0 items-center gap-1.5 text-sm" style={color ? { color } : undefined}>
@@ -823,15 +871,4 @@ function StackLabel({ stack, t, hoverProps }: StackLabelProps) {
       )}
     </div>
   );
-}
-
-function getPlayerLabel(
-  t: ReturnType<typeof useTranslation>["t"],
-  playerId: PlayerId,
-  myId: PlayerId,
-  teamBased: boolean,
-): string {
-  if (playerId === myId) return t("attackTargetPicker.you");
-  if (teamBased && Math.floor(playerId / 2) === Math.floor(myId / 2)) return t("attackTargetPicker.ally");
-  return getPlayerDisplayName(playerId, myId);
 }

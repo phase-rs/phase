@@ -167,6 +167,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
@@ -405,6 +406,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
@@ -3240,6 +3242,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // for this snapshot shape.
         FilterProp::Token => false,
         FilterProp::NonToken => true,
+        // SpellCastRecord does not retain the copy/representation bit. Fail
+        // closed rather than treating every cast spell as card-represented.
+        FilterProp::RepresentedByCard => false,
         FilterProp::WasPlayed => true,
         FilterProp::InZone { zone: required } => record.from_zone == *required,
         // CR 400.1 + CR 601.2a: cast-origin membership — the record's captured
@@ -3622,6 +3627,9 @@ fn matches_filter_prop(
         FilterProp::Token => obj.is_token,
         // CR 111.1: Nontoken identity of the matched object or event-time snapshot.
         FilterProp::NonToken => !obj.is_token,
+        // CR 108.2 + CR 108.2b: A card-represented object is neither a token
+        // nor an object copy. This is deliberately stricter than `NonToken`.
+        FilterProp::RepresentedByCard => obj.is_represented_by_a_card(),
         // CR 607.2d / CR 607.2m (by analogy): the object's CONTROLLER last chose
         // this anchor label ("creatures controlled by players who last chose
         // red waterfall", Two Streams Facility).
@@ -4635,6 +4643,9 @@ fn zone_change_record_matches_property(
         FilterProp::Token => record.is_token,
         // CR 111.1 + CR 603.6a: Nontoken identity as of the zone change.
         FilterProp::NonToken => !record.is_token,
+        // Zone-change records do not currently snapshot copy identity. Fail
+        // closed; live layer filters use the object path above.
+        FilterProp::RepresentedByCard => false,
         // CR 305.1 + CR 601.2a: zone-change snapshots carry cast/play provenance
         // when the object was cast or played — not mere zone moves (reanimate).
         FilterProp::WasPlayed => {

@@ -630,6 +630,9 @@ impl EventObjectSnapshot {
             // Not reachable from the subject grammar today. Reaching one fails the gate,
             // which is the designed signal to extend the snapshot + evaluator together.
             FilterProp::WasPlayed
+            // CR 108.2 + CR 108.2b: event snapshots retain token status but not whether
+            // a nontoken object is a copy, so card representation cannot be reconstructed.
+            | FilterProp::RepresentedByCard
             | FilterProp::ControllerChoseLabel { .. }
             | FilterProp::ControllerMatches { .. }
             | FilterProp::BlockingSource

@@ -72,6 +72,27 @@ impl LayerZoneObjectCache {
     }
 }
 
+/// CR 400.1 + CR 611.3a: Gather candidate recipients from every zone implied
+/// by a continuous effect's filter. This distributes the implicit battlefield
+/// default across disjuncts and stably deduplicates candidate objects.
+fn effect_candidate_ids(
+    state: &GameState,
+    filter: &TargetFilter,
+    zone_cache: &mut LayerZoneObjectCache,
+) -> Vec<ObjectId> {
+    let zones = continuous_effect_scan_zones(state, filter);
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    for zone in zones {
+        for &id in zone_cache.ids_for(state, zone) {
+            if seen.insert(id) {
+                candidates.push(id);
+            }
+        }
+    }
+    candidates
+}
+
 struct PreparedIncrementalFlush {
     recipient_ids: HashSet<ObjectId>,
     active_effects: Vec<ActiveContinuousEffect>,
@@ -1668,6 +1689,51 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     }
 }
 
+/// CR 613.1d: Recover the off-battlefield objects whose types were derived in
+/// the preceding Layer-4 evaluation. The cache is normally populated directly
+/// by the layer application pipeline. Attribution is its persisted, derived
+/// fallback after a save/load boundary, before the first new pass repopulates
+/// the cache.
+fn take_remote_type_layer_recipients(state: &mut GameState) -> im::HashSet<ObjectId> {
+    let mut recipients = std::mem::take(&mut state.remote_type_layer_recipients);
+    if recipients.is_empty() {
+        recipients.extend(
+            state
+                .attribution
+                .iter()
+                .filter(|(id, attribution)| {
+                    state
+                        .objects
+                        .get(*id)
+                        .is_some_and(|object| object.zone != Zone::Battlefield)
+                        && attribution.by_layer.contains_key(&Layer::Type)
+                })
+                .map(|(id, _)| *id),
+        );
+    }
+    recipients
+}
+
+/// CR 613.1 + CR 613.1d: Reset only remote objects previously changed in the
+/// type layer. Unlike a whole-characteristics reset, this preserves independent
+/// object state that is not a continuous effect, such as a spell's cast-time
+/// `CantBeCountered` grant or a searched card's pre-existing subtype.
+fn reset_remote_type_layer_recipients(
+    state: &mut GameState,
+    recipients: impl IntoIterator<Item = ObjectId>,
+) {
+    for id in recipients {
+        let Some(object) = state.objects.get_mut(&id) else {
+            continue;
+        };
+        if object.zone == Zone::Battlefield {
+            continue;
+        }
+        object.card_types = object.base_card_types.clone();
+        object.restore_fused_split_characteristics();
+    }
+}
+
 /// Unconditional full layer evaluation (CR 613.1).
 ///
 /// Production code must NOT call this directly — go through [`flush_layers`],
@@ -1700,6 +1766,7 @@ pub fn evaluate_layers(state: &mut GameState) {
     // `im::HashMap::clear()` drops the cleared map's own root Arc; clones
     // taken by AI search or snapshot diffing retain their own roots, so this
     // does not break structural sharing across `GameState` clones.
+    let remote_type_layer_recipients = take_remote_type_layer_recipients(state);
     state.attribution.clear();
     let mut abilities_suppressed = HashSet::new();
     // CR 702.26b + CR 702.26e: Phased-out permanents are treated as though
@@ -1727,8 +1794,8 @@ pub fn evaluate_layers(state: &mut GameState) {
             obj.assigns_damage_as_though_unblocked = false;
             obj.assigns_no_combat_damage = false;
             // CR 701.60c: re-derive the suspected designation's menace +
-            // "can't block" onto the just-reset live fields (not base), so the
-            // grant lasts exactly as long as the designation.
+            // "can't block" onto the just-reset live fields (not base), so
+            // the grant lasts exactly as long as the designation.
             derive_suspected_abilities(obj);
         }
     }
@@ -1751,6 +1818,7 @@ pub fn evaluate_layers(state: &mut GameState) {
             obj.keywords = obj.base_keywords.clone();
         }
     }
+    reset_remote_type_layer_recipients(state, remote_type_layer_recipients);
 
     // CR 613.1 + CR 611.2c: Stack-zone continuous effects grant keywords to objects ON THE
     // STACK — a spell that "gains rebound" (Taigam, Ojutai Master; CR 702.88a: rebound
@@ -1764,9 +1832,11 @@ pub fn evaluate_layers(state: &mut GameState) {
     // Toxic) would accumulate one instance per evaluation, and a grant would outlive the
     // transient continuous effect that produced it.
     //
-    // Scoped narrowly to `keywords` for the same reason as the hand loop: keyword grants are
-    // the only characteristic any currently-supported static modifies on a stack object.
-    // Extend this reset set before landing a static that modifies them.
+    // Scoped narrowly to `keywords`: remote type-changing effects use
+    // `reset_remote_type_layer_recipients` above, which resets only their prior
+    // recipients and therefore preserves independent cast-time state on every
+    // other stack object. Extend the relevant reset authority before landing a
+    // static that modifies another stack characteristic.
     let stack_ids = super::targeting::zone_object_ids(state, crate::types::zones::Zone::Stack);
     for id in stack_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
@@ -2070,14 +2140,16 @@ pub fn evaluate_layers(state: &mut GameState) {
     state.layers_dirty = LayersDirty::Clean;
 }
 
-/// CR 404 + CR 611.3a: Does a `TargetFilter` test membership of a specific
-/// `zone` (a `FilterProp::InZone { zone }`)? Recurses `Or`/`And`/`Not` compounds.
+/// CR 400.1 + CR 404 + CR 611.3a: Does a `TargetFilter` test membership of a
+/// specific `zone`? Recurses `Or`/`And`/`Not` compounds and preserves the
+/// multiple-zone semantics of `InAnyZone`.
 fn target_filter_reads_zone(filter: &TargetFilter, zone: Zone) -> bool {
     match filter {
-        TargetFilter::Typed(typed) => typed
-            .properties
-            .iter()
-            .any(|prop| matches!(prop, FilterProp::InZone { zone: z } if *z == zone)),
+        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| match prop {
+            FilterProp::InZone { zone: z } => *z == zone,
+            FilterProp::InAnyZone { zones } => zones.contains(&zone),
+            _ => false,
+        }),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(|f| target_filter_reads_zone(f, zone))
         }
@@ -2280,34 +2352,41 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
     }
 }
 
-/// CR 611.3a: Is any ACTIVE static-ability continuous effect gated on membership
-/// of `zone`? Consulted at the zone-change seam (`zones::move_to_zone`) so a card
-/// entering or leaving `zone` re-evaluates layers ONLY when a matching gate is
-/// live. This keeps routine off-battlefield churn (deaths, mill, discard) cheap
-/// in the common case where no `zone`-membership-gated static exists. Scans the
-/// static-effect-source index — O(generators), not O(zone).
+/// CR 611.3a + CR 613.1: Does a continuous static definition depend on the
+/// membership of `zone` through its recipient filter, enabling condition, or a
+/// dynamic quantity? All three surfaces must participate in zone invalidation.
+fn static_definition_reads_zone_membership(def: &StaticDefinition, zone: Zone) -> bool {
+    def.mode == StaticMode::Continuous
+        && (def
+            .affected
+            .as_ref()
+            .is_some_and(|filter| target_filter_reads_zone(filter, zone))
+            || def
+                .condition
+                .as_ref()
+                .is_some_and(|condition| static_condition_reads_zone_membership(condition, zone))
+            || def.modifications.iter().any(|modification| {
+                continuous_modification_dynamic_quantity(modification)
+                    .is_some_and(|quantity| quantity_expr_reads_zone(quantity, zone))
+            }))
+}
+
+/// CR 611.3a: Is any functioning continuous static dependent on membership of
+/// `zone`? Consulted at the zone-change seam (`zones::move_to_zone`) so a card
+/// entering or leaving a relevant zone re-evaluates layers. This scans live
+/// static sources, including currently-false gates, because the transition may
+/// be exactly what flips a gate's truth.
 pub(crate) fn any_active_static_reads_zone_membership(state: &GameState, zone: Zone) -> bool {
     let mut found = false;
     for_each_static_effect_source(state, |_state, obj| {
         if found {
             return;
         }
-        if obj.static_definitions.iter_all().any(|def| {
-            def.mode == StaticMode::Continuous
-                && (def
-                    .condition
-                    .as_ref()
-                    .is_some_and(|c| static_condition_reads_zone_membership(c, zone))
-                    // CR 604.3 + CR 613: a continuous MODIFICATION whose dynamic
-                    // quantity reads this zone's membership also depends on it —
-                    // e.g. Subgoyf's CDA `SetDynamicPower`/`SetDynamicToughness`
-                    // counting distinct subtypes among cards in all graveyards.
-                    // The static's `condition` is not the only zone-reading surface.
-                    || def.modifications.iter().any(|m| {
-                        continuous_modification_dynamic_quantity(m)
-                            .is_some_and(|q| quantity_expr_reads_zone(q, zone))
-                    }))
-        }) {
+        if obj
+            .static_definitions
+            .iter_all()
+            .any(|def| static_definition_reads_zone_membership(def, zone))
+        {
             found = true;
         }
     });
@@ -2360,6 +2439,19 @@ pub(crate) fn mark_layers_full_if_top_of_library_static_live(state: &mut GameSta
     if any_active_static_reads_top_of_library(state) {
         mark_layers_full(state);
     }
+}
+
+/// CR 400.7 + CR 611.3a: Query zone-sensitive static dependencies on both sides
+/// of a move. A source or recipient can become visible only after the move, so a
+/// pre-move scan alone is insufficient; the post-move scan runs before trigger
+/// collection, ensuring spell-cast triggers see derived spell characteristics.
+pub(crate) fn static_layer_dependency_for_zone_transition(
+    state: &GameState,
+    from: Zone,
+    to: Zone,
+) -> bool {
+    any_active_static_reads_zone_membership(state, from)
+        || any_active_static_reads_zone_membership(state, to)
 }
 
 /// Mark the layer system as requiring a FULL battlefield re-evaluation. The
@@ -2446,7 +2538,6 @@ fn prepare_incremental_flush(
             derive_suspected_abilities(obj);
         }
     }
-
     crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
 
     let active_effects = collect_shared_active_continuous_effects(state);
@@ -3890,13 +3981,10 @@ fn apply_combat_assignment_rule_effects_filtered(
 ) {
     let mut effects = collect_active_combat_assignment_rule_effects(state);
     effects.sort_by_key(|effect| (effect.timestamp, effect.controller.0, effect.source_id.0));
+    let mut zone_cache = LayerZoneObjectCache::default();
 
     for effect in effects {
-        let scan_zone = effect
-            .affected_filter
-            .extract_in_zone()
-            .unwrap_or(crate::types::zones::Zone::Battlefield);
-        let scan_ids = super::targeting::zone_object_ids(state, scan_zone);
+        let scan_ids = effect_candidate_ids(state, &effect.affected_filter, &mut zone_cache);
         let ctx = FilterContext::from_source(state, effect.source_id);
         let affected_ids: Vec<ObjectId> = scan_ids
             .iter()
@@ -4544,6 +4632,29 @@ fn record_attribution(
     }
 }
 
+/// CR 613.1d: Record remote Layer-4 recipients for the next full evaluation.
+/// This derived-state bookkeeping deliberately sits beside effect application,
+/// rather than in display attribution, because it controls the narrow type
+/// baseline reset when a static effect changes or expires.
+fn record_remote_type_layer_recipients(
+    state: &mut GameState,
+    effect: &ActiveContinuousEffect,
+    affected_ids: &[ObjectId],
+) {
+    if effect.layer != Layer::Type {
+        return;
+    }
+    for &target in affected_ids {
+        if state
+            .objects
+            .get(&target)
+            .is_some_and(|object| object.zone != Zone::Battlefield)
+        {
+            state.remote_type_layer_recipients.insert(target);
+        }
+    }
+}
+
 fn apply_continuous_effect(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
@@ -4628,10 +4739,11 @@ fn continuous_effect_scan_zones(state: &GameState, filter: &TargetFilter) -> Vec
 /// `And`/`Not` propagate their child/children's zones into the same
 /// accumulator unmodified — an unzoned `And` sibling narrows type, color, etc.,
 /// not zone, so it must not erase a zone an already-scoped sibling requires.
-/// A leaf contributes its own explicit zone, if any, mirroring
-/// [`TargetFilter::extract_in_zone`] (which this function supersedes for
-/// affected-filter scanning specifically; `extract_in_zone` keeps its
-/// existing single-zone contract for its other callers).
+/// A leaf contributes every explicit zone it carries, preserving
+/// [`FilterProp::InAnyZone`] rather than collapsing it to the first zone. Stack
+/// filters retain their implicit `Zone::Stack` interpretation through
+/// [`TargetFilter::extract_in_zone`].
+/// `SpecificObject` resolves its recipient's actual zone from `state`.
 fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zone>) {
     match filter {
         TargetFilter::Or { filters } => {
@@ -4698,7 +4810,26 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
             }
         }
         other => {
-            if let Some(zone) = other.extract_in_zone() {
+            // CR 611.3a: A continuous effect generated by a static ability
+            // isn't "locked in"; it applies at any given moment to whatever
+            // its text indicates — including every zone indicated by the
+            // affected filter (Painter's Servant / Mycosynth Lattice Oxford
+            // subjects span off-battlefield cards, stack spells, and
+            // permanents). Prefer the multi-zone union (`InAnyZone` / `InZone`
+            // via `extract_zones`) so off-battlefield card legs scan every
+            // indicated zone, not only Battlefield. Fall back to
+            // `extract_in_zone` for stack-spell / exiled-by-source leaves that
+            // encode their zone without a Typed `In*` property.
+            let leaf_zones = {
+                let mut zones = other.extract_zones();
+                if zones.is_empty() {
+                    if let Some(zone) = other.extract_in_zone() {
+                        zones.push(zone);
+                    }
+                }
+                zones
+            };
+            for zone in leaf_zones {
                 if !out.contains(&zone) {
                     out.push(zone);
                 }
@@ -4721,37 +4852,17 @@ fn apply_continuous_effect_filtered(
         return;
     }
 
-    // CR 611.3a: a compound affected filter may combine disjuncts that imply
-    // different zones — Secret Arcade's "nonland permanents you control and
-    // permanent spells you control" unions a battlefield-implicit disjunct
-    // with a stack-scoped one — and an `Or` can itself be nested under an
-    // `And` (the static-subject grammar's own qualifier-wrapping helper,
-    // `add_property`, produces exactly that shape for e.g. "`<compound
-    // subject>` with a mana ability"). `continuous_effect_scan_zones` walks
-    // the whole tree so every disjunct's zone defaults independently,
-    // however deeply it's nested, rather than a single `extract_in_zone()`
-    // call stopping at the first explicit zone marker found anywhere and
-    // silently dropping a sibling disjunct's implicit-battlefield
-    // population. For a filter with no `Or` anywhere this produces exactly
-    // one zone, identical to the previous single-zone behavior.
-    let scan_zones = continuous_effect_scan_zones(state, &effect.affected_filter);
-
+    let scan_ids = effect_candidate_ids(state, &effect.affected_filter, zone_cache);
     let ctx = FilterContext::from_source(state, effect.source_id);
-    let mut affected_ids: Vec<ObjectId> = Vec::new();
-    for &zone in &scan_zones {
-        let zone_ids = zone_cache.ids_for(state, zone);
-        for &id in zone_ids {
-            // Incremental fast path: re-apply only to the freshly-entered
-            // objects. The rest of the battlefield was not reset and keeps
-            // its prior derived values, so re-applying to it would
-            // double-apply.
-            if !restrict_to.is_none_or(|ids| ids.contains(&id)) {
-                continue;
-            }
-            if !matches_target_filter(state, id, &effect.affected_filter, &ctx) {
-                continue;
-            }
-            let condition_ok = effect.condition.as_ref().is_none_or(|condition| {
+    let affected_ids: Vec<ObjectId> = scan_ids
+        .iter()
+        // Incremental fast path: re-apply only to the freshly-entered objects.
+        // The rest of the battlefield was not reset and keeps its prior derived
+        // values, so re-applying to it would double-apply.
+        .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
+        .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
+        .filter(|&&id| {
+            effect.condition.as_ref().is_none_or(|condition| {
                 evaluate_condition_with_recipient(
                     state,
                     condition,
@@ -4759,13 +4870,12 @@ fn apply_continuous_effect_filtered(
                     effect.source_id,
                     id,
                 )
-            });
-            if condition_ok {
-                affected_ids.push(id);
-            }
-        }
-    }
+            })
+        })
+        .copied()
+        .collect();
 
+    record_remote_type_layer_recipients(state, effect, &affected_ids);
     record_attribution(state, effect, &affected_ids);
 
     // Pre-read chosen subtype from source (avoids borrow conflict in the loop).
@@ -4793,24 +4903,25 @@ fn apply_continuous_effect_filtered(
     // granting source's chosen color must be baked into the granted modifier
     // at apply-time, because the modifier lives on the granted creature
     // (which has no chosen-color attribute of its own).
-    let chosen_color = if matches!(effect.modification, ContinuousModification::AddChosenColor)
-        || matches!(
-            &effect.modification,
-            ContinuousModification::AddKeyword { keyword }
-                if matches!(
-                    keyword,
-                    crate::types::keywords::Keyword::HexproofFrom(
-                        crate::types::keywords::HexproofFilter::ChosenColor,
-                    ) | crate::types::keywords::Keyword::Protection(
-                        crate::types::keywords::ProtectionTarget::ChosenColor,
-                    )
+    let chosen_color = if matches!(
+        effect.modification,
+        ContinuousModification::AddChosenColor { .. }
+    ) || matches!(
+        &effect.modification,
+        ContinuousModification::AddKeyword { keyword }
+            if matches!(
+                keyword,
+                crate::types::keywords::Keyword::HexproofFrom(
+                    crate::types::keywords::HexproofFilter::ChosenColor,
+                ) | crate::types::keywords::Keyword::Protection(
+                    crate::types::keywords::ProtectionTarget::ChosenColor,
                 )
-        )
-        || matches!(
-            &effect.modification,
-            ContinuousModification::AddStaticMode { mode }
-                if static_mode_uses_chosen_color(mode)
-        ) {
+            )
+    ) || matches!(
+        &effect.modification,
+        ContinuousModification::AddStaticMode { mode }
+            if static_mode_uses_chosen_color(mode)
+    ) {
         state
             .objects
             .get(&effect.source_id)
@@ -5348,10 +5459,21 @@ fn apply_continuous_effect_filtered(
                     }
                 }
             }
-            // CR 105.3: Set the object's color to the chosen color.
-            ContinuousModification::AddChosenColor => {
+            // CR 105.3 + CR 613.1e: Apply the source's chosen color. `Set`
+            // replaces prior colors; `Add` retains them (Painter's Servant
+            // "in addition to their other colors").
+            ContinuousModification::AddChosenColor { mode } => {
                 if let Some(color) = chosen_color {
-                    obj.color = vec![color];
+                    match mode {
+                        crate::types::ability::ColorChangeMode::Set => {
+                            obj.color = vec![color];
+                        }
+                        crate::types::ability::ColorChangeMode::Add => {
+                            if !obj.color.contains(&color) {
+                                obj.color.push(color);
+                            }
+                        }
+                    }
                 }
             }
             ContinuousModification::SetDynamicPower { .. } => {
@@ -5992,13 +6114,11 @@ mod tests {
     }
 
     // Non-`Or` filters (the overwhelming majority of existing static
-    // abilities) must still resolve to exactly the single zone
-    // `extract_in_zone` would have produced — no behavior change for the
-    // common case.
+    // abilities) retain their existing single-zone resolution, while a typed
+    // `InAnyZone` recipient filter keeps every explicitly named card zone.
     #[test]
-    fn continuous_effect_scan_zones_matches_extract_in_zone_for_non_or_filters() {
+    fn continuous_effect_scan_zones_preserves_non_or_zone_semantics() {
         let state = GameState::new_two_player(0);
-
         let no_zone = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
         assert_eq!(
             continuous_effect_scan_zones(&state, &no_zone),
@@ -6023,6 +6143,17 @@ mod tests {
         assert_eq!(
             continuous_effect_scan_zones(&state, &flat_stack_and),
             vec![Zone::Stack]
+        );
+
+        let card_zones =
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::InAnyZone {
+                    zones: vec![Zone::Library, Zone::Hand, Zone::Graveyard],
+                }]),
+            );
+        assert_eq!(
+            continuous_effect_scan_zones(&state, &card_zones),
+            vec![Zone::Library, Zone::Hand, Zone::Graveyard]
         );
     }
 
@@ -6094,6 +6225,46 @@ mod tests {
              (falling back to the battlefield default, where it simply matches nothing). \
              off_zone_characteristics owns exile keywords; this pass must not write them."
         );
+    }
+
+    /// CR 400.1 + CR 611.3a + issue #5798: Painter's Servant Oxford subject
+    /// includes an `InAnyZone` off-battlefield card leg. Scan-zone collection
+    /// must honor `extract_zones()` (not just `extract_in_zone()`), otherwise
+    /// the card leg silently collapses to Battlefield and never paints hand /
+    /// library / exile cards.
+    #[test]
+    fn painters_servant_or_filter_scans_off_battlefield_in_any_zone() {
+        let state = GameState::new_two_player(0);
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InAnyZone {
+                    zones: vec![
+                        Zone::Library,
+                        Zone::Hand,
+                        Zone::Graveyard,
+                        Zone::Exile,
+                        Zone::Command,
+                    ],
+                }])),
+                TargetFilter::StackSpell,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+            ],
+        };
+        let zones = continuous_effect_scan_zones(&state, &filter);
+        for expected in [
+            Zone::Library,
+            Zone::Hand,
+            Zone::Graveyard,
+            Zone::Exile,
+            Zone::Command,
+            Zone::Stack,
+            Zone::Battlefield,
+        ] {
+            assert!(
+                zones.contains(&expected),
+                "expected scan zone {expected:?} in {zones:?}"
+            );
+        }
     }
 
     /// CR 109.2 + CR 611.3a + issue #5740: Secret Arcade's compound-subject

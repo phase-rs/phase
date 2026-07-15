@@ -740,6 +740,12 @@ pub fn move_to_zone(
         // than battlefield, exile, or command move to command instead.
         to = Zone::Command;
     }
+    // CR 400.7 + CR 611.3a: a static may depend on an object's membership in
+    // either the leaving or destination zone through its recipient filter,
+    // condition, or dynamic quantity. Query before the move and repeat below
+    // after the object reaches its destination, before any trigger collection.
+    let static_dependency_before =
+        crate::game::layers::static_layer_dependency_for_zone_transition(state, from, to);
     let unattached_from = state.objects.get(&object_id).and_then(|obj| {
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
@@ -864,24 +870,18 @@ pub fn move_to_zone(
         });
     }
 
+    let static_dependency_after =
+        crate::game::layers::static_layer_dependency_for_zone_transition(state, from, to);
+
     // CR 611.3a + CR 400.3: Hand size affects continuous effects gated on the
     // controller's hand (Carnage Interpreter, issue #3991) and hand-zone
     // effects (Miracle in hand). Re-evaluate layers on any hand entry/exit.
-    if to == Zone::Battlefield || to == Zone::Hand || from == Zone::Hand {
-        crate::game::layers::mark_layers_full(state);
-    }
-
-    // CR 404 + CR 611.3a: A card entering or leaving a graveyard changes
-    // graveyard population, which can flip a static condition gated on graveyard
-    // membership (Tarmogoyf, Cairn Wanderer: "as long as a creature card with
-    // <keyword> is in a graveyard, ~ has <keyword>"). The incremental layer path
-    // is battlefield-entry scoped and the hand/battlefield mark above does not
-    // cover graveyard moves (mill, discard, a death that lands in the graveyard),
-    // so re-evaluate layers on a graveyard membership change — but only when such
-    // a static is actually live, so routine graveyard churn stays cheap when no
-    // graveyard-gated static exists.
-    if (to == Zone::Graveyard || from == Zone::Graveyard)
-        && crate::game::layers::any_active_static_reads_zone_membership(state, Zone::Graveyard)
+    if to == Zone::Battlefield
+        || from == Zone::Battlefield
+        || to == Zone::Hand
+        || from == Zone::Hand
+        || static_dependency_before
+        || static_dependency_after
     {
         crate::game::layers::mark_layers_full(state);
     }

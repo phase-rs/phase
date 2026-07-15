@@ -7,6 +7,7 @@ import type {
   GameState,
   LegalActionsResult,
   ManaCost,
+  ObjectId,
   PlayerId,
   PersistedGameState,
   SubmitResult,
@@ -36,12 +37,13 @@ export interface DeckData {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 15 — Mana-payment preview request/response variants.
  * 14 — PrecastCopyShortcut action and its two WaitingFor variants.
  * 13 — WaitingFor::MulliganBottomCards removed; mulligan bottoming folded
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 14;
+export const PROTOCOL_VERSION = 15;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -133,6 +135,11 @@ export class WebSocketAdapter implements EngineAdapter {
   private _gameCode: string | null = null;
   private pendingResolve: ((result: SubmitResult) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
+  private nextManaPaymentPreviewRequestId = 1;
+  private pendingManaPaymentPreviews = new Map<
+    number,
+    { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
+  >();
   private initResolve: (() => void) | null = null;
   private initReject: ((error: Error) => void) | null = null;
   /** Starting-player contest event captured from the initial GameStarted
@@ -338,6 +345,9 @@ export class WebSocketAdapter implements EngineAdapter {
         this.pendingResolve = null;
         this.pendingReject = null;
       }
+      this.rejectPendingManaPaymentPreviews(
+        new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
+      );
       if (this.initReject) {
         this.initReject(
           new AdapterError("WS_CLOSED", "Connection closed before game started", true),
@@ -382,6 +392,21 @@ export class WebSocketAdapter implements EngineAdapter {
         this.pendingReject = null;
         this.emit({ type: "actionPendingChanged", pending: false });
         reject(new AdapterError("WS_CLOSED", "Failed to send action", true));
+      }
+    });
+  }
+
+  async previewManaPayment(action: GameAction, _actor: PlayerId): Promise<ObjectId[]> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+
+    const requestId = this.nextManaPaymentPreviewRequestId++;
+    return new Promise<ObjectId[]>((resolve, reject) => {
+      this.pendingManaPaymentPreviews.set(requestId, { resolve, reject });
+      if (!this.send({ type: "PreviewManaPayment", data: { request_id: requestId, action } })) {
+        this.pendingManaPaymentPreviews.delete(requestId);
+        reject(new AdapterError("WS_CLOSED", "Failed to send mana-payment preview", true));
       }
     });
   }
@@ -487,6 +512,9 @@ export class WebSocketAdapter implements EngineAdapter {
     this._gameCode = null;
     this.pendingResolve = null;
     this.pendingReject = null;
+    this.rejectPendingManaPaymentPreviews(
+      new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
+    );
     this.initResolve = null;
     this.initReject = null;
     this.reconnectInFlight = false;
@@ -582,6 +610,13 @@ export class WebSocketAdapter implements EngineAdapter {
       });
       return false;
     }
+  }
+
+  private rejectPendingManaPaymentPreviews(error: Error): void {
+    for (const { reject } of this.pendingManaPaymentPreviews.values()) {
+      reject(error);
+    }
+    this.pendingManaPaymentPreviews.clear();
   }
 
   /** Snapshot of the server's advertised identity, or null before ServerHello. */
@@ -740,6 +775,26 @@ export class WebSocketAdapter implements EngineAdapter {
           );
           this.pendingResolve = null;
           this.pendingReject = null;
+        }
+        break;
+      }
+
+      case "ManaPaymentPreview": {
+        const data = msg.data as { request_id: number; source_ids: ObjectId[] };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          pending.resolve(data.source_ids);
+        }
+        break;
+      }
+
+      case "ManaPaymentPreviewRejected": {
+        const data = msg.data as { request_id: number; reason: string };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          pending.reject(new AdapterError("ACTION_REJECTED", data.reason, true));
         }
         break;
       }

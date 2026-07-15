@@ -246,6 +246,65 @@ fn activated_ability_opponent_turn_restriction_uses_not_your_turn_condition() {
     );
 }
 
+/// CR 508.1: a STANDALONE combat-window activation gate — "Activate only before
+/// attackers are declared" / "Activate only before combat" (Arcum's Whistle,
+/// Arcum's Sleigh) with no "during <role>" first half — must map to the enforced
+/// `BeforeAttackersDeclared` variant instead of falling through to
+/// `Effect::Unimplemented`. The compound "during <role> … before combat" form
+/// already bound the window; this covers the bare-window class.
+#[test]
+fn standalone_before_attackers_activation_gate_maps_to_before_attackers_declared() {
+    for text in [
+        "{T}: Draw a card. Activate only before attackers are declared.",
+        "{T}: Draw a card. Activate only before combat.",
+    ] {
+        let r = parse(text, "Arcum's Whistle", &[], &["Artifact"], &[]);
+        assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+        let restrictions = &r.abilities[0].activation_restrictions;
+        assert!(
+            restrictions.contains(&ActivationRestriction::BeforeAttackersDeclared),
+            "{text:?} must yield BeforeAttackersDeclared, got {restrictions:?}"
+        );
+    }
+}
+
+/// CR 510: standalone "activate only before the combat damage step" / "before
+/// combat damage" (Angus Mackenzie) maps to the enforced `BeforeCombatDamage`
+/// variant, and the "during combat before combat damage has been dealt" compound
+/// (Save Point) yields `[DuringCombat, BeforeCombatDamage]` through the combinator
+/// grammar that replaced the former verbatim-string special case.
+#[test]
+fn combat_damage_window_activation_gate_maps_to_before_combat_damage() {
+    for text in [
+        "{T}: Draw a card. Activate only before the combat damage step.",
+        "{T}: Draw a card. Activate only before combat damage.",
+    ] {
+        let r = parse(text, "Angus Mackenzie", &[], &["Creature"], &[]);
+        assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+        let restrictions = &r.abilities[0].activation_restrictions;
+        assert!(
+            restrictions.contains(&ActivationRestriction::BeforeCombatDamage),
+            "{text:?} must yield BeforeCombatDamage, got {restrictions:?}"
+        );
+    }
+
+    let r = parse(
+        "{T}: Draw a card. Activate only during combat before combat damage has been dealt.",
+        "Save Point",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let restrictions = &r.abilities[0].activation_restrictions;
+    assert!(
+        restrictions.contains(&ActivationRestriction::DuringCombat)
+            && restrictions.contains(&ActivationRestriction::BeforeCombatDamage),
+        "'during combat before combat damage' must yield both DuringCombat and \
+         BeforeCombatDamage, got {restrictions:?}"
+    );
+}
+
 #[test]
 fn legacy_play_this_ability_as_sorcery_records_activation_restriction() {
     let r = parse(

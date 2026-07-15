@@ -51,7 +51,6 @@ crates/engine/src/game/effects/discover.rs	shuffle_to_bottom	mover	1
 crates/engine/src/game/effects/drawn_this_turn_choice.rs	handle_topdeck_choice	mover	1
 crates/engine/src/game/effects/epic.rs	resolve	zone-assign	1
 crates/engine/src/game/effects/explore.rs	resolve_explore_effect	mover	1
-crates/engine/src/game/effects/gift_delivery.rs	deliver_card_draw	mover	1
 crates/engine/src/game/effects/paradigm.rs	cast_paradigm_copy	zone-assign	1
 crates/engine/src/game/effects/prepare.rs	synthesize_prepared_copy_object	zone-assign	1
 crates/engine/src/game/effects/put_on_top.rs	resolve	mover	2
@@ -79,4 +78,3 @@ crates/engine/src/game/planechase.rs	planeswalk	container	2
 crates/engine/src/game/planechase.rs	reveal_starting_plane	container	1
 crates/engine/src/game/planechase.rs	reveal_starting_plane	zone-assign	1
 crates/engine/src/game/sba.rs	check_token_cease_to_exist	mover	1
-crates/engine/src/game/turns.rs	execute_draw_for	mover	1

@@ -7136,6 +7136,19 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
     pub attribution: im::HashMap<ObjectId, ObjectAttribution>,
 
+    /// CR 613.1d: Remote recipients whose live card types were derived by a
+    /// Layer-4 continuous effect during the preceding evaluation. The next
+    /// full pass restores only these objects' type baselines before applying
+    /// the new Layer-4 effect set, leaving independent spell/card state (such
+    /// as cast-time ability grants) untouched.
+    ///
+    /// This is an engine-only derived cache. It is reconstructed from the
+    /// serialized attribution side-table on the first post-deserialization
+    /// layer pass, then rebuilt directly by the layer application pipeline.
+    /// It is intentionally excluded from equality like the other layer caches.
+    #[serde(skip, default)]
+    pub(crate) remote_type_layer_recipients: im::HashSet<ObjectId>,
+
     // Day/night tracking
     #[serde(default)]
     pub day_night: Option<DayNight>,
@@ -9798,6 +9811,7 @@ impl GameState {
             transient_continuous_effects: im::Vector::new(),
             next_continuous_effect_id: 1,
             attribution: im::HashMap::new(),
+            remote_type_layer_recipients: im::HashSet::new(),
             day_night: None,
             spells_cast_this_turn: 0,
             spells_cast_last_turn: None,
@@ -10083,8 +10097,8 @@ impl GameState {
 
     /// CR 603.3b: upsert a trigger-ordering [`DecisionTemplate`], replacing any existing
     /// template with the same `(owner, key)`. Used by both tiers: the prompt path and
-    /// the persistent-permute path register ephemeral markers, `SetTriggerOrderTemplate`
-    /// saves persistent ones.
+    /// the persistent-permute path register ephemeral markers; the live
+    /// `OrderTriggers` submission records persistent ones.
     pub fn set_trigger_order_template(
         &mut self,
         tmpl: crate::analysis::decision_template::DecisionTemplate,
@@ -10114,16 +10128,6 @@ impl GameState {
         self.decision_templates
             .iter()
             .find(|t| t.owner == controller && t.key.kind == kind && t.key.covers(group_sources))
-    }
-
-    /// CR 603.3b: revoke one saved persistent ordering preference by `(actor, key)`.
-    pub fn remove_trigger_order_template(
-        &mut self,
-        actor: PlayerId,
-        key: &crate::analysis::decision_template::DecisionGroupKey,
-    ) {
-        self.decision_templates
-            .retain(|t| !(t.owner == actor && &t.key == key));
     }
 
     /// CR 603.3b: revoke all of `actor`'s PERSISTENT (`AllCopies`-keyed) ordering
@@ -10798,6 +10802,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         transient_continuous_effects: _,
         next_continuous_effect_id: _,
         attribution: _,
+        remote_type_layer_recipients: _,
         day_night: _,
         spells_cast_this_turn: _,
         spells_cast_last_turn: _,

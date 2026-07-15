@@ -710,15 +710,10 @@ export type MayTriggerAutoChoiceOp =
   | { type: "Remove"; data: { key: MayTriggerAutoChoiceKey } }
   | { type: "ClearAll" };
 
-// CR 603.3b: The mutation a `SetTriggerOrderTemplate` action performs on the
-// acting player's saved trigger-ordering templates. `Save` echoes the prompted
-// group's source object ids + the submitted permutation; `Remove` echoes a
-// stored key; `ClearAll` drops every saved template belonging to the acting
-// player. Mirrors engine `TriggerOrderTemplateOp` (types/actions.rs).
-export type TriggerOrderTemplateOp =
-  | { type: "Save"; data: { sources: ObjectId[]; order: number[] } }
-  | { type: "Remove"; data: { key: DecisionGroupKey } }
-  | { type: "ClearAll" };
+// CR 603.3b: A live `OrderTriggers` answer is the only way to save a
+// trigger-ordering preference. This public action only forgets the acting
+// player's saved preferences.
+export type TriggerOrderTemplateOp = { type: "ClearAll" };
 
 // CR 603.3b: Order-insensitive identity of a recurring decision group — the
 // canonical sorted (identity, multiplicity) source multiset plus its kind.
@@ -2353,6 +2348,12 @@ export interface TurnOrderSlotView {
  * `engine::game::derived_views::DerivedViews`.
  */
 export interface DerivedViews {
+  /**
+   * Engine-classified live keyword badges for battlefield permanents. The
+   * strip renders this map directly rather than deciding which keyword timing
+   * matters on the battlefield. Keyed by ObjectId-as-string.
+   */
+  battlefield_keyword_badges?: Record<string, Keyword[]>;
   /** Keyed by attacking commander's current controller (PlayerId as string). */
   commander_damage_by_attacker?: Record<string, CommanderDamageView[]>;
   /**
@@ -2976,6 +2977,11 @@ export interface EngineAdapter {
    * action payload or the UI state.
    */
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  /**
+   * Read-only preview of the exact automatic `CastSpell` action currently
+   * offered by the engine. Unsupported transports omit this capability.
+   */
+  previewManaPayment?(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
   /**

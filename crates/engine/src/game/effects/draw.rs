@@ -463,6 +463,16 @@ pub fn apply_draw_after_replacement(
         // draw of the draw step" read this ordinal.
         let (nth_in_turn, nth_in_step) =
             if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
+                // CR 121.1: This driver is the single authority for every
+                // settled draw, so it is the single place that marks the
+                // player as having drawn a card this turn — broadened from
+                // the pre-migration "took the draw-step draw" reading (the
+                // only production setter, deleted by the turns.rs/gift
+                // migration onto this driver) to "drew at least one card
+                // this turn". No production reader distinguishes the two;
+                // `turns.rs` clears it at turn start and
+                // `analysis/resource.rs` ignores it entirely.
+                player.has_drawn_this_turn = true;
                 player.cards_drawn_this_turn = player.cards_drawn_this_turn.saturating_add(1);
                 player.cards_drawn_this_step = player.cards_drawn_this_step.saturating_add(1);
                 (player.cards_drawn_this_turn, player.cards_drawn_this_step)

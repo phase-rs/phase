@@ -885,22 +885,13 @@ pub enum MayTriggerAutoChoiceOp {
     ClearAll,
 }
 
-/// CR 603.3b: The mutation a `GameAction::SetTriggerOrderTemplate` performs on the
-/// acting player's saved trigger-ordering templates. `Save` echoes the just-prompted
-/// group's source object ids plus the submitted permutation (the engine resolves each
-/// id to its card identity, mirroring `PriorityYieldOp::Add` — no frontend game-state
-/// computation); `Remove` echoes a stored key verbatim; `ClearAll` drops every saved
-/// (persistent) ordering template belonging to the acting player.
+/// CR 603.3b: The only public mutation of the acting player's saved
+/// trigger-ordering preferences. A live `OrderTriggers` response is the sole
+/// authority that records a preference; clients may only forget all of their
+/// saved preferences.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum TriggerOrderTemplateOp {
-    Save {
-        sources: Vec<ObjectId>,
-        order: Vec<usize>,
-    },
-    Remove {
-        key: crate::analysis::decision_template::DecisionGroupKey,
-    },
     ClearAll,
 }
 

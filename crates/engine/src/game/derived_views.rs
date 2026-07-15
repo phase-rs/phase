@@ -189,6 +189,14 @@ pub struct TurnOrderSlotView {
 /// otherwise have to compute game logic (a CLAUDE.md violation).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedViews {
+    /// The live (post-layer) keyword badges each battlefield permanent should
+    /// display. The engine classifies the complete keyword list so the client
+    /// can render the compact strip without reinterpreting keyword timing.
+    /// Keyed by object ID; absent when a permanent has no display-relevant
+    /// keyword.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub battlefield_keyword_badges: HashMap<ObjectId, Vec<Keyword>>,
+
     /// Commander damage grouped by the attacking commander's current
     /// controller. Each inner entry preserves per-commander identity so
     /// partner commanders under one controller render as separate badges.
@@ -409,6 +417,15 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         };
         if obj.zone != Zone::Battlefield {
             continue;
+        }
+        let badges: Vec<Keyword> = obj
+            .keywords
+            .iter()
+            .filter(|keyword| keyword.is_battlefield_display_relevant())
+            .cloned()
+            .collect();
+        if !badges.is_empty() {
+            views.battlefield_keyword_badges.insert(obj_id, badges);
         }
         if let Some(AttachTarget::Player(host)) = obj.attached_to {
             views
@@ -1122,6 +1139,45 @@ mod tests {
         assert!(
             views.commander_damage_by_attacker.is_empty(),
             "non-Commander format must short-circuit regardless of stored damage entries"
+        );
+    }
+
+    #[test]
+    fn derive_views_projects_only_battlefield_relevant_keyword_badges() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let permanent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Keyword Test Creature".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&permanent).unwrap().keywords = vec![
+            Keyword::Flying,
+            Keyword::Ravenous,
+            Keyword::Evoke(crate::types::keywords::EvokeCost::Mana(ManaCost::NoCost)),
+            Keyword::Fading(3),
+        ];
+
+        let hand_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Off-Battlefield Flyer".into(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&hand_card).unwrap().keywords = vec![Keyword::Flying];
+
+        let views = derive_views(&state, None);
+
+        assert_eq!(
+            views.battlefield_keyword_badges.get(&permanent),
+            Some(&vec![Keyword::Flying, Keyword::Fading(3)]),
+            "the strip keeps live battlefield abilities but hides Ravenous and Evoke"
+        );
+        assert!(
+            !views.battlefield_keyword_badges.contains_key(&hand_card),
+            "only battlefield permanents receive keyword badge entries"
         );
     }
 

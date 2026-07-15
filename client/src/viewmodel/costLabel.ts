@@ -262,19 +262,18 @@ export function formatCost(cost: SerializedCost): string {
 
 /**
  * Loyalty badge descriptor for a planeswalker ability cost, or null when the
- * cost isn't a Loyalty cost with a shipped numeral glyph. Reads the structured
- * `{ type: "Loyalty", amount }` cost — never parses "+N" strings. `text` is the
- * plain fallback shown before the mana-font is ready ("+2" / "-7" / "0").
+ * cost isn't a Loyalty cost. Reads the structured `{ type: "Loyalty", amount
+ * }` cost — never parses "+N" strings. `text` is the plain fallback when the
+ * mana font has no matching numeral glyph ("+2" / "-7" / "0").
  */
 export function loyaltyBadge(
   cost: SerializedAbilityCost | undefined,
-): { iconClasses: string; text: string } | null {
+): { amount: number; iconClasses: string | null; text: string } | null {
   const c = cost as SerializedCost | undefined;
   if (!c || c.type !== "Loyalty") return null;
   const amount = typeof c.amount === "number" ? c.amount : 0;
   const iconClasses = loyaltyIconClasses(amount);
-  if (!iconClasses) return null;
-  return { iconClasses, text: formatCost(c) };
+  return { amount, iconClasses, text: formatCost(c) };
 }
 
 /**

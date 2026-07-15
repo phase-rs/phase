@@ -1,4 +1,12 @@
-import type { GameAction, GameEvent, GameLogEntry, GameState, LegalActionsResult, ManaCost } from "../adapter/types";
+import type {
+  GameAction,
+  GameEvent,
+  GameLogEntry,
+  GameState,
+  LegalActionsResult,
+  ManaCost,
+  ObjectId,
+} from "../adapter/types";
 import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
 
 /**
@@ -53,12 +61,13 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *   3 — Planechase state and action payloads in game_setup/reconnect snapshots
  *   4 — Archenemy derived view and scheme deck payloads
  *   5 — CardPredicateGuessMade game event shape
+ *   8 — Mana-payment preview request/response variants.
  *   7 — PrecastCopyShortcut action and its two WaitingFor variants.
  *   6 — Mulligan bottoming folded into a MulliganDecisionPhase::BottomCards
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 7 as const;
+export const WIRE_PROTOCOL_VERSION = 8 as const;
 
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
@@ -72,6 +81,7 @@ export type P2PMessage =
       playerNames?: Record<number, string>;
     } & LegalActionsWire)
   | { type: "action"; senderPlayerId: number; action: GameAction }
+  | { type: "preview_mana_payment"; requestId: number; action: GameAction }
   | ({
       type: "state_update";
       state: GameState;
@@ -79,6 +89,8 @@ export type P2PMessage =
       logEntries?: GameLogEntry[];
     } & LegalActionsWire)
   | { type: "action_rejected"; reason: string }
+  | { type: "mana_payment_preview"; requestId: number; sourceIds: ObjectId[] }
+  | { type: "mana_payment_preview_rejected"; requestId: number; reason: string }
   | { type: "ping"; timestamp: number }
   | { type: "pong"; timestamp: number }
   | { type: "disconnect"; reason: string }
@@ -126,8 +138,11 @@ const VALID_TYPES = new Set([
   "guest_deck",
   "game_setup",
   "action",
+  "preview_mana_payment",
   "state_update",
   "action_rejected",
+  "mana_payment_preview",
+  "mana_payment_preview_rejected",
   "ping",
   "pong",
   "disconnect",

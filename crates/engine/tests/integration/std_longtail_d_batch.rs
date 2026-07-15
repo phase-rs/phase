@@ -591,11 +591,10 @@ fn choreographed_sparks_copy_grant_is_supported() {
 }
 
 #[test]
-fn leyline_of_transformation_nonbattlefield_grant_is_deferred() {
-    // The first clause (creatures you control are the chosen type) parses; the
-    // "same is true for creature spells you control and creature cards you own
-    // that aren't on the battlefield" continuous non-battlefield grant is not
-    // modeled.
+fn leyline_of_transformation_nonbattlefield_grant_is_modeled() {
+    // The complete same-is-true static has one dynamic recipient filter spanning
+    // creatures on the battlefield, creature spells, and owned creature cards in
+    // the other card zones.
     let dbg = parsed_debug(
         "If this card is in your opening hand, you may begin the game with it on the battlefield.\nAs this enchantment enters, choose a creature type.\nCreatures you control are the chosen type in addition to their other types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.",
         "Leyline of Transformation",
@@ -603,8 +602,8 @@ fn leyline_of_transformation_nonbattlefield_grant_is_deferred() {
         &[],
     );
     assert!(
-        dbg.contains("Unimplemented"),
-        "Leyline of Transformation non-battlefield grant must remain honestly Unimplemented"
+        !dbg.contains("Unimplemented"),
+        "Leyline of Transformation's same-is-true continuation must be fully modeled: {dbg}"
     );
 }
 
