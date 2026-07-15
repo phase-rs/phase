@@ -14755,9 +14755,6 @@ fn try_parse_reanimate_self_and_target(
     // "up to N" cardinality (which the generic try_split wrapper omits).
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_ability.sub_ability = sub_clause.sub_ability;
-    // CR 601.2c + CR 115.1: keep the continuation's announcing player on its
-    // own chained link rather than leaking it to the primary target.
-    sub_ability.target_chooser = continuation_ctx.target_chooser.clone();
     sub_ability.multi_target = multi_target;
     sub_ability.optional = sub_clause.optional;
 
@@ -15093,6 +15090,9 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
 
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_ability.sub_ability = sub_clause.sub_ability;
+    // CR 601.2c + CR 115.1: the continuation's opponent-choice announcer belongs
+    // to this chained link rather than the primary target.
+    sub_ability.target_chooser = continuation_ctx.target_chooser.clone();
     // CR 115.6: Propagate "up to N" cardinality so the sub-clause target
     // remains optional (e.g. "up to one other target artifact or enchantment").
     sub_ability.multi_target = sub_clause.multi_target;

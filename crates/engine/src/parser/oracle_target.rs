@@ -3256,19 +3256,15 @@ pub fn parse_type_phrase_with_ctx<'a>(
     }
 
     // CR 601.2c: the controller normally announces every target; this card text
-    // overrides the announcer for THIS slot — "of an opponent's choice" / "of a
-    // player's choice" (Volcanic Offering). The announcing player is an opponent
-    // of the controller (CR 102.3); the slot is still a target of the controller's
-    // spell (CR 115.1). In 3+ player games the controller picks which opponent
-    // announces (CR 700.2e by analogy — that rule is mode-specific); the engine
-    // resolves a deterministic opponent for now (see resolve_effect_player_ref).
+    // overrides the announcer for THIS slot — "of an opponent's choice" (Volcanic
+    // Offering). The announcing player is an opponent of the controller (CR 102.3);
+    // the slot is still a target of the controller's spell (CR 115.1). In 3+ player
+    // games the controller picks which opponent announces before target selection
+    // (see `ChooseAnnouncingOpponent`).
     let remaining_opp_choice = lower[pos..].trim_start();
     let opp_choice_offset = lower[pos..].len() - remaining_opp_choice.len();
-    if let Ok((rest, _)) = alt((
-        tag::<_, _, OracleError<'_>>("of an opponent's choice"),
-        tag::<_, _, OracleError<'_>>("of a player's choice"),
-    ))
-    .parse(remaining_opp_choice)
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("of an opponent's choice").parse(remaining_opp_choice)
     {
         pos += opp_choice_offset + (remaining_opp_choice.len() - rest.len());
         ctx.target_chooser = Some(TargetFilter::Opponent);

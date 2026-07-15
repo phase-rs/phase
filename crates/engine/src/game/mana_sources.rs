@@ -465,13 +465,14 @@ pub(crate) fn mana_ability_penalty(ability: &AbilityDefinition) -> ManaSourcePen
 ///
 /// Exact AST shapes (verified against `types/ability.rs`): opponent scope is
 /// `TargetFilter::Typed(TypedFilter { controller: Some(ControllerRef::Opponent),
-/// .. })` — there is NO bare `TargetFilter::Opponent` variant (cf.
-/// `player_matches_filter`). `DamageEachPlayer { player_filter: Opponent }` is
-/// Zhur-Taa Druid's live shape. `GainLife.player` is a `TargetFilter` that
-/// serde-defaults to `Controller` (never `None` in the AST). Everything else —
-/// self / triggering-player scope, `Unimplemented`, `GenericEffect`, and every
-/// unmodeled shape — falls through the documented default arm to `false`
-/// (default-pass). Broadening beyond CR 119 / CR 120 is a deliberate follow-up.
+/// .. })`; the bare `TargetFilter::Opponent` variant identifies an announcing
+/// player for opponent-choice target slots and is intentionally not a damage
+/// scope. `DamageEachPlayer { player_filter: Opponent }` is Zhur-Taa Druid's live
+/// shape. `GainLife.player` is a `TargetFilter` that serde-defaults to
+/// `Controller` (never `None` in the AST). Everything else — self /
+/// triggering-player scope, `Unimplemented`, `GenericEffect`, and every unmodeled
+/// shape — falls through the documented default arm to `false` (default-pass).
+/// Broadening beyond CR 119 / CR 120 is a deliberate follow-up.
 fn effect_benefits_trigger_controller(effect: &Effect) -> bool {
     matches!(
         effect,

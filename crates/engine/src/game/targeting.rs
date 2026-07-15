@@ -5443,6 +5443,8 @@ mod tests {
                 .contains(&TargetRef::Object(c1)),
             "hexproof does not block the controller (CR 702.11b)"
         );
+    }
+
     /// CR 102.3 + CR 601.2c: `TargetFilter::Opponent` resolves to a deterministic
     /// opponent of the ability's controller. In a two-player game that is the one
     /// opponent.
@@ -5463,9 +5465,9 @@ mod tests {
         );
     }
 
-    /// CR 102.3 + CR 700.2e (by analogy): in a 3+ player game the controller would
-    /// choose which opponent announces; the engine resolves a deterministic
-    /// stand-in — the first opponent in seat order.
+    /// The fallback for an unselected 3+ player ability is deterministic; the cast
+    /// pipeline prompts the controller before target selection, so normal casts do
+    /// not rely on this defensive branch.
     #[test]
     fn resolve_effect_player_ref_opponent_three_player_resolves_to_first_seat_opponent() {
         use crate::types::ability::Effect;

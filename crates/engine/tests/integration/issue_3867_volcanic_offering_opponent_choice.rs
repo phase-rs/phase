@@ -1,10 +1,10 @@
 //! Runtime regression for #3867 — Volcanic Offering's "of an opponent's choice"
 //! per-slot target announcer.
 //!
-//! "Destroy target nonbasic land an opponent controls and another target
-//! nonbasic land of an opponent's choice. Volcanic Offering deals 7 damage to
-//! target creature an opponent controls and 7 damage to another target creature
-//! of an opponent's choice."
+//! "Destroy target nonbasic land you don't control and target nonbasic land of an
+//! opponent's choice you don't control. Volcanic Offering deals 7 damage to target
+//! creature you don't control and 7 damage to target creature of an opponent's
+//! choice you don't control."
 //!
 //! CR 601.2c: the controller normally announces every target; this card text
 //! overrides the announcer for the second land slot and the second creature slot
@@ -28,14 +28,14 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-const VOLCANIC_OFFERING: &str = "Destroy target nonbasic land an opponent controls \
-     and another target nonbasic land of an opponent's choice. Volcanic Offering \
-     deals 7 damage to target creature an opponent controls and 7 damage to \
-     another target creature of an opponent's choice.";
+const VOLCANIC_OFFERING: &str = "Destroy target nonbasic land you don't control \
+     and target nonbasic land of an opponent's choice you don't control. Volcanic \
+     Offering deals 7 damage to target creature you don't control and 7 damage to \
+     target creature of an opponent's choice you don't control.";
 
 /// Add a nonbasic land controlled by `player` to the battlefield. `add_creature`
 /// plus `as_land()` yields a Land with no Basic supertype, which satisfies the
-/// "nonbasic land an opponent controls" filter.
+/// "nonbasic land you don't control" filter.
 fn nonbasic_land(
     scenario: &mut GameScenario,
     player: PlayerId,
@@ -88,7 +88,7 @@ fn waiting_for_player_flips_controller_opponent_across_slots_and_controller_keep
     assert_eq!(
         current_announcer(&runner.state().waiting_for),
         P0,
-        "slot 0 (target nonbasic land an opponent controls) is announced by the controller"
+        "slot 0 (target nonbasic land you don't control) is announced by the controller"
     );
     runner
         .act(GameAction::ChooseTarget {
@@ -109,11 +109,11 @@ fn waiting_for_player_flips_controller_opponent_across_slots_and_controller_keep
         })
         .expect("opponent announces land B");
 
-    // Slot 2: controller again (damage to a creature an opponent controls).
+    // Slot 2: controller again (damage to a creature it doesn't control).
     assert_eq!(
         current_announcer(&runner.state().waiting_for),
         P0,
-        "slot 2 (creature an opponent controls) is announced by the controller"
+        "slot 2 (creature you don't control) is announced by the controller"
     );
     runner
         .act(GameAction::ChooseTarget {
@@ -121,7 +121,7 @@ fn waiting_for_player_flips_controller_opponent_across_slots_and_controller_keep
         })
         .expect("controller announces creature A");
 
-    // Slot 3: opponent again ("another target creature of an opponent's choice").
+    // Slot 3: opponent again ("target creature of an opponent's choice").
     assert_eq!(
         current_announcer(&runner.state().waiting_for),
         P1,
@@ -178,6 +178,47 @@ fn waiting_for_player_flips_controller_opponent_across_slots_and_controller_keep
         !runner.state().objects.contains_key(&creature_b)
             || runner.state().objects[&creature_b].damage_marked >= 7,
         "opponent creature B must take 7 damage (and die)"
+    );
+}
+
+/// CR 601.2c: Each printed instance of "target" may choose the same legal object.
+/// Volcanic Offering's official ruling specifically confirms that the opponent may
+/// choose the same nonbasic land or creature that the controller chose.
+#[test]
+fn opponent_may_choose_the_controller_selected_land_and_creature() {
+    let (scenario, [spell, land_a, _land_b, creature_a, _creature_b]) = build_scenario();
+    let mut runner = scenario.build();
+    let spell_card = runner.state().objects[&spell].card_id;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: spell_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the free instant must succeed");
+
+    for (announcer, target) in [
+        (P0, land_a),
+        (P1, land_a),
+        (P0, creature_a),
+        (P1, creature_a),
+    ] {
+        assert_eq!(current_announcer(&runner.state().waiting_for), announcer);
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .expect("the repeated target remains legal for a distinct target word");
+    }
+
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::Priority { player } if *player == P0
+        ),
+        "the spell was announced and priority returned to its controller"
     );
 }
 
@@ -269,7 +310,7 @@ fn controller_chooses_non_first_opponent_as_announcer_in_three_player_game() {
             .expect("controller picks P2 as the announcer");
     }
 
-    // Slot 0: controller announces a nonbasic land an opponent controls.
+    // Slot 0: controller announces a nonbasic land it doesn't control.
     assert_eq!(current_announcer(&runner.state().waiting_for), P0);
     runner
         .act(GameAction::ChooseTarget {
@@ -372,7 +413,7 @@ fn controller_may_choose_different_announcing_opponents_per_effect() {
         .act(GameAction::ChooseAnnouncingOpponent { opponent: p2 })
         .expect("P2 announces the second-creature effect");
 
-    // Slot 0: controller announces a nonbasic land an opponent controls.
+    // Slot 0: controller announces a nonbasic land it doesn't control.
     assert_eq!(current_announcer(&runner.state().waiting_for), P0);
     runner
         .act(GameAction::ChooseTarget {
@@ -392,7 +433,7 @@ fn controller_may_choose_different_announcing_opponents_per_effect() {
         })
         .expect("P1 announces the second land");
 
-    // Slot 2: controller announces a creature an opponent controls.
+    // Slot 2: controller announces a creature it doesn't control.
     assert_eq!(current_announcer(&runner.state().waiting_for), P0);
     runner
         .act(GameAction::ChooseTarget {

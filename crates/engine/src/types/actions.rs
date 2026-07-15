@@ -195,6 +195,8 @@ pub enum GameAction {
     /// CR 608.2d + CR 700.3: "An opponent separates" — the controller's answer
     /// to `WaitingFor::SeparatePilesChooseOpponent`.
     ChoosePileOpponent {
+        opponent: PlayerId,
+    },
     /// CR 601.2c + CR 115.1: The spell controller's answer to
     /// `WaitingFor::ChooseAnnouncingOpponent` — which opponent announces the
     /// "of an opponent's choice" target slot. `opponent` must be one of that

@@ -389,6 +389,7 @@ mod issue_3817_sheoldred_apocalypse;
 mod issue_3862_ulvenwald_tracker_fight;
 mod issue_3864_swords_two_targets;
 mod issue_3866_insidious_roots_double_trigger;
+mod issue_3867_volcanic_offering_opponent_choice;
 mod issue_3869_pentad_prism_mana;
 mod issue_3871_summoners_pact;
 mod issue_3872_tithe_taker_turn_scoped_tax;

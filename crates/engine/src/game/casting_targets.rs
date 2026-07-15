@@ -448,7 +448,7 @@ pub(crate) fn handle_choose_target(
             let controller = pending.ability.controller;
 
             if let Some(waiting_for) =
-                maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
+                maybe_pause_for_cast_distribution(state, controller, &pending, &ability)?
             {
                 return Ok(waiting_for);
             }
