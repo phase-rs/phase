@@ -3231,7 +3231,7 @@ mod tests {
     #[test]
     fn sba_pipeline_graveyard_clears_attached_to() {
         use crate::game::effects::attach::attach_to;
-        use crate::game::zone_pipeline::{ZoneChangeCause, ZoneMoveRequest, ZoneMoveResult};
+        use crate::game::zone_pipeline::{ZoneMoveRequest, ZoneMoveResult};
         use crate::types::card_type::CoreType;
 
         let mut state = setup();
@@ -3268,14 +3268,7 @@ mod tests {
         let mut events = Vec::new();
         let result = crate::game::zone_pipeline::move_object(
             &mut state,
-            ZoneMoveRequest {
-                object_id: aura,
-                to: Zone::Graveyard,
-                cause: ZoneChangeCause::StateBasedAction,
-                mods: crate::game::zone_pipeline::EntryMods::default(),
-                placement: None,
-                exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
-            },
+            ZoneMoveRequest::state_based_action(aura, Zone::Graveyard),
             &mut events,
         );
         assert!(matches!(result, ZoneMoveResult::Done));

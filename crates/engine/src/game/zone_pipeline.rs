@@ -1,12 +1,4 @@
-//! Unified zone-change pipeline (Phase A carve-out).
-//!
-//! This module is the home of the single zone-change entry point. Phase A moves
-//! the most-complete pipeline copy (`change_zone::execute_zone_move` and its
-//! delivery tail) here verbatim, exposes the new request/cause types and the
-//! `move_object` wrapper, and seeds the `ApprovedZoneChange` proof token used to
-//! fence delivery in later phases. Existing callers continue to reach the moved
-//! functions through `pub(crate) use` shims left at their old `change_zone.rs`
-//! paths, so no behavior changes in this phase.
+//! Unified zone-change pipeline.
 //!
 //! Layer discipline (PLAN §2): `zones.rs` keeps every guard that must hold
 //! unconditionally (CR 111.8 token guard, CR 614.1d ETB block, CR 400.7 cleanup,
@@ -45,11 +37,6 @@ use crate::types::ability::FaceDownProfile;
 /// ordering); the exempt variants are pipeline-internal and skip the replacement
 /// consult. Each exempt variant carries its CR citation so adding one is a
 /// reviewable diff (PLAN §3 "exemptions are data, not a second function").
-//
-// Phase A introduces the request/cause/mods vocabulary; the call sites that
-// construct each variant land in Phases B–D, so several arms are unconstructed
-// in this phase.
-#[allow(dead_code)]
 pub enum ZoneChangeCause {
     /// Resolving effect or ability instruction. `source` feeds
     /// `ProposedEvent::ZoneChange.cause`.
@@ -144,7 +131,6 @@ impl ZoneChangeCause {
 /// Destination modifiers — the union of what the pipeline copies need to seed
 /// onto the proposed `ZoneChange` before the replacement consult.
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct EntryMods {
     /// CR 614.1c effect seed. Reuses the three-state `EtbTapState`
     /// (`Unspecified` / `Tapped` / `Untapped`) rather than a bool, matching the
@@ -169,7 +155,6 @@ pub struct EntryMods {
 /// `exiled_by_source` bookkeeping always travel together, so they fold into one
 /// struct that also rides in `DeliveryCtx`.
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct ExileLinkSpec {
     /// `Some(Duration::UntilHostLeavesPlay)` installs a return-on-source-leave
     /// link; other durations / `None` fall back to `tracking`.
@@ -183,7 +168,6 @@ pub struct ExileLinkSpec {
 ///
 /// `from` is read from the object's current zone inside `move_object` (every
 /// pipeline copy except change_zone already did this).
-#[allow(dead_code)]
 pub struct ZoneMoveRequest {
     pub object_id: ObjectId,
     pub to: Zone,
@@ -197,8 +181,6 @@ pub struct ZoneMoveRequest {
     pub exile_links: ExileLinkSpec,
 }
 
-// Builder constructors are the Phase B+ call-site ergonomics; unused in Phase A.
-#[allow(dead_code)]
 impl ZoneMoveRequest {
     /// Effect- or ability-driven move with no destination modifiers.
     pub fn effect(object_id: ObjectId, to: Zone, source: ObjectId) -> Self {
@@ -234,6 +216,18 @@ impl ZoneMoveRequest {
             object_id,
             to,
             cause: ZoneChangeCause::SpellResolutionDefault,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+        }
+    }
+
+    /// CR 704: state-based action zone change with no destination modifiers.
+    pub fn state_based_action(object_id: ObjectId, to: Zone) -> Self {
+        Self {
+            object_id,
+            to,
+            cause: ZoneChangeCause::StateBasedAction,
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
@@ -406,18 +400,11 @@ impl ZoneMoveRequest {
 /// these would mint a token outside the pipeline (deserialization, cloning a
 /// stashed token, `Default::default()`) and silently reopen the loophole. A CI
 /// grep for derives adjacent to this type backs the review rule.
-//
-// Phase A seeds the token + its three mint paths; the consuming callers
-// (`deliver`, the bucket-A migrations) arrive in Phase B, so the field and
-// constructors are not yet read in this phase.
-#[allow(dead_code)]
 pub struct ApprovedZoneChange {
     event: ProposedEvent,
     _seal: (),
 }
 
-// Phase B wires every mint path and `deliver` consumer; Phase A only seeds them.
-#[allow(dead_code)]
 impl ApprovedZoneChange {
     /// The third mint path (PLAN §6.2): seal an event that has already completed
     /// a full replacement pass OUTSIDE this module — the outer Destroy /
@@ -509,14 +496,9 @@ pub(crate) enum ZoneDeliveryResult {
     NeedsChoice(PlayerId),
 }
 
-/// THE single zone-change entry point (Phase A: thin wrapper over the carved-out
-/// `execute_zone_move` engine). Reads `from` from the object's current zone,
-/// unpacks `EntryMods` / `ExileLinkSpec`, and runs the proposal through the
-/// replacement pipeline + delivery tail.
-///
-/// In this phase the entry has no production callers yet — call-site migration
-/// is Phase B+ — so it preserves the exact behavior of `execute_zone_move` for
-/// every modifier combination it forwards.
+/// THE single zone-change entry point. Reads `from` from the object's current
+/// zone, unpacks `EntryMods` / `ExileLinkSpec`, and runs the proposal through
+/// the replacement pipeline + delivery tail.
 ///
 /// `pub(crate)` while `ZoneMoveResult` is `pub(crate)`: every caller lives in the
 /// engine crate. (PLAN §1.3 writes `pub fn`; widening to `pub` only matters once

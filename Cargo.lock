@@ -730,6 +730,7 @@ name = "engine"
 version = "0.25.0"
 dependencies = [
  "assert_matches",
+ "engine",
  "im",
  "indexmap 2.14.0",
  "insta",
