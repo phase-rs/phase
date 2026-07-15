@@ -1,14 +1,19 @@
 //! Etching of Kumano exiles creatures dealt damage by a source it controls.
 
 use engine::game::combat::AttackTarget;
+use engine::game::sba::check_state_based_actions;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{Effect, FilterProp, ReplacementCondition, TargetFilter};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, FilterProp, ReplacementCondition,
+    ReplacementDefinition, TargetFilter,
+};
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
-use engine::types::zones::Zone;
+use engine::types::zones::{EtbTapState, Zone};
 
 const ETCHING: &str =
     "Haste\nIf a creature dealt damage this turn by a source you controlled would die, exile it instead.";
@@ -94,6 +99,139 @@ fn etching_of_kumano_exiles_a_creature_it_kills_in_combat() {
         Zone::Exile,
         "a creature killed by Etching's combat damage must be exiled"
     );
+}
+
+#[test]
+fn etching_of_kumano_exiles_a_trading_creature_in_either_battlefield_order() {
+    for etching_first in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let (etching, other) = if etching_first {
+            let etching = scenario
+                .add_creature_from_oracle(P0, "Etching of Kumano", 2, 2, ETCHING)
+                .id();
+            let other = scenario.add_creature(P1, "Trading Creature", 2, 2).id();
+            (etching, other)
+        } else {
+            let other = scenario.add_creature(P1, "Trading Creature", 2, 2).id();
+            let etching = scenario
+                .add_creature_from_oracle(P0, "Etching of Kumano", 2, 2, ETCHING)
+                .id();
+            (etching, other)
+        };
+        let mut runner = scenario.build();
+
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(etching, AttackTarget::Player(P1))])
+            .expect("Etching must be able to attack");
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            runner.pass_both_players();
+        }
+        runner
+            .declare_blockers(&[(other, etching)])
+            .expect("the other creature must be able to block Etching");
+        runner.combat_damage();
+
+        assert_eq!(
+            runner.state().objects[&other].zone,
+            Zone::Exile,
+            "a creature trading with Etching must be exiled (etching_first={etching_first})"
+        );
+    }
+}
+
+#[test]
+fn opposing_etchings_that_trade_exile_each_other() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let p0_etching = scenario
+        .add_creature_from_oracle(P0, "Etching of Kumano A", 2, 2, ETCHING)
+        .id();
+    let p1_etching = scenario
+        .add_creature_from_oracle(P1, "Etching of Kumano B", 2, 2, ETCHING)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(p0_etching, AttackTarget::Player(P1))])
+        .expect("the first Etching must be able to attack");
+    if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+        runner.pass_both_players();
+    }
+    runner
+        .declare_blockers(&[(p1_etching, p0_etching)])
+        .expect("the second Etching must be able to block");
+    runner.combat_damage();
+
+    assert_eq!(runner.state().objects[&p0_etching].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&p1_etching].zone, Zone::Exile);
+}
+
+fn graveyard_exile_replacement(description: &str, consume_on_apply: bool) -> ReplacementDefinition {
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Graveyard)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        ))
+        .description(description.to_string());
+    replacement.consume_on_apply = consume_on_apply;
+    replacement
+}
+
+#[test]
+fn earlier_one_shot_death_redirect_survives_a_later_replacement_choice_and_resume() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let earlier = scenario
+        .add_creature(P0, "Earlier One-Shot", 2, 2)
+        .with_damage_marked(2)
+        .with_replacement_definition(graveyard_exile_replacement("one-shot", true))
+        .id();
+    let later = scenario
+        .add_creature(P1, "Later Choice", 2, 2)
+        .with_damage_marked(2)
+        .with_replacement_definition(graveyard_exile_replacement("redirect A", false))
+        .with_replacement_definition(graveyard_exile_replacement("redirect B", false))
+        .id();
+    let mut runner = scenario.build();
+    let mut events = Vec::new();
+
+    check_state_based_actions(runner.state_mut(), &mut events);
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(
+        runner.state().objects[&earlier].zone,
+        Zone::Exile,
+        "an earlier consumed redirect must either be delivered or rolled back before a later pause"
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("answer the later CR 616.1 ordering choice");
+
+    assert_eq!(runner.state().objects[&earlier].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&later].zone, Zone::Exile);
+    assert!(runner.state().pending_replacement.is_none());
 }
 
 #[test]
