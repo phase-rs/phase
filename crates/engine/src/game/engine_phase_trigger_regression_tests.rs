@@ -3464,6 +3464,112 @@ fn echoing_deeps_with_empty_graveyards_enters_untapped_without_copy_offer() {
     );
 }
 
+/// CR 614.1c + CR 707.9: the impossible-copy guard must not suppress a real
+/// Echoing Deeps choice. A land card in either graveyard makes the optional
+/// replacement applicable; accepting it prompts for that land and the Deeps
+/// enters tapped as its copy with the additional Cave subtype.
+#[test]
+fn echoing_deeps_with_graveyard_land_offers_and_applies_copy() {
+    let mut state = setup_game_at_main_phase();
+    let forest = zones::create_object(
+        &mut state,
+        CardId(9_024),
+        PlayerId(1),
+        "Forest".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&forest)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    let deeps = zones::create_object(
+        &mut state,
+        CardId(9_025),
+        PlayerId(0),
+        "Echoing Deeps".to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&deeps)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_oracle_to_object(
+        &mut state,
+        deeps,
+        "Echoing Deeps",
+        "You may have this land enter tapped as a copy of any land card in a graveyard, except it's a Cave in addition to its other types.\n{T}: Add {C}.",
+    );
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: deeps,
+            card_id: CardId(9_025),
+        },
+    )
+    .expect("Echoing Deeps should be playable with a graveyard land");
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidate_count,
+        ..
+    } = result.waiting_for
+    else {
+        panic!(
+            "a valid graveyard land must expose the optional copy replacement, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(player, PlayerId(0));
+    assert_eq!(
+        candidate_count, 2,
+        "the player may accept or decline the copy"
+    );
+
+    let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting Echoing Deeps' replacement should prompt for a copy target");
+    let WaitingFor::CopyTargetChoice {
+        player,
+        source_id,
+        valid_targets,
+        ..
+    } = result.waiting_for
+    else {
+        panic!(
+            "accepting the copy replacement must expose the graveyard land, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(player, PlayerId(0));
+    assert_eq!(source_id, deeps);
+    assert_eq!(valid_targets, vec![forest]);
+
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(forest)),
+        },
+    )
+    .expect("Echoing Deeps should enter as a copy of the chosen graveyard land");
+    let entered = &state.objects[&deeps];
+    assert_eq!(entered.zone, Zone::Battlefield);
+    assert_eq!(entered.name, "Forest");
+    assert!(entered.tapped, "a copied Echoing Deeps enters tapped");
+    assert!(
+        entered
+            .card_types
+            .subtypes
+            .iter()
+            .any(|subtype| subtype == "Cave"),
+        "the copy must be a Cave in addition to its other types"
+    );
+}
+
 /// CR 614.12a + CR 707.9: Callidus Assassin grants its copy a "When this
 /// creature enters" trigger as part of the entering-as-copy bundle. The
 /// ETB event for the copy must fire *after* the player chooses a target
