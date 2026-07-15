@@ -8147,6 +8147,37 @@ fn trigger_you_cast_another_spell_keeps_another_filter() {
     );
 }
 
+/// CR 702.8a + CR 603.2 (issue #4754): Slitherwisp — "Whenever you cast another
+/// spell that has flash" must scope the trigger to flash spells. The "that has
+/// flash" keyword clause was dropped by `parse_type_phrase`, leaving only the
+/// `Another` prop, so the trigger over-fired on every non-first spell (a
+/// counterspell without flash wrongly triggered it). The spell filter must now
+/// carry BOTH `WithKeyword(Flash)` and `Another`.
+#[test]
+fn slitherwisp_cast_another_flash_spell_scopes_to_flash() {
+    let def = parse_trigger_line(
+        "Whenever you cast another spell that has flash, you draw a card and each opponent loses 1 life.",
+        "Slitherwisp",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    let Some(TargetFilter::Typed(tf)) = &def.valid_card else {
+        panic!("expected Typed valid_card, got {:?}", def.valid_card);
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::WithKeyword {
+            value: Keyword::Flash
+        }),
+        "expected WithKeyword(Flash) in {:?}",
+        tf.properties
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::Another),
+        "expected Another retained in {:?}",
+        tf.properties
+    );
+}
+
 /// CR 701.47a + CR 603.1 (issue #5341): Dreadhorde Invasion upkeep trigger —
 /// "you lose 1 life and amass Zombies 1" must keep Amass as a sub_ability.
 /// Coverage previously claimed support while only emitting LoseLife.
