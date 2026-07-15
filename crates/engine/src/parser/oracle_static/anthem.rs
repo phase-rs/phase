@@ -38,7 +38,10 @@ pub(crate) fn parse_typed_you_control(
             // unparsed predicate noise that `parse_continuous_gets_has`'s lenient
             // `parse_additive_type_clause_modifications` fallback can scan past
             // and silently drop.
-            if after_prefix.trim_start().starts_with("and ") {
+            if tag::<_, _, OracleError<'_>>("and ")
+                .parse(after_prefix.trim_start())
+                .is_ok()
+            {
                 return None;
             }
             let full_subject = tp.original[..creatures_pos + " creatures you control".len()].trim();
@@ -182,7 +185,10 @@ pub(crate) fn parse_typed_you_control(
             let after_prefix = &after.original[" you control ".len()..];
             // CR 611.3: same compound-subject guard as the "creatures you
             // control" branch above — see its comment for the full rationale.
-            if after_prefix.trim_start().starts_with("and ") {
+            if tag::<_, _, OracleError<'_>>("and ")
+                .parse(after_prefix.trim_start())
+                .is_ok()
+            {
                 return None;
             }
             let full_subject = tp.original[..yc_pos + " you control".len()].trim();
