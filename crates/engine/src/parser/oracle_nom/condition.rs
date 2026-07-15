@@ -275,6 +275,11 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_there_exists_compound_zone_condition,
         parse_there_exists_condition,
         parse_subject_first_zone_count,
+        // CR 603.4 + CR 113.6b: "~ is the only <type> [card] in <zone>" —
+        // self-referential count-equals-one gate (Nether Spirit). Anchored on
+        // the self-token + literal " is the only ", so it never mis-claims the
+        // non-self "a <type> card is in a graveyard" phrase below.
+        parse_source_is_only_type_in_zone,
         // CR 611.3a + CR 702: "a <type> card [with <keyword>] is in a graveyard"
         // — graveyard-presence gate for conditional continuous statics
         // (Tarmogoyf, Cairn Wanderer). Guarded by the "is in a graveyard"
@@ -4117,6 +4122,62 @@ fn parse_creature_has_keyword(input: &str) -> OracleResult<'_, StaticCondition> 
 /// Graveyard }` (plus any `FilterProp::WithKeyword` the type phrase's "with
 /// <keyword>" clause supplies).
 ///
+/// CR 603.4 + CR 113.6 + CR 113.6b: "~ is the only <type> [card] in <zone>" —
+/// self-referential count-equals-one gate (Nether Spirit's intervening-if:
+/// "if this card is the only creature card in your graveyard, ...").
+///
+/// Composes existing building blocks only:
+///   - `parse_source_self_token` — the self-reference subject (`~` /
+///     `this card`; "this card" is a parse-only self-reference not yet
+///     normalized to `~`, so the literal `tag("this card")` arm in that
+///     combinator is required here).
+///   - `parse_type_phrase` — folds the informational " card" qualifier and the
+///     attached "in your <zone>" clause into one `TargetFilter` (the same
+///     grammar shape `parse_card_in_graveyard` relies on).
+///   - `make_quantity_comparison` — the shared `ObjectCount == N` shape.
+///
+/// When the filter carries an explicit non-battlefield zone
+/// (graveyard/hand/library/exile), conjoin an explicit `SourceInZone` predicate
+/// so the EXISTING `trigger_condition_source_zones` walker (oracle_trigger.rs)
+/// derives `trigger_zones` and `ChangeZone.origin` automatically — the CR
+/// 113.6/113.6b off-battlefield self-function class. Precedent: Jocasta,
+/// Automaton Avenger (issue #4566), whose `{SourceInZone, Graveyard}` condition
+/// already drives this exact derivation with zero special-casing (see
+/// `stamp_self_return_origin_from_trigger_condition`'s doc comment). A
+/// battlefield-only "the only <type> you control" static omits the redundant
+/// `SourceInZone` conjunct since `trigger_zones` already defaults to
+/// battlefield-only.
+fn parse_source_is_only_type_in_zone(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, ()) = parse_source_self_token(input)?;
+    let (rest, _) = tag(" is the only ").parse(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let quantity = make_quantity_comparison(
+        QuantityRef::ObjectCount {
+            filter: filter.clone(),
+        },
+        Comparator::EQ,
+        1,
+    );
+    // CR 113.6b: an ability that states which zone it functions in functions
+    // only from that zone. Wrapping the count gate in `And{SourceInZone, ...}`
+    // for an explicit non-battlefield zone lets the trigger's zone derivation
+    // (oracle_trigger.rs) hoist that zone into `trigger_zones` and the return
+    // effect's `ChangeZone.origin` — mirroring Jocasta, Automaton Avenger.
+    let condition = match filter.extract_in_zone() {
+        Some(zone) if zone != Zone::Battlefield => StaticCondition::And {
+            conditions: vec![StaticCondition::SourceInZone { zone }, quantity],
+        },
+        _ => quantity,
+    };
+    Ok((remainder, condition))
+}
+
 /// Graveyard-presence sibling of `parse_creature_has_keyword`: instead of a "has
 /// <keyword>" battlefield predicate, the subject's presence is checked in a
 /// graveyard. This is the gate half of a conditional continuous static (CR
@@ -9797,6 +9858,85 @@ mod tests {
                 zone: crate::types::zones::Zone::Graveyard
             }
         ));
+    }
+
+    /// CR 603.4 + CR 113.6b: Nether Spirit's intervening-if. The off-battlefield
+    /// zone must be hoisted into an explicit `SourceInZone` conjunct so
+    /// `trigger_condition_source_zones` can derive `trigger_zones == [Graveyard]`
+    /// and `ChangeZone.origin == Graveyard` (Jocasta, Automaton Avenger precedent).
+    #[test]
+    fn parse_condition_source_is_only_creature_card_in_graveyard() {
+        let (rest, c) =
+            parse_condition("if ~ is the only creature card in your graveyard").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::And { conditions } = c else {
+            panic!("expected And, got {c:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert!(
+            matches!(
+                conditions[0],
+                StaticCondition::SourceInZone {
+                    zone: crate::types::zones::Zone::Graveyard
+                }
+            ),
+            "first conjunct must be SourceInZone(Graveyard): {:?}",
+            conditions[0]
+        );
+        let StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } = &conditions[1]
+        else {
+            panic!("expected QuantityComparison, got {:?}", conditions[1]);
+        };
+        assert_eq!(*comparator, Comparator::EQ);
+        assert_eq!(*rhs, QuantityExpr::Fixed { value: 1 });
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = lhs
+        else {
+            panic!("expected ObjectCount ref, got {lhs:?}");
+        };
+        // The count is scoped to your graveyard by the folded zone suffix.
+        assert_eq!(
+            filter.extract_in_zone(),
+            Some(crate::types::zones::Zone::Graveyard)
+        );
+    }
+
+    /// A battlefield-scoped "the only <type> you control" omits the redundant
+    /// `SourceInZone` conjunct — `trigger_zones` already defaults to battlefield.
+    #[test]
+    fn parse_condition_source_is_only_creature_you_control_omits_source_in_zone() {
+        let (rest, c) = parse_condition("if ~ is the only creature you control").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } = c
+        else {
+            panic!("expected bare QuantityComparison (no And/SourceInZone), got {c:?}");
+        };
+        assert_eq!(comparator, Comparator::EQ);
+        assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = lhs
+        else {
+            panic!("expected ObjectCount ref, got {lhs:?}");
+        };
+        assert_eq!(filter.extract_in_zone(), None);
+    }
+
+    /// Rejection guard: without "only" the arm must not spuriously fire.
+    #[test]
+    fn parse_source_is_only_type_in_zone_rejects_without_only() {
+        assert!(
+            parse_source_is_only_type_in_zone("~ is a creature card in your graveyard").is_err()
+        );
     }
 
     #[test]
