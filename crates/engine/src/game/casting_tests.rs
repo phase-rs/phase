@@ -29084,6 +29084,13 @@ fn sneak_cast_succeeds_and_pays_sneak_cost() {
         Zone::Hand,
         "Returned creature should be bounced to hand"
     );
+    assert!(
+        !state.combat.as_ref().is_some_and(|combat| combat
+            .attackers
+            .iter()
+            .any(|entry| entry.object_id == attacker_id)),
+        "Returned attacker should be removed from combat"
+    );
     // Spell on stack.
     assert!(
         !state.stack.is_empty(),

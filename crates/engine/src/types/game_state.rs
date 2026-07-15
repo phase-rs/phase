@@ -2378,15 +2378,44 @@ fn default_origin_zone() -> Zone {
     Zone::Hand
 }
 
-/// CR 601.2h + CR 616.1: Resume paying a discard cost after a replacement choice.
+/// CR 601.2h + CR 616.1: Tail behavior for a sequential cost move that paused
+/// on a replacement choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingCostMoveCompletion {
+    FinishPending,
+    PublishExileTrackedSet,
+    FinalizeCast {
+        phyrexian_choices: Option<Vec<ShardChoice>>,
+        cascade_cast_transformed: bool,
+        resolution_success_waiting_for: Option<Box<WaitingFor>>,
+        pool_before: usize,
+        prepaid_actual_mana_spent: Option<u32>,
+    },
+}
+
+/// CR 601.2h + CR 616.1: Resumption kind for a cost payment that paused on a
+/// replacement choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingCostPaymentResume {
+    Discard,
+    Move {
+        destination: Zone,
+        completion: PendingCostMoveCompletion,
+    },
+}
+
+/// CR 601.2h + CR 616.1: Resume paying a sequential cost after a replacement
+/// choice. The object at `paused_at_index` completes during
+/// `handle_replacement_choice`; resumption starts with the following object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingDiscardForCostResume {
     pub player: PlayerId,
     pub pending: PendingCast,
     pub chosen: Vec<ObjectId>,
-    /// Index into `chosen` whose discard was paused; that discard completes
-    /// during `handle_replacement_choice` before this resume runs.
+    /// Index into `chosen` whose move was paused; that move completes during
+    /// `handle_replacement_choice` before this resume runs.
     pub paused_at_index: usize,
+    pub resume: PendingCostPaymentResume,
 }
 
 impl PendingCast {
@@ -8826,9 +8855,10 @@ pub struct GameState {
     #[serde(skip)]
     pub current_triggered_mana_override: Option<ProductionOverride>,
 
-    /// CR 601.2h + CR 616.1: Resume state when `handle_discard_for_cost` pauses mid-loop
-    /// for a replacement choice. The card at `paused_at_index` is completed by
-    /// `handle_replacement_choice`; resume continues at `paused_at_index + 1`.
+    /// CR 601.2h + CR 616.1: Resume state when a sequential cost move pauses
+    /// mid-loop for a replacement choice. The object at `paused_at_index` is
+    /// completed by `handle_replacement_choice`; resume continues at the next
+    /// object through the existing cost-payment seam.
     #[serde(skip)]
     pub pending_discard_for_cost: Option<PendingDiscardForCostResume>,
 

@@ -14,8 +14,9 @@ use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActivationResidual, AssistState, CastPaymentMode, CastingVariant, ConvokeMode, CostResume,
     CounterCostChoice, CounterRemoveChoice, DeferredSacrificeSelection, DistributionUnit,
-    GameState, PayCostKind, PendingCast, PendingDiscardForCostResume, SpellCostSource, StackEntry,
-    StackEntryKind, StackPaidSnapshot, WaitingFor,
+    GameState, PayCostKind, PendingCast, PendingCostMoveCompletion, PendingCostPaymentResume,
+    PendingDiscardForCostResume, SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -34,6 +35,7 @@ use super::mana_sources::{self, ManaSourceOption};
 use super::priority;
 use super::restrictions;
 use super::stack;
+use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
@@ -1376,6 +1378,7 @@ pub(crate) fn handle_discard_for_cost(
                     pending: pending.clone(),
                     chosen: chosen.to_vec(),
                     paused_at_index: index,
+                    resume: PendingCostPaymentResume::Discard,
                 });
                 super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                 // CR 603.2 + CR 603.3b: Earlier cards in a count>1 discard cost may
@@ -1383,7 +1386,7 @@ pub(crate) fn handle_discard_for_cost(
                 // replacement pause. Park them now — the post-action pipeline will
                 // not run over this action's `events` (engine.rs gates on Priority).
                 let waiting_for = state.waiting_for.clone();
-                park_discard_for_cost_triggers_if_paused(
+                park_cost_payment_triggers_if_paused(
                     state,
                     events,
                     cost_event_start,
@@ -1412,7 +1415,7 @@ pub(crate) fn handle_discard_for_cost(
     // observer (Sefris of the Hidden Ways) would under-observe a discard paid
     // before the remaining mana leg. Mirror the established B2 parking pattern
     // used by `handle_sacrifice_for_cost`.
-    park_discard_for_cost_triggers_if_paused(
+    park_cost_payment_triggers_if_paused(
         state,
         events,
         cost_event_start,
@@ -1429,7 +1432,7 @@ pub(crate) fn handle_discard_for_cost(
 /// `run_post_action_pipeline` does not drop them on the next action boundary
 /// (engine.rs gates the pipeline on `WaitingFor::Priority`). Mirrors
 /// `handle_sacrifice_for_cost`.
-fn park_discard_for_cost_triggers_if_paused(
+fn park_cost_payment_triggers_if_paused(
     state: &mut GameState,
     events: &[GameEvent],
     cost_event_start: usize,
@@ -1446,18 +1449,164 @@ fn park_discard_for_cost_triggers_if_paused(
     }
 }
 
-/// CR 601.2h + CR 616.1: After a replacement choice during discard-for-cost payment, finish
-/// discarding any remaining cards and continue the cast/activation pipeline.
+#[allow(clippy::too_many_arguments)]
+fn finish_cost_object_moves(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    chosen: Vec<ObjectId>,
+    start_at_index: usize,
+    destination: Zone,
+    completion: PendingCostMoveCompletion,
+    cost_event_start: usize,
+    park_events_after_completion: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    for (index, &object_id) in chosen.iter().enumerate().skip(start_at_index) {
+        match zone_pipeline::move_object(
+            state,
+            ZoneMoveRequest::cost(object_id, destination, pending.object_id),
+            events,
+        ) {
+            ZoneMoveResult::Done => {}
+            ZoneMoveResult::NeedsChoice(choice_player) => {
+                state.pending_discard_for_cost = Some(PendingDiscardForCostResume {
+                    player,
+                    pending,
+                    chosen,
+                    paused_at_index: index,
+                    resume: PendingCostPaymentResume::Move {
+                        destination,
+                        completion,
+                    },
+                });
+                super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
+                let waiting_for = state.waiting_for.clone();
+                park_cost_payment_triggers_if_paused(
+                    state,
+                    events,
+                    cost_event_start,
+                    events.len(),
+                    &waiting_for,
+                );
+                return Ok(waiting_for);
+            }
+            ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                unreachable!("a cost move to Hand or Exile cannot require an Aura attachment")
+            }
+        }
+    }
+
+    let waiting_for = match completion {
+        PendingCostMoveCompletion::FinishPending => {
+            finish_pending_cost_or_cast(state, player, pending, events)?
+        }
+        PendingCostMoveCompletion::PublishExileTrackedSet => {
+            // CR 614: a replacement may deliver a card elsewhere; the set must reflect
+            // what actually arrived in exile.
+            let delivered: Vec<ObjectId> = chosen
+                .into_iter()
+                .filter(|object_id| {
+                    state
+                        .objects
+                        .get(object_id)
+                        .is_some_and(|object| object.zone == Zone::Exile)
+                })
+                .collect();
+            let set_id = super::effects::publish_fresh_tracked_set(state, delivered);
+            let mut pending = pending;
+            pending.ability.bind_tracked_set_sentinel_recursive(set_id);
+            finish_pending_cost_or_cast(state, player, pending, events)?
+        }
+        PendingCostMoveCompletion::FinalizeCast {
+            phyrexian_choices,
+            cascade_cast_transformed,
+            resolution_success_waiting_for,
+            pool_before,
+            prepaid_actual_mana_spent,
+        } => {
+            let returned_creature = chosen
+                .first()
+                .copied()
+                .expect("finalized Sneak or Web-slinging cost has one returned creature");
+            if let Some(combat) = state.combat.as_mut() {
+                combat
+                    .attackers
+                    .retain(|attacker| attacker.object_id != returned_creature);
+                combat.blocker_assignments.remove(&returned_creature);
+            }
+            let pool_after = state
+                .players
+                .iter()
+                .find(|candidate| candidate.id == player)
+                .map(|candidate| candidate.mana_pool.produced_mana_total())
+                .unwrap_or(0);
+            let actual_mana_spent = prepaid_actual_mana_spent
+                .unwrap_or_else(|| pool_before.saturating_sub(pool_after) as u32);
+            finalize_cast_with_phyrexian_choices_inner(
+                state,
+                player,
+                pending.object_id,
+                pending.card_id,
+                pending.ability,
+                &pending.cost,
+                pending.casting_variant,
+                pending.cast_timing_permission,
+                pending.origin_zone,
+                phyrexian_choices.as_deref(),
+                Some(FinalizePrePaymentChecks {
+                    early_waiting_for: None,
+                    cascade_cast_transformed,
+                    resolution_success_waiting_for: resolution_success_waiting_for.map(|wf| *wf),
+                }),
+                Some(actual_mana_spent),
+                ReturnedCreatureCostMove::Delivered,
+                events,
+            )?
+        }
+    };
+    if park_events_after_completion {
+        park_cost_payment_triggers_if_paused(
+            state,
+            events,
+            cost_event_start,
+            events.len(),
+            &waiting_for,
+        );
+    }
+    Ok(waiting_for)
+}
+
+/// CR 601.2h + CR 616.1: After a replacement choice during sequential cost payment, finish
+/// the remaining cost moves and continue the cast/activation pipeline.
 ///
 /// `replacement_action_cost_event_start`, when set, is the `events` index at the
-/// start of the `ChooseReplacement` action that delivered the paused discard;
-/// it must include the replacement-resolved discard `ZoneChanged` record(s).
+/// start of the `ChooseReplacement` action that delivered the paused cost move;
+/// it must include the replacement-resolved `ZoneChanged` record(s).
 pub(crate) fn resume_interrupted_cost_payment(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     replacement_action_cost_event_start: Option<usize>,
 ) -> Result<WaitingFor, EngineError> {
     if let Some(resume) = state.pending_discard_for_cost.take() {
+        if let PendingCostPaymentResume::Move {
+            destination,
+            completion,
+        } = resume.resume
+        {
+            return finish_cost_object_moves(
+                state,
+                resume.player,
+                resume.pending,
+                resume.chosen,
+                resume.paused_at_index + 1,
+                destination,
+                completion,
+                replacement_action_cost_event_start.unwrap_or(events.len()),
+                true,
+                events,
+            );
+        }
         let player = resume.player;
         let pending = resume.pending;
         let cost_event_start = replacement_action_cost_event_start.unwrap_or(events.len());
@@ -1475,6 +1624,7 @@ pub(crate) fn resume_interrupted_cost_payment(
                         pending: pending.clone(),
                         chosen: resume.chosen.clone(),
                         paused_at_index,
+                        resume: PendingCostPaymentResume::Discard,
                     });
                     super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                     // CR 603.2 + CR 603.3b: Same mid-loop replacement pause as
@@ -1482,7 +1632,7 @@ pub(crate) fn resume_interrupted_cost_payment(
                     // cost events (including replacement-delivered discards in
                     // this action) before the non-Priority action boundary.
                     let waiting_for = state.waiting_for.clone();
-                    park_discard_for_cost_triggers_if_paused(
+                    park_cost_payment_triggers_if_paused(
                         state,
                         events,
                         cost_event_start,
@@ -1495,7 +1645,7 @@ pub(crate) fn resume_interrupted_cost_payment(
         }
         let cost_event_end = events.len();
         let waiting_for = finish_pending_cost_or_cast(state, player, pending, events)?;
-        park_discard_for_cost_triggers_if_paused(
+        park_cost_payment_triggers_if_paused(
             state,
             events,
             cost_event_start,
@@ -2181,6 +2331,7 @@ pub(crate) fn handle_return_to_hand_for_cost(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let cost_event_start = events.len();
     if chosen.len() != count {
         return Err(EngineError::InvalidAction(format!(
             "Must return exactly {} permanent(s), got {}",
@@ -2215,11 +2366,18 @@ pub(crate) fn handle_return_to_hand_for_cost(
     // Karoo lands, Cavern Harpy): `count` is almost always 1, so the stamp's
     // `len() < 2` guard would no-op. If a >=2-permanent return-to-hand cost ever
     // ships, mirror the A1 stamp from `handle_sacrifice_for_cost` here.
-    for &id in chosen {
-        super::zones::move_to_zone(state, id, Zone::Hand, events);
-    }
-
-    finish_pending_cost_or_cast(state, player, pending, events)
+    finish_cost_object_moves(
+        state,
+        player,
+        pending,
+        chosen.to_vec(),
+        0,
+        Zone::Hand,
+        PendingCostMoveCompletion::FinishPending,
+        cost_event_start,
+        false,
+        events,
+    )
 }
 
 /// CR 118.3 + CR 122.1 + CR 601.2b: Complete remove-counter-as-cost after
@@ -2667,6 +2825,7 @@ pub(crate) fn handle_behold_for_cost(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let cost_event_start = events.len();
     if chosen.len() != count {
         return Err(EngineError::InvalidAction(format!(
             "Must behold exactly {} object(s), got {}",
@@ -2713,9 +2872,22 @@ pub(crate) fn handle_behold_for_cost(
     }
 
     if action == BeholdCostAction::ExileChosen {
-        for &chosen_id in chosen {
-            super::zones::move_to_zone(state, chosen_id, Zone::Exile, events);
+        pending.ability.context.additional_cost_paid = true;
+        if let Some(snapshot) = snapshot {
+            pending.ability.set_cost_paid_object_recursive(snapshot);
         }
+        return finish_cost_object_moves(
+            state,
+            player,
+            pending,
+            chosen.to_vec(),
+            0,
+            Zone::Exile,
+            PendingCostMoveCompletion::FinishPending,
+            cost_event_start,
+            false,
+            events,
+        );
     } else if !revealed_ids.is_empty() {
         events.push(GameEvent::CardsRevealed {
             player,
@@ -2848,6 +3020,7 @@ fn finish_exile_selection_for_cost(
     illegal_message: &str,
     revalidate: impl Fn(&GameState, PlayerId, ObjectId, &PendingCast) -> Result<(), EngineError>,
 ) -> Result<WaitingFor, EngineError> {
+    let cost_event_start = events.len();
     let (min_count, max_count) = bounds;
     if chosen.len() < min_count || chosen.len() > max_count {
         let expected = if min_count == max_count {
@@ -2898,11 +3071,18 @@ fn finish_exile_selection_for_cost(
         }
     }
 
-    for &id in chosen {
-        super::zones::move_to_zone(state, id, Zone::Exile, events);
-    }
-
-    finish_pending_cost_or_cast(state, player, pending, events)
+    finish_cost_object_moves(
+        state,
+        player,
+        pending,
+        chosen.to_vec(),
+        0,
+        Zone::Exile,
+        PendingCostMoveCompletion::FinishPending,
+        cost_event_start,
+        false,
+        events,
+    )
 }
 
 /// CR 117.1 + CR 601.2b + CR 602.2b + CR 608.2c: Resolve an `ExileWithAggregate`
@@ -2939,6 +3119,7 @@ pub(crate) fn handle_exile_aggregate_for_cost(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let cost_event_start = events.len();
     // CR 601.2b: the chosen cards must be distinct.
     if (0..chosen.len()).any(|i| chosen[i + 1..].contains(&chosen[i])) {
         return Err(EngineError::InvalidAction(
@@ -2976,19 +3157,18 @@ pub(crate) fn handle_exile_aggregate_for_cost(
         )));
     }
 
-    for &id in chosen {
-        super::zones::move_to_zone(state, id, Zone::Exile, events);
-    }
-
-    // CR 608.2c: publish the exiled cards as a fresh tracked set and bind the
-    // resolving ability's `TrackedSetId(0)` sentinel to that concrete id before
-    // the ability reaches the stack (see the doc comment for the robustness
-    // rationale across the activation→resolution gap).
-    let set_id = super::effects::publish_fresh_tracked_set(state, chosen.to_vec());
-    let mut pending = pending;
-    pending.ability.bind_tracked_set_sentinel_recursive(set_id);
-
-    finish_pending_cost_or_cast(state, player, pending, events)
+    finish_cost_object_moves(
+        state,
+        player,
+        pending,
+        chosen.to_vec(),
+        0,
+        Zone::Exile,
+        PendingCostMoveCompletion::PublishExileTrackedSet,
+        cost_event_start,
+        false,
+        events,
+    )
 }
 
 /// CR 702.167a/b + CR 601.2b: Resolve a craft materials cost. The player has
@@ -6578,6 +6758,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         phyrexian_choices,
         None,
         None,
+        ReturnedCreatureCostMove::Pending,
         events,
     )
     .map_err(|err| {
@@ -6594,6 +6775,15 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     })
 }
 
+/// Whether the Sneak/Web-slinging returned creature's cost move (CR 702.190a /
+/// CR 702.188a) still needs to be delivered through the zone pipeline, or has
+/// already been delivered by `PendingCostMoveCompletion::FinalizeCast` re-entry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReturnedCreatureCostMove {
+    Pending,
+    Delivered,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finalize_cast_with_phyrexian_choices_inner(
     state: &mut GameState,
@@ -6608,8 +6798,10 @@ fn finalize_cast_with_phyrexian_choices_inner(
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     pre_payment_checks: Option<FinalizePrePaymentChecks>,
     prepaid_actual_mana_spent: Option<u32>,
+    returned_creature_move: ReturnedCreatureCostMove,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let cost_event_start = events.len();
     // CR 702.150a: Record how many of this spell's Phyrexian mana symbols are
     // being paid with life. A compleated planeswalker entering from this spell
     // exposes this as an intrinsic AddCounter replacement so it can order with
@@ -6695,14 +6887,31 @@ fn finalize_cast_with_phyrexian_choices_inner(
         | CastingVariant::WebSlinging { returned_creature } => Some(returned_creature),
         _ => None,
     };
-    if let Some(returned_creature) = returned_creature {
-        super::zones::move_to_zone(state, returned_creature, Zone::Hand, events);
-        if let Some(combat) = state.combat.as_mut() {
-            combat
-                .attackers
-                .retain(|a| a.object_id != returned_creature);
-            combat.blocker_assignments.remove(&returned_creature);
-        }
+    if let Some(returned_creature) =
+        returned_creature.filter(|_| returned_creature_move == ReturnedCreatureCostMove::Pending)
+    {
+        let mut resume_pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        resume_pending.casting_variant = casting_variant;
+        resume_pending.cast_timing_permission = cast_timing_permission;
+        resume_pending.origin_zone = origin_zone;
+        return finish_cost_object_moves(
+            state,
+            player,
+            resume_pending,
+            vec![returned_creature],
+            0,
+            Zone::Hand,
+            PendingCostMoveCompletion::FinalizeCast {
+                phyrexian_choices: phyrexian_choices.map(|choices| choices.to_vec()),
+                cascade_cast_transformed,
+                resolution_success_waiting_for: resolution_success_waiting_for.map(Box::new),
+                pool_before,
+                prepaid_actual_mana_spent,
+            },
+            cost_event_start,
+            false,
+            events,
+        );
     }
 
     // CR 700.14: Compute actual mana deducted from pool (not declared cost).
@@ -9451,6 +9660,7 @@ pub fn finalize_mana_payment(
                     None,
                     pre_payment_checks.clone(),
                     prepaid_actual_mana_spent,
+                    ReturnedCreatureCostMove::Pending,
                     events,
                 )?;
                 return Ok(drain_deferred_triggers_after_stack_object_announcement(
@@ -9490,6 +9700,7 @@ pub fn finalize_mana_payment(
             None,
             pre_payment_checks,
             prepaid_actual_mana_spent,
+            ReturnedCreatureCostMove::Pending,
             events,
         )?;
         let waiting_for =
@@ -9741,6 +9952,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                     Some(phyrexian_choices),
                     pre_payment_checks.clone(),
                     prepaid_actual_mana_spent,
+                    ReturnedCreatureCostMove::Pending,
                     events,
                 )?;
                 let waiting_for = drain_deferred_triggers_after_stack_object_announcement(
@@ -9787,6 +9999,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             Some(phyrexian_choices),
             pre_payment_checks,
             prepaid_actual_mana_spent,
+            ReturnedCreatureCostMove::Pending,
             events,
         )?;
         let waiting_for =
