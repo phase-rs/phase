@@ -1769,9 +1769,16 @@ pub(super) fn apply_post_replacement_effect(
         if valid_targets.is_empty() {
             return None;
         }
-        // CR 607.2a: For ExiledCardByIndex (The Mimeoplasm), the target is already
-        // determined by the index - no choice prompt needed. Directly resolve the copy.
-        if matches!(target, TargetFilter::ExiledCardByIndex { .. }) {
+        // CR 614.12a + CR 707.2: Some copy sources are already determined before
+        // the permanent enters (indexed exiled cards, or the `SpecificObject`
+        // frozen by a Mystic Reflection-style ChangeZone shield). No new choice
+        // prompt is made for those shapes; resolve the copy directly. Do not
+        // generalize every `SpecificObject` ETB copy replacement here: existing
+        // Moved enter-as-copy paths still use `CopyTargetChoice` to defer the
+        // frontend entry event until the final copy snapshot is chosen.
+        let specific_change_zone_copy = matches!(target, TargetFilter::SpecificObject { .. })
+            && matches!(event, Some(ReplacementEvent::ChangeZone));
+        if matches!(target, TargetFilter::ExiledCardByIndex { .. }) || specific_change_zone_copy {
             let targets = valid_targets
                 .into_iter()
                 .map(TargetRef::Object)

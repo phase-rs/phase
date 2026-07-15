@@ -25,8 +25,8 @@ use crate::types::identifiers::ObjectId;
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    AppliedReplacementKey, CounterMoveStage, CounterPlacement, EtbTapState, ProposedEvent,
-    ReplacementId,
+    AppliedReplacementKey, CopyTokenSpec, CounterMoveStage, CounterPlacement, EtbTapState,
+    ProposedEvent, ReplacementId,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -3120,6 +3120,45 @@ fn create_token_applier(
     } else {
         ApplyResult::Modified(event)
     }
+}
+
+fn create_token_copy_spec_for_replacement(
+    state: &GameState,
+    repl_def: &ReplacementDefinition,
+    replacement_source: ObjectId,
+    controller: PlayerId,
+) -> Option<CopyTokenSpec> {
+    let execute = repl_def.execute.as_deref()?;
+    let real_work = EventModifiers::first_non_modifier_ability(Some(execute)).unwrap_or(execute);
+    let Effect::BecomeCopy {
+        target: TargetFilter::SpecificObject { id: copy_source },
+        duration,
+        additional_modifications,
+        ..
+    } = real_work.effect.as_ref()
+    else {
+        return None;
+    };
+    let source = state.objects.get(copy_source)?;
+    let values = crate::game::layers::compute_current_copiable_values(state, *copy_source)?;
+    Some(CopyTokenSpec {
+        values: Box::new(values),
+        display_source: source.display_source,
+        printed_ref: source.printed_ref.clone(),
+        token_image_ref: source.token_image_ref.clone(),
+        extra_keywords: Vec::new(),
+        additional_modifications: additional_modifications.clone(),
+        tapped: false,
+        enters_attacking: false,
+        sacrifice_at: duration.clone(),
+        source_id: replacement_source,
+        controller,
+    })
+}
+
+fn ability_becomes_copy(def: &AbilityDefinition) -> bool {
+    let real_work = EventModifiers::first_non_modifier_ability(Some(def)).unwrap_or(def);
+    matches!(&*real_work.effect, Effect::BecomeCopy { .. })
 }
 
 // --- 10. ProduceMana ---
@@ -6276,176 +6315,200 @@ fn apply_single_replacement(
     // the same resolution step, right after the ZoneChange completes. Without this,
     // the chooser would never be prompted. Optional replacements set
     // `post_replacement_continuation` in `continue_replacement` when the player accepts.
-    let (event_key, modifiers, mandatory_post_effect, consume_on_apply) = match repl_def_ref {
-        Some(repl_def) => {
-            let ability = match branch {
-                ReplacementBranch::Execute => repl_def.execute.as_deref(),
-                ReplacementBranch::Decline => replacement_mode_decline(&repl_def.mode),
-            };
-            // CR 510.2 + CR 615.13: A `Prevention::All` shield created by a
-            // resolving spell (e.g. Inkshield) captures a `runtime_execute`
-            // rider at resolution time and fires it once post-batch against the
-            // aggregate prevented amount. Suppress the per-event stash here for
-            // such shields so `fire_combat_prevention_riders` owns the single
-            // continuation.
-            //
-            // Static permanent-ability shields (e.g. Weeping Angel's "prevent
-            // that damage and that creature's owner shuffles it into their
-            // library") only carry an `execute` AST template — no
-            // `runtime_execute`. These must fire per-event inline so the event
-            // target (`PostReplacementDamageTarget`) is correctly populated for
-            // each victim creature. Do NOT suppress their stash.
-            let batched_combat_all_shield = state.combat_prevention_tally.is_some()
-                && repl_def.runtime_execute.is_some()
-                && matches!(
-                    repl_def.shield_kind,
-                    ShieldKind::Prevention {
-                        amount: PreventionAmount::All
-                    }
+    let (event_key, modifiers, mandatory_post_effect, consume_on_apply, create_token_copy) =
+        match repl_def_ref {
+            Some(repl_def) => {
+                let replacement_controller = if rid.source == ObjectId(0) {
+                    repl_def.source_controller.unwrap_or(state.active_player)
+                } else {
+                    state
+                        .objects
+                        .get(&rid.source)
+                        .map(|obj| obj.controller)
+                        .unwrap_or(state.active_player)
+                };
+                let create_token_copy = create_token_copy_spec_for_replacement(
+                    state,
+                    repl_def,
+                    rid.source,
+                    replacement_controller,
                 );
-            let post_effect = match (branch, &repl_def.mode) {
-                (ReplacementBranch::Execute, ReplacementMode::Mandatory)
-                    if !batched_combat_all_shield =>
-                {
-                    // CR 615.5: Damage prevention follow-ups (e.g. Phyrexian
-                    // Hydra's "Put a -1/-1 counter on ~ for each 1 damage
-                    // prevented this way") must always stash as a post-effect
-                    // — the `has_only_event_modifier` heuristic that classifies
-                    // self-targeted PutCounter as an ETB modifier does not
-                    // apply to Damage events, where there is no `etb_counters`
-                    // slot to absorb the counters into.
-                    let is_damage = matches!(proposed, ProposedEvent::Damage { .. });
-                    if let Some(runtime) = repl_def.runtime_execute.clone() {
-                        Some(PostReplacementContinuation::Resolved(runtime))
-                    } else {
-                        repl_def.execute.as_deref().and_then(|def| {
-                            // CR 608.2c + CR 614.11: Draw-count replacements with
-                            // chained riders (Blood Scrivener: draw two, then lose
-                            // 1 life) modify the draw via `draw_replacement_count`
-                            // and stash only the rider chain for post-draw drain.
-                            if matches!(*def.effect, Effect::Draw { .. })
-                                && def.sub_ability.is_some()
-                                && matches!(proposed, ProposedEvent::Draw { .. })
-                                && draw_replacement_count(state, rid, &proposed).is_some()
-                            {
-                                return def
-                                    .sub_ability
-                                    .clone()
-                                    .map(PostReplacementContinuation::Template);
-                            }
-                            // CR 615.5: for Damage event replacements, `ChangeZone`
-                            // (and other effects classified as "event modifiers") in
-                            // the follow-up chain are SIDE EFFECTS of the prevention
-                            // — they do not modify the damage event itself. Stash the
-                            // full `def` chain so every link (ChangeZone → Shuffle,
-                            // etc.) fires as a post-replacement continuation.
-                            //
-                            // Without this guard, `first_non_modifier_ability` skips
-                            // the ChangeZone prefix (treating it as a Damage-event
-                            // modifier, which has no meaning) and stashes only the
-                            // Shuffle tail — leaving the creature on the battlefield.
-                            //
-                            // CR 614.1c: for non-Damage events, walk past modifier-
-                            // only effects (Tap/Untap/PutCounter/ChangeZone) to find
-                            // the first non-modifier work. Covers the existing
-                            // ChangeZone → sub_ability pattern (Nexus of Fate shuffle-
-                            // back) and composed replacements like Tap → BecomeCopy
-                            // (Vesuva "enter tapped as a copy").
-                            if is_damage {
-                                Some(PostReplacementContinuation::Template(Box::new(def.clone())))
-                            } else {
-                                match EventModifiers::first_non_modifier_ability(Some(def)) {
-                                    Some(real_work) => Some(PostReplacementContinuation::Template(
-                                        Box::new(real_work.clone()),
-                                    )),
-                                    None if EventModifiers::has_only_event_modifier(Some(def)) => {
-                                        None
-                                    }
-                                    _ => Some(PostReplacementContinuation::Template(Box::new(
-                                        def.clone(),
-                                    ))),
+                let ability = match branch {
+                    ReplacementBranch::Execute => repl_def.execute.as_deref(),
+                    ReplacementBranch::Decline => replacement_mode_decline(&repl_def.mode),
+                };
+                // CR 510.2 + CR 615.13: A `Prevention::All` shield created by a
+                // resolving spell (e.g. Inkshield) captures a `runtime_execute`
+                // rider at resolution time and fires it once post-batch against the
+                // aggregate prevented amount. Suppress the per-event stash here for
+                // such shields so `fire_combat_prevention_riders` owns the single
+                // continuation.
+                //
+                // Static permanent-ability shields (e.g. Weeping Angel's "prevent
+                // that damage and that creature's owner shuffles it into their
+                // library") only carry an `execute` AST template — no
+                // `runtime_execute`. These must fire per-event inline so the event
+                // target (`PostReplacementDamageTarget`) is correctly populated for
+                // each victim creature. Do NOT suppress their stash.
+                let batched_combat_all_shield = state.combat_prevention_tally.is_some()
+                    && repl_def.runtime_execute.is_some()
+                    && matches!(
+                        repl_def.shield_kind,
+                        ShieldKind::Prevention {
+                            amount: PreventionAmount::All
+                        }
+                    );
+                let post_effect = match (branch, &repl_def.mode) {
+                    (ReplacementBranch::Execute, ReplacementMode::Mandatory)
+                        if !batched_combat_all_shield =>
+                    {
+                        // CR 615.5: Damage prevention follow-ups (e.g. Phyrexian
+                        // Hydra's "Put a -1/-1 counter on ~ for each 1 damage
+                        // prevented this way") must always stash as a post-effect
+                        // — the `has_only_event_modifier` heuristic that classifies
+                        // self-targeted PutCounter as an ETB modifier does not
+                        // apply to Damage events, where there is no `etb_counters`
+                        // slot to absorb the counters into.
+                        let is_damage = matches!(proposed, ProposedEvent::Damage { .. });
+                        if let Some(runtime) = repl_def.runtime_execute.clone() {
+                            Some(PostReplacementContinuation::Resolved(runtime))
+                        } else {
+                            repl_def.execute.as_deref().and_then(|def| {
+                                // CR 608.2c + CR 614.11: Draw-count replacements with
+                                // chained riders (Blood Scrivener: draw two, then lose
+                                // 1 life) modify the draw via `draw_replacement_count`
+                                // and stash only the rider chain for post-draw drain.
+                                if matches!(*def.effect, Effect::Draw { .. })
+                                    && def.sub_ability.is_some()
+                                    && matches!(proposed, ProposedEvent::Draw { .. })
+                                    && draw_replacement_count(state, rid, &proposed).is_some()
+                                {
+                                    return def
+                                        .sub_ability
+                                        .clone()
+                                        .map(PostReplacementContinuation::Template);
                                 }
-                            }
-                        })
+                                // CR 615.5: for Damage event replacements, `ChangeZone`
+                                // (and other effects classified as "event modifiers") in
+                                // the follow-up chain are SIDE EFFECTS of the prevention
+                                // — they do not modify the damage event itself. Stash the
+                                // full `def` chain so every link (ChangeZone → Shuffle,
+                                // etc.) fires as a post-replacement continuation.
+                                //
+                                // Without this guard, `first_non_modifier_ability` skips
+                                // the ChangeZone prefix (treating it as a Damage-event
+                                // modifier, which has no meaning) and stashes only the
+                                // Shuffle tail — leaving the creature on the battlefield.
+                                //
+                                // CR 614.1c: for non-Damage events, walk past modifier-
+                                // only effects (Tap/Untap/PutCounter/ChangeZone) to find
+                                // the first non-modifier work. Covers the existing
+                                // ChangeZone → sub_ability pattern (Nexus of Fate shuffle-
+                                // back) and composed replacements like Tap → BecomeCopy
+                                // (Vesuva "enter tapped as a copy").
+                                if is_damage {
+                                    Some(PostReplacementContinuation::Template(Box::new(
+                                        def.clone(),
+                                    )))
+                                } else {
+                                    match EventModifiers::first_non_modifier_ability(Some(def)) {
+                                        Some(real_work) => {
+                                            Some(PostReplacementContinuation::Template(Box::new(
+                                                real_work.clone(),
+                                            )))
+                                        }
+                                        None if EventModifiers::has_only_event_modifier(Some(
+                                            def,
+                                        )) =>
+                                        {
+                                            None
+                                        }
+                                        _ => Some(PostReplacementContinuation::Template(Box::new(
+                                            def.clone(),
+                                        ))),
+                                    }
+                                }
+                            })
+                        }
                     }
-                }
-                _ => None,
-            };
-            // CR 614.6 + CR 614.11: When the branch being applied substitutes the
-            // draw with a non-Draw chain (Jace's WinTheGame, Abundance's
-            // reveal-until), zero the count here so `draw_applier` and
-            // `apply_draw_after_replacement` see a no-op draw — the original draw
-            // never happens (CR 614.6). Branch-aware via the `ability` binding
-            // above, so an optional replacement's decline never pre-zeros against
-            // the accept-side AST. The `draw_replacement_count` guard preserves
-            // the count-modifier path (Alhammarret's Archive: count -> 2*count).
-            if matches!(proposed, ProposedEvent::Draw { .. }) {
-                // CR 614.6 + CR 614.11: A one-shot draw replacement
-                // (Words of Worship/Wilding) carries its substitute in
-                // `runtime_execute` (`execute` is `None`), so the `ability`
-                // binding above is `None`. Inspect that slot too — a non-Draw,
-                // non-event-modifier substitute (GainLife / Token) must still
-                // pre-zero the draw, or the card is drawn AND the substitute
-                // runs (double). Damage/Jace/Abundance use `execute`, so
-                // `ability` is `Some` and this `runtime` branch never engages.
-                let is_non_draw_substitute = match ability {
-                    Some(def) => {
-                        !matches!(*def.effect, Effect::Draw { .. })
-                            && !EventModifiers::has_only_event_modifier(Some(def))
-                            && draw_replacement_count(state, rid, &proposed).is_none()
-                    }
-                    None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
-                        !matches!(runtime.effect, Effect::Draw { .. })
-                            && !EventModifiers::is_event_modifier_effect(&runtime.effect)
-                    }),
+                    _ => None,
                 };
-                if is_non_draw_substitute {
-                    if let ProposedEvent::Draw { count, .. } = &mut proposed {
-                        *count = 0;
+                // CR 614.6 + CR 614.11: When the branch being applied substitutes the
+                // draw with a non-Draw chain (Jace's WinTheGame, Abundance's
+                // reveal-until), zero the count here so `draw_applier` and
+                // `apply_draw_after_replacement` see a no-op draw — the original draw
+                // never happens (CR 614.6). Branch-aware via the `ability` binding
+                // above, so an optional replacement's decline never pre-zeros against
+                // the accept-side AST. The `draw_replacement_count` guard preserves
+                // the count-modifier path (Alhammarret's Archive: count -> 2*count).
+                if matches!(proposed, ProposedEvent::Draw { .. }) {
+                    // CR 614.6 + CR 614.11: A one-shot draw replacement
+                    // (Words of Worship/Wilding) carries its substitute in
+                    // `runtime_execute` (`execute` is `None`), so the `ability`
+                    // binding above is `None`. Inspect that slot too — a non-Draw,
+                    // non-event-modifier substitute (GainLife / Token) must still
+                    // pre-zero the draw, or the card is drawn AND the substitute
+                    // runs (double). Damage/Jace/Abundance use `execute`, so
+                    // `ability` is `Some` and this `runtime` branch never engages.
+                    let is_non_draw_substitute = match ability {
+                        Some(def) => {
+                            !matches!(*def.effect, Effect::Draw { .. })
+                                && !EventModifiers::has_only_event_modifier(Some(def))
+                                && draw_replacement_count(state, rid, &proposed).is_none()
+                        }
+                        None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
+                            !matches!(runtime.effect, Effect::Draw { .. })
+                                && !EventModifiers::is_event_modifier_effect(&runtime.effect)
+                        }),
+                    };
+                    if is_non_draw_substitute {
+                        if let ProposedEvent::Draw { count, .. } = &mut proposed {
+                            *count = 0;
+                        }
                     }
                 }
-            }
-            // CR 614.6 + CR 111.1: A CreateToken replacement whose execute is
-            // a non-Token substitute chain (Jinnie Fay's ChooseOneOf branch
-            // choice) fully replaces the original token event. Zero the
-            // surviving count here so the delivery path creates no original
-            // tokens while the substitute chain runs via the continuation.
-            if matches!(proposed, ProposedEvent::CreateToken { .. }) {
-                let is_non_token_substitute = match ability {
-                    Some(def) => {
-                        !matches!(*def.effect, Effect::Token { .. })
-                            && !EventModifiers::has_only_event_modifier(Some(def))
-                    }
-                    None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
-                        !matches!(runtime.effect, Effect::Token { .. })
-                            && !EventModifiers::is_event_modifier_effect(&runtime.effect)
-                    }),
-                };
-                if is_non_token_substitute {
-                    if let ProposedEvent::CreateToken { count, .. } = &mut proposed {
-                        *count = 0;
+                // CR 614.6 + CR 111.1: A CreateToken replacement whose execute is
+                // a non-Token substitute chain (Jinnie Fay's ChooseOneOf branch
+                // choice) fully replaces the original token event. Zero the
+                // surviving count here so the delivery path creates no original
+                // tokens while the substitute chain runs via the continuation.
+                if matches!(proposed, ProposedEvent::CreateToken { .. }) {
+                    let is_non_token_substitute = match ability {
+                        Some(def) => {
+                            !matches!(*def.effect, Effect::Token { .. })
+                                && !EventModifiers::has_only_event_modifier(Some(def))
+                                && !ability_becomes_copy(def)
+                        }
+                        None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
+                            !matches!(runtime.effect, Effect::Token { .. })
+                                && !EventModifiers::is_event_modifier_effect(&runtime.effect)
+                        }),
+                    };
+                    if is_non_token_substitute {
+                        if let ProposedEvent::CreateToken { count, .. } = &mut proposed {
+                            *count = 0;
+                        }
                     }
                 }
-            }
-            // CR 614.6: When the applier itself substitutes the event with the
-            // execute's effect (Draw count-modifier via `draw_replacement_count`,
-            // Scry → Draw / Scry → Scry via `scry_applier`), the work is already
-            // encoded in the substituted event — do NOT also stash the same
-            // ability as a post-replacement continuation, or it will execute
-            // twice (once via the applier-modified event, once via the drain).
-            // Only the "residual work beyond the event substitution" case (a
-            // sub_ability chain or a non-event-substituting effect like Choose /
-            // WinTheGame) belongs in the continuation slot.
-            let post_effect = post_effect.filter(|_| {
-                let Some(def) = ability else {
-                    return true;
-                };
-                if def.sub_ability.is_some() {
-                    return true;
-                }
-                !matches!(
-                    (&proposed, &*def.effect),
-                    (ProposedEvent::Draw { .. }, Effect::Draw { .. })
+                // CR 614.6: When the applier itself substitutes the event with the
+                // execute's effect (Draw count-modifier via `draw_replacement_count`,
+                // Scry → Draw / Scry → Scry via `scry_applier`), the work is already
+                // encoded in the substituted event — do NOT also stash the same
+                // ability as a post-replacement continuation, or it will execute
+                // twice (once via the applier-modified event, once via the drain).
+                // Only the "residual work beyond the event substitution" case (a
+                // sub_ability chain or a non-event-substituting effect like Choose /
+                // WinTheGame) belongs in the continuation slot.
+                let post_effect = post_effect.filter(|_| {
+                    let Some(def) = ability else {
+                        return true;
+                    };
+                    if def.sub_ability.is_some() {
+                        return true;
+                    }
+                    !matches!(
+                        (&proposed, &*def.effect),
+                        (ProposedEvent::Draw { .. }, Effect::Draw { .. })
                         | (ProposedEvent::Scry { .. }, Effect::Draw { .. })
                         | (ProposedEvent::Scry { .. }, Effect::Scry { .. })
                         | (ProposedEvent::Proliferate { .. }, Effect::Proliferate)
@@ -6457,47 +6520,53 @@ fn apply_single_replacement(
                         // would re-propose token creation and re-enter the
                         // replacement pipeline (issue #4249 hang).
                         | (ProposedEvent::CreateToken { .. }, Effect::Token { .. })
+                    )
+                });
+                // CR 701.50a + CR 614.5: The connive applier runs the entire
+                // replacement `execute` chain ("instead you draw a card, then that
+                // creature connives") itself and returns `Prevented`. Stashing the
+                // same chain as a post-replacement continuation would re-run it when
+                // the continuation drains (e.g. after the connive's `ConniveDiscard`
+                // choice resolves), executing the modified action twice. The applier
+                // is the single authority for this event, so suppress the generic
+                // stash. On its parking path the applier stashes its deferred connive
+                // into the DEDICATED `state.pending_connive_reentry` slot (only the
+                // deferred connive link, not the whole chain), so suppressing this
+                // generic Template stash here does not drop the deferred connive.
+                let post_effect =
+                    post_effect.filter(|_| !matches!(proposed, ProposedEvent::Connive { .. }));
+                // CR 701.44a + CR 614.5: The explore applier runs the entire
+                // replacement `execute` chain itself — Twists and Turns' "scry 1,
+                // then it explores", Topography Tracker's "it explores, then it
+                // explores again" — through the interactive continuation machinery
+                // and returns `Prevented` (mirroring connive). Stashing the same
+                // chain as a post-replacement continuation would run it a SECOND
+                // time when the drain fires, exploring again on the replacement's
+                // own source instead of the exploring permanent. The applier is the
+                // single authority for this event, so suppress the generic stash.
+                let post_effect =
+                    post_effect.filter(|_| !matches!(proposed, ProposedEvent::Explore { .. }));
+                let post_effect = post_effect.filter(|_| {
+                    !(matches!(proposed, ProposedEvent::CreateToken { .. })
+                        && create_token_copy.is_some())
+                });
+                let mut modifiers =
+                    event_modifiers_for_ability(ability, state, rid.source, &proposed);
+                // CR 110.2a: A self-ETB controller override is carried directly on the
+                // replacement definition (not derived from `execute`), parallel to the
+                // imperative `Effect::ChangeZone.enters_under` slot. Surface it as an
+                // event modifier so it is written onto the `ZoneChange` below.
+                modifiers.controller_override = repl_def.enters_under.clone();
+                (
+                    repl_def.event.clone(),
+                    modifiers,
+                    post_effect,
+                    repl_def.consume_on_apply,
+                    create_token_copy,
                 )
-            });
-            // CR 701.50a + CR 614.5: The connive applier runs the entire
-            // replacement `execute` chain ("instead you draw a card, then that
-            // creature connives") itself and returns `Prevented`. Stashing the
-            // same chain as a post-replacement continuation would re-run it when
-            // the continuation drains (e.g. after the connive's `ConniveDiscard`
-            // choice resolves), executing the modified action twice. The applier
-            // is the single authority for this event, so suppress the generic
-            // stash. On its parking path the applier stashes its deferred connive
-            // into the DEDICATED `state.pending_connive_reentry` slot (only the
-            // deferred connive link, not the whole chain), so suppressing this
-            // generic Template stash here does not drop the deferred connive.
-            let post_effect =
-                post_effect.filter(|_| !matches!(proposed, ProposedEvent::Connive { .. }));
-            // CR 701.44a + CR 614.5: The explore applier runs the entire
-            // replacement `execute` chain itself — Twists and Turns' "scry 1,
-            // then it explores", Topography Tracker's "it explores, then it
-            // explores again" — through the interactive continuation machinery
-            // and returns `Prevented` (mirroring connive). Stashing the same
-            // chain as a post-replacement continuation would run it a SECOND
-            // time when the drain fires, exploring again on the replacement's
-            // own source instead of the exploring permanent. The applier is the
-            // single authority for this event, so suppress the generic stash.
-            let post_effect =
-                post_effect.filter(|_| !matches!(proposed, ProposedEvent::Explore { .. }));
-            let mut modifiers = event_modifiers_for_ability(ability, state, rid.source, &proposed);
-            // CR 110.2a: A self-ETB controller override is carried directly on the
-            // replacement definition (not derived from `execute`), parallel to the
-            // imperative `Effect::ChangeZone.enters_under` slot. Surface it as an
-            // event modifier so it is written onto the `ZoneChange` below.
-            modifiers.controller_override = repl_def.enters_under.clone();
-            (
-                repl_def.event.clone(),
-                modifiers,
-                post_effect,
-                repl_def.consume_on_apply,
-            )
-        }
-        None => return Ok(proposed),
-    };
+            }
+            None => return Ok(proposed),
+        };
 
     // CR 615.5 + CR 609.7: Snapshot the *prevented event's* damage source
     // before the applier consumes `proposed`. Stashed below at the `Prevented`
@@ -6569,6 +6638,11 @@ fn apply_single_replacement(
                     if let ProposedEvent::ZoneChange { ref mut to, .. } = new_event {
                         *to = zone;
                     }
+                }
+                if let (Some(copy_spec), ProposedEvent::CreateToken { copy, .. }) =
+                    (create_token_copy.clone(), &mut new_event)
+                {
+                    *copy = Some(Box::new(copy_spec));
                 }
                 // CR 614.1c: Applied branch carries ETB counter data; add to the zone change.
                 if !modifiers.etb_counters.is_empty() {
