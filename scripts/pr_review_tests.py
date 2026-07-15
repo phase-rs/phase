@@ -2936,7 +2936,7 @@ class PrReviewTests(unittest.TestCase):
         self.assertFalse(pass_5552["triggered"])
         self.assertFalse(pass_5610["triggered"])
 
-    def test_architecture_scope_authorizes_only_private_author_or_accepted_closing_issue(self) -> None:
+    def test_architecture_scope_authorizes_private_author_or_accepted_label(self) -> None:
         policy = pr_review.Policy(
             {
                 "admission": {"mode": "audit", "accepted_issue_label": "accepted"},
@@ -2957,6 +2957,9 @@ class PrReviewTests(unittest.TestCase):
         private = pr_review.architecture_scope_profile(
             base_pr, ["central.rs"], policy, {"architecture_scope_authors": ["Contrib"]}
         )
+        direct_pr = copy.deepcopy(base_pr)
+        direct_pr["labels"] = [{"name": "accepted"}]
+        direct = pr_review.architecture_scope_profile(direct_pr, ["central.rs"], policy, {})
         issue_pr = copy.deepcopy(base_pr)
         issue_pr["closingIssuesReferences"] = [
             {"number": 42, "labels": [{"name": "accepted"}]}
@@ -2970,6 +2973,8 @@ class PrReviewTests(unittest.TestCase):
         self.assertTrue(denied["would_decline"])
         self.assertFalse(denied["authorized"])
         self.assertTrue(private["authorized"])
+        self.assertTrue(direct["authorized"])
+        self.assertTrue(direct["evidence"]["accepted_pr_label"])
         self.assertTrue(issue["authorized"])
         self.assertEqual(issue["evidence"]["accepted_closing_issues"], [42])
         self.assertFalse(incomplete["authorized"])

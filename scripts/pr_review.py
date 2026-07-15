@@ -2075,6 +2075,15 @@ def accepted_closing_issues(pr: dict[str, Any], accepted_label: str | None) -> l
     )
 
 
+def has_accepted_pr_label(pr: dict[str, Any], accepted_label: str | None) -> bool:
+    if not accepted_label:
+        return False
+    accepted = accepted_label.casefold()
+    return accepted in {
+        str(label.get("name") or "").casefold() for label in pr.get("labels", [])
+    }
+
+
 def architecture_scope_profile(
     pr: dict[str, Any], files: list[str], policy: Policy, private_overrides: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2111,10 +2120,16 @@ def architecture_scope_profile(
         else []
     )
     issue_authorized = bool(issues)
-    authorized = author_authorized or issue_authorized
+    pr_label_authorized = has_accepted_pr_label(
+        pr, policy.architecture_accepted_issue_label
+    )
+    authorized = author_authorized or issue_authorized or pr_label_authorized
     mode = policy.architecture_scope_mode
     incomplete_issue_evidence = (
-        triggered and not author_authorized and not issue_evidence_complete
+        triggered
+        and not author_authorized
+        and not pr_label_authorized
+        and not issue_evidence_complete
     )
     evidence = {
         "matched_paths": matched_paths,
@@ -2125,6 +2140,7 @@ def architecture_scope_profile(
         "closing_issue_records": pr.get("closingIssuesReferences", []),
         "closing_issue_count": pr.get("closingIssuesReferencesCount"),
         "author_private_override": author_authorized,
+        "accepted_pr_label": pr_label_authorized,
         "closing_issue_evidence_complete": issue_evidence_complete,
         "files_complete": bool(pr.get("filesComplete")),
     }
@@ -2134,8 +2150,8 @@ def architecture_scope_profile(
         "**Closed without implementation-diff review.** This PR enters protected "
         "architecture scope because it touches "
         f"`{path_text}` and/or spans `{span_text}`. AI-contributor PRs may enter "
-        "this scope only after an explicit prior maintainer appointment or when "
-        "the PR closes an issue labeled `accepted`. Tier, contributor standing, "
+        "this scope only after an explicit prior maintainer appointment, the PR "
+        "has the `accepted` label, or it closes an issue labeled `accepted`. Tier, contributor standing, "
         "the `quality` label, prior praise, and frontend permission do not waive "
         "this gate. Open a fresh PR from current `main` only after one of those "
         "authorizations exists, and rerun `/engine-implementer`, the final "
