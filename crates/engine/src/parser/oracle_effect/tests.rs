@@ -1,3 +1,4 @@
+use super::lower::rewrite_parent_target_to_last_created;
 use super::*;
 use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
