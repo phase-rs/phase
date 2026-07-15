@@ -20,7 +20,6 @@
 crates/engine/src/analysis/resource.rs	eq_except_growable	exempt	2
 crates/engine/src/game/archenemy.rs	set_in_motion	container	1
 crates/engine/src/game/archenemy.rs	turn_face_down_to_bottom_of_scheme_deck	container	1
-crates/engine/src/game/casting.rs	handle_foretell	mover	1
 crates/engine/src/game/casting_costs.rs	handle_resolution_cast_rejection	mover	1
 crates/engine/src/game/conspiracy.rs	start_with_conspiracy	container	1
 crates/engine/src/game/conspiracy.rs	start_with_conspiracy	zone-assign	1
