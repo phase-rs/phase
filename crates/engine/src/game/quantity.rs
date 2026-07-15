@@ -1143,27 +1143,31 @@ fn enclosing_trigger_event_amount_suppressed() -> bool {
     SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT.with(|c| c.get())
 }
 
-/// CR 603.12 + CR 603.2c/603.4: The enclosing trigger's own count or scalar
-/// amount — the trigger-context tiers of the `EventContextAmount` cascade.
+/// CR 603.12 + CR 603.2c: The enclosing trigger's filtered subject count.
+/// Suppressed inside `with_reflexive_resolution_scope` so a reflexive trigger
+/// cannot inherit its enclosing trigger's batched-event count.
+fn enclosing_trigger_match_count(state: &GameState) -> Option<i32> {
+    if enclosing_trigger_event_amount_suppressed() {
+        return None;
+    }
+    state.current_trigger_match_count.map(u32_to_i32_saturating)
+}
+
+/// CR 603.12 + CR 603.2c/603.4: The enclosing trigger's scalar event amount.
 /// Suppressed inside `with_reflexive_resolution_scope` so a reflexive trigger
 /// falls through to the action that created it.
-fn enclosing_trigger_context_amount(state: &GameState) -> Option<i32> {
+fn enclosing_trigger_event_amount(state: &GameState) -> Option<i32> {
     if enclosing_trigger_event_amount_suppressed() {
         return None;
     }
     state
-        .current_trigger_match_count
-        .map(u32_to_i32_saturating)
+        .current_trigger_event
+        .as_ref()
+        .and_then(crate::game::targeting::extract_amount_from_event)
         .or_else(|| {
-            state
-                .current_trigger_event
+            detection_trigger_event()
                 .as_ref()
                 .and_then(crate::game::targeting::extract_amount_from_event)
-                .or_else(|| {
-                    detection_trigger_event()
-                        .as_ref()
-                        .and_then(crate::game::targeting::extract_amount_from_event)
-                })
         })
 }
 
@@ -2575,7 +2579,7 @@ fn resolve_ref(
             // continuation resolves (Moonlit Meditation); `None` otherwise, so it
             // falls straight through to the existing trigger/effect cascade.
             .post_replacement_token_substitution_count
-            .or_else(|| enclosing_trigger_context_amount(state))
+            .or_else(|| enclosing_trigger_match_count(state))
             // CR 706.4: Die results recorded earlier in THIS resolution
             // outrank the triggering event's own amount, so "roll one or more
             // dice. <effect> equal to the result(s)" consumes the roll total,
@@ -2588,6 +2592,7 @@ fn resolve_ref(
             // suppressed inside `with_reflexive_resolution_scope` (CR 603.12) so
             // a reflexive ability's "that many" never reads the enclosing
             // trigger's event while that trigger's resolution is paused.
+            .or_else(|| enclosing_trigger_event_amount(state))
             .or_else(|| {
                 ctx.scoped_player.and_then(|player| {
                     (!state.last_effect_counts_by_player.is_empty()).then(|| {
