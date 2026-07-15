@@ -69,6 +69,55 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 701.3a + CR 614.1a: Route the attach through the replacement pipeline
+    // so an "as it becomes attached, choose …" definition on the attachment
+    // (`ReplacementEvent::Attached`, Psychic Paper) can bind its choice as the
+    // attachment resolves — the attach-time analogue of "as ~ enters, choose".
+    let proposed = crate::types::proposed_event::ProposedEvent::Attach {
+        attachment_id,
+        target_id,
+        applied: Default::default(),
+    };
+    match crate::game::replacement::replace_event(state, proposed, events) {
+        crate::game::replacement::ReplacementResult::Execute(_) => {
+            if let Some(waiting_for) =
+                deliver_attach(state, attachment_id, target_id, source_id, events)
+            {
+                state.waiting_for = waiting_for;
+            }
+        }
+        crate::game::replacement::ReplacementResult::Prevented => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id,
+                subject: None,
+            });
+        }
+        crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+            // CR 616.1: multiple "becomes attached" replacements apply — park
+            // for the ordering choice. `handle_replacement_choice`'s
+            // `ProposedEvent::Attach` arm resumes via `deliver_attach` once
+            // the player orders them.
+            crate::game::replacement::park_waiting_for(state, player);
+        }
+    }
+
+    Ok(())
+}
+
+/// CR 701.3a + CR 614.1a: Perform the attach mutation and, if the attachment
+/// carries an "as it becomes attached, choose …" replacement, drain its
+/// stashed continuation (`ReplacementEvent::Attached`). Single authority for
+/// completing an attach after the replacement pipeline consult — used both by
+/// the immediate `resolve()` path and by `handle_replacement_choice`'s
+/// post-ordering-choice resume, so the two paths cannot drift apart.
+pub(crate) fn deliver_attach(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
     if let Some(old_target) = attach_to(state, attachment_id, target_id) {
         events.push(GameEvent::Unattached {
             attachment_id,
@@ -77,12 +126,18 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
+        kind: EffectKind::Attach,
         source_id,
         subject: None,
     });
 
-    Ok(())
+    crate::game::engine_replacement::apply_pending_post_replacement_effect(
+        state,
+        Some(attachment_id),
+        None,
+        Some(crate::types::replacements::ReplacementEvent::Attached),
+        events,
+    )
 }
 
 /// CR 701.3d: Unattach each matching Equipment from the matched host, leaving
