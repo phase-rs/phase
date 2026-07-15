@@ -38,6 +38,7 @@ export interface DeckData {
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
  * 16 — Meld pair/attacking-entry choices after the mana-payment preview variants.
+ * 15 — Mana-payment preview request/response variants.
  * 14 — PrecastCopyShortcut action and its two WaitingFor variants.
  * 13 — WaitingFor::MulliganBottomCards removed; mulligan bottoming folded
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
