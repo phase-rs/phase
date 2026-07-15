@@ -1625,7 +1625,7 @@ fn try_parse_exile_top_library(rest: &str) -> Option<u32> {
     None
 }
 
-/// CR 107.9: Parse energy costs like "{E}", "{E}{E}", "pay N {e}", "pay eight {e}",
+/// CR 107.3a + CR 107.14: Parse energy costs like "{E}", "{E}{E}", "pay N {e}", "pay eight {e}",
 /// "pay x {e}" (Chthonian Nightmare / issue #1092). Returns a `QuantityExpr` rather
 /// than a bare count so a variable-X amount ("pay x {e}") can be represented as
 /// `QuantityExpr::Ref { qty: Variable("X") }`, mirroring the "pay x life" /

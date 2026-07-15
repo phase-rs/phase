@@ -3900,7 +3900,7 @@ fn concretize_chosen_x_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
             zone: Some(Zone::Graveyard),
             filter: filter.clone(),
         },
-        // CR 107.9 + CR 601.2b: once X is announced, a variable "Pay X {E}"
+        // CR 107.3a + CR 601.2b: once X is announced, a variable "Pay X {E}"
         // activation cost (Chthonian Nightmare, issue #1092) becomes a fixed
         // energy amount before `pay_ability_cost_inner` deducts it — otherwise
         // the `Variable("X")` amount would resolve to 0 at payment time.
@@ -5998,7 +5998,7 @@ fn additional_cost_x_max(
         AbilityCost::PayLife { amount } if amount.contains_x() => {
             Some(max_pay_life_x(state, player))
         }
-        // CR 107.9 + CR 601.2b: X in a variable "Pay X {E}" activation cost
+        // CR 107.3a + CR 601.2b: X in a variable "Pay X {E}" activation cost
         // (Chthonian Nightmare, issue #1092) is capped by the player's current
         // energy counters, the same way `max_pay_life_x` caps life-X.
         AbilityCost::PayEnergy { amount } if amount.contains_x() => {
@@ -6108,7 +6108,7 @@ pub(super) fn activation_cost_needs_x_choice(
 
 /// True when an activated ability's cost carries a symbolic X that must be
 /// announced before payment: a variable counter-removal count (CR 601.2b) or a
-/// variable `{E}` amount (CR 107.9 + CR 601.2b, e.g. "Pay X {E}" — Chthonian
+/// variable `{E}` amount (CR 107.3a + CR 601.2b, e.g. "Pay X {E}" — Chthonian
 /// Nightmare, issue #1092). `AbilityCost::PayLife`/`PaySpeed` variable amounts
 /// are handled by a separate, older path (`additional_cost_x_max`'s `PayLife`
 /// arm feeds `pay_additional_cost_with_source` directly; `PaySpeed` rides the
