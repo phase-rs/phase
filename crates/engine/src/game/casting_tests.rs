@@ -636,6 +636,38 @@ fn foretell_special_action_exiles_and_grants_later_turn_permission() {
     ));
 }
 
+#[test]
+fn foretell_completion_without_exile_clears_paid_continuation_without_stamp() {
+    let mut state = setup_game_at_main_phase();
+    let object_id = add_foretell_sorcery(&mut state);
+    let turn_foretold = state.turn_number;
+    state.pending_cost_move_resume = Some(PendingCostMoveResume::Foretell {
+        player: PlayerId(0),
+        object_id,
+        cost: foretell_test_cost(),
+        turn_foretold,
+    });
+    let mana_after_payment = state.players[0].mana_pool.total();
+    let mut events = Vec::new();
+
+    let waiting = resume_foretell_cost_move(&mut state, &mut events);
+
+    assert_eq!(
+        waiting,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    );
+    assert!(state.pending_cost_move_resume.is_none());
+    assert_eq!(state.players[0].mana_pool.total(), mana_after_payment);
+    let object = &state.objects[&object_id];
+    assert_eq!(object.zone, Zone::Hand);
+    assert!(!object.foretold);
+    assert!(!object.face_down);
+    assert!(object.casting_permissions.is_empty());
+    assert!(events.is_empty());
+}
+
 // CR 708.4 + CR 702.143a / CR 702.143c: a FORETOLD card is cast FACE UP from
 // exile, never as a face-down spell. Mana payment runs `build_spell_meta` while
 // the object still sits in exile with `obj.face_down == true`; the resulting

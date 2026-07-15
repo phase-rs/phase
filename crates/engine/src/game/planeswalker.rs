@@ -288,11 +288,11 @@ pub fn handle_activate_loyalty(
         pending.activation_ability_index = Some(ability_index);
         pending.target_constraints = target_constraints;
         // CR 606.4: Loyalty cost is paid after targets are chosen.
-        // Stored here so handle_select_targets can call pay_ability_cost.
+        // Stored here so handle_select_targets can call pay_ability_cost and
+        // record the CR 606.3 activation only after target selection completes.
         pending.activation_cost = Some(crate::types::ability::AbilityCost::Loyalty {
             amount: loyalty_cost,
         });
-        record_loyalty_activation(state, pw_id, player);
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending),
@@ -989,8 +989,9 @@ mod tests {
             Some(4),
             "loyalty unchanged before target selection"
         );
-        // But activation is marked to prevent re-activation this turn.
-        assert!(state.objects[&pw].loyalty_activations_this_turn > 0);
+        // Activation is recorded only after target selection completes and the
+        // loyalty cost is paid.
+        assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 0);
         // Engine waits for the player to select a target.
         assert!(
             matches!(result, WaitingFor::TargetSelection { .. }),

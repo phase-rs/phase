@@ -714,6 +714,23 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 702.143a-c + CR 614.1 + CR 616.1: A Foretell cost move may
+            // deliver its card and then surface an interactive post-replacement
+            // effect. Complete the special action at the delivery boundary,
+            // before preserving that non-priority prompt, so the card cannot be
+            // left face up or with a stranded cost continuation.
+            if zone_change_object_id.is_some_and(|object_id| {
+                matches!(
+                    state.pending_cost_move_resume.as_ref(),
+                    Some(PendingCostMoveResume::Foretell {
+                        object_id: pending_object_id,
+                        ..
+                    }) if *pending_object_id == object_id
+                )
+            }) {
+                super::casting::complete_foretell_cost_move(state, events);
+            }
+
             // CR 805.4b: a draw-step draw that paused on the choice just
             // resolved above may have queued teammate(s) still owed their
             // own draw this step (`turns::execute_draw` seeds the queue; the
@@ -946,6 +963,18 @@ pub(super) fn handle_replacement_choice(
                 waiting_for = super::costs::resume_replacement_may_cost_move(state, events)?;
             }
 
+            // CR 702.143a-c + CR 614.1 + CR 616.1: Finish a foretell special
+            // action after its replacement-aware move is delivered. The
+            // foretell resume stamps the card only if it arrived in exile.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && matches!(
+                    state.pending_cost_move_resume,
+                    Some(PendingCostMoveResume::Foretell { .. })
+                )
+            {
+                waiting_for = super::casting::resume_foretell_cost_move(state, events);
+            }
+
             // CR 601.2h + CR 602.2b + CR 616.1: Resume a non-move cast or
             // activation cost payment paused during discard or sacrifice.
             if matches!(waiting_for, WaitingFor::Priority { .. })
@@ -1136,6 +1165,15 @@ pub(super) fn handle_replacement_choice(
                 Some(PendingCostMoveResume::ReplacementMayCost { .. })
             ) {
                 return super::costs::resume_replacement_may_cost_move(state, events);
+            }
+            // CR 702.143a-c + CR 614.1 + CR 616.1: A fully substituted
+            // foretell move completes the special action without stamping a
+            // card that was not delivered to exile.
+            if matches!(
+                state.pending_cost_move_resume,
+                Some(PendingCostMoveResume::Foretell { .. })
+            ) {
+                return Ok(super::casting::resume_foretell_cost_move(state, events));
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,
             // the permanent goes to the graveyard instead.

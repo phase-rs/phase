@@ -13,8 +13,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActivationResidual, CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption,
     ConvokeMode, CostResume, GameState, NextSpellModifier, PayCostKind, PendingCast,
-    SneakPlacement, SpellCastRecord, SpellCostSource, StackEntry, StackEntryKind,
-    TargetSelectionSlot, WaitingFor,
+    PendingCostMoveResume, SneakPlacement, SpellCastRecord, SpellCostSource, StackEntry,
+    StackEntryKind, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -52,6 +52,7 @@ use super::speed::effective_speed;
 use super::splice;
 use super::stack;
 use super::targeting;
+use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 const FORETELL_SPECIAL_ACTION_COST: u32 = 2;
 
@@ -1214,8 +1215,8 @@ pub fn can_foretell_card(state: &GameState, player: PlayerId, object_id: ObjectI
     can_pay_special_action_cost_after_auto_tap(state, player, &cost)
 }
 
-/// CR 702.143a-b: Pay {2}, exile the hand card, mark it foretold in exile, and
-/// grant the later-turn foretell-cost casting permission.
+/// CR 702.143a-b: Pay {2}, then begin the foretell special-action move through
+/// the replacement-aware zone pipeline.
 pub fn handle_foretell(
     state: &mut GameState,
     player: PlayerId,
@@ -1255,21 +1256,94 @@ pub fn handle_foretell(
         &ManaCost::generic(FORETELL_SPECIAL_ACTION_COST),
         events,
     )?;
-    super::zones::move_to_zone(state, object_id, Zone::Exile, events);
-    if let Some(obj) = state.objects.get_mut(&object_id) {
-        obj.foretold = true;
-        obj.face_down = true;
-        obj.casting_permissions.push(CastingPermission::Foretold {
-            cost: foretell_cost,
-            turn_foretold: state.turn_number,
-        });
-    }
-    events.push(GameEvent::Foretold {
-        player_id: player,
+    state.pending_cost_move_resume = Some(PendingCostMoveResume::Foretell {
+        player,
         object_id,
+        cost: foretell_cost,
+        turn_foretold: state.turn_number,
     });
 
-    Ok(WaitingFor::Priority { player })
+    let move_event_start = events.len();
+    match zone_pipeline::move_object(
+        state,
+        ZoneMoveRequest::cost(object_id, Zone::Exile, object_id),
+        events,
+    ) {
+        ZoneMoveResult::Done => Ok(resume_foretell_cost_move(state, events)),
+        ZoneMoveResult::NeedsChoice(_) => {
+            // `NeedsChoice` is overloaded by the zone pipeline: it can be the
+            // pre-delivery CR 616.1 ordering prompt, or a post-delivery prompt
+            // raised by a replacement's continuation. A delivery emits the
+            // card's `ZoneChanged` event, so it is the reliable boundary even
+            // if a post-effect has moved the card again before it prompts.
+            if events[move_event_start..].iter().any(|event| {
+                matches!(event, GameEvent::ZoneChanged { object_id: moved, .. } if *moved == object_id)
+            }) {
+                complete_foretell_cost_move(state, events);
+            }
+            Ok(state.waiting_for.clone())
+        }
+        ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            unreachable!("foretell moves a hand card to exile, never an aura to the battlefield")
+        }
+    }
+}
+
+/// CR 702.143a-c + CR 614.1 + CR 616.1: A card is foretold only when the
+/// special action's replacement-aware move delivers it to exile. A redirected
+/// or prevented move still completes the special action without granting a
+/// foretell casting permission.
+pub(crate) fn resume_foretell_cost_move(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    WaitingFor::Priority {
+        player: complete_foretell_cost_move(state, events),
+    }
+}
+
+/// CR 702.143a-c + CR 614.6: Completes the paid Foretell special action after
+/// its zone move either delivers or is fully replaced. The caller owns the
+/// resulting `WaitingFor`, which makes completion safe at both the normal
+/// priority boundary and a post-replacement prompt boundary.
+pub(crate) fn complete_foretell_cost_move(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> PlayerId {
+    let Some(PendingCostMoveResume::Foretell {
+        player,
+        object_id,
+        cost,
+        turn_foretold,
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("foretell cost move resume must be pending")
+    };
+
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.zone == Zone::Exile)
+    {
+        let object = state
+            .objects
+            .get_mut(&object_id)
+            .expect("foretell object remains in game state");
+        object.foretold = true;
+        object.face_down = true;
+        object
+            .casting_permissions
+            .push(CastingPermission::Foretold {
+                cost,
+                turn_foretold,
+            });
+        events.push(GameEvent::Foretold {
+            player_id: player,
+            object_id,
+        });
+    }
+
+    player
 }
 
 // CR 702.34 (Flashback) / CR 702.81 (Retrace) / CR 702.127 (Aftermath) /

@@ -633,6 +633,7 @@ fn pay_activation_costs_after_target_selection(
             let mut pending = pending.clone();
             pending.ability = assigned_ability;
             pending.activation_cost = remaining_cost;
+            pending.pending_loyalty_activation_player = should_record_loyalty.then_some(player);
             if let Some(pending) =
                 super::casting_costs::attach_pending_cast_to_cost_move(state, Box::new(pending))
             {

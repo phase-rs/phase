@@ -6685,6 +6685,7 @@ fn apply_action(
                         pending.ability,
                         pending.activation_cost.as_ref(),
                         pending.activation_residual,
+                        pending.pending_loyalty_activation_player,
                         &mut events,
                     )?
                 } else {

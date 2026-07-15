@@ -2314,6 +2314,12 @@ pub struct PendingCast {
     pub activation_cost: Option<AbilityCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_ability_index: Option<usize>,
+    /// CR 606.3: Loyalty activation history is recorded only after the loyalty
+    /// cost is successfully paid. Positive loyalty costs can pause for a CR 616.1
+    /// replacement-choice ordering prompt, so this marker carries the activator
+    /// across the pause/resume path until the ability reaches the stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_loyalty_activation_player: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_constraints: Vec<TargetSelectionConstraint>,
     /// How this spell was cast — threads through the casting pipeline to finalize_cast.
@@ -2475,6 +2481,8 @@ pub enum PendingCostMoveCompletion {
 /// choice. `Cast` resumes a cast or activation after its next object is
 /// delivered. `ReplacementMayCost` keeps the outer optional replacement parked
 /// while an inner MayCost move finishes through the replacement pipeline.
+/// `Foretell` records the special action until its replacement-aware exile move
+/// has been delivered or prevented.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PendingCostMoveResume {
     Cast {
@@ -2497,6 +2505,12 @@ pub enum PendingCostMoveResume {
         /// The outer optional replacement is restored only after every inner
         /// cost move is delivered or prevented.
         outer_replacement: Option<Box<PendingReplacement>>,
+    },
+    Foretell {
+        player: PlayerId,
+        object_id: ObjectId,
+        cost: ManaCost,
+        turn_foretold: u32,
     },
 }
 
@@ -2529,6 +2543,7 @@ impl PendingCast {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
@@ -12864,6 +12879,7 @@ mod tests {
                 declared_mana_additions: Vec::new(),
                 activation_cost: None,
                 activation_ability_index: None,
+                pending_loyalty_activation_player: None,
                 target_constraints: vec![],
                 casting_variant: CastingVariant::Normal,
                 cast_timing_permission: None,
@@ -13232,6 +13248,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
