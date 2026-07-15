@@ -64,7 +64,7 @@ fn clockspinning_parses_choose_counter_adjustment_with_zero_unimplemented() {
 #[test]
 fn escape_keyword_extracted_on_instants_and_sorceries() {
     // CR 702.138a: Escape is castable from graveyard regardless of card type.
-    // The em-dash alt-cost branch in `parse_keyword_from_oracle` must surface
+    // The em-dash alt-cost branch in `parse_granted_keyword_fragment` must surface
     // escape to BOTH generic keyword-cost guards (spell at Priority 9 and
     // permanent at Priority 13), so extraction is card-type-agnostic.
     let esc = "Escape\u{2014}{2}{U}{R}, Exile four other cards from your graveyard. \
@@ -243,6 +243,65 @@ fn activated_ability_opponent_turn_restriction_uses_not_your_turn_condition() {
         has_not_your_turn_activation_restriction(restrictions),
         "expected Not(IsYourTurn) activation restriction, got {:?}",
         restrictions
+    );
+}
+
+/// CR 508.1: a STANDALONE combat-window activation gate — "Activate only before
+/// attackers are declared" / "Activate only before combat" (Arcum's Whistle,
+/// Arcum's Sleigh) with no "during <role>" first half — must map to the enforced
+/// `BeforeAttackersDeclared` variant instead of falling through to
+/// `Effect::Unimplemented`. The compound "during <role> … before combat" form
+/// already bound the window; this covers the bare-window class.
+#[test]
+fn standalone_before_attackers_activation_gate_maps_to_before_attackers_declared() {
+    for text in [
+        "{T}: Draw a card. Activate only before attackers are declared.",
+        "{T}: Draw a card. Activate only before combat.",
+    ] {
+        let r = parse(text, "Arcum's Whistle", &[], &["Artifact"], &[]);
+        assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+        let restrictions = &r.abilities[0].activation_restrictions;
+        assert!(
+            restrictions.contains(&ActivationRestriction::BeforeAttackersDeclared),
+            "{text:?} must yield BeforeAttackersDeclared, got {restrictions:?}"
+        );
+    }
+}
+
+/// CR 510: standalone "activate only before the combat damage step" / "before
+/// combat damage" (Angus Mackenzie) maps to the enforced `BeforeCombatDamage`
+/// variant, and the "during combat before combat damage has been dealt" compound
+/// (Save Point) yields `[DuringCombat, BeforeCombatDamage]` through the combinator
+/// grammar that replaced the former verbatim-string special case.
+#[test]
+fn combat_damage_window_activation_gate_maps_to_before_combat_damage() {
+    for text in [
+        "{T}: Draw a card. Activate only before the combat damage step.",
+        "{T}: Draw a card. Activate only before combat damage.",
+    ] {
+        let r = parse(text, "Angus Mackenzie", &[], &["Creature"], &[]);
+        assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+        let restrictions = &r.abilities[0].activation_restrictions;
+        assert!(
+            restrictions.contains(&ActivationRestriction::BeforeCombatDamage),
+            "{text:?} must yield BeforeCombatDamage, got {restrictions:?}"
+        );
+    }
+
+    let r = parse(
+        "{T}: Draw a card. Activate only during combat before combat damage has been dealt.",
+        "Save Point",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let restrictions = &r.abilities[0].activation_restrictions;
+    assert!(
+        restrictions.contains(&ActivationRestriction::DuringCombat)
+            && restrictions.contains(&ActivationRestriction::BeforeCombatDamage),
+        "'during combat before combat damage' must yield both DuringCombat and \
+         BeforeCombatDamage, got {restrictions:?}"
     );
 }
 
@@ -10427,10 +10486,18 @@ fn triggered_modal_header_supports_you_may_choose_and_constraints() {
             &[],
         );
     assert_eq!(r.triggers.len(), 1);
+    assert!(
+        r.triggers[0].optional,
+        "you may choose two header must make the trigger optional"
+    );
     let execute = r.triggers[0]
         .execute
         .as_ref()
         .expect("trigger should have execute");
+    assert!(
+        execute.optional,
+        "optional triggered modal must stamp execute.optional for resolution"
+    );
     let modal = execute.modal.as_ref().expect("execute should be modal");
     assert_eq!(modal.min_choices, 2);
     assert_eq!(modal.max_choices, 2);
@@ -21083,4 +21150,553 @@ fn gilanra_mana_value_spend_trigger_survives_the_retype() {
         !matches!(*r.abilities[0].effect, Effect::Unimplemented { .. }),
         "Gilanra must not regress to Unimplemented"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Plan 02 step 5 — consume-on-success for keyword-cost lines.
+//
+// A router may advance past a line ONLY on a complete strict parse. These pin
+// both halves of that contract, because either half alone is a trap:
+//
+//   * the REJECTION tests prove a keyword-cost candidate carrying unmodelled
+//     semantic text is no longer silently swallowed;
+//   * the REACH tests prove the rejection is not an upstream short-circuit that
+//     also broke the valid form. A strict parser that rejects everything would
+//     pass the rejection tests alone.
+// ---------------------------------------------------------------------------
+
+/// Every ability/keyword-bearing channel a swallowed line could have hidden in.
+/// Reading `abilities` alone fabricates swallows — triggers and statics live in
+/// their own arrays.
+fn has_unimplemented_mentioning(r: &ParsedAbilities, needle: &str) -> bool {
+    let hay = format!("{:?}", r);
+    hay.contains("Unimplemented") && hay.contains(needle)
+}
+
+#[test]
+fn crew_with_semantic_suffix_is_not_swallowed_at_priority_13() {
+    // Permanent (Vehicle) harness -> priority 13. `is_keyword_cost_line` accepts
+    // "crew ...", and the permissive parser would return Some(Crew(2)) having
+    // EATEN " if it's an artifact". Priority 13 then advanced unconditionally,
+    // so the clause vanished with no keyword AND no Unimplemented.
+    let r = parse_oracle_text(
+        "Crew 2 if it's an artifact",
+        "Hostile Vehicle",
+        &[],
+        &["Artifact".to_string()],
+        &["Vehicle".to_string()],
+    );
+    assert!(
+        !r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Crew { .. })),
+        "no Crew keyword may be synthesized from a line the router cannot fully parse; got {:?}",
+        r.extracted_keywords
+    );
+    assert!(
+        has_unimplemented_mentioning(&r, "Crew 2 if it's an artifact"),
+        "the exact source line must survive as an Unimplemented, not vanish; got {r:?}"
+    );
+}
+
+#[test]
+fn crew_valid_whole_line_still_reaches_the_keyword_route() {
+    // Reach guard: proves the rejection above is a TAIL rejection, not an
+    // upstream short-circuit that also killed the valid form.
+    let r = parse_oracle_text(
+        "Crew 2",
+        "Plain Vehicle",
+        &[],
+        &["Artifact".to_string()],
+        &["Vehicle".to_string()],
+    );
+    assert!(
+        r.extracted_keywords.iter().any(|k| matches!(
+            k,
+            Keyword::Crew {
+                power: 2,
+                once_per_turn: None
+            }
+        )),
+        "valid whole-line Crew 2 must still parse; got {:?}",
+        r.extracted_keywords
+    );
+    assert!(
+        !format!("{r:?}").contains("Unimplemented"),
+        "valid Crew 2 must not go red; got {r:?}"
+    );
+}
+
+#[test]
+fn crew_cadence_modifier_is_applied_not_dropped() {
+    // CR 702.122 + CR 602.5b: the cadence sentence is a MODELED tail (`M`), so
+    // the strict router accepts it and must APPLY it to the typed keyword.
+    let r = parse_oracle_text(
+        "Crew 2. Activate only once each turn.",
+        "Cadenced Vehicle",
+        &[],
+        &["Artifact".to_string()],
+        &["Vehicle".to_string()],
+    );
+    assert!(
+        r.extracted_keywords.iter().any(|k| matches!(
+            k,
+            Keyword::Crew {
+                power: 2,
+                once_per_turn: Some(_)
+            }
+        )),
+        "the modeled cadence modifier must be applied to the keyword, not dropped; got {:?}",
+        r.extracted_keywords
+    );
+}
+
+#[test]
+fn cycling_with_semantic_suffix_is_not_swallowed_at_priority_9() {
+    // Spell harness -> priority 9. Same class-B defect on the spell side: the
+    // permissive parser returned Some(Cycling) and ate the conditional.
+    let r = parse_oracle_text(
+        "Cycling {2} if you control an artifact",
+        "Hostile Cantrip",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert!(
+        !r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Cycling(_))),
+        "no Cycling keyword may be synthesized from an unparsable line; got {:?}",
+        r.extracted_keywords
+    );
+    assert!(
+        has_unimplemented_mentioning(&r, "Cycling {2} if you control an artifact"),
+        "the exact source line must survive as an Unimplemented; got {r:?}"
+    );
+}
+
+#[test]
+fn cycling_valid_whole_line_still_reaches_the_keyword_route() {
+    let r = parse_oracle_text(
+        "Cycling {2}",
+        "Plain Cantrip",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert!(
+        r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Cycling(_))),
+        "valid whole-line Cycling {{2}} must still parse; got {:?}",
+        r.extracted_keywords
+    );
+}
+
+#[test]
+fn keyword_line_with_reminder_text_is_still_routed() {
+    // `R` tail: balanced reminder-text removal is the ONLY permitted
+    // normalization, and it must not cause a rejection.
+    let r = parse_oracle_text(
+        "Cycling {2} ({2}, Discard this card: Draw a card.)",
+        "Reminder Cantrip",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert!(
+        r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Cycling(_))),
+        "a reminder-text tail is permitted and must still route; got {:?}",
+        r.extracted_keywords
+    );
+}
+
+/// CR 400.6 + CR 115.1d + CR 601.2c: Ill-Gotten Gains — "Exile ~. Each player
+/// discards their hand, then returns up to three cards from their graveyard
+/// to their hand." The final clause (no "target" keyword, an explicit
+/// graveyard origin) lowers to `Effect::ChangeZone` via `ReturnToZone` — the
+/// origin-bearing sibling of the plain `Return`/`Bounce` arm — whose "up to
+/// three" quantifier previously had no field to ride: the clause parsed to a
+/// valid (non-Unimplemented) `ChangeZone` with NO count restriction at all,
+/// silently returning a player's *entire* graveyard to hand instead of up to
+/// three cards — the defining number was dropped, not merely unsupported.
+/// Must now carry `multi_target: up_to(Fixed(3))` on that clause so the
+/// existing `EffectZoneChoice` multi-target picker (already exercised by
+/// `targeted_up_to_two_graveyard_bounce_moves_chosen_creature` in
+/// `game::effects::bounce`, and by the Exile/Forage precedent for
+/// `ChangeZone` specifically) bounds the choice correctly. No runtime/
+/// game-logic change was needed — only the parser dropped the quantifier
+/// before it ever reached that machinery.
+#[test]
+fn ill_gotten_gains_return_clause_binds_bounded_multi_target() {
+    let parsed = parse_oracle_text(
+        "Exile Ill-Gotten Gains. Each player discards their hand, then returns up to three cards from their graveyard to their hand.",
+        "Ill-Gotten Gains",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "got {:?}", parsed.abilities);
+    let exile = &parsed.abilities[0];
+    assert!(
+        matches!(
+            exile.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "expected self-exile head, got {:?}",
+        exile.effect
+    );
+    let discard = exile
+        .sub_ability
+        .as_ref()
+        .expect("expected the 'each player discards' sub-ability");
+    assert!(
+        matches!(discard.effect.as_ref(), Effect::Discard { .. }),
+        "expected Discard, got {:?}",
+        discard.effect
+    );
+    let return_clause = discard
+        .sub_ability
+        .as_ref()
+        .expect("expected the 'then returns up to three cards' sub-ability");
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Hand,
+        target,
+        ..
+    } = return_clause.effect.as_ref()
+    else {
+        panic!(
+            "expected a graveyard-to-hand ChangeZone, got {:?}",
+            return_clause.effect
+        );
+    };
+    let TargetFilter::Typed(tf) = target else {
+        panic!("expected a Typed graveyard-card filter, got {target:?}");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }),
+        "target must be constrained to the graveyard, got {target:?}"
+    );
+    assert_eq!(
+        return_clause.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 })),
+        "the 'up to three' count must ride the sub-ability's MultiTargetSpec \
+         (was silently dropped on main, resolving as an unbounded return of \
+         the entire graveyard), got {:?}",
+        return_clause.multi_target
+    );
+}
+// ===========================================================================
+// Task #123 — router wiring: every router slot and routing classifier parses
+// keyword lines through a STRICT (remainder-checking) surface.
+//
+// The invariant under test is CONSUME-ON-SUCCESS: a router may advance past a
+// line only when the line parsed COMPLETELY. A keyword-cost line carrying a
+// semantic clause it cannot model must fall through and become an honest,
+// exact-unit `Effect::Unimplemented` — never vanish with no keyword and no
+// diagnostic, which renders the card as fully supported.
+//
+// Each swallow witness below is paired with a POSITIVE control on the same
+// family, because "everything is now Unimplemented" would satisfy the swallow
+// assertions vacuously. The controls prove the valid line still routes.
+// ===========================================================================
+
+/// The hostile suffix: semantic prose no permitted (`P`/`R`/`M`) tail admits.
+const T123_SEMANTIC_TAIL: &str = " if you control an artifact";
+
+fn t123_parse(text: &str, kws: &[&str], types: &[&str]) -> ParsedAbilities {
+    let kwv: Vec<String> = kws.iter().map(|s| s.to_string()).collect();
+    let tyv: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+    parse_oracle_text(text, "Witness", &kwv, &tyv, &[])
+}
+
+fn t123_unimplemented_count(parsed: &ParsedAbilities) -> usize {
+    parsed
+        .abilities
+        .iter()
+        .filter(|a| matches!(&*a.effect, Effect::Unimplemented { .. }))
+        .count()
+}
+
+/// A swallowed line: consumed, nothing recorded, nothing flagged. The exact
+/// failure this unit exists to remove.
+fn t123_assert_not_swallowed(label: &str, parsed: &ParsedAbilities) {
+    assert!(
+        t123_unimplemented_count(parsed) > 0,
+        "[{label}] the line was CONSUMED with no Effect::Unimplemented — a silent \
+         swallow. keywords={:?} abilities={} statics={} triggers={}",
+        parsed.extracted_keywords,
+        parsed.abilities.len(),
+        parsed.statics.len(),
+        parsed.triggers.len(),
+    );
+}
+
+/// THE 8f witness. `Kickerfoo {2}` is a fabricated keyword line: no such
+/// keyword exists, so nothing can parse it.
+///
+/// Before this unit, priority 8f dispatched on a bare `tag("kicker")` with NO
+/// word-boundary guard, so "kickerfoo" matched the "kicker" prefix; then
+/// `i += 1; continue;` sat OUTSIDE both `if let Some` blocks, so the line was
+/// consumed with no keyword, no additional cost, and no diagnostic. It vanished
+/// entirely, and the card rendered as fully supported.
+///
+/// Red-first: on pre-fix code this test FAILS with 0 abilities / 0 keywords /
+/// 0 Unimplemented — the line is simply gone.
+#[test]
+fn t123_kickerfoo_synthetic_line_is_honestly_unimplemented_not_swallowed() {
+    let parsed = t123_parse("Kickerfoo {2}", &[], &["Instant"]);
+
+    t123_assert_not_swallowed("kickerfoo", &parsed);
+    assert_eq!(
+        t123_unimplemented_count(&parsed),
+        1,
+        "expected exactly ONE exact-unit Unimplemented for the one bogus line"
+    );
+    assert!(
+        parsed.extracted_keywords.is_empty(),
+        "a fabricated keyword line must not manufacture a keyword, got {:?}",
+        parsed.extracted_keywords
+    );
+}
+
+/// Priority 8f, defect (a): a REAL kicker prefix at a word boundary, with a
+/// semantic tail neither the additional-cost parser nor the keyword parser can
+/// model. Pre-fix this produced `Kicker(generic: 0)` — the tail eaten AND the
+/// cost fabricated as 0 (`parse_oracle_cost` never fails, so the cost slot was
+/// built out of untyped prose).
+#[test]
+fn t123_kicker_with_semantic_tail_is_not_consumed() {
+    let text = format!("Kicker {{2}}{T123_SEMANTIC_TAIL}");
+    let parsed = t123_parse(&text, &[], &["Instant"]);
+
+    t123_assert_not_swallowed("kicker+tail", &parsed);
+    assert!(
+        !parsed
+            .extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Kicker(_))),
+        "must not commit a Kicker built from an unmodelled tail, got {:?}",
+        parsed.extracted_keywords
+    );
+}
+
+/// Positive control for 8f: the valid lines still route to typed keywords with
+/// their real costs, and raise no Unimplemented. Without this, the two tests
+/// above would pass even if 8f had simply been deleted.
+#[test]
+fn t123_kicker_family_valid_lines_still_route() {
+    for (text, label) in [
+        ("Kicker {2}", "kicker"),
+        ("Multikicker {1}{R}", "multikicker"),
+        ("Replicate {2}", "replicate"),
+    ] {
+        let parsed = t123_parse(text, &[], &["Instant"]);
+        assert_eq!(
+            t123_unimplemented_count(&parsed),
+            0,
+            "[{label}] a VALID keyword line must not become Unimplemented: {parsed:#?}"
+        );
+    }
+
+    // The cost must be the printed one, not a fabricated empty cost.
+    let replicate = t123_parse("Replicate {2}", &[], &["Instant"]);
+    assert!(
+        replicate
+            .extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Replicate(_))),
+        "Replicate {{2}} must yield a Replicate keyword, got {:?}",
+        replicate.extracted_keywords
+    );
+}
+
+/// THE SHADOW witness (priority 1b). This is the finding the census did not
+/// record: priority 1b runs LONG before the strict routers at priority 9/13, so
+/// whenever MTGJSON names the keyword — the common case — it is 1b, not those,
+/// that decides the line.
+///
+/// Pre-fix, 1b's permissive list parser consumed this whole line as a bare
+/// `Cycling`, dropped the conditional, and raised nothing. The strict wiring
+/// downstream never even saw it.
+///
+/// The `mtgjson EMPTY` half is the discriminator: it proves the difference is
+/// caused by 1b's MTGJSON-gated path and not by some unrelated slot.
+#[test]
+fn t123_priority_1b_does_not_shadow_the_strict_router() {
+    let text = format!("Cycling {{2}}{T123_SEMANTIC_TAIL}");
+
+    // MTGJSON names the keyword -> pre-fix, priority 1b claimed and swallowed it.
+    let named = t123_parse(&text, &["cycling"], &["Creature"]);
+    t123_assert_not_swallowed("1b cycling+tail (mtgjson named)", &named);
+    assert!(
+        !named
+            .extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Cycling(_))),
+        "must not commit a Cycling built from an unmodelled tail, got {:?}",
+        named.extracted_keywords
+    );
+
+    // MTGJSON silent -> 1b declines, and the line was ALREADY honest pre-fix.
+    // Both paths must now agree; that agreement is the point of the migration.
+    let unnamed = t123_parse(&text, &[], &["Creature"]);
+    t123_assert_not_swallowed("1b cycling+tail (mtgjson silent)", &unnamed);
+}
+
+/// Positive control for 1b: bare keyword lines and correctly-parameterized
+/// keyword lines still route. This is the path a naive "just make it strict"
+/// change would destroy, since `parse_router_keyword_line` alone cannot see a
+/// bare-keyword list.
+#[test]
+fn t123_priority_1b_valid_keyword_lines_still_route() {
+    let bare = t123_parse("Flying, vigilance", &["flying", "vigilance"], &["Creature"]);
+    assert_eq!(
+        t123_unimplemented_count(&bare),
+        0,
+        "a bare keyword list must still route: {bare:#?}"
+    );
+
+    let cycling = t123_parse("Cycling {2}", &["cycling"], &["Creature"]);
+    assert_eq!(
+        t123_unimplemented_count(&cycling),
+        0,
+        "a valid parameterized keyword line must still route: {cycling:#?}"
+    );
+    assert!(
+        cycling
+            .extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Cycling(_))),
+        "Cycling {{2}} must yield a Cycling keyword, got {:?}",
+        cycling.extracted_keywords
+    );
+}
+
+/// THE OVERREACH CONTROL, and the reason this unit does NOT refuse a line merely
+/// because its parsed keyword list came back empty.
+///
+/// A bare, MTGJSON-named keyword line parses to an EMPTY `extracted_keywords`: the
+/// keyword rides the card's MTGJSON metadata, and the router's job on this line is
+/// simply to consume it without raising anything. So "the strict parser produced no
+/// keywords" is NOT evidence of a swallow here — it is the normal, correct outcome
+/// for the single most common keyword line in the corpus. A refusal keyed on that
+/// emptiness would satisfy every swallow assertion above and false-red every vanilla
+/// evergreen creature in the pool.
+///
+/// Green in BOTH worlds, pre- and post-fix. That is the point: it is the line the
+/// migration must NOT move.
+#[test]
+fn t123_metadata_named_bare_keyword_line_still_routes() {
+    let parsed = t123_parse("Flying", &["flying"], &["Creature"]);
+
+    assert_eq!(
+        t123_unimplemented_count(&parsed),
+        0,
+        "a bare metadata-named keyword line must not become Unimplemented: {parsed:#?}"
+    );
+    assert!(
+        parsed.abilities.is_empty() && parsed.statics.is_empty() && parsed.triggers.is_empty(),
+        "a bare metadata-named keyword line must be consumed cleanly, got {parsed:#?}"
+    );
+}
+
+/// Priority 1b, Crew. The strict `parse_crew_keyword` intercept correctly
+/// DECLINES "Crew 2 <semantic tail>" (its cadence tail is `all_consuming`), and
+/// the line then fell into 1b's permissive list — which ate the tail. The leak
+/// was never in the Crew parser; it was downstream, exactly as the charter says.
+#[test]
+fn t123_crew_with_semantic_tail_falls_through_to_unimplemented() {
+    let text = format!("Crew 2{T123_SEMANTIC_TAIL}");
+    let parsed = t123_parse(&text, &["crew"], &["Artifact"]);
+
+    t123_assert_not_swallowed("crew+tail", &parsed);
+    assert!(
+        !parsed
+            .extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Crew { .. })),
+        "must not commit a Crew built from an unmodelled tail, got {:?}",
+        parsed.extracted_keywords
+    );
+
+    // Positive control: the plain Crew line, and the modeled cadence sentence,
+    // both still route (this is the NOT-A-DEFECT path — do not regress it).
+    let plain = t123_parse("Crew 2", &["crew"], &["Artifact"]);
+    assert!(
+        plain
+            .extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Crew { .. })),
+        "plain Crew 2 must still route, got {:?}",
+        plain.extracted_keywords
+    );
+}
+
+/// Priority 0, the semicolon keyword line. Every part must parse completely;
+/// one part carrying a semantic clause declines the WHOLE line.
+#[test]
+fn t123_semicolon_keyword_line_with_semantic_tail_is_not_consumed() {
+    let text = format!("Defender; cycling {{2}}{T123_SEMANTIC_TAIL}");
+    let parsed = t123_parse(&text, &["defender", "cycling"], &["Creature"]);
+
+    t123_assert_not_swallowed("semicolon+tail", &parsed);
+
+    // Positive control: a clean semicolon keyword line still routes.
+    let clean = t123_parse("Defender; reach", &["defender", "reach"], &["Creature"]);
+    assert_eq!(
+        t123_unimplemented_count(&clean),
+        0,
+        "a clean semicolon keyword line must still route: {clean:#?}"
+    );
+}
+
+/// The advance-on-partial family: each of these router intercepts used to call
+/// the permissive fragment parser and advance `i` on a parse that had discarded
+/// the remainder. Every one of them ate its tail AND fabricated its cost.
+///
+/// Driven as a table because the defect — and the fix — are one shape, not six.
+#[test]
+fn t123_advance_on_partial_intercepts_no_longer_eat_their_tails() {
+    let cases: [(&str, &str, &[&str]); 5] = [
+        ("suspend", "Suspend 3—{1}{R}", &["Sorcery"]),
+        ("specialize", "Specialize {2}", &["Creature"]),
+        ("escalate", "Escalate {2}", &["Instant"]),
+        (
+            "commander ninjutsu",
+            "Commander ninjutsu {1}{U}",
+            &["Creature"],
+        ),
+        ("buyback", "Buyback {3}", &["Instant"]),
+    ];
+
+    for (label, valid_line, types) in cases {
+        // Swallow witness: valid keyword + a clause nothing can model.
+        let hostile = format!("{valid_line}{T123_SEMANTIC_TAIL}");
+        let parsed = t123_parse(&hostile, &[], types);
+        t123_assert_not_swallowed(label, &parsed);
+
+        // Positive control: the same line WITHOUT the tail must still route,
+        // or the assertion above is passing for the wrong reason.
+        let clean = t123_parse(valid_line, &[], types);
+        assert_eq!(
+            t123_unimplemented_count(&clean),
+            0,
+            "[{label}] the valid line must still route to a keyword: {clean:#?}"
+        );
+        assert!(
+            !clean.extracted_keywords.is_empty(),
+            "[{label}] the valid line must yield a keyword, got {:?}",
+            clean.extracted_keywords
+        );
+    }
 }

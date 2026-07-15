@@ -167,6 +167,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
@@ -405,6 +406,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
@@ -594,6 +596,36 @@ pub struct FilterContext<'a> {
     pub scoped_iteration_player: Option<PlayerId>,
 }
 
+/// CR 608.2h + CR 111.7: The controller of a filter context's SOURCE, from live
+/// state when the source still exists and from last known information when it does
+/// not.
+///
+/// CR 608.2h: "If the effect requires information from a specific object, INCLUDING
+/// THE SOURCE OF THE ABILITY ITSELF, the effect uses the current information of that
+/// object if it's in the public zone it was expected to be in; if it's no longer in
+/// that zone ... the effect uses the object's last known information."
+///
+/// A token that leaves the battlefield ceases to exist (CR 111.7 / CR 704.5d) and is
+/// purged from `state.objects` outright, so a live-only lookup answers `None` — and
+/// every `ControllerRef::You` predicate built on such a context is then unanswerable
+/// and fails closed. The CR 603.4 intervening-if re-check of a token's OWN triggered
+/// ability (stack.rs → `check_trigger_condition`) runs after the CR 111.7 SBA has
+/// purged the source, so "if you control a …" silently read false and the ability was
+/// removed from the stack. CR 113.7a: the ability on the stack exists independently of
+/// its source, so the source's death must not make "you" unanswerable.
+///
+/// `state.lki_cache` holds the at-exit controller (captured by `apply_zone_exit_cleanup`,
+/// zones.rs). Live state wins; LKI answers only when the object is gone — so this is a
+/// strict no-op for every source that still exists. Mirrors the live-then-LKI fallback
+/// `ability_utils::parent_target_controller` / `parent_target_owner` already use.
+fn source_controller_or_lki(state: &GameState, source_id: ObjectId) -> Option<PlayerId> {
+    state
+        .objects
+        .get(&source_id)
+        .map(|o| o.controller)
+        .or_else(|| state.lki_cache.get(&source_id).map(|lki| lki.controller))
+}
+
 impl<'a> FilterContext<'a> {
     /// Context-free object matching. Use only for constraints whose filters are
     /// printed object qualities rather than source/controller-relative clauses.
@@ -610,8 +642,11 @@ impl<'a> FilterContext<'a> {
     /// Bare context: source object known, controller derived from state.
     /// Use when no activating ability is in scope (combat restrictions, layer
     /// predicates, passive trigger condition checks).
+    ///
+    /// CR 608.2h: the controller falls back to the source's last known information
+    /// when the source has ceased to exist (CR 111.7) — see [`source_controller_or_lki`].
     pub fn from_source(state: &GameState, source_id: ObjectId) -> Self {
-        let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+        let source_controller = source_controller_or_lki(state, source_id);
         Self {
             source_id,
             source_controller,
@@ -642,7 +677,7 @@ impl<'a> FilterContext<'a> {
         source_id: ObjectId,
         recipient_id: ObjectId,
     ) -> Self {
-        let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+        let source_controller = source_controller_or_lki(state, source_id);
         Self {
             source_id,
             source_controller,
@@ -767,6 +802,58 @@ fn effective_controller(
         }
     }
     obj.controller
+}
+
+/// CR 608.2h + CR 704.5m/n: Is `candidate` attached to `referent`, as of the moment the
+/// question is asked?
+///
+/// SINGLE AUTHORITY for the attachment back-reference. Both `FilterProp::AttachedToSource`
+/// and `FilterProp::AttachedToRecipient` ask this same question and differ only in which
+/// object is the referent, so both route here rather than each re-deriving the lookup.
+///
+/// Attachment is a BATTLEFIELD-ONLY relationship, and the state-based actions tear it down
+/// the instant the host leaves: an Aura attached to an illegal object is put into its owner's
+/// graveyard (CR 704.5m) and an Equipment attached to an illegal permanent becomes unattached
+/// (CR 704.5n). So once the referent is off the battlefield, every candidate's live
+/// `attached_to` back-reference has ALREADY been cleared, and the live board cannot answer
+/// this question at all — it can only answer "no".
+///
+/// CR 608.2h routes exactly that case to last known information: "If the effect requires
+/// information from a specific object, INCLUDING THE SOURCE OF THE ABILITY ITSELF, the effect
+/// uses the current information of that object if it's in the public zone it was expected to
+/// be in; if it's no longer in that zone ... the effect uses the object's LAST KNOWN
+/// INFORMATION." The referent's expected zone is the battlefield, so:
+///
+/// * referent ON the battlefield — live: the candidate's own `attached_to` back-reference.
+/// * referent anywhere else — the exit-time attachment set captured into `state.lki_cache`
+///   by `capture_attachment_snapshot` (zones.rs) on battlefield exit.
+///
+/// The off-battlefield leg covers a merely-dead referent (nontoken, now in the graveyard) and
+/// a purged one (a token, which ceased to exist under CR 111.7 and is absent from
+/// `state.objects` entirely) with one predicate: SBA unattaches on ANY battlefield exit, so
+/// the zone — not the object's continued existence — is what decides.
+///
+/// The snapshot's `object_id` is compared for IDENTITY only and is never dereferenced, so an
+/// attachment that has itself ceased to exist since the snapshot cannot break the look-back.
+fn attached_to_referent(
+    state: &GameState,
+    referent: ObjectId,
+    candidate: &GameObject,
+    candidate_id: ObjectId,
+) -> bool {
+    let referent_on_battlefield = state
+        .objects
+        .get(&referent)
+        .is_some_and(|r| r.zone == Zone::Battlefield);
+
+    if referent_on_battlefield {
+        return candidate.attached_to.and_then(|t| t.as_object()) == Some(referent);
+    }
+
+    state
+        .lki_cache
+        .get(&referent)
+        .is_some_and(|lki| lki.attachments.iter().any(|a| a.object_id == candidate_id))
 }
 
 pub(crate) fn controller_ref_player(
@@ -1190,7 +1277,22 @@ pub fn matches_target_filter_on_battlefield_entry(
 ) -> bool {
     match event {
         ProposedEvent::ZoneChange { object_id, to, .. } if *to == Zone::Battlefield => {
-            matches_target_filter(state, *object_id, filter, ctx)
+            if let Some(entry) = state.liminal_entries.get(object_id) {
+                filter_inner_for_object(
+                    state,
+                    &entry.object,
+                    *object_id,
+                    filter,
+                    ctx.source_id,
+                    ctx.source_controller,
+                    ctx.ability,
+                    ctx.recipient_id,
+                    ctx.scoped_iteration_player,
+                    ControllerLookup::LiveOrLki,
+                )
+            } else {
+                matches_target_filter(state, *object_id, filter, ctx)
+            }
         }
         ProposedEvent::TokenEntry { entry_ref, .. } => {
             state.liminal_entries.get(entry_ref).is_some_and(|entry| {
@@ -1421,7 +1523,12 @@ pub fn matches_target_filter_on_lki_snapshot(
         cast_from_zone: None,
         played_from_zone: None,
         to_zone: Zone::Battlefield,
-        attachments: vec![],
+        // CR 608.2h: Carry the exit-time attachment set so a source-referential
+        // predicate ("if this creature is enchanted" — Dreampod Druid) reads LAST
+        // KNOWN INFORMATION rather than the empty set. SBA unattaches everything the
+        // instant the host leaves the battlefield (CR 704.5m/n), so the live board can
+        // never answer this for a source that is already gone.
+        attachments: lki.attachments.clone(),
         linked_exile_snapshot: vec![],
         is_token: false,
         combat_status: Default::default(),
@@ -3150,6 +3257,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // for this snapshot shape.
         FilterProp::Token => false,
         FilterProp::NonToken => true,
+        // SpellCastRecord does not retain the copy/representation bit. Fail
+        // closed rather than treating every cast spell as card-represented.
+        FilterProp::RepresentedByCard => false,
         FilterProp::WasPlayed => true,
         FilterProp::InZone { zone: required } => record.from_zone == *required,
         // CR 400.1 + CR 601.2a: cast-origin membership — the record's captured
@@ -3532,6 +3642,9 @@ fn matches_filter_prop(
         FilterProp::Token => obj.is_token,
         // CR 111.1: Nontoken identity of the matched object or event-time snapshot.
         FilterProp::NonToken => !obj.is_token,
+        // CR 108.2 + CR 108.2b: A card-represented object is neither a token
+        // nor an object copy. This is deliberately stricter than `NonToken`.
+        FilterProp::RepresentedByCard => obj.is_represented_by_a_card(),
         // CR 607.2d / CR 607.2m (by analogy): the object's CONTROLLER last chose
         // this anchor label ("creatures controlled by players who last chose
         // red waterfall", Two Streams Facility).
@@ -3919,12 +4032,10 @@ fn matches_filter_prop(
             }
         }
         // CR 301.5 + CR 303.4: Inverse of `EnchantedBy`/`EquippedBy` — matches
-        // when THIS object is attached TO the source (`obj.attached_to ==
-        // Some(source.id)`). Used for "Aura and Equipment attached to ~"
-        // quantity clauses on the source object (Kellan, the Fae-Blooded).
-        FilterProp::AttachedToSource => {
-            obj.attached_to.and_then(|t| t.as_object()) == Some(source.id)
-        }
+        // when THIS object is attached TO the source. Used for "Aura and
+        // Equipment attached to ~" quantity clauses on the source object
+        // (Kellan, the Fae-Blooded; Whiplash, Vengeful Engineer).
+        FilterProp::AttachedToSource => attached_to_referent(state, source.id, obj, object_id),
         // CR 301.5 + CR 303.4 + CR 613.4c + CR 109.3: Anaphoric "it" referent
         // in "for each X attached to it". Two contextual referents share the
         // same parser-emitted prop:
@@ -3946,7 +4057,7 @@ fn matches_filter_prop(
         // surrounding effect.
         FilterProp::AttachedToRecipient => {
             let referent = source.recipient_id.unwrap_or(source.id);
-            obj.attached_to.and_then(|t| t.as_object()) == Some(referent)
+            attached_to_referent(state, referent, obj, object_id)
         }
         // CR 303.4 + CR 301.5: Attachment predicate. Matches objects that have
         // at least one attachment of the given kind whose controller satisfies
@@ -4547,6 +4658,9 @@ fn zone_change_record_matches_property(
         FilterProp::Token => record.is_token,
         // CR 111.1 + CR 603.6a: Nontoken identity as of the zone change.
         FilterProp::NonToken => !record.is_token,
+        // Zone-change records do not currently snapshot copy identity. Fail
+        // closed; live layer filters use the object path above.
+        FilterProp::RepresentedByCard => false,
         // CR 305.1 + CR 601.2a: zone-change snapshots carry cast/play provenance
         // when the object was cast or played — not mere zone moves (reanimate).
         FilterProp::WasPlayed => {
@@ -4761,19 +4875,75 @@ fn zone_change_record_matches_property(
             .lki_cache
             .get(&record.object_id)
             .is_some_and(|lki| !lki.tapped),
+        // CR 508.1a + CR 608.2h: "attacked this turn" is a turn-scoped HISTORICAL FACT about
+        // the object as it most recently existed, not a query against live combat state.
+        // `creatures_attacked_this_turn` (and the per-defender
+        // `creature_attacked_defenders_this_turn`) are keyed by the battlefield ObjectId,
+        // written at attacker declaration (combat.rs) and cleared ONLY at turn cleanup
+        // (turns.rs) — never on a zone change. The ledger therefore already outlives the
+        // object, and the record carries the very id it is keyed by, so a look-back rider
+        // ("if Taigam attacked this turn" — Taigam, Ojutai Master, re-checked at resolution
+        // per CR 603.4 after the source has died) reads the SAME ledger the live evaluator
+        // uses. Mirrors the live arm exactly, and the `WasDealtDamageThisTurn` arm above.
+        //
+        // NOT A CR 400.7 VIOLATION. CR 400.7 says the object that ARRIVES in the new zone is
+        // a new object with no memory of its previous existence — and that stays true: this
+        // arm is only ever reached for a subject that is NOT on the battlefield, and it
+        // reports what the object did while it WAS there. CR 608.2h names exactly that
+        // subject: "the effect uses the object's last known information ... If an ability
+        // states that an object does something, it's the object as it exists — OR AS IT MOST
+        // RECENTLY EXISTED — that does it." Failing closed here does not protect CR 400.7; it
+        // just refuses to answer a question the game still has the record for.
+        // CR 508.1a + CR 608.2h: "attacked this turn" is a turn-scoped HISTORICAL FACT about the
+        // object as it most recently existed, not a query against live combat state.
+        // `creatures_attacked_this_turn` (and the per-defender
+        // `creature_attacked_defenders_this_turn`) are keyed by the battlefield ObjectId, written
+        // at attacker declaration (combat.rs) and cleared ONLY at turn cleanup (turns.rs) — never
+        // on a zone change. The ledger therefore already outlives the object, and the record
+        // carries the very id it is keyed by, so a look-back rider ("if Taigam attacked this
+        // turn" — Taigam, Ojutai Master, re-checked at resolution per CR 603.4 after the source
+        // has died) reads the SAME ledger the live evaluator uses. Mirrors the live arm, and the
+        // `WasDealtDamageThisTurn` arm above.
+        //
+        // NOT A CR 400.7 VIOLATION (the rationale this arm previously fail-closed on). CR 400.7
+        // governs the object that ARRIVES in the new zone — it is a new object with no memory of
+        // its previous existence, and that stays true: this arm is reached only for a subject
+        // that is NOT on the battlefield, and it reports what the object did while it WAS there.
+        // CR 608.2h names exactly that subject: "the effect uses the object's last known
+        // information ... If an ability states that an object does something, it's the object as
+        // it exists — OR AS IT MOST RECENTLY EXISTED — that does it." Failing closed did not
+        // protect CR 400.7; it declined to answer a question the game still had the record for.
+        FilterProp::AttackedThisTurn { defender } => match defender {
+            None => state
+                .creatures_attacked_this_turn
+                .contains(&record.object_id),
+            // CR 508.6 + CR 508.1b: defender-scoped — the object attacked THAT player.
+            Some(_) => state
+                .creature_attacked_defenders_this_turn
+                .get(&record.object_id)
+                .is_some_and(|defs| {
+                    defs.iter()
+                        .any(|&d| attacking_defender_matches(state, source, d, defender.as_ref()))
+                }),
+        },
+        // CR 509.1a + CR 608.2h: sibling of `AttackedThisTurn` — same durable id-keyed ledger,
+        // same look-back reasoning.
+        FilterProp::BlockedThisTurn => state.creatures_blocked_this_turn.contains(&record.object_id),
+        // CR 508.1a + CR 509.1a + CR 608.2h: disjunction of the two ledgers above.
+        FilterProp::AttackedOrBlockedThisTurn => {
+            state
+                .creatures_attacked_this_turn
+                .contains(&record.object_id)
+                || state
+                    .creatures_blocked_this_turn
+                    .contains(&record.object_id)
+        }
+
         FilterProp::IsSaddled
         | FilterProp::SaddledSource
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
-        // CR 400.7: a permanent that changes zones becomes a new object with no
-        // memory of its previous existence, so the zone-change snapshot captures
-        // no attack history. Intentionally fail-closed for both `None` (board-wide)
-        // and `Some` (defender-scoped), matching the `Attacking { defender }`
-        // look-back behavior.
-        | FilterProp::AttackedThisTurn { .. }
-        | FilterProp::BlockedThisTurn
-        | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -5896,6 +6066,7 @@ mod tests {
                 counters: Default::default(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         );
 
@@ -10171,6 +10342,7 @@ mod tests {
             counters: Default::default(),
             tapped: false,
             is_suspected: false,
+            attachments: Vec::new(),
         };
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
@@ -10216,6 +10388,7 @@ mod tests {
             counters: Default::default(),
             tapped: false,
             is_suspected: false,
+            attachments: Vec::new(),
         };
         let filter =
             TargetFilter::Typed(
@@ -10363,6 +10536,7 @@ mod tests {
             counters: Default::default(),
             tapped,
             is_suspected: false,
+            attachments: Vec::new(),
         };
 
         // Left the battlefield TAPPED.
@@ -11279,6 +11453,7 @@ mod tests {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            attachments: Vec::new(),
         };
         let land_lki = LKISnapshot {
             name: "Test Land".to_string(),
@@ -11299,6 +11474,7 @@ mod tests {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            attachments: Vec::new(),
         };
 
         let filter =
@@ -11444,6 +11620,7 @@ mod tests {
                 chosen_attributes: vec![],
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         );
 
@@ -11514,6 +11691,7 @@ mod tests {
                 chosen_attributes: vec![],
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         );
 

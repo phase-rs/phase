@@ -760,12 +760,56 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::LoopShortcut { .. } => engine::ai_support::legal_actions(state)
             .into_iter()
             .find(|action| matches!(action, GameAction::DeclineShortcut)),
+        // CR 732.2a: the finite pre-cast family has the same conservative
+        // proposer fallback as the legacy shortcut. Ask the engine for its
+        // issued decline capability instead of fabricating a route response.
+        WaitingFor::PrecastCopyShortcutOffer { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::PrecastCopyShortcut {
+                        response: engine::types::actions::PrecastCopyShortcutResponse::Decline,
+                        ..
+                    }
+                )
+            }),
         // PR-7 Phase 4c (LOW-2): self-preservation via the single-authority
         // `smart_shortcut_response` — Shorten when the polled player has a meaningful
         // way to break the loop, else Accept.
         WaitingFor::RespondToShortcut { player, .. } => Some(GameAction::RespondToShortcut {
             response: engine::ai_support::smart_shortcut_response(state, *player),
         }),
+        // CR 732.2b/c: use the same meaningful-priority probe as the legacy
+        // responder. A finite route can only shorten at its engine-issued
+        // breakpoint, so translate a legacy-style Shorten to that concrete
+        // capability; if none is issued, accepting is the only legal fallback.
+        WaitingFor::RespondToPrecastCopyShortcut {
+            player,
+            epoch,
+            breakpoint_ids,
+            ..
+        } => {
+            let response = match engine::ai_support::smart_shortcut_response(state, *player) {
+                engine::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
+                    breakpoint_ids.first().map_or(
+                        engine::types::actions::PrecastCopyShortcutResponse::Accept,
+                        |breakpoint_id| {
+                            engine::types::actions::PrecastCopyShortcutResponse::Shorten {
+                                breakpoint_id: *breakpoint_id,
+                            }
+                        },
+                    )
+                }
+                engine::analysis::loop_check::ShortcutResponse::Accept => {
+                    engine::types::actions::PrecastCopyShortcutResponse::Accept
+                }
+            };
+            Some(GameAction::PrecastCopyShortcut {
+                epoch: *epoch,
+                response,
+            })
+        }
 
         // Combat declarations: an empty declaration is NOT always legal —
         // CR 508.1d / CR 701.15b require goaded / "attacks if able" creatures
@@ -799,6 +843,23 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // CR 508.1g + CR 702.154a: Enlist is optional; the conservative
         // fallback declines while normal search evaluates legal tap choices.
         WaitingFor::EnlistChoice { .. } => Some(GameAction::ChooseEnlist { target: None }),
+
+        // CR 701.42b / CR 508.4: deadlock-safe deterministic fallbacks. Normal
+        // public `choose_action` evaluates these legal actions through search;
+        // when time expires, preserve the engine's canonical physical-pair
+        // authority before falling back to the first legal live-name choice.
+        WaitingFor::MeldPairChoice { choices, .. } => choices
+            .iter()
+            .find(|choice| engine::game::meld::is_canonical_physical_meld_pair(state, choice))
+            .or_else(|| choices.first())
+            .map(|choice| GameAction::ChooseMeldPair {
+                source_id: choice.source_id,
+                partner_id: choice.partner_id,
+            }),
+        WaitingFor::MeldAttackTargetChoice { valid_targets, .. } => valid_targets
+            .first()
+            .copied()
+            .map(|target| GameAction::ChooseEntryAttackTarget { target }),
 
         // Target selection: skip optional slots, fizzle mandatory ones.
         // TriggerTargetSelection is not a pending cast — the trigger is
@@ -1547,6 +1608,16 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                 }
             }
             Some(GameAction::ChooseKeptCreatures { kept })
+        }
+
+        // CR 101.4 + CR 701.21a: choose a valid exact-size baseline subset.
+        WaitingFor::KeepExactPermanentsChoice {
+            eligible,
+            required_count,
+            ..
+        } => {
+            let kept = eligible.iter().copied().take(*required_count).collect();
+            Some(GameAction::ChooseKeptPermanents { kept })
         }
 
         // CR 700.3: Pile-separation fallbacks — empty pile-A partition (every
@@ -2960,6 +3031,137 @@ mod tests {
             fallback_action(&state),
             Some(GameAction::DeclineShortcut),
             "the no-score fallback must select DeclineShortcut from engine legal actions"
+        );
+    }
+
+    /// CR 701.42b: the public search path prefers the physical canonical meld
+    /// pair over an earlier live-name impostor that would exile both selected
+    /// objects without producing the result permanent. This proves the choice
+    /// is handled by ordinary simulation/evaluation, not bespoke name scoring.
+    #[test]
+    fn choose_action_simulates_meld_pair_outcomes() {
+        use engine::types::ability::{PermanentEntryMode, PtValue};
+        use engine::types::card::CardFace;
+        use engine::types::game_state::{MeldPairRecord, MeldSelection};
+
+        const SOURCE: &str = "AI Meld Source";
+        const PARTNER: &str = "AI Meld Partner";
+        const RESULT: &str = "AI Meld Result";
+
+        let mut state = make_state();
+        let impostor_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let impostor_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        for (id, live_name, base_name) in [
+            (impostor_source, SOURCE, "Printed Impostor Source"),
+            (impostor_partner, PARTNER, "Printed Impostor Partner"),
+            (real_source, SOURCE, SOURCE),
+            (real_partner, PARTNER, PARTNER),
+        ] {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.name = live_name.to_string();
+            object.base_name = base_name.to_string();
+        }
+        let mut result = CardFace {
+            name: RESULT.to_string(),
+            power: Some(PtValue::Fixed(9)),
+            toughness: Some(PtValue::Fixed(9)),
+            ..CardFace::default()
+        };
+        result.card_type.core_types.push(CoreType::Creature);
+        Arc::make_mut(&mut state.card_face_registry).insert(RESULT.to_lowercase(), result);
+        Arc::make_mut(&mut state.meld_pair_registry).insert(
+            format!("{}\0{}", SOURCE.to_lowercase(), PARTNER.to_lowercase()),
+            MeldPairRecord {
+                source: SOURCE.to_string(),
+                partner: PARTNER.to_string(),
+                result: RESULT.to_string(),
+            },
+        );
+        let selection = |source_id, partner_id| MeldSelection {
+            source_id,
+            partner_id,
+            controller: PlayerId(0),
+            expected_source: SOURCE.to_string(),
+            expected_partner: PARTNER.to_string(),
+            result: RESULT.to_string(),
+            entry: PermanentEntryMode::Normal,
+        };
+        state.waiting_for = WaitingFor::MeldPairChoice {
+            player: PlayerId(0),
+            choices: vec![
+                selection(impostor_source, impostor_partner),
+                selection(real_source, real_partner),
+            ],
+        };
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(9);
+        let mut rng = SmallRng::seed_from_u64(9);
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseMeldPair {
+                source_id: real_source,
+                partner_id: real_partner,
+            })
+        );
+    }
+
+    /// CR 701.42b: even when search cannot run, the deterministic fallback
+    /// prefers the canonical physical pair over an earlier live-name impostor.
+    #[test]
+    fn meld_pair_fallback_prefers_canonical_pair_in_hostile_order() {
+        use engine::types::ability::PermanentEntryMode;
+        use engine::types::game_state::{MeldPairRecord, MeldSelection};
+
+        const SOURCE: &str = "Fallback Meld Source";
+        const PARTNER: &str = "Fallback Meld Partner";
+        const RESULT: &str = "Fallback Meld Result";
+
+        let mut state = make_state();
+        let impostor_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let impostor_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        for (id, base_name) in [
+            (impostor_source, "Printed Impostor Source"),
+            (impostor_partner, "Printed Impostor Partner"),
+            (real_source, SOURCE),
+            (real_partner, PARTNER),
+        ] {
+            state.objects.get_mut(&id).unwrap().base_name = base_name.to_string();
+        }
+        Arc::make_mut(&mut state.meld_pair_registry).insert(
+            format!("{}\0{}", SOURCE.to_lowercase(), PARTNER.to_lowercase()),
+            MeldPairRecord {
+                source: SOURCE.to_string(),
+                partner: PARTNER.to_string(),
+                result: RESULT.to_string(),
+            },
+        );
+        let selection = |source_id, partner_id| MeldSelection {
+            source_id,
+            partner_id,
+            controller: PlayerId(0),
+            expected_source: SOURCE.to_string(),
+            expected_partner: PARTNER.to_string(),
+            result: RESULT.to_string(),
+            entry: PermanentEntryMode::Normal,
+        };
+        state.waiting_for = WaitingFor::MeldPairChoice {
+            player: PlayerId(0),
+            choices: vec![
+                selection(impostor_source, impostor_partner),
+                selection(real_source, real_partner),
+            ],
+        };
+
+        assert_eq!(
+            fallback_action(&state),
+            Some(GameAction::ChooseMeldPair {
+                source_id: real_source,
+                partner_id: real_partner,
+            })
         );
     }
 

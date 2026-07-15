@@ -10,9 +10,9 @@ use crate::types::actions::{
 };
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
-    ActionResult, AssistState, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode,
-    CostResume, GameState, LandPlayRecord, LoopDetectionMode, MayTriggerAutoChoiceKey, PayCostKind,
-    RetargetScope, StackEntry, StackEntryKind, WaitingFor,
+    ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
+    ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode, MayTriggerAutoChoiceKey,
+    PayCostKind, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -2229,6 +2229,11 @@ fn pass_priority_once_with_pipeline(
     events: &mut Vec<GameEvent>,
     stack_resolution_limit: Option<u32>,
 ) -> Result<WaitingFor, EngineError> {
+    if let WaitingFor::Priority { player } = &state.waiting_for {
+        if super::precast_copy_shortcut::blocks_pass(state, *player) {
+            return Ok(state.waiting_for.clone());
+        }
+    }
     state.cancelled_casts.clear();
     // CR 117.4 + 608.1: When all players pass in succession the stack begins
     // resolving; at that moment the AI guard against re-activating pending
@@ -2476,6 +2481,9 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
         match &result.waiting_for {
             WaitingFor::Priority { player } => {
                 let player = *player;
+                if super::precast_copy_shortcut::blocks_pass(state, player) {
+                    break;
+                }
                 let decision = priority_auto_pass_decision(state, player);
                 match decision {
                     AutoPassDecision::Exit => {
@@ -2852,58 +2860,11 @@ fn apply_action(
         });
     }
 
-    // CR 603.3b: SetTriggerOrderTemplate propagates the actor's saved trigger-ordering
-    // templates (persistent, `AllCopies`-keyed). Mirrors SetMayTriggerAutoChoice: pure
-    // preference state, routed by `actor`, handled before the loop-ring / auto-pass
-    // teardown so it is a legal any-state mutation. Actor scoping is enforced by forcing
-    // `owner`/key player to `actor`, so a player can only mutate their own templates.
+    // CR 603.3b: Preferences are written only by a live `OrderTriggers` response.
+    // This public action can only forget the actor's saved preferences and remains a
+    // legal any-state, actor-scoped preference action.
     if let GameAction::SetTriggerOrderTemplate { op } = &action {
-        use crate::analysis::decision_template::{
-            DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
-        };
-        use crate::types::game_state::YieldTarget;
         match op {
-            TriggerOrderTemplateOp::Save { sources, order } => {
-                // `order[pos]` = index into `sources` of the trigger the player placed
-                // at ordering position `pos` (same convention as `OrderTriggers`).
-                // Resolve each source id → its `AllCopies` card identity (CR 704.5d, so
-                // the template survives token death / re-entry) and pin it at `pos`. A
-                // source that no longer resolves is skipped defensively — a divergent
-                // template simply won't cover a future batch (re-prompt), never a wrong
-                // order.
-                let mut decisions = Vec::with_capacity(order.len());
-                let mut key_sources = Vec::with_capacity(order.len());
-                for (pos, &src_idx) in order.iter().enumerate() {
-                    let Some(&source_id) = sources.get(src_idx) else {
-                        continue;
-                    };
-                    let Some(card_id) = state.objects.get(&source_id).map(|o| o.card_id) else {
-                        continue;
-                    };
-                    let src = YieldTarget::AllCopies {
-                        card_id,
-                        trigger_description: None,
-                    };
-                    decisions.push(PinnedDecision::Order {
-                        source: src.clone(),
-                        pos: pos as u8,
-                    });
-                    key_sources.push(src);
-                }
-                let tmpl = DecisionTemplate {
-                    owner: actor,
-                    decisions,
-                    replay: ReplayMode::Static,
-                    key: DecisionGroupKey::from_sources(
-                        &key_sources,
-                        DecisionKind::TriggerOrdering,
-                    ),
-                };
-                state.set_trigger_order_template(tmpl);
-            }
-            TriggerOrderTemplateOp::Remove { key } => {
-                state.remove_trigger_order_template(actor, key);
-            }
             TriggerOrderTemplateOp::ClearAll => {
                 state.clear_trigger_order_templates(actor);
             }
@@ -3085,6 +3046,12 @@ fn apply_action(
         state.loop_detect_ring.clear();
     }
 
+    // Keep the semantic owner of the prompt before reducing it. Under turn
+    // control this can differ from the authenticated submitter; a successful
+    // action discharges a shortened shortcut only for that owner.
+    let semantic_actor = state.waiting_for.acting_player().unwrap_or(actor);
+    let action_for_divergence = action.clone();
+
     // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass.
     // CR 103.5: Use the authenticated `actor` directly so the simultaneous mulligan
     // variants (where `authorized_submitter` is None when multiple players are pending)
@@ -3127,6 +3094,12 @@ fn apply_action(
                 != turn_control::authorized_submitter_for_player(state, *player)
             {
                 return Err(EngineError::NotYourPriority);
+            }
+            if super::precast_copy_shortcut::blocks_pass(state, *player) {
+                return Err(EngineError::ActionNotAllowed(
+                    "A shortened pre-cast shortcut requires a different meaningful action before passing"
+                        .to_string(),
+                ));
             }
             let wf = pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit)?;
             return Ok(ActionResult {
@@ -4374,6 +4347,13 @@ fn apply_action(
         (WaitingFor::LoopShortcut { .. }, GameAction::DeclineShortcut) => {
             return handle_decline_shortcut(state, &mut events);
         }
+        // The finite pre-cast protocol is intentionally isolated from the
+        // legacy generic loop-shortcut handlers above.
+        (
+            WaitingFor::PrecastCopyShortcutOffer { .. }
+            | WaitingFor::RespondToPrecastCopyShortcut { .. },
+            GameAction::PrecastCopyShortcut { epoch, response },
+        ) => super::precast_copy_shortcut::handle(state, actor, epoch, response, &mut events)?,
         // CR 732.2b/c: an opponent answers the loop-shortcut offer.
         (
             WaitingFor::RespondToShortcut {
@@ -6044,13 +6024,14 @@ fn apply_action(
             super::morph::play_face_down(state, p, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
-        (WaitingFor::Priority { player }, GameAction::TurnFaceUp { object_id }) => {
+        (WaitingFor::Priority { player }, GameAction::TurnFaceUp { object_id, x }) => {
             if state.priority_player
                 != turn_control::authorized_submitter_for_player(state, *player)
             {
                 return Err(EngineError::NotYourPriority);
             }
             let p = *player;
+            let announced_x = x;
             // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b + CR 106.6: turning
             // a face-down permanent face up is a special action whose morph/disguise/
             // manifest cost must be paid *before* the flip. `turn_face_up_prepare`
@@ -6060,12 +6041,47 @@ fn apply_action(
             // Gossip) is eligible here while other-context mana is rejected. Mirrors
             // the `UnlockDoor` special-action handler.
             let cost = super::morph::turn_face_up_prepare(state, object_id, p)?;
-            let cost = casting::apply_special_action_cost_reduction(
+            let mut cost = casting::apply_special_action_cost_reduction(
                 state,
                 p,
                 crate::types::mana::SpecialAction::TurnFaceUp,
                 cost,
             );
+
+            // CR 107.3d: "If a cost associated with a special action, such as a suspend
+            // cost or a morph cost, has an {X} ... in it, the value of X is chosen by the
+            // player taking the special action immediately before they pay that cost."
+            // The announcement happens HERE — inside the action, with no priority window
+            // between choosing X and paying it, exactly as the rule describes.
+            //
+            // Warbreak Trumpeter (Morph {X}{X}{R}), Bane of the Living (Morph {X}{B}{B})
+            // and Aurelia's Vindicator (Disguise {X}{3}{W}) are the live faces.
+            let has_x = casting_costs::cost_has_x(&cost);
+            if has_x {
+                // CR 118.3: a player can't announce an X they cannot pay for. The cap is
+                // computed with `object_id: None` deliberately — this is a SPECIAL ACTION,
+                // not a cast, so cast-time cost modifiers and floors must not apply (the
+                // special-action reduction was already applied above).
+                let max_x = casting_costs::max_x_value(state, p, &cost, None);
+                if announced_x > max_x {
+                    return Err(EngineError::InvalidAction(format!(
+                        "X={announced_x} exceeds the maximum payable value of {max_x} for this \
+                         turn-face-up cost"
+                    )));
+                }
+                // CR 107.1b + CR 601.2f: each `{X}` shard becomes `announced_x` generic, so
+                // Warbreak Trumpeter's `{X}{X}{R}` costs 2X + {R}. Without this the X shards
+                // reach mana payment unresolved and are dropped — the permanent flips for
+                // its non-X remainder alone.
+                cost.concretize_x(announced_x);
+            } else if announced_x != 0 {
+                // A cost with no {X} admits no choice: CR 107.3d only grants one "if a cost
+                // ... has an {X} ... in it". Reject rather than silently ignore, so a client
+                // bug cannot masquerade as a legal flip.
+                return Err(EngineError::InvalidAction(
+                    "This permanent's turn-face-up cost has no {X}, so X must be 0".to_string(),
+                ));
+            }
             casting::pay_special_action_mana_cost(
                 state,
                 p,
@@ -6074,6 +6090,29 @@ fn apply_action(
                 crate::types::mana::SpecialAction::TurnFaceUp,
                 &mut events,
             )?;
+
+            // CR 702.37f (morph) / CR 702.168e (disguise): "If a permanent's morph cost
+            // includes X, other abilities of that permanent may also refer to X. The value
+            // of X in those abilities is equal to the value of X chosen as the morph special
+            // action was taken." Publish the announced X on the source-keyed carrier BEFORE
+            // the flip emits `TurnedFaceUp`, so `triggers::build_triggered_ability` — the
+            // single trigger-instantiation authority — stamps it onto the turn-face-up
+            // trigger's `chosen_x`.
+            //
+            // The stamp must land at INSTANTIATION, not resolution: Aurelia's Vindicator
+            // spends its X in `multi_target.max` ("exile up to X other target creatures"),
+            // which is consumed during target selection, before the trigger ever resolves.
+            //
+            // Published only when the cost actually HAS an {X} (CR 107.3d grants a choice
+            // only then). A no-X flip leaves the carrier untouched rather than clobbering it
+            // with `Some((.., 0))`: an unrelated activated ability of ANOTHER object may be
+            // on the stack with its own announced X in flight, and that value must survive.
+            // The carrier is cleared at the start of the next `resolve_top`, so this
+            // publication cannot outlive the trigger it is for.
+            if has_x {
+                state.announced_source_x = Some((object_id, announced_x));
+            }
+
             super::morph::turn_face_up(state, p, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
@@ -6225,6 +6264,12 @@ fn apply_action(
             GameAction::PassParadigmOffer,
         ) => WaitingFor::Priority { player: *player },
         (WaitingFor::Priority { player }, GameAction::SetAutoPass { mode }) => {
+            if super::precast_copy_shortcut::blocks_pass(state, *player) {
+                return Err(EngineError::ActionNotAllowed(
+                    "A shortened pre-cast shortcut requires a different meaningful action before passing"
+                        .to_string(),
+                ));
+            }
             // Convert request to stored mode, capturing engine state as needed.
             let stored_mode = match mode {
                 AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
@@ -6640,6 +6685,7 @@ fn apply_action(
                         pending.ability,
                         pending.activation_cost.as_ref(),
                         pending.activation_residual,
+                        pending.pending_loyalty_activation_player,
                         &mut events,
                     )?
                 } else {
@@ -6847,6 +6893,16 @@ fn apply_action(
         }
     };
 
+    // A shortened shortcut is discharged only by an action the normal reducer
+    // accepted. In particular, a rejected cast/land attempt must leave the
+    // CR 732.2c divergence requirement armed; preference actions returned
+    // earlier and priority passes never reach this successful-reducer seam.
+    super::precast_copy_shortcut::note_meaningful_action(
+        state,
+        semantic_actor,
+        &action_for_divergence,
+    );
+
     // Run post-action pipeline (SBAs, triggers, layers) and check for terminal states.
     // When triggers were already processed inline (e.g., DeclareAttackers, combat damage),
     // pass the flag to skip the trigger scan but still run SBAs, delayed triggers, and layers.
@@ -6986,6 +7042,34 @@ fn apply_retarget(
     Ok(state.waiting_for.clone())
 }
 
+/// CR 603.3c + CR 608.2c: Drop a mid-construction optional triggered modal that
+/// was declined before mode choice.
+pub(super) fn drop_mid_construction_pending_trigger(state: &mut GameState) {
+    if let Some(entry_id) = state.pending_trigger_entry.take() {
+        if state.stack.back().map(|e| e.id) == Some(entry_id) {
+            state.stack.pop_back();
+            state.stack_paid_facts.remove(&entry_id);
+            state.stack_trigger_event_batches.remove(&entry_id);
+        }
+    }
+    state.pending_trigger = None;
+}
+
+/// Clear optionality after the controller accepts a "you may choose N" gate so
+/// mode choice can proceed and resolution does not re-prompt.
+pub(super) fn clear_pending_trigger_optional(state: &mut GameState) {
+    if let Some(trigger) = state.pending_trigger.as_mut() {
+        trigger.ability.optional = false;
+    }
+    if let Some(entry_id) = state.pending_trigger_entry {
+        if let Some(entry) = state.stack.iter_mut().find(|e| e.id == entry_id) {
+            if let Some(ability) = entry.ability_mut() {
+                ability.optional = false;
+            }
+        }
+    }
+}
+
 /// Run state-based actions, exile returns, delayed triggers, and trigger processing
 /// after an action that produced `WaitingFor::Priority`. Returns the resulting
 /// `WaitingFor` state — may be terminal (GameOver, interactive choice) or
@@ -7011,17 +7095,23 @@ pub(super) fn begin_pending_trigger_target_selection(
             let source_id = trigger.source_id;
             let mode_abilities = trigger.mode_abilities.clone();
             let trigger_event = trigger.trigger_event.clone();
+            // Clone optional-gate fields before any `&mut state` borrow so the
+            // `pending_trigger` imm borrow from `trigger` does not overlap.
+            let ability_optional = trigger.ability.optional;
+            let may_trigger_origin = trigger.may_trigger_origin;
+            let trigger_description = trigger.description.clone();
             let trigger_events = if state.pending_trigger_event_batch.is_empty() {
                 trigger_event.iter().cloned().collect::<Vec<_>>()
             } else {
                 state.pending_trigger_event_batch.clone()
             };
             let subject_match_count = trigger.subject_match_count;
+            let modal = modal.clone();
             let modal = modal_choice_for_player(
                 state,
                 player,
                 source_id,
-                modal,
+                &modal,
                 &crate::types::ability::SpellContext::default(),
             );
             let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
@@ -7102,6 +7192,48 @@ pub(super) fn begin_pending_trigger_target_selection(
                 }
                 state.pending_trigger = None;
                 return Ok(None);
+            }
+
+            // CR 608.2c: "you may choose N" (Shadrix Silverquill) — modes are
+            // chosen as the triggered ability is put on the stack (CR 700.2b +
+            // CR 603.3d). Offer the decline first so accepting still requires
+            // exactly `min_choices` modes; declining removes the mid-construction
+            // stack entry without choosing zero modes (count stays fixed).
+            if ability_optional {
+                let may_trigger_key = may_trigger_origin.map(|origin| MayTriggerAutoChoiceKey {
+                    player,
+                    source_id,
+                    origin,
+                });
+                if let Some(ref key) = may_trigger_key {
+                    if let Some(choice) = state.may_trigger_auto_choice(key) {
+                        match choice {
+                            AutoMayChoice::Decline => {
+                                drop_mid_construction_pending_trigger(state);
+                                return Ok(None);
+                            }
+                            AutoMayChoice::Accept => {
+                                clear_pending_trigger_optional(state);
+                                return Ok(Some(WaitingFor::AbilityModeChoice {
+                                    player,
+                                    modal,
+                                    source_id,
+                                    mode_abilities,
+                                    is_activated: false,
+                                    ability_index: None,
+                                    ability_cost: None,
+                                    unavailable_modes,
+                                }));
+                            }
+                        }
+                    }
+                }
+                return Ok(Some(WaitingFor::OptionalEffectChoice {
+                    player,
+                    source_id,
+                    description: trigger_description,
+                    may_trigger_key,
+                }));
             }
 
             return Ok(Some(WaitingFor::AbilityModeChoice {

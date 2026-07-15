@@ -122,6 +122,53 @@ Stack resolves later:
 
 ---
 
+## The Purged Source — Last Known Information (CR 608.2h)
+
+**A trigger routinely has to answer questions about an object that no longer exists.** The
+source dies and its own dies-trigger asks "if you control a Zombie"; a token sacrifices
+itself and the CR 111.7 SBA purges it from `state.objects` before the ability resolves. A
+live-only lookup answers `false`/`None` there, and the ability silently fails to fire or is
+removed from the stack — CR 113.7a says the ability on the stack exists independently of its
+source, so the source's death must **not** make its own predicates unanswerable.
+
+**CR 608.2h is the rule:** if the object is no longer in the public zone the effect expected
+it in, "the effect uses the object's **last known information**." (CR 608.2i is the
+narrower look-back rule for effects that ask about *previous game states* — attacked this
+turn, etc.)
+
+**The mechanism.** `apply_zone_exit_cleanup()` (`game/zones.rs`) captures an `LKISnapshot`
+into `state.lki_cache` on every battlefield/exile exit — name, P/T, base P/T, core types,
+counters, controller, and the **pre-sever attachment set**. Live state always wins; LKI
+answers only when the object is gone, so every LKI-aware helper is a strict no-op for a
+source that still exists.
+
+**Use the LKI-aware helpers — never a bare live lookup:**
+
+| Question | Helper | Where |
+|---|---|---|
+| Does the trigger's **subject** match this filter? | `subject_filter_matches_with_lki()` | `game/trigger_matchers.rs` — single authority for `match_sacrificed`, `exploiter_matches_subject_filter`, `match_connives` |
+| Who is "you" for a source-relative `ControllerRef::You`? | `source_controller_or_lki()` | `game/filter.rs` — feeds `FilterContext`; the CR 603.4 intervening-if re-check runs *after* the SBA purge |
+
+**Two traps that decide whether your test proves anything:**
+
+- **Attachments do NOT survive on the live object.** CR 704.5m/n unattach an Aura/Equipment
+  as an SBA the moment the permanent leaves, and
+  `sever_battlefield_attachment_graph_on_exit` empties the list *before* cleanup runs. Only
+  `LKISnapshot::attachments` still holds it — an "if it was equipped" predicate that reads
+  the live object reads an empty set, and always answers `false`.
+- **Attack/block history DOES survive.** It lives in durable, `ObjectId`-keyed ledgers on
+  `GameState` (`creatures_attacked_this_turn`,
+  `creature_attacked_defenders_this_turn`, `creatures_blocked_this_turn`), not on the
+  object, so a purged source's `AttackedThisTurn` (CR 508.1a) is still answerable.
+
+**Non-vacuity:** a printed card keeps its `core_types` and `controller` across a zone change
+and `filter_inner` has no zone gate, so a regression test that merely moves a printed
+creature to the graveyard **passes either way and proves nothing**. The vector that actually
+discriminates an LKI path from a bare live match is the **ceased-to-exist token** (CR 111.7)
+— use one.
+
+---
+
 ## Checklist — Adding a New Trigger
 
 ### Phase 1 — Type Definition
@@ -207,6 +254,9 @@ The trigger pipeline responds to `GameEvent` variants. If no existing event cove
 - [ ] **`crates/engine/src/types/game_state.rs` — tracking state** (if new constraint)
   `OncePerTurn` uses `triggers_fired_this_turn: HashSet`. `OncePerGame` uses `triggers_fired_this_game: HashSet`. If you need new tracking, add it to `GameState`.
 
+- [ ] **LKI: can the source or subject be GONE when this condition is checked?**
+  If yes (dies triggers, sacrifice triggers, self-exploiting tokens, any intervening-if re-checked at resolution per CR 603.4), route the lookup through `subject_filter_matches_with_lki()` / `source_controller_or_lki()` — see [The Purged Source](#the-purged-source--last-known-information-cr-6082h). A bare live lookup fails closed and the ability silently never fires.
+
 ### Phase 7 — Stack Resolution
 
 - [ ] **`crates/engine/src/game/stack.rs` — `resolve_top()`**
@@ -261,6 +311,9 @@ Used by all matchers — always call this instead of reimplementing filter logic
 | APNAP ordering wrong | Triggers resolve in wrong player order | `process_triggers()` handles this — don't manually reorder |
 | `trigger_zones` empty (default) | Trigger only fires from battlefield, not graveyard | Set `trigger_zones: vec![Zone::Graveyard]` for dies triggers that work from graveyard |
 | Forgetting `valid_card: Some(SelfRef)` on "When ~" triggers | Trigger fires for any permanent, not just the source | Set valid_card for self-triggers |
+| Live-only lookup for a source/subject that may be purged | Fails closed (CR 608.2h): a dies/sacrifice trigger's own intervening-if reads `false` and the ability is removed from the stack | Use `subject_filter_matches_with_lki()` / `source_controller_or_lki()` |
+| Reading attachments off a purged object | CR 704.5m/n already unattached them; the live list is empty and "if it was equipped" always answers `false` | Read `LKISnapshot::attachments` (the pre-sever set) |
+| LKI regression test that moves a printed creature to the graveyard | **Vacuous** — the card keeps `core_types`/`controller` across zones, so the test passes without the LKI path | Discriminate with a ceased-to-exist **token** (CR 111.7) |
 
 ---
 
@@ -279,6 +332,10 @@ rg -q "fn process_triggers" crates/engine/src/game/triggers.rs && \
 rg -q "fn collect_matching_triggers" crates/engine/src/game/triggers.rs && \
 rg -q "fn extract_target_filter_from_effect" crates/engine/src/game/triggers.rs && \
 rg -q "fn build_trigger_registry" crates/engine/src/game/trigger_matchers.rs && \
+rg -q "fn subject_filter_matches_with_lki" crates/engine/src/game/trigger_matchers.rs && \
+rg -q "fn source_controller_or_lki" crates/engine/src/game/filter.rs && \
+rg -q "fn apply_zone_exit_cleanup" crates/engine/src/game/zones.rs && \
+rg -q "struct LKISnapshot" crates/engine/src/types/game_state.rs && \
 rg -q "struct TriggerDefinition" crates/engine/src/types/ability.rs && \
 rg -q "enum TriggerMode" crates/engine/src/types/triggers.rs && \
 rg -q "enum TriggerConstraint" crates/engine/src/types/ability.rs && \

@@ -4452,6 +4452,11 @@ pub(super) fn apply_clause_continuation(
                     // applying them unconditionally.
                     *enters_modified_if = moved_filter;
                 }
+                Effect::Meld { entry, .. } => {
+                    *entry = crate::types::ability::PermanentEntryMode::TappedAndAttacking {
+                        destination: crate::types::ability::EntryAttackDestination::AnyDefender,
+                    };
+                }
                 _ => {}
             }
         }
@@ -5864,7 +5869,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::CreateEmblem { .. }
         | Effect::CastFromZone { .. }
         | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDrawReplacement { .. }
@@ -6888,9 +6893,12 @@ pub(super) fn parse_followup_continuation_ast(
         }
         // CR 508.4 / CR 614.1: "It/The token enters tapped and attacking" (singular)
         // or "They/Those tokens enter tapped and attacking" (plural)
-        // after CopyTokenOf or Token. Tokens/copies always enter
+        // after CopyTokenOf, Token, or Meld. Tokens/copies always enter
         // unconditionally — no moved-object type gate applies.
-        Effect::CopyTokenOf { .. } | Effect::Token { .. }
+        // CR 701.42c: a successfully melded permanent is the single object
+        // entering in the follow-up sentence, so the same entry modifier is
+        // applied to the preceding Meld effect.
+        Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::Meld { .. }
             if nom_primitives::scan_contains(&lower, "enters tapped and attacking")
                 || nom_primitives::scan_contains(&lower, "enter tapped and attacking") =>
         {
@@ -8544,6 +8552,7 @@ mod tests {
             choose_filter: TargetFilter::Typed(TypedFilter::permanent()),
             sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
             total_power_cap: None,
+            keeper_constraint: None,
         };
         assert_eq!(
             parse_followup_continuation_ast(

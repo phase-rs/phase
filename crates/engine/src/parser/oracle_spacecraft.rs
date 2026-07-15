@@ -30,7 +30,7 @@ use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
-use super::oracle_keyword::parse_keyword_from_oracle;
+use super::oracle_keyword::parse_granted_keyword_fragment;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_special::normalize_self_refs_for_static;
 use super::oracle_static::{parse_static_line, parse_static_line_multi};
@@ -299,7 +299,7 @@ fn parse_keyword_only_body(body: &str) -> Option<Vec<ContinuousModification>> {
     let mut mods = Vec::with_capacity(parts.len());
     for part in parts {
         let lower = part.trim_end_matches('.').to_lowercase();
-        let kw = parse_keyword_from_oracle(&lower)?;
+        let kw = parse_granted_keyword_fragment(&lower)?;
         if matches!(kw, Keyword::Unknown(_)) {
             return None;
         }

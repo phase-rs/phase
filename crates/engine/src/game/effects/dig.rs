@@ -910,8 +910,8 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
         };
-        state.pending_continuation =
-            Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
+        state.pending_continuation = Some(PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
@@ -919,7 +919,9 @@ mod tests {
                 vec![],
                 ObjectId(100),
                 PlayerId(0),
-            ))));
+            )),
+            &state,
+        ));
 
         let mut events = Vec::new();
         let outcome = handle_resolution_choice(
@@ -1190,7 +1192,7 @@ mod tests {
             use_lki: false,
             subject_slot: None,
         });
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life), &state));
 
         let mut events = Vec::new();
         let outcome = handle_resolution_choice(
@@ -1256,7 +1258,7 @@ mod tests {
         gain_life.condition = Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::effect_performed()),
         });
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life), &state));
 
         let mut events = Vec::new();
         let outcome = handle_resolution_choice(
@@ -1322,7 +1324,7 @@ mod tests {
         gain_life.condition = Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::effect_performed()),
         });
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life), &state));
 
         let mut events = Vec::new();
         let outcome = handle_resolution_choice(

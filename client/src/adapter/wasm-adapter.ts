@@ -7,6 +7,8 @@ import type {
   GameState,
   LegalActionsResult,
   MatchConfig,
+  ObjectId,
+  PersistedGameState,
   PlayerId,
   SubmitResult,
   ViewerSnapshot,
@@ -253,6 +255,16 @@ export class WasmAdapter implements EngineAdapter {
     }
   }
 
+  async previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]> {
+    this.assertInitialized();
+    try {
+      if (this.engine) return await this.engine.previewManaPayment(actor, action);
+      return await this.fallback!.previewManaPayment(action, actor);
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
   async getState(): Promise<GameState> {
     this.assertInitialized();
     try {
@@ -456,12 +468,23 @@ export class WasmAdapter implements EngineAdapter {
     throw new Error("resolveAll requires worker-based engine");
   }
 
-  async restoreState(state: GameState): Promise<void> {
+  async restoreState(state: PersistedGameState): Promise<void> {
     this.assertInitialized();
     await this.ensureCardDb();
     const json = JSON.stringify(state);
     if (this.engine) await this.engine.restoreState(json);
     else await this.fallback!.restoreState(json);
+  }
+
+  /**
+   * Export the engine-authored trusted persistence envelope. The local store
+   * may retain this opaque JSON, but only the engine decodes its private route
+   * runtime on restore.
+   */
+  async exportPersistenceState(): Promise<string> {
+    this.assertInitialized();
+    if (this.engine) return this.engine.exportState();
+    return this.fallback!.exportState();
   }
 
   /**
@@ -506,7 +529,7 @@ export class WasmAdapter implements EngineAdapter {
    * Distinct from `restoreState` (undo semantics, deterministic re-seed).
    * Mirrors `server-core::GameSession::from_persisted`.
    */
-  async resumeMultiplayerHostState(state: GameState): Promise<void> {
+  async resumeMultiplayerHostState(state: PersistedGameState): Promise<void> {
     this.assertInitialized();
     const json = JSON.stringify(state);
     if (this.engine) {
@@ -661,6 +684,7 @@ export class WasmAdapter implements EngineAdapter {
 interface MainThreadFallback {
   ensureCardDatabase(): Promise<number>;
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
   getState(): Promise<GameState>;
   getFilteredState(viewerId: number): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
@@ -668,6 +692,7 @@ interface MainThreadFallback {
   getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult>;
   getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot>;
   getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null>;
+  exportState(): Promise<string>;
   restoreState(stateJson: string): Promise<void>;
   resumeMultiplayerHostState(stateJson: string): void;
   setMultiplayerMode(enabled: boolean): void;
@@ -710,6 +735,13 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         const r = wasm.submit_action(actor, action);
         if (typeof r === "string") throw new Error(r);
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
+      }),
+
+    previewManaPayment: (action: GameAction, actor: PlayerId) =>
+      enqueue(() => {
+        const sources = wasm.preview_mana_payment_js(actor, action);
+        if (typeof sources === "string") throw new Error(sources);
+        return sources as ObjectId[];
       }),
 
     // null from any of these three getters means WASM `GAME_STATE` is None
@@ -771,6 +803,8 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         const r = wasm.get_ai_action(difficulty, playerId);
         return (r ?? null) as GameAction | null;
       }),
+
+    exportState: () => enqueue(() => wasm.export_game_state_json()),
 
     restoreState: (stateJson: string) =>
       enqueue(() => wasm.restore_game_state(stateJson)),

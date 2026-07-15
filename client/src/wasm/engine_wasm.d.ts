@@ -238,6 +238,18 @@ export function is_card_commander_eligible(name: string): boolean;
 export function is_multiplayer_mode(): boolean;
 
 /**
+ * Read-only preview of cast-time target slots for a currently castable spell.
+ * Returns `[]` for uncastable, untargeted, or target-ambiguous casts.
+ */
+export function legal_targets_for_castable_js(object_id: number): any;
+
+/**
+ * Batch variant for hover/drag clients that need previews for many castable
+ * cards. The engine flushes layers once and reuses that snapshot for every id.
+ */
+export function legal_targets_for_castables_js(object_ids: any): any;
+
+/**
  * Returns the engine-typed catalog of debug-spawnable token presets,
  * loaded from `crates/engine/data/known-tokens.toml`. Read by the debug UI
  * to populate the Create Token dropdown — frontend never derives this list.
@@ -282,6 +294,14 @@ export function ping(): string;
  * an error string when `action` is malformed or illegal in the current state.
  */
 export function preview_action_js(actor: number, action: any): any;
+
+/**
+ * Non-mutating automatic spell-payment preview. The engine simulates the
+ * exact, currently legal `CastSpell` action and returns the permanent ids that
+ * produced mana before that spell was committed to the stack. It returns an
+ * empty array when the cast needs another choice before payment can be final.
+ */
+export function preview_mana_payment_js(actor: number, action: any): any;
 
 /**
  * Project an authoritative seat view from Rust so frontend transports do not
@@ -443,10 +463,13 @@ export interface InitOutput {
     readonly isCardCommanderEligibleForFormat: (a: number, b: number, c: any) => number;
     readonly is_card_commander_eligible: (a: number, b: number) => number;
     readonly is_multiplayer_mode: () => number;
+    readonly legal_targets_for_castable_js: (a: number) => any;
+    readonly legal_targets_for_castables_js: (a: any) => any;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly ping: () => [number, number];
     readonly preview_action_js: (a: number, b: any) => any;
+    readonly preview_mana_payment_js: (a: number, b: any) => any;
     readonly project_seat_view: (a: number, b: number) => [number, number, number];
     readonly replay_seek_js: (a: number) => [number, number, number];
     readonly resolve_all: (a: number, b: number, c: number, d: number) => [number, number, number];

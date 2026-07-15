@@ -30,6 +30,58 @@ pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<
     state.stack.push_back(entry);
 }
 
+/// The ability currently represented by a stack entry for presentation.
+///
+/// A spell is placed on the stack before its cast is finalized (CR 601.2a-b),
+/// so its final entry can still hold `None` while the matching `PendingCast`
+/// carries the selected modes and targets. Identity is always the stack entry
+/// ID; this deliberately never falls back to the top stack entry.
+pub(crate) struct EffectiveStackAbility<'a> {
+    pub ability: Option<&'a ResolvedAbility>,
+    pub is_pending: bool,
+}
+
+pub(crate) fn effective_stack_ability<'a>(
+    state: &'a GameState,
+    entry: &'a StackEntry,
+) -> EffectiveStackAbility<'a> {
+    if let Some(ability) = entry.ability() {
+        return EffectiveStackAbility {
+            ability: Some(ability),
+            is_pending: false,
+        };
+    }
+
+    if let Some(pending) = state
+        .waiting_for
+        .pending_cast_ref()
+        .filter(|pending| pending.object_id == entry.id)
+    {
+        return EffectiveStackAbility {
+            ability: Some(&pending.ability),
+            is_pending: true,
+        };
+    }
+
+    if matches!(entry.kind, StackEntryKind::Spell { .. }) {
+        if let Some(pending) = state
+            .pending_cast
+            .as_deref()
+            .filter(|pending| pending.object_id == entry.id)
+        {
+            return EffectiveStackAbility {
+                ability: Some(&pending.ability),
+                is_pending: true,
+            };
+        }
+    }
+
+    EffectiveStackAbility {
+        ability: None,
+        is_pending: false,
+    }
+}
+
 pub(crate) fn restore_alternative_spell_normal_face(state: &mut GameState, object_id: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&object_id) {
         if let Some(normal_face) = obj.back_face.take() {
@@ -192,6 +244,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
     // `resolving_stack_entry` so it never leaks into the next resolution.
     state.resolution_source_relatch = None;
+    // CR 107.3a: the announced activation-X carrier is scoped to the activation that
+    // published it. Clear it here so it never leaks into an unrelated resolution; it is
+    // republished below for an `ActivatedAbility` entry (and only for that kind).
+    state.announced_source_x = None;
 
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
     let entry = match state.stack.pop_back() {
@@ -463,6 +519,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // optional copy decision is pending. Cleared at the start of the next
     // `resolve_top`.
     state.resolving_stack_entry = Some(entry.clone());
+    // CR 107.3a + CR 107.3i: republish the resolving activated ability's announced X for
+    // the duration of its own resolution, so a triggered ability of the SAME object that
+    // this resolution causes (Hydra Broodmaster / Polukranos: "when this becomes
+    // monstrous, …X…", fired off the `EffectResolved{Monstrosity}` emitted below) reads
+    // that X. Deliberately restricted to `ActivatedAbility`: a resolving SPELL must NOT
+    // publish, because a permanent it puts onto the battlefield has X = 0 (CR 107.3m) and
+    // its ETB trigger reads the spell's X through `GameObject::cost_x_paid` instead.
+    if let StackEntryKind::ActivatedAbility {
+        source_id,
+        ability: activated,
+    } = &entry.kind
+    {
+        state.announced_source_x = activated.chosen_x.map(|x| (*source_id, x));
+    }
     let resolution_start_phase = state.phase;
 
     // Only run targeting validation and effect execution when an ability exists.
@@ -1205,6 +1275,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // trigger context, then bail so the replacement-choice resume
                 // path delivers the redirected move.
                 let stack_exile_link_source = stack_exile_linked_source(state, entry.id);
+                // CR 603.7a + CR 702.170c: snapshot the exile-instead
+                // consequence rider BEFORE the move — every zone exit clears the
+                // transient rider fields (zones.rs), so the post-move apply site
+                // below must read the pre-move value.
+                let exile_rider = state
+                    .objects
+                    .get(&entry.id)
+                    .and_then(|o| o.exile_from_stack_rider.clone());
                 let req = ZoneMoveRequest::spell_resolution_default(entry.id, dest);
                 match zone_pipeline::move_object(state, req, events) {
                     ZoneMoveResult::Done => {
@@ -1227,9 +1305,35 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     link_source,
                                 );
                             }
+                            // CR 603.7a + CR 702.170c: the exile-instead
+                            // replacement has now actually been APPLIED (the
+                            // spell landed in exile), so this is the moment the
+                            // "If you do, ..." consequence is applied — Feather's
+                            // return-to-hand delayed trigger, or Lilah's plotted
+                            // grant — never earlier (a countered or fizzled
+                            // spell's marker was cleared on its stack exit and
+                            // never reaches here).
+                            if let Some(rider) = exile_rider {
+                                effects::exile_resolving_spell::apply_exile_rider(
+                                    state,
+                                    entry.id,
+                                    entry.controller,
+                                    stack_exile_link_source.unwrap_or(entry.id),
+                                    rider,
+                                    events,
+                                );
+                            }
                         }
                     }
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        // NOTE: the `exile_rider` snapshot is intentionally
+                        // dropped on this bail — a parked move here can only be
+                        // a Graveyard-destination replacement-ordering prompt
+                        // (RIP/Leyline redirects match Graveyard destinations
+                        // only), so no stack→Exile move that could apply the
+                        // consequence rider can currently park. If a stack→Exile
+                        // replacement choice is ever added, the rider must be
+                        // carried through the pending-resolution resume path.
                         events.push(GameEvent::StackResolved {
                             object_id: entry.id,
                         });
@@ -2032,8 +2136,10 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         target_constraints,
         target_choice_timing,
         description,
+        selected_mode_labels,
         repeat_for,
         min_x_value,
+        announced_x,
         cant_be_copied,
         copy_count_status,
         forward_result,
@@ -2087,8 +2193,12 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && target_constraints.is_empty()
         && *target_choice_timing == TargetChoiceTiming::Stack
         && description.is_none()
+        && selected_mode_labels.is_empty()
         && repeat_for.is_none()
         && *min_x_value == 0
+        // CR 601.2b: an announce-locked X makes this ability's X board-dependent;
+        // it is not the vanilla self-counter shape this batch path proves safe.
+        && announced_x.is_none()
         && !*cant_be_copied
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
@@ -2828,8 +2938,10 @@ struct StackGroupKey {
     source_name: String,
     tag: &'static str,
     description: Option<String>,
+    selected_mode_labels: Vec<String>,
     targets: Vec<TargetRef>,
     paid: Option<StackPaidSnapshot>,
+    is_pending: bool,
 }
 
 /// Grouping signature for `stack_display_groups`. Two entries coalesce iff
@@ -2851,17 +2963,24 @@ fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
         }
         StackEntryKind::KeywordAction { .. } => ("keyword", None),
     };
-    let targets = entry
-        .ability()
+    let effective_ability = effective_stack_ability(state, entry);
+    let targets = effective_ability
+        .ability
         .map(flatten_targets_in_chain)
+        .unwrap_or_default();
+    let selected_mode_labels = effective_ability
+        .ability
+        .map(|ability| ability.selected_mode_labels.clone())
         .unwrap_or_default();
     let paid = state.stack_paid_facts.get(&entry.id).cloned();
     StackGroupKey {
         source_name,
         tag,
         description: description.map(str::to_owned),
+        selected_mode_labels,
         targets,
         paid,
+        is_pending: effective_ability.is_pending,
     }
 }
 
@@ -2971,12 +3090,13 @@ mod tests {
     use crate::game::triggers::{check_delayed_triggers, PendingTrigger};
     use crate::game::zones::{self, create_object, move_to_zone};
     use crate::types::ability::{
-        CastingPermission, ControllerRef, CostPaidObjectSnapshot, Effect, QuantityExpr,
-        ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        CastingPermission, ControllerRef, CostPaidObjectSnapshot, Effect, ModalChoice,
+        QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
-        AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, WaitingFor,
+        AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCast, StackPaidSnapshot,
+        WaitingFor,
     };
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
@@ -2986,6 +3106,125 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    fn pending_spell_entry(id: ObjectId) -> StackEntry {
+        StackEntry {
+            id,
+            source_id: id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(id.0),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn effective_stack_ability_prefers_final_entry_over_matching_inline_pending_cast() {
+        let id = ObjectId(10);
+        let mut final_ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), id, PlayerId(0));
+        final_ability.selected_mode_labels = vec!["Final mode.".to_string()];
+        let entry = StackEntry {
+            kind: StackEntryKind::Spell {
+                card_id: CardId(10),
+                ability: Some(final_ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+            ..pending_spell_entry(id)
+        };
+
+        let mut pending_ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), id, PlayerId(0));
+        pending_ability.selected_mode_labels = vec!["Pending mode.".to_string()];
+        let pending = PendingCast::new(id, CardId(10), pending_ability, ManaCost::NoCost);
+        let mut state = setup();
+        state.waiting_for = WaitingFor::ModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice::default(),
+            pending_cast: Box::new(pending),
+            unavailable_modes: Vec::new(),
+        };
+
+        let effective = effective_stack_ability(&state, &entry);
+        assert!(
+            !effective.is_pending,
+            "finalized entry must take precedence"
+        );
+        assert_eq!(
+            effective.ability.unwrap().selected_mode_labels,
+            ["Final mode."],
+            "the matching inline pending cast must not replace a finalized ability",
+        );
+    }
+
+    #[test]
+    fn effective_stack_ability_uses_only_the_matching_inline_pending_cast() {
+        let pending_id = ObjectId(11);
+        let other_id = ObjectId(12);
+        let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), pending_id, PlayerId(0));
+        ability.selected_mode_labels = vec!["Selected mode.".to_string()];
+        let pending = PendingCast::new(pending_id, CardId(11), ability, ManaCost::NoCost);
+        let mut state = setup();
+        state.waiting_for = WaitingFor::ModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice::default(),
+            pending_cast: Box::new(pending),
+            unavailable_modes: Vec::new(),
+        };
+        state.stack.push_back(pending_spell_entry(pending_id));
+        state.stack.push_back(pending_spell_entry(other_id));
+
+        let lower = effective_stack_ability(&state, state.stack.front().unwrap());
+        assert!(
+            lower.is_pending,
+            "the matching lower stack entry is pending"
+        );
+        assert_eq!(
+            lower.ability.unwrap().selected_mode_labels,
+            ["Selected mode."],
+        );
+        let top = effective_stack_ability(&state, state.stack.back().unwrap());
+        assert!(
+            top.ability.is_none(),
+            "a nonmatching top entry must not inherit labels"
+        );
+        assert!(!top.is_pending);
+    }
+
+    #[test]
+    fn effective_stack_ability_uses_only_the_matching_outer_pending_spell() {
+        let pending_id = ObjectId(13);
+        let other_id = ObjectId(14);
+        let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), pending_id, PlayerId(0));
+        ability.selected_mode_labels = vec!["Mana-payment mode.".to_string()];
+        let mut state = setup();
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+        state.pending_cast = Some(Box::new(PendingCast::new(
+            pending_id,
+            CardId(13),
+            ability,
+            ManaCost::NoCost,
+        )));
+        state.stack.push_back(pending_spell_entry(pending_id));
+        state.stack.push_back(pending_spell_entry(other_id));
+
+        let lower = effective_stack_ability(&state, state.stack.front().unwrap());
+        assert!(
+            lower.is_pending,
+            "matching pending spell is discovered by object id"
+        );
+        let top = effective_stack_ability(&state, state.stack.back().unwrap());
+        assert!(
+            top.ability.is_none(),
+            "no top-of-stack fallback is permitted"
+        );
+        assert!(!top.is_pending);
     }
 
     /// CR 115.1 + CR 603.3d — regression twin for the "don't ask again → Yes
@@ -4888,6 +5127,140 @@ mod tests {
             "triggers with divergent targets must not coalesce: got {:?}",
             groups
         );
+    }
+
+    #[test]
+    fn stack_display_groups_distinguish_selected_spell_modes() {
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Brotherhood's End".to_string(),
+            Zone::Stack,
+        );
+        for (id, label) in [
+            (ObjectId(10_003), "Deal 3 damage."),
+            (ObjectId(10_004), "Destroy artifacts."),
+        ] {
+            let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), source, PlayerId(0));
+            ability.selected_mode_labels = vec![label.to_string()];
+            state.stack.push_back(StackEntry {
+                id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: Some(ability),
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+        }
+
+        assert_eq!(
+            stack_display_groups(&state).len(),
+            2,
+            "spells with different selected mode labels must not coalesce",
+        );
+    }
+
+    #[test]
+    fn stack_display_groups_distinguish_pending_modal_spells_from_finalized_spells() {
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Brotherhood's End".to_string(),
+            Zone::Stack,
+        );
+        let target = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        let lower_id = ObjectId(10_005);
+        let pending_id = ObjectId(10_006);
+        let mut modal_ability = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        modal_ability.selected_mode_labels = vec![
+            "Brotherhood's End deals 3 damage to each creature and each planeswalker.".to_string(),
+        ];
+        let paid = StackPaidSnapshot {
+            actual_mana_spent: 3,
+            ..Default::default()
+        };
+        state.stack.push_back(StackEntry {
+            id: lower_id,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(modal_ability.clone()),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 3,
+            },
+        });
+        state.stack.push_back(StackEntry {
+            id: pending_id,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 3,
+            },
+        });
+        state.stack_paid_facts.insert(lower_id, paid.clone());
+        state.stack_paid_facts.insert(pending_id, paid);
+        state.waiting_for = WaitingFor::ModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice::default(),
+            pending_cast: Box::new(PendingCast::new(
+                pending_id,
+                CardId(1),
+                modal_ability.clone(),
+                ManaCost::NoCost,
+            )),
+            unavailable_modes: Vec::new(),
+        };
+
+        let views = crate::game::derived_views::derive_views(&state, None);
+        assert_eq!(
+            views.stack_display_groups.len(),
+            2,
+            "an otherwise-identical pending modal spell must not coalesce with a finalized spell",
+        );
+        assert_eq!(views.stack_display_groups[1].representative, pending_id);
+        assert!(
+            views.stack_entry_details[&pending_id].is_pending,
+            "the pending group representative must retain its casting state",
+        );
+
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.stack.back_mut().unwrap().kind = StackEntryKind::Spell {
+            card_id: CardId(1),
+            ability: Some(modal_ability),
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 3,
+        };
+        let finalized_views = crate::game::derived_views::derive_views(&state, None);
+        assert_eq!(
+            finalized_views.stack_display_groups.len(),
+            1,
+            "entries with the same finalized state must continue to coalesce",
+        );
+        assert_eq!(finalized_views.stack_display_groups[0].count, 2);
     }
 
     #[test]

@@ -66,6 +66,7 @@ fn meld_of(trigger: &TriggerDefinition) -> (String, String, String) {
                 source,
                 partner,
                 result,
+                ..
             } => Some((source.clone(), partner.clone(), result.clone())),
             _ => None,
         })
@@ -139,6 +140,7 @@ fn vanille_optional_cost_gate_lowers_to_meld() {
         source,
         partner,
         result,
+        ..
     } = gated.effect.as_ref()
     else {
         panic!(

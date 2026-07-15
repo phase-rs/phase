@@ -159,3 +159,67 @@ fn total_war_destroys_attacking_players_idle_creatures_only() {
         "a non-attacking third party (P2) must keep its idle creature"
     );
 }
+
+/// Discriminating regression for the continuity exemption (#5641 follow-up):
+/// "..., except for creatures the player hasn't controlled continuously since
+/// the beginning of the turn." Total War must SPARE an idle creature the
+/// attacking player gained this turn (summoning-sick → not controlled
+/// continuously, CR 508.1a) while still destroying one it has controlled since
+/// the turn began.
+///
+/// Revert-failing: without the `parse_except_continuity_exemption_suffix` arm
+/// the DestroyAll filter carries no `ControlledContinuouslySinceTurnBegan`
+/// restriction, so the freshly-gained creature is destroyed too — flipping the
+/// "Fresh Idler survives" assertion.
+#[test]
+fn total_war_spares_creatures_not_controlled_since_turn_began() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    {
+        let mut b = scenario.add_creature(P0, "Total War", 0, 1);
+        b.as_enchantment().from_oracle_text(TOTAL_WAR);
+    }
+
+    // P1 (attacker): an attacker, an idle creature controlled since the turn
+    // began (destroyed), and an idle creature gained THIS turn (spared).
+    let p1_attacker = scenario.add_creature(P1, "P1 Attacker", 2, 2).id();
+    scenario.add_creature(P1, "P1 Established Idler", 2, 2);
+    let p1_fresh = scenario.add_creature(P1, "P1 Fresh Idler", 2, 2).id();
+
+    let mut runner = scenario.build();
+
+    hand_turn_to(&mut runner, P1);
+    // Mark the fresh creature summoning-sick AFTER the turn advance (so the untap
+    // step can't clear it): at Total War's resolution it reads as not controlled
+    // continuously since the turn began.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&p1_fresh)
+        .unwrap()
+        .summoning_sick = true;
+
+    runner
+        .declare_attackers(&[(p1_attacker, AttackTarget::Player(P0))])
+        .expect("P1's attacker should be a legal attack declaration");
+    order_triggers_if_needed(&mut runner);
+    runner.advance_until_stack_empty();
+
+    // Controlled since the turn began → destroyed.
+    assert!(
+        !on_battlefield_named(&runner, "P1 Established Idler"),
+        "an idle creature the attacking player controlled since the turn began must be destroyed"
+    );
+    // THE CONTINUITY EXEMPTION: gained this turn → spared.
+    assert!(
+        on_battlefield_named(&runner, "P1 Fresh Idler"),
+        "a creature the attacking player hasn't controlled continuously since the beginning of \
+         the turn must be exempt from Total War's destruction"
+    );
+    // The attacker itself attacked (tapped) — excluded regardless.
+    assert!(
+        on_battlefield_named(&runner, "P1 Attacker"),
+        "the attacker attacked and is excluded by the didn't-attack filter"
+    );
+}

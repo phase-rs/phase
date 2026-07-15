@@ -14,8 +14,9 @@ use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActivationResidual, AssistState, CastPaymentMode, CastingVariant, ConvokeMode, CostResume,
     CounterCostChoice, CounterRemoveChoice, DeferredSacrificeSelection, DistributionUnit,
-    GameState, PayCostKind, PendingCast, PendingDiscardForCostResume, SpellCostSource, StackEntry,
-    StackEntryKind, StackPaidSnapshot, WaitingFor,
+    GameState, PayCostKind, PendingCast, PendingCostMoveCompletion, PendingCostMoveResume,
+    PendingDiscardForCostResume, SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -34,6 +35,7 @@ use super::mana_sources::{self, ManaSourceOption};
 use super::priority;
 use super::restrictions;
 use super::stack;
+use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
@@ -1125,6 +1127,7 @@ fn finish_pending_cost_or_cast(
             pending.ability,
             pending.activation_cost.as_ref(),
             pending.activation_residual,
+            pending.pending_loyalty_activation_player,
             events,
         )?;
         return Ok(drain_deferred_triggers_after_stack_object_announcement(
@@ -1383,7 +1386,7 @@ pub(crate) fn handle_discard_for_cost(
                 // replacement pause. Park them now — the post-action pipeline will
                 // not run over this action's `events` (engine.rs gates on Priority).
                 let waiting_for = state.waiting_for.clone();
-                park_discard_for_cost_triggers_if_paused(
+                park_cost_payment_triggers_if_paused(
                     state,
                     events,
                     cost_event_start,
@@ -1412,7 +1415,7 @@ pub(crate) fn handle_discard_for_cost(
     // observer (Sefris of the Hidden Ways) would under-observe a discard paid
     // before the remaining mana leg. Mirror the established B2 parking pattern
     // used by `handle_sacrifice_for_cost`.
-    park_discard_for_cost_triggers_if_paused(
+    park_cost_payment_triggers_if_paused(
         state,
         events,
         cost_event_start,
@@ -1429,7 +1432,7 @@ pub(crate) fn handle_discard_for_cost(
 /// `run_post_action_pipeline` does not drop them on the next action boundary
 /// (engine.rs gates the pipeline on `WaitingFor::Priority`). Mirrors
 /// `handle_sacrifice_for_cost`.
-fn park_discard_for_cost_triggers_if_paused(
+fn park_cost_payment_triggers_if_paused(
     state: &mut GameState,
     events: &[GameEvent],
     cost_event_start: usize,
@@ -1446,17 +1449,278 @@ fn park_discard_for_cost_triggers_if_paused(
     }
 }
 
-/// CR 601.2h + CR 616.1: After a replacement choice during discard-for-cost payment, finish
-/// discarding any remaining cards and continue the cast/activation pipeline.
+#[allow(clippy::too_many_arguments)]
+fn finish_cost_object_moves(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    chosen: Vec<ObjectId>,
+    start_at_index: usize,
+    destination: Zone,
+    completion: PendingCostMoveCompletion,
+    cost_event_start: usize,
+    park_events_after_completion: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    for (index, &object_id) in chosen.iter().enumerate().skip(start_at_index) {
+        match zone_pipeline::move_object(
+            state,
+            ZoneMoveRequest::cost(object_id, destination, pending.object_id),
+            events,
+        ) {
+            ZoneMoveResult::Done => {}
+            ZoneMoveResult::NeedsChoice(choice_player) => {
+                state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
+                    player,
+                    pending: Some(Box::new(pending)),
+                    chosen,
+                    paused_at_index: index,
+                    destination,
+                    completion,
+                });
+                super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
+                let waiting_for = state.waiting_for.clone();
+                park_cost_payment_triggers_if_paused(
+                    state,
+                    events,
+                    cost_event_start,
+                    events.len(),
+                    &waiting_for,
+                );
+                return Ok(waiting_for);
+            }
+            ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                unreachable!("a cost move to Hand or Exile cannot require an Aura attachment")
+            }
+        }
+    }
+
+    let waiting_for = match completion {
+        PendingCostMoveCompletion::FinishPending => {
+            finish_pending_cost_or_cast(state, player, pending, events)?
+        }
+        PendingCostMoveCompletion::CompleteSelectedReturnToHand {
+            selected,
+            automatic_remaining,
+        } => finish_selected_return_to_hand_after_automatic(
+            state,
+            player,
+            pending,
+            selected,
+            automatic_remaining,
+            cost_event_start,
+            park_events_after_completion,
+            events,
+        )?,
+        PendingCostMoveCompletion::PublishExileTrackedSet => {
+            // CR 614: a replacement may deliver a card elsewhere; the set must reflect
+            // what actually arrived in exile.
+            let delivered: Vec<ObjectId> = chosen
+                .into_iter()
+                .filter(|object_id| {
+                    state
+                        .objects
+                        .get(object_id)
+                        .is_some_and(|object| object.zone == Zone::Exile)
+                })
+                .collect();
+            let set_id = super::effects::publish_fresh_tracked_set(state, delivered);
+            let mut pending = pending;
+            pending.ability.bind_tracked_set_sentinel_recursive(set_id);
+            finish_pending_cost_or_cast(state, player, pending, events)?
+        }
+        PendingCostMoveCompletion::FinalizeCast {
+            phyrexian_choices,
+            cascade_cast_transformed,
+            resolution_success_waiting_for,
+            pool_before,
+            prepaid_actual_mana_spent,
+        } => {
+            let returned_creature = chosen
+                .first()
+                .copied()
+                .expect("finalized Sneak or Web-slinging cost has one returned creature");
+            if let Some(combat) = state.combat.as_mut() {
+                combat
+                    .attackers
+                    .retain(|attacker| attacker.object_id != returned_creature);
+                combat.blocker_assignments.remove(&returned_creature);
+            }
+            let pool_after = state
+                .players
+                .iter()
+                .find(|candidate| candidate.id == player)
+                .map(|candidate| candidate.mana_pool.produced_mana_total())
+                .unwrap_or(0);
+            let actual_mana_spent = prepaid_actual_mana_spent
+                .unwrap_or_else(|| pool_before.saturating_sub(pool_after) as u32);
+            finalize_cast_with_phyrexian_choices_inner(
+                state,
+                player,
+                pending.object_id,
+                pending.card_id,
+                pending.ability,
+                &pending.cost,
+                pending.casting_variant,
+                pending.cast_timing_permission,
+                pending.origin_zone,
+                phyrexian_choices.as_deref(),
+                Some(FinalizePrePaymentChecks {
+                    early_waiting_for: None,
+                    cascade_cast_transformed,
+                    resolution_success_waiting_for: resolution_success_waiting_for.map(|wf| *wf),
+                }),
+                Some(actual_mana_spent),
+                ReturnedCreatureCostMove::Delivered,
+                events,
+            )?
+        }
+    };
+    if park_events_after_completion {
+        park_cost_payment_triggers_if_paused(
+            state,
+            events,
+            cost_event_start,
+            events.len(),
+            &waiting_for,
+        );
+    }
+    Ok(waiting_for)
+}
+
+/// CR 601.2h + CR 602.2b + CR 616.1: A replacement can interrupt an automatic
+/// activation-cost leg before the chosen return-to-hand leg is delivered. Resume
+/// that automatic suffix first, then deliver the already selected return, so each
+/// cost leg is paid exactly once before later return legs re-surface.
+#[allow(clippy::too_many_arguments)]
+fn finish_selected_return_to_hand_after_automatic(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    selected: Vec<ObjectId>,
+    automatic_remaining: Option<AbilityCost>,
+    cost_event_start: usize,
+    park_events_after_completion: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if let Some(cost) = automatic_remaining {
+        let ability_index = pending.activation_ability_index.ok_or_else(|| {
+            EngineError::InvalidAction(
+                "return-cost continuation missing an activation ability index".to_string(),
+            )
+        })?;
+        match super::casting::pay_ability_cost_for_activation(
+            state,
+            player,
+            pending.object_id,
+            &cost,
+            super::casting::activation_ability_tag(state, pending.object_id, ability_index),
+            events,
+        )? {
+            super::casting::PaymentOutcome::Paid => {}
+            super::casting::PaymentOutcome::Paused { remaining_cost } => {
+                let Some(PendingCostMoveResume::Cast {
+                    pending: slot @ None,
+                    completion,
+                    ..
+                }) = state.pending_cost_move_resume.as_mut()
+                else {
+                    return Err(EngineError::InvalidAction(
+                        "automatic return-cost suffix paused without a cost-move continuation"
+                            .to_string(),
+                    ));
+                };
+                *slot = Some(Box::new(pending));
+                *completion = PendingCostMoveCompletion::CompleteSelectedReturnToHand {
+                    selected,
+                    automatic_remaining: remaining_cost,
+                };
+                return Ok(state.waiting_for.clone());
+            }
+            super::casting::PaymentOutcome::Failed { reason } => {
+                return Err(EngineError::ActionNotAllowed(reason.reason));
+            }
+        }
+    }
+
+    finish_cost_object_moves(
+        state,
+        player,
+        pending,
+        selected,
+        0,
+        Zone::Hand,
+        PendingCostMoveCompletion::FinishPending,
+        cost_event_start,
+        park_events_after_completion,
+        events,
+    )
+}
+
+/// CR 601.2h + CR 602.2b: An activation that paused while paying a self-move
+/// cost keeps its continuation with the typed cost-move resume, rather than in
+/// `GameState::pending_cast`. Returns the payload unchanged for every other
+/// kind of pause.
+pub(crate) fn attach_pending_cast_to_cost_move(
+    state: &mut GameState,
+    pending: Box<PendingCast>,
+) -> Option<Box<PendingCast>> {
+    let Some(PendingCostMoveResume::Cast {
+        pending: slot @ None,
+        ..
+    }) = state.pending_cost_move_resume.as_mut()
+    else {
+        return Some(pending);
+    };
+    *slot = Some(pending);
+    None
+}
+
+/// CR 601.2h + CR 616.1: After a replacement choice during sequential cost payment, finish
+/// the remaining cost moves and continue the cast/activation pipeline.
 ///
 /// `replacement_action_cost_event_start`, when set, is the `events` index at the
-/// start of the `ChooseReplacement` action that delivered the paused discard;
-/// it must include the replacement-resolved discard `ZoneChanged` record(s).
+/// start of the `ChooseReplacement` action that delivered the paused cost move;
+/// it must include the replacement-resolved `ZoneChanged` record(s).
 pub(crate) fn resume_interrupted_cost_payment(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     replacement_action_cost_event_start: Option<usize>,
 ) -> Result<WaitingFor, EngineError> {
+    if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::Cast { .. })
+    ) {
+        let Some(PendingCostMoveResume::Cast {
+            player,
+            pending,
+            chosen,
+            paused_at_index,
+            destination,
+            completion,
+        }) = state.pending_cost_move_resume.take()
+        else {
+            unreachable!("matched a cast cost-move continuation")
+        };
+        let Some(pending) = pending else {
+            return Ok(WaitingFor::Priority {
+                player: state.active_player,
+            });
+        };
+        return finish_cost_object_moves(
+            state,
+            player,
+            *pending,
+            chosen,
+            paused_at_index + 1,
+            destination,
+            completion,
+            replacement_action_cost_event_start.unwrap_or(events.len()),
+            true,
+            events,
+        );
+    }
+
     if let Some(resume) = state.pending_discard_for_cost.take() {
         let player = resume.player;
         let pending = resume.pending;
@@ -1482,7 +1746,7 @@ pub(crate) fn resume_interrupted_cost_payment(
                     // cost events (including replacement-delivered discards in
                     // this action) before the non-Priority action boundary.
                     let waiting_for = state.waiting_for.clone();
-                    park_discard_for_cost_triggers_if_paused(
+                    park_cost_payment_triggers_if_paused(
                         state,
                         events,
                         cost_event_start,
@@ -1495,7 +1759,7 @@ pub(crate) fn resume_interrupted_cost_payment(
         }
         let cost_event_end = events.len();
         let waiting_for = finish_pending_cost_or_cast(state, player, pending, events)?;
-        park_discard_for_cost_triggers_if_paused(
+        park_cost_payment_triggers_if_paused(
             state,
             events,
             cost_event_start,
@@ -1525,6 +1789,7 @@ pub(crate) fn resume_interrupted_cost_payment(
             pending.ability,
             pending.activation_cost.as_ref(),
             pending.activation_residual,
+            pending.pending_loyalty_activation_player,
             events,
         );
     }
@@ -2181,6 +2446,7 @@ pub(crate) fn handle_return_to_hand_for_cost(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let cost_event_start = events.len();
     if chosen.len() != count {
         return Err(EngineError::InvalidAction(format!(
             "Must return exactly {} permanent(s), got {}",
@@ -2196,13 +2462,55 @@ pub(crate) fn handle_return_to_hand_for_cost(
         }
     }
 
-    if pending.activation_ability_index.is_some() {
+    if let Some(ability_index) = pending.activation_ability_index {
         if let Some(cost) = pending.activation_cost.take() {
             // CR 118.3 + CR 601.2h + CR 602.2b: A player pays an activated ability's total
             // cost before that ability becomes activated. For self-bounce costs
             // such as Maze's End, pay automatic components like {T} while the
             // source is still on the battlefield, then perform the chosen return.
-            super::casting::pay_ability_cost(state, player, pending.object_id, &cost, events)?;
+            // This handler pays exactly the selected return below. Keep later
+            // return legs in the pending activation so they re-surface as their
+            // own choices after this move completes.
+            let residual = super::casting::remove_selected_return_to_hand_cost(cost);
+            let (automatic_cost, deferred_return_cost) = residual
+                .map(super::casting::split_return_to_hand_cost_legs)
+                .unwrap_or((None, None));
+            pending.activation_cost = deferred_return_cost;
+
+            if let Some(cost) = automatic_cost {
+                match super::casting::pay_ability_cost_for_activation(
+                    state,
+                    player,
+                    pending.object_id,
+                    &cost,
+                    super::casting::activation_ability_tag(state, pending.object_id, ability_index),
+                    events,
+                )? {
+                    super::casting::PaymentOutcome::Paid => {}
+                    super::casting::PaymentOutcome::Paused { remaining_cost } => {
+                        let Some(PendingCostMoveResume::Cast {
+                            pending: slot @ None,
+                            completion,
+                            ..
+                        }) = state.pending_cost_move_resume.as_mut()
+                        else {
+                            return Err(EngineError::InvalidAction(
+                                "automatic return-cost leg paused without a cost-move continuation"
+                                    .to_string(),
+                            ));
+                        };
+                        *slot = Some(Box::new(pending));
+                        *completion = PendingCostMoveCompletion::CompleteSelectedReturnToHand {
+                            selected: chosen.to_vec(),
+                            automatic_remaining: remaining_cost,
+                        };
+                        return Ok(state.waiting_for.clone());
+                    }
+                    super::casting::PaymentOutcome::Failed { reason } => {
+                        return Err(EngineError::ActionNotAllowed(reason.reason));
+                    }
+                }
+            }
         }
     }
 
@@ -2215,11 +2523,18 @@ pub(crate) fn handle_return_to_hand_for_cost(
     // Karoo lands, Cavern Harpy): `count` is almost always 1, so the stamp's
     // `len() < 2` guard would no-op. If a >=2-permanent return-to-hand cost ever
     // ships, mirror the A1 stamp from `handle_sacrifice_for_cost` here.
-    for &id in chosen {
-        super::zones::move_to_zone(state, id, Zone::Hand, events);
-    }
-
-    finish_pending_cost_or_cast(state, player, pending, events)
+    finish_cost_object_moves(
+        state,
+        player,
+        pending,
+        chosen.to_vec(),
+        0,
+        Zone::Hand,
+        PendingCostMoveCompletion::FinishPending,
+        cost_event_start,
+        false,
+        events,
+    )
 }
 
 /// CR 118.3 + CR 122.1 + CR 601.2b: Complete remove-counter-as-cost after
@@ -2270,16 +2585,6 @@ pub(crate) fn handle_remove_counter_for_cost(
         ));
     }
 
-    if pending.activation_ability_index.is_some() {
-        if let Some(cost) = pending.activation_cost.take() {
-            // CR 601.2h + CR 602.2b: Pay automatic activation-cost components such as
-            // {T} before removing the chosen counter and putting the ability
-            // on the stack. The targeted RemoveCounter sub-cost no-ops in
-            // `pay_ability_cost` because this handler pays that choice.
-            super::casting::pay_ability_cost(state, player, pending.object_id, &cost, events)?;
-        }
-    }
-
     let mut remaining = count;
     for &object_id in chosen {
         if remaining == 0 {
@@ -2323,6 +2628,39 @@ pub(crate) fn handle_remove_counter_for_cost(
                 object_id: obj.0,
                 lki: obj.1.snapshot_for_mana_spent(),
             });
+    }
+
+    if let Some(ability_index) = pending.activation_ability_index {
+        if let Some(cost) = pending.activation_cost.take() {
+            // CR 601.2h + CR 602.2b: Counter selection is already committed, so
+            // pay the automatic residual through the outcome-aware authority.
+            // If a self-move pauses, the typed continuation resumes this pending
+            // activation only after the selected counter was paid exactly once.
+            let ability_tag =
+                super::casting::activation_ability_tag(state, pending.object_id, ability_index);
+            match super::casting::pay_ability_cost_for_activation(
+                state,
+                player,
+                pending.object_id,
+                &cost,
+                ability_tag,
+                events,
+            )? {
+                super::casting::PaymentOutcome::Paid => {}
+                super::casting::PaymentOutcome::Paused { remaining_cost } => {
+                    pending.activation_cost = remaining_cost;
+                    if let Some(pending) =
+                        attach_pending_cast_to_cost_move(state, Box::new(pending))
+                    {
+                        state.pending_cast = Some(pending);
+                    }
+                    return Ok(state.waiting_for.clone());
+                }
+                super::casting::PaymentOutcome::Failed { reason } => {
+                    return Err(EngineError::ActionNotAllowed(reason.reason));
+                }
+            }
+        }
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
@@ -2435,15 +2773,6 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
     super::effects::counters::validate_counter_selection(&available_by_type, &per_type)
         .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
 
-    if pending.activation_ability_index.is_some() {
-        if let Some(cost) = pending.activation_cost.take() {
-            // CR 601.2h + CR 602.2b: Pay automatic activation-cost components
-            // such as {T} before removing the assigned counters and putting
-            // the ability on the stack.
-            super::casting::pay_ability_cost(state, player, pending.object_id, &cost, events)?;
-        }
-    }
-
     for choice in distribution {
         let removable = state
             .objects
@@ -2473,6 +2802,38 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
                     object_id: choice.object_id,
                     lki: obj.snapshot_for_mana_spent(),
                 });
+        }
+    }
+
+    if let Some(ability_index) = pending.activation_ability_index {
+        if let Some(cost) = pending.activation_cost.take() {
+            // CR 601.2h + CR 602.2b: The assigned counter payment is complete
+            // before an automatic residual can pause on a self-move replacement,
+            // so its typed continuation cannot replay the selected distribution.
+            let ability_tag =
+                super::casting::activation_ability_tag(state, pending.object_id, ability_index);
+            match super::casting::pay_ability_cost_for_activation(
+                state,
+                player,
+                pending.object_id,
+                &cost,
+                ability_tag,
+                events,
+            )? {
+                super::casting::PaymentOutcome::Paid => {}
+                super::casting::PaymentOutcome::Paused { remaining_cost } => {
+                    pending.activation_cost = remaining_cost;
+                    if let Some(pending) =
+                        attach_pending_cast_to_cost_move(state, Box::new(pending))
+                    {
+                        state.pending_cast = Some(pending);
+                    }
+                    return Ok(state.waiting_for.clone());
+                }
+                super::casting::PaymentOutcome::Failed { reason } => {
+                    return Err(EngineError::ActionNotAllowed(reason.reason));
+                }
+            }
         }
     }
 
@@ -2667,6 +3028,7 @@ pub(crate) fn handle_behold_for_cost(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let cost_event_start = events.len();
     if chosen.len() != count {
         return Err(EngineError::InvalidAction(format!(
             "Must behold exactly {} object(s), got {}",
@@ -2713,9 +3075,22 @@ pub(crate) fn handle_behold_for_cost(
     }
 
     if action == BeholdCostAction::ExileChosen {
-        for &chosen_id in chosen {
-            super::zones::move_to_zone(state, chosen_id, Zone::Exile, events);
+        pending.ability.context.additional_cost_paid = true;
+        if let Some(snapshot) = snapshot {
+            pending.ability.set_cost_paid_object_recursive(snapshot);
         }
+        return finish_cost_object_moves(
+            state,
+            player,
+            pending,
+            chosen.to_vec(),
+            0,
+            Zone::Exile,
+            PendingCostMoveCompletion::FinishPending,
+            cost_event_start,
+            false,
+            events,
+        );
     } else if !revealed_ids.is_empty() {
         events.push(GameEvent::CardsRevealed {
             player,
@@ -2848,6 +3223,7 @@ fn finish_exile_selection_for_cost(
     illegal_message: &str,
     revalidate: impl Fn(&GameState, PlayerId, ObjectId, &PendingCast) -> Result<(), EngineError>,
 ) -> Result<WaitingFor, EngineError> {
+    let cost_event_start = events.len();
     let (min_count, max_count) = bounds;
     if chosen.len() < min_count || chosen.len() > max_count {
         let expected = if min_count == max_count {
@@ -2898,11 +3274,18 @@ fn finish_exile_selection_for_cost(
         }
     }
 
-    for &id in chosen {
-        super::zones::move_to_zone(state, id, Zone::Exile, events);
-    }
-
-    finish_pending_cost_or_cast(state, player, pending, events)
+    finish_cost_object_moves(
+        state,
+        player,
+        pending,
+        chosen.to_vec(),
+        0,
+        Zone::Exile,
+        PendingCostMoveCompletion::FinishPending,
+        cost_event_start,
+        false,
+        events,
+    )
 }
 
 /// CR 117.1 + CR 601.2b + CR 602.2b + CR 608.2c: Resolve an `ExileWithAggregate`
@@ -2939,6 +3322,7 @@ pub(crate) fn handle_exile_aggregate_for_cost(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let cost_event_start = events.len();
     // CR 601.2b: the chosen cards must be distinct.
     if (0..chosen.len()).any(|i| chosen[i + 1..].contains(&chosen[i])) {
         return Err(EngineError::InvalidAction(
@@ -2976,19 +3360,18 @@ pub(crate) fn handle_exile_aggregate_for_cost(
         )));
     }
 
-    for &id in chosen {
-        super::zones::move_to_zone(state, id, Zone::Exile, events);
-    }
-
-    // CR 608.2c: publish the exiled cards as a fresh tracked set and bind the
-    // resolving ability's `TrackedSetId(0)` sentinel to that concrete id before
-    // the ability reaches the stack (see the doc comment for the robustness
-    // rationale across the activation→resolution gap).
-    let set_id = super::effects::publish_fresh_tracked_set(state, chosen.to_vec());
-    let mut pending = pending;
-    pending.ability.bind_tracked_set_sentinel_recursive(set_id);
-
-    finish_pending_cost_or_cast(state, player, pending, events)
+    finish_cost_object_moves(
+        state,
+        player,
+        pending,
+        chosen.to_vec(),
+        0,
+        Zone::Exile,
+        PendingCostMoveCompletion::PublishExileTrackedSet,
+        cost_event_start,
+        false,
+        events,
+    )
 }
 
 /// CR 702.167a/b + CR 601.2b: Resolve a craft materials cost. The player has
@@ -3073,23 +3456,55 @@ pub(super) fn push_activated_ability_to_stack(
     // the non-X mana-leg detour (`ManaLeg` → re-surface the residual non-self
     // battlefield-removal: Sacrifice / battlefield Exile / ReturnToHand).
     activation_residual: ActivationResidual,
+    mut pending_loyalty_activation_player: Option<PlayerId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // CR 702.170b: plot is a special action that never uses the stack — it is
-    // intercepted in `handle_activate_ability` before any stack push. No current
-    // plot cost can pause (mana auto-pays, the self-exile auto-moves), so this
-    // cost-pause resume path is unreachable for plot. If a future plot variant
-    // carries a pausing sub-cost it would reach here — relocate the special-action
-    // guard to this chokepoint then.
-    debug_assert!(
-        !super::casting::effect_is_plot_grant(&resolved.effect),
-        "plot special action reached the cost-pause resume path; relocate the CR 702.170b intercept to this chokepoint"
-    );
+    // CR 702.170b: Plot is a special action that never uses the stack. A Moved
+    // replacement can now pause its self-exile cost, so resume it here rather
+    // than falling through to the activated-ability stack path.
+    if super::casting::effect_is_plot_grant(&resolved.effect) {
+        super::effects::grant_permission::resolve(state, &resolved, events).map_err(|error| {
+            EngineError::ActionNotAllowed(format!("plot special action failed: {error}"))
+        })?;
+        priority::clear_priority_passes(state);
+        return Ok(WaitingFor::Priority { player });
+    }
 
     // Pay any activation-cost tail still outstanding. Cost-selection flows may
     // pass the original full cost; choice-based sub-costs already paid by a
     // WaitingFor handler are no-ops here.
     if let Some(cost) = remaining_cost {
+        // A residual return-to-hand leg is not auto-payable: it needs the same
+        // card-selection round-trip as the first leg. This also covers a second
+        // return in a composite after `handle_return_to_hand_for_cost` paid the
+        // first one.
+        if super::casting::has_only_return_to_hand_cost_legs(cost) {
+            if let Some((count, filter)) = super::casting::find_return_to_hand_cost(cost) {
+                let eligible = super::casting::find_eligible_return_to_hand_targets(
+                    state, player, source_id, filter,
+                );
+                if eligible.len() < count as usize {
+                    return Err(EngineError::ActionNotAllowed(
+                        "No eligible permanents to return".into(),
+                    ));
+                }
+                let mut pending_return =
+                    PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+                pending_return.activation_cost = Some(cost.clone());
+                pending_return.activation_ability_index = Some(ability_index);
+                return Ok(WaitingFor::PayCost {
+                    player,
+                    kind: PayCostKind::ReturnToHand,
+                    choices: eligible,
+                    count: count as usize,
+                    min_count: 0,
+                    resume: CostResume::Spell {
+                        spell: Box::new(pending_return),
+                    },
+                });
+            }
+        }
+
         // CR 601.2f + CR 601.2h + CR 701.9a: When the X-mana detour ran first
         // (e.g. the Momir Basic emblem's `{X}, Discard a card` cost), the non-self
         // "discard a card" sub-cost is still OUTSTANDING here AFTER mana payment,
@@ -3116,6 +3531,7 @@ pub(super) fn push_activated_ability_to_stack(
             let mut pending_discard =
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_discard.activation_ability_index = Some(ability_index);
+            pending_discard.pending_loyalty_activation_player = pending_loyalty_activation_player;
             return Ok(WaitingFor::PayCost {
                 player,
                 kind: PayCostKind::Discard,
@@ -3157,6 +3573,7 @@ pub(super) fn push_activated_ability_to_stack(
                     PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
                 pending_sac.activation_cost = Some(cost.clone());
                 pending_sac.activation_ability_index = Some(ability_index);
+                pending_sac.pending_loyalty_activation_player = pending_loyalty_activation_player;
                 return Ok(WaitingFor::PayCost {
                     player,
                     kind: PayCostKind::Sacrifice,
@@ -3193,6 +3610,7 @@ pub(super) fn push_activated_ability_to_stack(
                     PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
                 pending_exile.activation_cost = Some(cost.clone());
                 pending_exile.activation_ability_index = Some(ability_index);
+                pending_exile.pending_loyalty_activation_player = pending_loyalty_activation_player;
                 return Ok(WaitingFor::PayCost {
                     player,
                     kind: PayCostKind::ExilePermanent {
@@ -3225,6 +3643,8 @@ pub(super) fn push_activated_ability_to_stack(
                     PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
                 pending_return.activation_cost = Some(cost.clone());
                 pending_return.activation_ability_index = Some(ability_index);
+                pending_return.pending_loyalty_activation_player =
+                    pending_loyalty_activation_player;
                 return Ok(WaitingFor::PayCost {
                     player,
                     kind: PayCostKind::ReturnToHand,
@@ -3334,11 +3754,17 @@ pub(super) fn push_activated_ability_to_stack(
             let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending.activation_cost = remaining_cost;
             pending.activation_ability_index = Some(ability_index);
-            state.pending_cast = Some(Box::new(pending));
+            pending.pending_loyalty_activation_player = should_record_loyalty
+                .then_some(player)
+                .or(pending_loyalty_activation_player);
+            if let Some(pending) = attach_pending_cast_to_cost_move(state, Box::new(pending)) {
+                state.pending_cast = Some(pending);
+            }
             return Ok(state.waiting_for.clone());
         }
         if should_record_loyalty {
             super::planeswalker::record_loyalty_activation(state, source_id, player);
+            pending_loyalty_activation_player = None;
         }
     }
 
@@ -3357,7 +3783,15 @@ pub(super) fn push_activated_ability_to_stack(
         && (assigned_targets.len() >= target_slots.len() || resolved.distribution.is_some())
     {
         emit_targeting_events(state, &assigned_targets, source_id, player, events);
-        return push_ability_entry(state, player, source_id, ability_index, resolved, events);
+        return push_ability_entry(
+            state,
+            player,
+            source_id,
+            ability_index,
+            resolved,
+            pending_loyalty_activation_player,
+            events,
+        );
     }
     if !target_slots.is_empty() {
         // CR 115.1 + CR 701.9b: Random-target activated abilities — game picks
@@ -3373,7 +3807,15 @@ pub(super) fn push_activated_ability_to_stack(
             let assigned_targets = flatten_targets_in_chain(&resolved);
             emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
-            return push_ability_entry(state, player, source_id, ability_index, resolved, events);
+            return push_ability_entry(
+                state,
+                player,
+                source_id,
+                ability_index,
+                resolved,
+                pending_loyalty_activation_player,
+                events,
+            );
         }
 
         if let Some(targets) =
@@ -3385,7 +3827,15 @@ pub(super) fn push_activated_ability_to_stack(
             let assigned_targets = flatten_targets_in_chain(&resolved);
             emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
-            return push_ability_entry(state, player, source_id, ability_index, resolved, events);
+            return push_ability_entry(
+                state,
+                player,
+                source_id,
+                ability_index,
+                resolved,
+                pending_loyalty_activation_player,
+                events,
+            );
         }
 
         // Targets need interactive selection
@@ -3405,6 +3855,7 @@ pub(super) fn push_activated_ability_to_stack(
         // cost here — it was already consumed above (issue #897 class).
         pending_act.activation_cost = None;
         pending_act.activation_ability_index = Some(ability_index);
+        pending_act.pending_loyalty_activation_player = pending_loyalty_activation_player;
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending_act),
@@ -3416,7 +3867,15 @@ pub(super) fn push_activated_ability_to_stack(
 
     emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
-    push_ability_entry(state, player, source_id, ability_index, resolved, events)
+    push_ability_entry(
+        state,
+        player,
+        source_id,
+        ability_index,
+        resolved,
+        pending_loyalty_activation_player,
+        events,
+    )
 }
 
 fn concretize_chosen_x_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
@@ -3458,10 +3917,21 @@ fn push_ability_entry(
     source_id: ObjectId,
     ability_index: usize,
     mut resolved: ResolvedAbility,
+    pending_loyalty_activation_player: Option<PlayerId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
+
+    // CR 107.3a + CR 602.2b: this is the single authority where an activated ability
+    // reaches the stack, so it is where its announced X is published. CR 107.3i then
+    // lets a triggered ability of the SAME object that this activation causes read the
+    // same X — the `Cycled` event emitted a few lines below (Shark Typhoon: "When you
+    // cycle this card, create an X/X blue Shark") is collected into triggers while this
+    // publication is live, and `triggers::build_triggered_ability` stamps it onto the
+    // trigger's `chosen_x`. An activation with no announced X publishes `None`, which
+    // also clears any stale value.
+    state.announced_source_x = resolved.chosen_x.map(|x| (source_id, x));
 
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
     resolved.ability_index = Some(ability_index);
@@ -3478,6 +3948,9 @@ fn push_ability_entry(
         },
         events,
     );
+    if let Some(activation_player) = pending_loyalty_activation_player {
+        super::planeswalker::record_loyalty_activation(state, source_id, activation_player);
+    }
 
     restrictions::record_ability_activation(state, source_id, ability_index);
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
@@ -6568,6 +7041,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         phyrexian_choices,
         None,
         None,
+        ReturnedCreatureCostMove::Pending,
         events,
     )
     .map_err(|err| {
@@ -6584,6 +7058,15 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     })
 }
 
+/// Whether the Sneak/Web-slinging returned creature's cost move (CR 702.190a /
+/// CR 702.188a) still needs to be delivered through the zone pipeline, or has
+/// already been delivered by `PendingCostMoveCompletion::FinalizeCast` re-entry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReturnedCreatureCostMove {
+    Pending,
+    Delivered,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finalize_cast_with_phyrexian_choices_inner(
     state: &mut GameState,
@@ -6598,8 +7081,10 @@ fn finalize_cast_with_phyrexian_choices_inner(
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     pre_payment_checks: Option<FinalizePrePaymentChecks>,
     prepaid_actual_mana_spent: Option<u32>,
+    returned_creature_move: ReturnedCreatureCostMove,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let cost_event_start = events.len();
     // CR 702.150a: Record how many of this spell's Phyrexian mana symbols are
     // being paid with life. A compleated planeswalker entering from this spell
     // exposes this as an intrinsic AddCounter replacement so it can order with
@@ -6685,14 +7170,31 @@ fn finalize_cast_with_phyrexian_choices_inner(
         | CastingVariant::WebSlinging { returned_creature } => Some(returned_creature),
         _ => None,
     };
-    if let Some(returned_creature) = returned_creature {
-        super::zones::move_to_zone(state, returned_creature, Zone::Hand, events);
-        if let Some(combat) = state.combat.as_mut() {
-            combat
-                .attackers
-                .retain(|a| a.object_id != returned_creature);
-            combat.blocker_assignments.remove(&returned_creature);
-        }
+    if let Some(returned_creature) =
+        returned_creature.filter(|_| returned_creature_move == ReturnedCreatureCostMove::Pending)
+    {
+        let mut resume_pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        resume_pending.casting_variant = casting_variant;
+        resume_pending.cast_timing_permission = cast_timing_permission;
+        resume_pending.origin_zone = origin_zone;
+        return finish_cost_object_moves(
+            state,
+            player,
+            resume_pending,
+            vec![returned_creature],
+            0,
+            Zone::Hand,
+            PendingCostMoveCompletion::FinalizeCast {
+                phyrexian_choices: phyrexian_choices.map(|choices| choices.to_vec()),
+                cascade_cast_transformed,
+                resolution_success_waiting_for: resolution_success_waiting_for.map(Box::new),
+                pool_before,
+                prepaid_actual_mana_spent,
+            },
+            cost_event_start,
+            false,
+            events,
+        );
     }
 
     // CR 700.14: Compute actual mana deducted from pool (not declared cost).
@@ -7045,28 +7547,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // protection all see the merged characteristics while the spell resolves.
     if casting_variant == CastingVariant::Fuse {
         if let Some(obj) = state.objects.get_mut(&object_id) {
-            // `fused_split_spell` was already set before mana payment (above). Here
-            // we union the right (Split back face) half's card types (CR 709.4c) and
-            // colors (CR 105.2) into the on-stack object so counterspell filters,
-            // type-matters effects, and protection that read `card_types`/`color`
-            // directly see the merged characteristics while the spell resolves.
-            let right_half_characteristics = obj
-                .back_face
-                .as_ref()
-                .filter(|bf| bf.layout_kind == Some(crate::types::card::LayoutKind::Split))
-                .map(|back| (back.card_types.core_types.clone(), back.color.clone()));
-            if let Some((core_types, colors)) = right_half_characteristics {
-                for ct in core_types {
-                    if !obj.card_types.core_types.contains(&ct) {
-                        obj.card_types.core_types.push(ct);
-                    }
-                }
-                for color in colors {
-                    if !obj.color.contains(&color) {
-                        obj.color.push(color);
-                    }
-                }
-            }
+            obj.restore_fused_split_characteristics();
         }
     }
 
@@ -7714,28 +8195,37 @@ fn option_allowed_for_context(
 fn find_least_flexible_source(
     available: &[ManaSourceOption],
     used: &HashSet<ObjectId>,
+    generic_reservations: &HashSet<ObjectId>,
     acceptable: &[ManaType],
     requires_two_or_more_color_source: bool,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> Option<ManaSourceOption> {
-    available
-        .iter()
-        .filter(|opt| {
-            !used.contains(&opt.object_id)
-                && option_satisfies(
-                    opt,
-                    acceptable,
-                    requires_two_or_more_color_source,
-                    payment_context,
-                )
-        })
-        .min_by_key(|opt| {
-            available
-                .iter()
-                .filter(|o| o.object_id == opt.object_id)
-                .count()
-        })
-        .cloned()
+    for exclude_reserved in [true, false] {
+        let least_flexible = available
+            .iter()
+            .filter(|opt| {
+                !used.contains(&opt.object_id)
+                    && (!exclude_reserved || !generic_reservations.contains(&opt.object_id))
+                    && option_satisfies(
+                        opt,
+                        acceptable,
+                        requires_two_or_more_color_source,
+                        payment_context,
+                    )
+            })
+            .min_by_key(|opt| {
+                available
+                    .iter()
+                    .filter(|other| other.object_id == opt.object_id)
+                    .count()
+            })
+            .cloned();
+        if least_flexible.is_some() {
+            return least_flexible;
+        }
+    }
+
+    None
 }
 
 /// Auto-tap mana sources controlled by `player` to produce enough mana for `cost`.
@@ -7892,7 +8382,7 @@ fn collect_sorted_auto_tap_source_options(
     deprioritize_source: Option<ObjectId>,
     excluded_sources: &HashSet<ObjectId>,
 ) -> Vec<ManaSourceOption> {
-    use crate::types::card_type::CoreType;
+    use crate::types::card_type::{CoreType, Supertype};
 
     // Loop-invariant hoist: the TapsForMana trigger-source list is identical for
     // every land in this board-global sweep, so compute it once instead of
@@ -7950,7 +8440,7 @@ fn collect_sorted_auto_tap_source_options(
     // The entire penalty axis is consulted only via `ManaSourcePenalty`
     // methods, so a future variant (e.g. `DiscardsOnActivation`) updates
     // the ordering at one place, not seven.
-    available.sort_by_key(|option| {
+    let source_sort_key = |option: &ManaSourceOption| {
         let obj = state.objects.get(&option.object_id);
         let is_land = obj.is_some_and(|o| o.card_types.core_types.contains(&CoreType::Land));
         let is_creature =
@@ -7979,12 +8469,33 @@ fn collect_sorted_auto_tap_source_options(
             // non-land non-creature mana source (rock / Signet)
             2
         };
+        // Within otherwise-identical colored land rows, keep atomic multi-mana
+        // combinations together, then prefer basic lands to nonbasic singles.
+        // This is a total lexicographic key rather than a pairwise exception,
+        // so combo rows retain their existing behavior and ordering remains
+        // transitive.
+        let colored_land_row_priority =
+            if is_land && !is_creature && option.mana_type != ManaType::Colorless {
+                match option.atomic_combination {
+                    Some(_) => 0,
+                    None if obj
+                        .is_some_and(|o| o.card_types.supertypes.contains(&Supertype::Basic)) =>
+                    {
+                        1
+                    }
+                    None => 2,
+                }
+            } else {
+                0
+            };
         (
             option.penalty.tier_byte() as u32,
             card_tier,
             option.penalty.priority_amount(),
+            colored_land_row_priority,
         )
-    });
+    };
+    available.sort_by_key(source_sort_key);
 
     available
 }
@@ -8167,6 +8678,34 @@ fn auto_tap_mana_sources_inner(
         effective_ctx,
     );
 
+    // Preserve a free, colorless source for each generic slot when another
+    // source can cover the colored shard. This keeps a painland's `{C}` mode
+    // available for generic payment instead of paying life for both mana.
+    // Only reserve options that need no mana sub-cost: those sources can still
+    // supply the generic slot without creating a recursive payment dependency.
+    let mut generic_reservations = HashSet::new();
+    let reservable_count = generic as usize + deferred_generic;
+    for option in available {
+        if generic_reservations.len() == reservable_count {
+            break;
+        }
+        let has_no_mana_sub_cost = option.ability_index.is_none_or(|ability_index| {
+            state
+                .objects
+                .get(&option.object_id)
+                .and_then(|obj| obj.abilities.get(ability_index))
+                .is_some_and(|ability| mana_sub_cost_of(&ability.cost).is_none())
+        });
+        if option.atomic_combination.is_none()
+            && option.mana_type == ManaType::Colorless
+            && option_allowed_for_context(option, effective_ctx)
+            && option.penalty == mana_sources::ManaSourcePenalty::None
+            && has_no_mana_sub_cost
+        {
+            generic_reservations.insert(option.object_id);
+        }
+    }
+
     // Phase 1: Assign remaining single-color sources to shards using MCV/LCV.
     // The naive greedy approach (tap first matching source per shard) fails when
     // a flexible source (dual land, multi-color dork) gets consumed for a color
@@ -8208,6 +8747,7 @@ fn auto_tap_mana_sources_inner(
         if let Some(option) = find_least_flexible_source(
             available,
             &used_sources,
+            &generic_reservations,
             acceptable,
             *requires_two_or_more_color_source,
             effective_ctx,
@@ -8228,9 +8768,14 @@ fn auto_tap_mana_sources_inner(
     //   class 0 — color-locked sources (every unit colorless): usable ONLY for
     //             generic, so spend them first and keep flexible colored
     //             sources open. This is why a colorless rock (Sol Ring, Mind
-    //             Stone) fills generic before a colored land is tapped.
-    //   class 1 — flexible single-mana sources (one colored mana each).
-    //   class 2 — flexible (colored) combination sources: last resort. Burning
+    //             Stone) fills generic before a colored land is tapped. A
+    //             colorless row of a multicolor nonbasic land is excluded: it
+    //             stays flexible at the object level and must not leapfrog a
+    //             basic land.
+    //   class 1 — basic lands.
+    //   class 2 — other flexible single-mana sources, including colorless rows
+    //             of multicolor nonbasic lands.
+    //   class 3 — flexible (colored) combination sources: last resort. Burning
     //             a 2-mana colored combo on generic wastes half its output when
     //             a cheaper line exists, so a filter land's `{T}: Add {C}`
     //             (class 0) is preferred over its colored combo for pure
@@ -8246,15 +8791,37 @@ fn auto_tap_mana_sources_inner(
             Some(combo) => combo.iter().all(|m| *m == ManaType::Colorless),
             None => option.mana_type == ManaType::Colorless,
         };
-        if color_locked {
+        let object = state.objects.get(&option.object_id);
+        let is_basic_land = object.is_some_and(|obj| {
+            obj.card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+                && obj
+                    .card_types
+                    .supertypes
+                    .contains(&crate::types::card_type::Supertype::Basic)
+        });
+        let is_multicolor_nonbasic_land = object.is_some_and(|obj| {
+            obj.card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+                && !obj
+                    .card_types
+                    .supertypes
+                    .contains(&crate::types::card_type::Supertype::Basic)
+                && option.source_could_produce_two_or_more_colors
+        });
+        if color_locked && !is_multicolor_nonbasic_land {
             0
-        } else if option.atomic_combination.is_none() {
+        } else if is_basic_land {
             1
-        } else {
+        } else if option.atomic_combination.is_none() {
             2
+        } else {
+            3
         }
     };
-    for class in 0u8..=2 {
+    for class in 0u8..=3 {
         if remaining_generic == 0 {
             break;
         }
@@ -9232,6 +9799,7 @@ pub fn finalize_mana_payment(
                 pending.ability,
                 pending.activation_cost.as_ref(),
                 pending.activation_residual,
+                pending.pending_loyalty_activation_player,
                 events,
             );
         }
@@ -9376,6 +9944,7 @@ pub fn finalize_mana_payment(
                     None,
                     pre_payment_checks.clone(),
                     prepaid_actual_mana_spent,
+                    ReturnedCreatureCostMove::Pending,
                     events,
                 )?;
                 return Ok(drain_deferred_triggers_after_stack_object_announcement(
@@ -9415,6 +9984,7 @@ pub fn finalize_mana_payment(
             None,
             pre_payment_checks,
             prepaid_actual_mana_spent,
+            ReturnedCreatureCostMove::Pending,
             events,
         )?;
         let waiting_for =
@@ -9522,6 +10092,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 pending.ability,
                 pending.activation_cost.as_ref(),
                 pending.activation_residual,
+                pending.pending_loyalty_activation_player,
                 events,
             );
         }
@@ -9666,6 +10237,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                     Some(phyrexian_choices),
                     pre_payment_checks.clone(),
                     prepaid_actual_mana_spent,
+                    ReturnedCreatureCostMove::Pending,
                     events,
                 )?;
                 let waiting_for = drain_deferred_triggers_after_stack_object_announcement(
@@ -9712,6 +10284,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             Some(phyrexian_choices),
             pre_payment_checks,
             prepaid_actual_mana_spent,
+            ReturnedCreatureCostMove::Pending,
             events,
         )?;
         let waiting_for =
@@ -10442,6 +11015,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: Some(0),
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
@@ -15432,6 +16006,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
@@ -15563,6 +16138,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
@@ -15663,6 +16239,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
@@ -15752,6 +16329,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
@@ -15874,6 +16452,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
@@ -18888,6 +19467,7 @@ its replicate cost was paid.)\nDraw a card.";
             resolved,
             Some(&residual),
             ActivationResidual::XMana,
+            None,
             &mut events,
         );
     }

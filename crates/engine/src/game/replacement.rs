@@ -814,6 +814,27 @@ fn combine_paused_may_cost(
     }
 }
 
+/// `ReplacementMode::MayCost` has no owner for an activation self-move
+/// continuation. The current card-data grammar has no such MayCost; keep that
+/// structural boundary explicit instead of reintroducing the synchronous raw
+/// activation mover at this call site.
+fn replacement_may_cost_has_self_zone_move(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            ..
+        }
+        | AbilityCost::ReturnToHand {
+            filter: Some(TargetFilter::SelfRef),
+            ..
+        } => true,
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            costs.iter().any(replacement_may_cost_has_self_zone_move)
+        }
+        _ => false,
+    }
+}
+
 fn pay_replacement_may_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -821,6 +842,13 @@ fn pay_replacement_may_cost(
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
 ) -> MayCostOutcome {
+    if replacement_may_cost_has_self_zone_move(cost) {
+        debug_assert!(
+            false,
+            "ReplacementMode::MayCost cannot own an activation self-move continuation"
+        );
+        return MayCostOutcome::Unpaid;
+    }
     if !cost.is_payable(state, player, source_id) {
         return MayCostOutcome::Unpaid;
     }
@@ -898,7 +926,7 @@ fn pay_replacement_may_cost(
             // the interactive pause. Snapshot it to distinguish a synchronous
             // forced/auto discard (`Paid`, no choice) from a paused one.
             let prior_waiting_for = state.waiting_for.clone();
-            match crate::game::costs::pay_ability_cost_for_resolution(
+            match crate::game::costs::pay_ability_cost_for_replacement_may_cost(
                 state, player, cost, &ability, events,
             ) {
                 Ok(crate::game::costs::PaymentOutcome::Paid) => {
@@ -933,7 +961,7 @@ fn pay_replacement_may_cost(
                 player,
             );
             let prior_waiting_for = state.waiting_for.clone();
-            match crate::game::costs::pay_ability_cost_for_resolution(
+            match crate::game::costs::pay_ability_cost_for_replacement_may_cost(
                 state, player, cost, &ability, events,
             ) {
                 Ok(crate::game::costs::PaymentOutcome::Paid) => {
@@ -959,7 +987,15 @@ fn pay_replacement_may_cost(
                 Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
             }
         }
-        _ => crate::game::casting::pay_ability_cost(state, player, source_id, cost, events).is_ok(),
+        _ => match crate::game::casting::pay_ability_cost_for_activation(
+            state, player, source_id, cost, None, events,
+        ) {
+            Ok(crate::game::costs::PaymentOutcome::Paid) => true,
+            Ok(crate::game::costs::PaymentOutcome::Paused { remaining_cost }) => {
+                return MayCostOutcome::PausedForChoice { remaining_cost };
+            }
+            Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
+        },
     };
     if paid {
         MayCostOutcome::Paid
@@ -4832,11 +4868,11 @@ fn object_replacement_candidate_applies(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     rid: ReplacementId,
 ) -> bool {
-    let liminal_obj = state
-        .liminal_entries
-        .get(&rid.source)
+    let liminal_obj = liminal_entry_ref(event)
+        .filter(|entry_ref| *entry_ref == rid.source)
+        .and_then(|entry_ref| state.liminal_entries.get(&entry_ref))
         .map(|entry| &entry.object);
-    let Some(obj) = state.objects.get(&rid.source).or(liminal_obj) else {
+    let Some(obj) = liminal_obj.or_else(|| state.objects.get(&rid.source)) else {
         return false;
     };
     let Some(repl_def) = obj.replacement_definitions.get(rid.index) else {
@@ -5236,6 +5272,20 @@ fn object_replacement_candidate_applies(
     true
 }
 
+/// CR 614.12: identify a not-yet-committed battlefield entry whose projected
+/// characteristics live in `GameState::liminal_entries`.
+fn liminal_entry_ref(event: &ProposedEvent) -> Option<ObjectId> {
+    match event {
+        ProposedEvent::TokenEntry { entry_ref, .. } => Some(*entry_ref),
+        ProposedEvent::ZoneChange {
+            object_id,
+            to: Zone::Battlefield,
+            ..
+        } => Some(*object_id),
+        _ => None,
+    }
+}
+
 fn legacy_object_replacement_candidates(
     state: &GameState,
     event: &ProposedEvent,
@@ -5250,8 +5300,8 @@ fn legacy_object_replacement_candidates(
             object_replacement_candidate_applies(state, event, registry, rid).then_some(rid)
         })
         .collect();
-    if let ProposedEvent::TokenEntry { entry_ref, .. } = event {
-        if let Some(entry) = state.liminal_entries.get(entry_ref) {
+    if let Some(entry_ref) = liminal_entry_ref(event) {
+        if let Some(entry) = state.liminal_entries.get(&entry_ref) {
             candidates.extend(
                 entry
                     .object
@@ -5260,7 +5310,7 @@ fn legacy_object_replacement_candidates(
                     .enumerate()
                     .filter_map(|(index, _)| {
                         let rid = ReplacementId {
-                            source: *entry_ref,
+                            source: entry_ref,
                             index,
                         };
                         object_replacement_candidate_applies(state, event, registry, rid)
@@ -5299,8 +5349,8 @@ fn indexed_object_replacement_candidates_from_index(
         })
         .collect();
 
-    if let ProposedEvent::TokenEntry { entry_ref, .. } = event {
-        if let Some(entry) = state.liminal_entries.get(entry_ref) {
+    if let Some(entry_ref) = liminal_entry_ref(event) {
+        if let Some(entry) = state.liminal_entries.get(&entry_ref) {
             candidates.extend(
                 entry
                     .object
@@ -5309,7 +5359,7 @@ fn indexed_object_replacement_candidates_from_index(
                     .enumerate()
                     .filter_map(|(index, _)| {
                         let rid = ReplacementId {
-                            source: *entry_ref,
+                            source: entry_ref,
                             index,
                         };
                         object_replacement_candidate_applies(state, event, registry, rid)
@@ -6207,14 +6257,10 @@ fn apply_single_replacement(
         state.pending_damage_replacements.get(rid.index)
     } else {
         state
-            .objects
+            .liminal_entries
             .get(&rid.source)
-            .or_else(|| {
-                state
-                    .liminal_entries
-                    .get(&rid.source)
-                    .map(|entry| &entry.object)
-            })
+            .map(|entry| &entry.object)
+            .or_else(|| state.objects.get(&rid.source))
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
 
@@ -7054,14 +7100,10 @@ fn replacement_definition_for_id(
     rid: ReplacementId,
 ) -> Option<&ReplacementDefinition> {
     state
-        .objects
+        .liminal_entries
         .get(&rid.source)
-        .or_else(|| {
-            state
-                .liminal_entries
-                .get(&rid.source)
-                .map(|entry| &entry.object)
-        })
+        .map(|entry| &entry.object)
+        .or_else(|| state.objects.get(&rid.source))
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
         // CR 121.2: an instruction to draw multiple cards is performed as that many
         // individual draws, and CR 121.2a modifies the instruction's count *before* any
@@ -7124,6 +7166,7 @@ fn pipeline_loop(
                 let affected = proposed.affected_player(state);
                 state.pending_replacement = Some(PendingReplacement {
                     proposed,
+                    sacrifice_provenance: None,
                     candidates,
                     depth,
                     is_optional: true,
@@ -7162,6 +7205,7 @@ fn pipeline_loop(
             let affected = proposed.affected_player(state);
             state.pending_replacement = Some(PendingReplacement {
                 proposed,
+                sacrifice_provenance: None,
                 candidates,
                 depth,
                 is_optional: false,
@@ -7326,6 +7370,7 @@ fn continue_replacement_impl(
         let reparked_candidates = pending.candidates.clone();
         let reparked_depth = pending.depth;
         let reparked_library_placement = pending.library_placement.clone();
+        let reparked_sacrifice_provenance = pending.sacrifice_provenance;
         let mut proposed = pending.proposed;
         proposed.mark_applied(rid);
         // CR 614.1a: the "first time you would create … each turn" window is
@@ -7379,8 +7424,9 @@ fn continue_replacement_impl(
                 // the resume finishes any `may_cost_remaining`. The carried
                 // `Execute` payload is inert — the flag short-circuits the caller
                 // before it is read.
-                state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+                let outer_replacement = crate::types::game_state::PendingReplacement {
                     proposed: proposed.clone(),
+                    sacrifice_provenance: reparked_sacrifice_provenance,
                     candidates: reparked_candidates,
                     depth: reparked_depth,
                     is_optional: true,
@@ -7392,7 +7438,21 @@ fn continue_replacement_impl(
                     lifelink_bonus: 0,
                     may_cost_paid: true,
                     may_cost_remaining: remaining_cost,
-                });
+                };
+                if let Some(crate::types::game_state::PendingCostMoveResume::ReplacementMayCost {
+                    outer_replacement: parked_outer,
+                    ..
+                }) = state.pending_cost_move_resume.as_mut()
+                {
+                    // CR 614.12a + CR 616.1: an inner cost move already owns
+                    // `pending_replacement` for its Moved replacement choice.
+                    // Keep that live inner prompt there and retain this outer
+                    // optional replacement only in the typed cost continuation.
+                    *parked_outer = Some(Box::new(outer_replacement));
+                    state.replacement_may_cost_paused = true;
+                    return ReplacementResult::Execute(proposed);
+                }
+                state.pending_replacement = Some(outer_replacement);
                 state.replacement_may_cost_paused = true;
                 return ReplacementResult::Execute(proposed);
             }
@@ -8213,6 +8273,8 @@ mod tests {
                 spec_resume: None,
                 enter_tapped: EtbTapState::Unspecified,
                 enter_with_counters: Vec::new(),
+                kind: crate::types::game_state::LiminalEntryKind::Token,
+                replacement_applied: HashSet::new(),
             },
         );
         assert!(!state.objects.contains_key(&entry_ref));
@@ -9739,6 +9801,7 @@ mod tests {
         // replacement, decline is synthetic. This isolates the label builder.
         state.pending_replacement = Some(PendingReplacement {
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
+            sacrifice_provenance: None,
             candidates: vec![ReplacementId {
                 source: ObjectId(20),
                 index: 0,
@@ -9820,6 +9883,7 @@ mod tests {
                 units: vec![],
                 applied: HashSet::new(),
             },
+            sacrifice_provenance: None,
             // The candidate's own source is the sentinel; `index` addresses the
             // handler list above.
             candidates: vec![ReplacementId {
@@ -13002,6 +13066,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.pending_replacement = Some(PendingReplacement {
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
+            sacrifice_provenance: None,
             candidates: vec![],
             depth: 0,
             is_optional: false,

@@ -1526,6 +1526,9 @@ fn census_of_typed(tf: &TypedFilter) -> Census {
             FilterProp::NonToken => {
                 tags.insert("nontoken".into());
             }
+            FilterProp::RepresentedByCard => {
+                tags.insert("represented-card".into());
+            }
             _ => {}
         }
     }
@@ -2308,6 +2311,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         FilterProp::InTrackedSet { .. } => false,
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -2565,6 +2569,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         FilterProp::InTrackedSet { .. } => true,
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -2693,7 +2698,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor
+        | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }
@@ -3035,6 +3040,7 @@ fn legacy_effect(x: &Effect) -> bool {
             max: _,
             copy_modifications,
             scale: _,
+            choose_scope: _,
         } => {
             legacy_target_filter(choose_filter)
                 || copy_modifications
@@ -3296,7 +3302,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::SolveCase
         | Effect::SetClassLevel { .. }
         | Effect::AddRestriction { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -3584,6 +3590,7 @@ fn walk_ability(
         player_scope,
         starting_with,
         repeat_for,
+        announced_x,
         multi_target,
         target_constraints,
         unless_pay,
@@ -3605,7 +3612,8 @@ fn walk_ability(
         optional_for: _,
         target_choice_timing: _,
         description: _,
-        min_x_value: _,
+        selected_mode_labels: _, // display snapshots, no game-state read/write
+        min_x_value: _,          // u32, no read
         cant_be_copied: _,
         copy_count_status: _,
         forward_result: _,
@@ -3654,6 +3662,12 @@ fn walk_ability(
     }
     if let Some(rf) = repeat_for {
         acc.merge(rw_quantity_expr(rf));
+    }
+    // CR 601.2b: the announce-time-locked X definition is a live board read, merely
+    // read at announcement rather than at resolution. Same read-kind as any other
+    // quantity slot.
+    if let Some(ax) = announced_x {
+        acc.merge(rw_quantity_expr(ax));
     }
     if let Some(MultiTargetSpec { min, max }) = multi_target {
         acc.merge(rw_quantity_expr(min));
@@ -3706,6 +3720,7 @@ fn walk_definition(
         player_scope,
         starting_with,
         repeat_for,
+        announced_x,
         multi_target,
         target_constraints,
         unless_pay,
@@ -3765,6 +3780,12 @@ fn walk_definition(
     }
     if let Some(rf) = repeat_for {
         acc.merge(rw_quantity_expr(rf));
+    }
+    // CR 601.2b: the announce-time-locked X definition is a live board read, merely
+    // read at announcement rather than at resolution. Same read-kind as any other
+    // quantity slot.
+    if let Some(ax) = announced_x {
+        acc.merge(rw_quantity_expr(ax));
     }
     if let Some(MultiTargetSpec { min, max }) = multi_target {
         acc.merge(rw_quantity_expr(min));
@@ -4637,10 +4658,15 @@ fn rw_effect(
             source: _,
             partner: _,
             result: _,
+            source_filter,
+            partner_filter,
+            entry: _,
         } => {
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            p.merge(rw_target_filter(source_filter));
+            p.merge(rw_target_filter(partner_filter));
             (p, None)
         }
         Effect::PhaseOut { target } => obj_membership_scope(target, chain_root),
@@ -4740,6 +4766,8 @@ fn rw_effect(
             cards: _,
             destination,
             tapped: _,
+            library_position: _,
+            library_players: _,
         } => {
             let mut p = RwProfile::empty();
             p.writes_external.set(StateKind::SetMembership);
@@ -5002,7 +5030,9 @@ fn rw_effect(
             p.writes_external.set(StateKind::StackShape);
             (p, None)
         }
-        Effect::ExileResolvingSpellInsteadOfGraveyard => (ext_write(StateKind::StackShape), None),
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: _ } => {
+            (ext_write(StateKind::StackShape), None)
+        }
 
         // ---- Pool ----
         Effect::Mana {

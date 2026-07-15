@@ -1025,7 +1025,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
     &UNSUPPORTED_PROTOCOL_CAPABILITIES
 }
 
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 16] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 18] = [
     UnsupportedCapability {
         code: "upstream.response-envelope-mismatch",
         area: "transport",
@@ -1121,6 +1121,18 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 16] = [
         area: "responses",
         reason: "The previous adapter accepted direct engine action ids, but the updated protocol requires prompt-id-correlated PromptResponse payloads.",
         suggested_protocol_extension: "Use canonical PromptResponse for all client decisions and keep engine action tables adapter-private.",
+    },
+    UnsupportedCapability {
+        code: "local.meld-pair-choice-unsupported",
+        area: "prompts",
+        reason: "The pinned protocol has no typed choice for selecting one physical meld pair from multiple live-name candidates.",
+        suggested_protocol_extension: "Add a non-target object-pair choice carrying stable card ids.",
+    },
+    UnsupportedCapability {
+        code: "local.entry-attack-target-choice-unsupported",
+        area: "combat",
+        reason: "The pinned protocol has no response shape for choosing the player, planeswalker, or battle attacked by an entering creature.",
+        suggested_protocol_extension: "Add an entry-attack destination choice using the existing attack-target reference shape.",
     },
 ];
 
@@ -1410,6 +1422,9 @@ fn build_prompt_input(
         WaitingFor::KeepWithinTotalPowerChoice { .. } => {
             unsupported_prompt(waiting_for, "local.keep-with-total-power-unsupported")
         }
+        WaitingFor::KeepExactPermanentsChoice { .. } => {
+            unsupported_prompt(waiting_for, "local.keep-exact-permanents-unsupported")
+        }
         WaitingFor::OptionalEffectChoice { .. } | WaitingFor::OpponentMayChoice { .. } => {
             unsupported_prompt(waiting_for, "local.optional-trigger-unsupported")
         }
@@ -1669,6 +1684,12 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::ChooseEnlist { .. } => {
             AvailableActionConversion::Unsupported("local.enlist-unsupported")
         }
+        GameAction::ChooseMeldPair { .. } => {
+            AvailableActionConversion::Unsupported("local.meld-pair-choice-unsupported")
+        }
+        GameAction::ChooseEntryAttackTarget { .. } => {
+            AvailableActionConversion::Unsupported("local.entry-attack-target-choice-unsupported")
+        }
         GameAction::ChooseClashOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.clash-unsupported")
         }
@@ -1771,7 +1792,8 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         | GameAction::ChooseLegend { .. }
         | GameAction::ChooseBattleProtector { .. }
         | GameAction::SelectCategoryPermanents { .. }
-        | GameAction::ChooseKeptCreatures { .. } => {
+        | GameAction::ChooseKeptCreatures { .. }
+        | GameAction::ChooseKeptPermanents { .. } => {
             AvailableActionConversion::Unsupported("local.non-target-selection-unsupported")
         }
         GameAction::ChooseDungeon { .. }
@@ -1855,7 +1877,8 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         // protocol — a legacy client never sets that mode.
         GameAction::DeclareShortcut { .. }
         | GameAction::RespondToShortcut { .. }
-        | GameAction::DeclineShortcut => {
+        | GameAction::DeclineShortcut
+        | GameAction::PrecastCopyShortcut { .. } => {
             AvailableActionConversion::Unsupported("local.loop-shortcut-unsupported")
         }
     }
@@ -3504,6 +3527,8 @@ mod tests {
         assert!(codes.contains("local.pass-until-unsupported"));
         assert!(codes.contains("local.auto-pay-unsupported"));
         assert!(codes.contains("local.legacy-engine-action-unsupported"));
+        assert!(codes.contains("local.meld-pair-choice-unsupported"));
+        assert!(codes.contains("local.entry-attack-target-choice-unsupported"));
     }
 
     #[test]
@@ -3552,6 +3577,42 @@ mod tests {
             kept: vec![ObjectId(1)]
         }])
         .is_empty());
+    }
+
+    #[test]
+    fn meld_actions_return_stable_unsupported_capability_codes() {
+        assert!(matches!(
+            convert_available_action(
+                &GameAction::ChooseMeldPair {
+                    source_id: ObjectId(1),
+                    partner_id: ObjectId(2),
+                },
+                "action-0".to_string(),
+            ),
+            AvailableActionConversion::Unsupported("local.meld-pair-choice-unsupported")
+        ));
+        assert!(matches!(
+            convert_available_action(
+                &GameAction::ChooseEntryAttackTarget {
+                    target: AttackTarget::Battle(ObjectId(3)),
+                },
+                "action-1".to_string(),
+            ),
+            AvailableActionConversion::Unsupported("local.entry-attack-target-choice-unsupported")
+        ));
+        assert!(
+            available_actions(&[
+                GameAction::ChooseMeldPair {
+                    source_id: ObjectId(1),
+                    partner_id: ObjectId(2),
+                },
+                GameAction::ChooseEntryAttackTarget {
+                    target: AttackTarget::Player(PlayerId(1)),
+                },
+            ])
+            .is_empty(),
+            "unsupported meld decisions must never be serialized as generic custom actions"
+        );
     }
 
     #[test]
@@ -4114,13 +4175,13 @@ mod protocol_wire_tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 16);
+        assert_eq!(capabilities.len(), 18);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 16, "capability codes must be unique");
+        assert_eq!(codes.len(), 18, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(

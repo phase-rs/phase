@@ -14621,9 +14621,11 @@ mod tests {
     /// from `state.objects`, which `filter_inner` cannot see at all. That case is covered
     /// for sacrifice by `sacrifice_artifact_trigger_matches_ceased_to_exist_token_via_lki`
     /// and for connive by `connives_typed_filter_matches_ceased_to_exist_token_conniver_via_lki`.
-    /// It is NOT covered here: a self-exploiting token is also its own trigger *source*,
-    /// and `FilterContext::from_source` cannot resolve a source that has been purged — a
-    /// separate gap, tracked independently, not papered over by this test.
+    /// For exploit it is covered by the sibling test
+    /// `exploited_typed_filter_matches_ceased_to_exist_token_self_exploiter_via_lki`, which
+    /// needed `FilterContext::from_source` to gain the CR 608.2h LKI fallback for the
+    /// SOURCE before it could be written: a self-exploiting token is also its own trigger
+    /// *source*, so both the subject AND the context had to survive the purge.
     #[test]
     fn exploited_typed_filter_matches_self_sacrificed_exploiter_via_lki() {
         let mut state = setup();
@@ -14667,6 +14669,75 @@ mod tests {
         assert!(
             !match_exploited(&event, &opponent, source, &state),
             "an opponent-controlled subject filter must NOT match the controller's own exploiter"
+        );
+    }
+
+    /// CR 603.10a + CR 111.7 + CR 608.2h: a creature TOKEN that exploits ITSELF has ceased
+    /// to exist AND is its own trigger source. Both the SUBJECT and the CONTEXT must
+    /// survive the CR 111.7 purge for the typed filter to match.
+    ///
+    /// This is the vector the sibling test above could not cover. `subject_filter_matches_with_lki`
+    /// already answered the SUBJECT from `lki_cache`, but `FilterContext::from_source` still
+    /// derived `source_controller` from live `state.objects` — where a purged token no longer
+    /// is — so `ControllerRef::You` was unanswerable and the filter failed anyway. CR 608.2h
+    /// requires last known information for "a specific object, including the source of the
+    /// ability itself"; `from_source` now falls back to `lki_cache` for exactly that.
+    ///
+    /// Discriminating guard: RED before `from_source` gained the CR 608.2h LKI fallback —
+    /// unlike the printed-card sibling, this one cannot pass on the live path, because
+    /// `filter_inner` cannot see the purged object at all.
+    #[test]
+    fn exploited_typed_filter_matches_ceased_to_exist_token_self_exploiter_via_lki() {
+        let mut state = setup();
+        let token = create_object(
+            &mut state,
+            CardId(810),
+            PlayerId(0),
+            "Sidisi's Faithful Token".to_string(),
+            Zone::Battlefield,
+        );
+        if let Some(obj) = state.objects.get_mut(&token) {
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+        }
+
+        // Real zone-change pipeline: snapshots LKI on battlefield exit.
+        crate::game::zones::move_to_zone(&mut state, token, Zone::Graveyard, &mut Vec::new());
+        assert!(state.lki_cache.contains_key(&token));
+        // CR 111.7: the token ceases to exist — purged from `state.objects` before the
+        // exploit trigger's filter is evaluated.
+        state.objects.remove(&token);
+        assert!(
+            !state.objects.contains_key(&token),
+            "the purge is the discriminating vector — if the token is still live this test \
+             is vacuous"
+        );
+
+        // The token exploited ITSELF: it is both the exploiter (subject) and the trigger's
+        // own source (context).
+        let event = GameEvent::CreatureExploited {
+            exploiter: token,
+            sacrificed: token,
+        };
+
+        let mut you = make_trigger(TriggerMode::Exploited);
+        you.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        assert!(
+            match_exploited(&event, &you, token, &state),
+            "CR 608.2h: a ceased-to-exist token that exploited itself must still match \
+             'a creature you control' — the SOURCE's controller comes from LKI"
+        );
+
+        let mut opponent = make_trigger(TriggerMode::Exploited);
+        opponent.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+        assert!(
+            !match_exploited(&event, &opponent, token, &state),
+            "the LKI fallback must not fabricate a match: an opponent-controlled subject \
+             filter must still NOT match the controller's own exploiter"
         );
     }
 

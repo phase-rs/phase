@@ -1389,10 +1389,21 @@ impl ManaCost {
 
     /// CR 202.3e: X in a mana cost equals the announced value only while the
     /// object is on the stack; in every other zone, X contributes 0.
+    ///
+    /// CR 202.3e is scoped to "an object **with an {X} in its mana cost**", so the
+    /// substitution is gated on [`ManaCost::has_x`]. An object's X (`cost_x_paid`,
+    /// the CR 107.3i single-value-per-object channel) is not always a *mana* X: a
+    /// spell whose X is defined by its own text rather than by an `{X}` symbol
+    /// (Monstrous Onslaught `{4}{R}` — "where X is the greatest power among
+    /// creatures you control as you cast this spell") carries an announced X with
+    /// nothing in its cost to substitute it into. Adding it here would report that
+    /// spell's mana value as 5+X on the stack and corrupt every mana-value-keyed
+    /// interaction with it (Spell Pierce, Mana Leak, "spells with mana value 3 or
+    /// less").
     pub fn mana_value_with_x(&self, zone: Zone, cost_x_paid: Option<u32>) -> u32 {
         self.mana_value()
             + match zone {
-                Zone::Stack => cost_x_paid.unwrap_or(0),
+                Zone::Stack if self.has_x() => cost_x_paid.unwrap_or(0),
                 _ => 0,
             }
     }
@@ -3160,14 +3171,28 @@ mod tests {
     }
 
     #[test]
-    fn mana_value_with_x_no_x_shard_adds_x_paid() {
-        // On the stack, cost_x_paid is the announced X value even when the cost
-        // expression has no literal {X} shard.
+    fn mana_value_with_x_no_x_shard_ignores_x_paid() {
+        // CR 202.3e is conditioned on the object HAVING an {X} in its mana cost:
+        // "When calculating the mana value of an object with an {X} in its mana
+        // cost, X is treated as ... the number chosen for it while the object is
+        // on the stack." A cost with no {X} shard has nothing to substitute, so
+        // an object's X (`cost_x_paid`, CR 107.3i) must NOT leak into its mana
+        // value.
+        //
+        // CORRECTED PIN. This previously asserted 8 and its comment asserted the
+        // buggy premise as if it were the rule ("cost_x_paid is the announced X
+        // value even when the cost expression has no literal {X} shard"). It is
+        // not: {1}{R}{U} has mana value 3, full stop. Left uncorrected, any spell
+        // whose X is defined by card text rather than by an {X} in its cost
+        // (Monstrous Onslaught {4}{R} — "where X is the greatest power among
+        // creatures you control as you cast this spell") would read as mana value
+        // 5+X on the stack, breaking every mana-value-keyed interaction with it
+        // (Spell Pierce, Mana Leak, "spells with mana value 3 or less").
         let cost = ManaCost::Cost {
             shards: vec![ManaCostShard::Red, ManaCostShard::Blue],
             generic: 1,
         };
-        assert_eq!(cost.mana_value_with_x(Zone::Stack, Some(5)), 8); // 1R+1U+1 generic = 3, +5 = 8
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, Some(5)), 3);
         assert_eq!(cost.mana_value_with_x(Zone::Stack, None), 3);
         assert_eq!(cost.mana_value_with_x(Zone::Graveyard, Some(5)), 3);
     }

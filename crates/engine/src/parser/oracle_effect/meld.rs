@@ -28,6 +28,7 @@
 //!    `ParseContext::pending_meld_partner`).
 
 use nom::bytes::complete::{tag, take_until};
+use nom::combinator::all_consuming;
 use nom::Parser;
 
 use crate::parser::oracle_ir::context::ParseContext;
@@ -36,7 +37,8 @@ use crate::parser::oracle_nom::error::OracleError;
 use crate::parser::oracle_target::parse_target;
 use crate::parser::oracle_trigger::static_condition_to_trigger_condition;
 use crate::types::ability::{
-    ControllerRef, Effect, FilterProp, TargetFilter, TriggerCondition, TypedFilter,
+    AbilityCondition, ControllerRef, Effect, FilterProp, TargetFilter, TriggerCondition,
+    TypedFilter,
 };
 
 /// The fixed sentinel that separates the gate from the meld effect clause.
@@ -52,6 +54,10 @@ const MELD_SENTINEL: &str = ", exile them, then meld them into ";
 /// which remain nom-combinator-based and remain the sole authority on whether
 /// the text actually forms a meld clause.
 pub(crate) const MELD_EFFECT_MARKER: &str = "meld them into ";
+
+/// Parsed semantic fields shared by the attacking meld-pair condition entry
+/// points.
+type LivePairCondition = (AbilityCondition, TargetFilter, TargetFilter, String);
 
 /// CR 701.42b: A `Typed` filter carrying only the `FilterProp::Owned { You }`
 /// ownership constraint, to AND with a self-reference filter.
@@ -254,7 +260,184 @@ pub(crate) fn parse_meld_effect_clause(text: &str, ctx: &ParseContext) -> Option
         source,
         partner,
         result: result_name.to_string(),
+        source_filter: TargetFilter::SelfRef,
+        partner_filter: TargetFilter::Any,
+        entry: crate::types::ability::PermanentEntryMode::Normal,
     })
+}
+
+/// CR 508.4 + CR 608.2c + CR 701.42: parse the resolution-time condition
+/// shared by the attacking meld-pair class. This parser owns only the condition
+/// production; `clause_shell::peel_clause` remains the authority that separates
+/// a leading condition from its imperative body, and the ordinary effect-chain
+/// assembler handles any following entry modifier.
+pub(crate) fn parse_live_pair_ability_condition(text: &str) -> Option<LivePairCondition> {
+    let (rest, fields) = parse_live_pair_condition_prefix(text)?;
+    all_consuming(nom::character::complete::multispace0::<_, OracleError<'_>>)
+        .parse(rest)
+        .ok()?;
+    Some(fields)
+}
+
+/// Peel the attacking-pair condition from a leading `if` clause while leaving
+/// the imperative body to the ordinary effect-chain parser. This is the
+/// condition-prefix sibling of [`parse_live_pair_ability_condition`]: neither
+/// parser knows or matches the body (meld or otherwise).
+pub(crate) fn strip_live_pair_conditional(
+    text: &str,
+) -> Option<(AbilityCondition, TargetFilter, TargetFilter, String, String)> {
+    let lower = text.to_lowercase();
+    let (after_if_lower, _) = tag::<_, _, OracleError<'_>>("if ")
+        .parse(lower.as_str())
+        .ok()?;
+    let after_if_offset = lower.len() - after_if_lower.len();
+    let after_if = &text[after_if_offset..];
+    let (rest, (condition, source, partner, partner_name)) =
+        parse_live_pair_condition_prefix(after_if)?;
+    let rest_lower = rest.to_lowercase();
+    let (body_lower, _) = tag::<_, _, OracleError<'_>>(", ")
+        .parse(rest_lower.as_str())
+        .ok()?;
+    let body_offset = rest_lower.len() - body_lower.len();
+    let body = rest[body_offset..].to_string();
+    Some((condition, source, partner, partner_name, body))
+}
+
+/// Parse the ordinary meld-pair ownership gate used by both triggered and
+/// activated instigators. Unlike [`parse_meld_gate`], this production returns
+/// an [`AbilityCondition`], so an inline `If ...` in an activated ability is
+/// checked only as that instruction resolves rather than being promoted to an
+/// intervening-if trigger condition (CR 603.4).
+pub(crate) fn strip_owned_pair_conditional(
+    text: &str,
+) -> Option<(AbilityCondition, TargetFilter, TargetFilter, String, String)> {
+    let lower = text.to_lowercase();
+    let (sentinel_lower, gate_region_lower): (&str, &str) =
+        take_until::<_, _, OracleError<'_>>(MELD_SENTINEL)
+            .parse(lower.as_str())
+            .ok()?;
+    let (after_prefix_lower, _) = tag::<_, _, OracleError<'_>>("if you both own and control ")
+        .parse(gate_region_lower)
+        .ok()?;
+    let gate_len = gate_region_lower.len();
+    let source_partner_start = gate_len - after_prefix_lower.len();
+    let source_partner = &text[source_partner_start..gate_len];
+
+    let (source_base, after_source) = parse_target(source_partner);
+    let after_source_lower = after_source.to_lowercase();
+    let (after_and_lower, _) = tag::<_, _, OracleError<'_>>("and ")
+        .parse(after_source_lower.trim_start())
+        .ok()?;
+    let partner_offset = after_source_lower.len() - after_and_lower.len();
+    let partner_original = &after_source[partner_offset..];
+    let (partner_base, partner_rest) = parse_target(partner_original);
+    let partner_name = named_of(&partner_base)?;
+    all_consuming(nom::character::complete::multispace0::<_, OracleError<'_>>)
+        .parse(partner_rest)
+        .ok()?;
+
+    let sentinel_offset = lower.len() - sentinel_lower.len();
+    let sentinel_original = &text[sentinel_offset..];
+    let (body_lower, _) = tag::<_, _, OracleError<'_>>(", ")
+        .parse(sentinel_lower)
+        .ok()?;
+    let body_offset = sentinel_lower.len() - body_lower.len();
+    let body = sentinel_original[body_offset..].to_string();
+
+    let source_filter = with_owned_you(source_base);
+    let partner_filter = with_owned_you(partner_base);
+    let condition = AbilityCondition::And {
+        conditions: vec![
+            AbilityCondition::SourceMatchesFilter {
+                filter: source_filter.clone(),
+            },
+            AbilityCondition::ControllerControlsMatching {
+                filter: partner_filter.clone(),
+            },
+        ],
+    };
+    Some((condition, source_filter, partner_filter, partner_name, body))
+}
+
+fn parse_live_pair_condition_prefix(text: &str) -> Option<(&str, LivePairCondition)> {
+    let (source_filter, after_source) = parse_target(text);
+    let after_source_lower = after_source.to_lowercase();
+    let (after_and, _) = tag::<_, _, OracleError<'_>>("and ")
+        .parse(after_source_lower.trim_start())
+        .ok()?;
+    let partner_offset = after_source_lower.len() - after_and.len();
+    let partner_original = &after_source[partner_offset..];
+    let (partner_base, partner_rest) = parse_target(partner_original);
+    let partner = named_of(&partner_base)?;
+    let partner_rest_lower = partner_rest.to_lowercase();
+    let (after_condition_lower, _) =
+        tag::<_, _, OracleError<'_>>(" are attacking, and you both own and control them")
+            .parse(partner_rest_lower.as_str())
+            .ok()?;
+    let after_condition_offset = partner_rest_lower.len() - after_condition_lower.len();
+    let after_condition = &partner_rest[after_condition_offset..];
+
+    let source_filter = TargetFilter::And {
+        filters: vec![
+            source_filter,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::Attacking { defender: None },
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+            ])),
+        ],
+    };
+    let partner_filter = with_owned_you(partner_base);
+    let partner_filter = match partner_filter {
+        TargetFilter::Typed(mut typed) => {
+            typed
+                .properties
+                .push(FilterProp::Attacking { defender: None });
+            TargetFilter::Typed(typed)
+        }
+        other => TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(
+                    TypedFilter::default()
+                        .properties(vec![FilterProp::Attacking { defender: None }]),
+                ),
+            ],
+        },
+    };
+    let condition = AbilityCondition::And {
+        conditions: vec![
+            AbilityCondition::SourceMatchesFilter {
+                filter: source_filter.clone(),
+            },
+            AbilityCondition::ControllerControlsMatching {
+                filter: partner_filter.clone(),
+            },
+        ],
+    };
+    Some((
+        after_condition,
+        (condition, source_filter, partner_filter, partner),
+    ))
+}
+
+pub(crate) fn live_pair_fields_from_condition(
+    condition: &AbilityCondition,
+) -> Option<(TargetFilter, TargetFilter, String)> {
+    let AbilityCondition::And { conditions } = condition else {
+        return None;
+    };
+    let source_filter = conditions.iter().find_map(|condition| match condition {
+        AbilityCondition::SourceMatchesFilter { filter } => Some(filter.clone()),
+        _ => None,
+    })?;
+    let partner_filter = conditions.iter().find_map(|condition| match condition {
+        AbilityCondition::ControllerControlsMatching { filter } => Some(filter.clone()),
+        _ => None,
+    })?;
+    let partner = named_of(&partner_filter)?;
+    Some((source_filter, partner_filter, partner))
 }
 
 #[cfg(test)]
@@ -355,5 +538,32 @@ mod tests {
         let text = "if you both own and control ~ and a creature named Fang, Fearless l'Cie, \
              it gains flying until end of turn.";
         assert!(parse_meld_gate(text).is_none());
+    }
+
+    #[test]
+    fn attacking_meld_pair_condition_uses_shared_typed_filters() {
+        let text = "~ and a creature named Phyrexian Dragon Engine are attacking, and you both own and control them";
+        let (condition, source, partner, name) =
+            parse_live_pair_ability_condition(text).expect("attacking meld-pair condition parses");
+        assert_eq!(name, "Phyrexian Dragon Engine");
+        assert!(matches!(condition, AbilityCondition::And { .. }));
+        assert!(matches!(source, TargetFilter::And { .. }));
+        assert!(matches!(partner, TargetFilter::Typed(_)));
+    }
+
+    #[test]
+    fn activated_owned_pair_condition_is_generic() {
+        let text = "if you both own and control ~ and a creature named Hanweir Garrison, \
+            exile them, then meld them into Hanweir, the Writhing Township.";
+        let (condition, source, partner, name, body) =
+            strip_owned_pair_conditional(text).expect("activated pair condition parses");
+        assert_eq!(name, "Hanweir Garrison");
+        assert!(matches!(condition, AbilityCondition::And { .. }));
+        assert!(!matches!(source, TargetFilter::Any));
+        assert!(!matches!(partner, TargetFilter::Any));
+        assert_eq!(
+            body,
+            "exile them, then meld them into Hanweir, the Writhing Township."
+        );
     }
 }

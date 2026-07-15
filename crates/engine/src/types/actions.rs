@@ -17,6 +17,19 @@ use super::zones::Zone;
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::AttachTarget;
 
+/// CR 732.2a-c: response to the narrowly-scoped, pre-cast Chain-copy
+/// shortcut. This intentionally does not reuse the legacy loop-shortcut
+/// vocabulary: the route is an engine-proved finite reducer transcript, not a
+/// general loop certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum PrecastCopyShortcutResponse {
+    Propose { route_id: u64 },
+    Decline,
+    Accept,
+    Shorten { breakpoint_id: u64 },
+}
+
 /// CR 701.57a + CR 702.85a: Player decision for any "you may cast that card
 /// without paying its mana cost" mid-resolution choice (Discover, Cascade).
 /// Bool flags are not composable — this enum can grow new branches (e.g.,
@@ -110,6 +123,16 @@ pub enum OutsideGameSelection {
 #[serde(tag = "type", content = "data")]
 pub enum GameAction {
     PassPriority,
+    /// CR 608.2d + CR 701.42: select the exact pair to process for meld.
+    ChooseMeldPair {
+        source_id: ObjectId,
+        partner_id: ObjectId,
+    },
+    /// CR 508.4a: select the engine-enumerated destination for a permanent
+    /// entering the battlefield attacking.
+    ChooseEntryAttackTarget {
+        target: AttackTarget,
+    },
     PlayLand {
         object_id: ObjectId,
         card_id: CardId,
@@ -293,8 +316,26 @@ pub enum GameAction {
         object_id: ObjectId,
         card_id: CardId,
     },
+    /// CR 116.2b: turning a face-down permanent face up is a SPECIAL ACTION — it uses
+    /// no stack and gets no priority window of its own.
+    ///
+    /// CR 107.3d: "If a cost associated with a special action, such as a suspend cost or a
+    /// morph cost, has an {X} or an X in it, the value of X is chosen by the player taking
+    /// the special action **immediately before they pay that cost**." Because the rules put
+    /// that choice inside the action itself — with no pause between choosing and paying —
+    /// X rides on the action rather than on a `WaitingFor` round-trip (which would model a
+    /// window the rules do not have).
+    ///
+    /// `x` is ignored when the turn-face-up cost has no `{X}` (it must then be 0). For a cost
+    /// that does have one, `x` is the announced value bound by CR 702.37f (morph) /
+    /// CR 702.168e (disguise): "other abilities of that permanent may also refer to X."
+    ///
+    /// `#[serde(default)]`: a client that omits the field announces **X = 0**, which is a legal
+    /// choice under CR 107.3d — never an error.
     TurnFaceUp {
         object_id: ObjectId,
+        #[serde(default)]
+        x: u32,
     },
     SubmitSideboard {
         main: Vec<DeckCardCount>,
@@ -704,6 +745,13 @@ pub enum GameAction {
     ChooseKeptCreatures {
         kept: Vec<ObjectId>,
     },
+    /// CR 101.4 + CR 701.21a: Answer to an exact keeper-cardinality choice.
+    /// Every object must be eligible and the submitted set must contain the
+    /// required number of distinct objects (or every eligible object when the
+    /// required number exceeds availability).
+    ChooseKeptPermanents {
+        kept: Vec<ObjectId>,
+    },
     /// CR 107.1b + CR 601.2f: Choose the value of X for a spell or activated
     /// ability whose cost contains X. Chosen as part of determining total cost,
     /// before mana is paid.
@@ -815,6 +863,13 @@ pub enum GameAction {
     /// Restores ordinary priority instead of forcing a proposal. Carries no payload
     /// (no template/count/response — it is the absence of a proposal).
     DeclineShortcut,
+    /// CR 732.2a-c: the separate finite Chain-copy shortcut protocol. `epoch`
+    /// is an actor-scoped, engine-issued capability; stale route/response
+    /// submissions are rejected rather than applied to a later offer.
+    PrecastCopyShortcut {
+        epoch: u64,
+        response: PrecastCopyShortcutResponse,
+    },
 }
 
 /// CR 117.3d: The mutation a `GameAction::SetPriorityYield` performs on the
@@ -847,22 +902,13 @@ pub enum MayTriggerAutoChoiceOp {
     ClearAll,
 }
 
-/// CR 603.3b: The mutation a `GameAction::SetTriggerOrderTemplate` performs on the
-/// acting player's saved trigger-ordering templates. `Save` echoes the just-prompted
-/// group's source object ids plus the submitted permutation (the engine resolves each
-/// id to its card identity, mirroring `PriorityYieldOp::Add` — no frontend game-state
-/// computation); `Remove` echoes a stored key verbatim; `ClearAll` drops every saved
-/// (persistent) ordering template belonging to the acting player.
+/// CR 603.3b: The only public mutation of the acting player's saved
+/// trigger-ordering preferences. A live `OrderTriggers` response is the sole
+/// authority that records a preference; clients may only forget all of their
+/// saved preferences.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum TriggerOrderTemplateOp {
-    Save {
-        sources: Vec<ObjectId>,
-        order: Vec<usize>,
-    },
-    Remove {
-        key: crate::analysis::decision_template::DecisionGroupKey,
-    },
     ClearAll,
 }
 
@@ -1394,6 +1440,8 @@ impl GameAction {
     /// without updating this method is a compile-time error.
     pub fn source_object(&self) -> Option<ObjectId> {
         match self {
+            GameAction::ChooseMeldPair { source_id, .. } => Some(*source_id),
+            GameAction::ChooseEntryAttackTarget { .. } => None,
             GameAction::PlayLand { object_id, .. } => Some(*object_id),
             GameAction::CastSpell { object_id, .. } => Some(*object_id),
             GameAction::Foretell { object_id, .. } => Some(*object_id),
@@ -1418,7 +1466,7 @@ impl GameAction {
             GameAction::UnlockRoomDoor { object_id, .. } => Some(*object_id),
             GameAction::ChooseRoomDoor { object_id, .. } => Some(*object_id),
             GameAction::PlayFaceDown { object_id, .. } => Some(*object_id),
-            GameAction::TurnFaceUp { object_id } => Some(*object_id),
+            GameAction::TurnFaceUp { object_id, .. } => Some(*object_id),
             GameAction::ChooseRingBearer { target } => Some(*target),
             GameAction::ChoosePair { partner } => *partner,
             GameAction::ChooseDamageSource { source } => Some(*source),
@@ -1503,6 +1551,7 @@ impl GameAction {
             | GameAction::LearnDecision { .. }
             | GameAction::SelectCategoryPermanents { .. }
             | GameAction::ChooseKeptCreatures { .. }
+            | GameAction::ChooseKeptPermanents { .. }
             | GameAction::ChooseX { .. }
             | GameAction::SubmitPhyrexianChoices { .. }
             | GameAction::ChooseManaColor { .. }
@@ -1517,6 +1566,7 @@ impl GameAction {
             | GameAction::DeclareShortcut { .. }
             | GameAction::RespondToShortcut { .. }
             | GameAction::DeclineShortcut
+            | GameAction::PrecastCopyShortcut { .. }
             | GameAction::ChooseActivationCostBranch { .. } => None,
         }
     }
@@ -1712,7 +1762,13 @@ mod tests {
                 },
                 Some(oid),
             ),
-            (GameAction::TurnFaceUp { object_id: oid }, Some(oid)),
+            (
+                GameAction::TurnFaceUp {
+                    object_id: oid,
+                    x: 0,
+                },
+                Some(oid),
+            ),
             (
                 GameAction::TapForConvoke {
                     object_id: oid,

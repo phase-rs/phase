@@ -58,6 +58,47 @@ fn dynamic_for_each_pump_recovers_trailing_quoted_ability() {
     );
 }
 
+/// #5681: `classify_quoted_inner` is the single boundary every quoted-ability
+/// grant funnels through. Oracle's punctuation convention carries the enclosing
+/// sentence's COMMA INSIDE the closing quote when a clause follows ("...until end
+/// of turn,"); that comma is not part of the ability and must be normalized away,
+/// or the inner duration matcher misses and the phrase falls through to prose. A
+/// comma-tailed body must parse identically to its clean form — building-block
+/// coverage, not a single card. A trailing PERIOD is the ability's own terminal
+/// punctuation and is deliberately left intact (it feeds the description, #5599).
+#[test]
+fn classify_quoted_inner_normalizes_trailing_sentence_comma() {
+    let base = "{G}{W}: Enchanted creature gains indestructible until end of turn";
+    let clean = classify_quoted_inner(base);
+    for suffix in [",", " ,", ",,"] {
+        let dirty = classify_quoted_inner(&format!("{base}{suffix}"));
+        assert_eq!(dirty, clean, "trailing {suffix:?} changed the parse",);
+    }
+    let ContinuousModification::GrantAbility { definition } = clean
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("expected a granted activated ability")
+    else {
+        unreachable!()
+    };
+    assert_eq!(definition.duration, Some(Duration::UntilEndOfTurn));
+    // A trailing period is NOT stripped — it is the ability's own terminal
+    // punctuation, preserved verbatim in the serialized description (#5599).
+    let with_period = classify_quoted_inner("{T}: Add {G}.");
+    let ContinuousModification::GrantAbility { definition } = with_period
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("mana ability grant")
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        definition.description.as_deref(),
+        Some("{T}: Add {G}."),
+        "terminal period must be preserved in the granted description",
+    );
+}
+
 // Regression: a for-each pump with only a trailing KEYWORD is unchanged and gains
 // no spurious subtype/grant.
 #[test]
@@ -20015,6 +20056,106 @@ fn static_all_creatures_are_black() {
     );
 }
 
+/// CR 105.2 + CR 613.1e (Layer 5) + CR 613.1f: a color-defining static composes
+/// its color with a trailing keyword/pump modification instead of dropping it —
+/// "All creatures are black and have deathtouch" (Onakke Catacomb) must SET the
+/// color AND grant the keyword. Before the fix, the "all creatures get/have" fast
+/// path claimed the line on the "have deathtouch" tail and silently dropped the
+/// "are black" color.
+#[test]
+fn static_all_creatures_are_color_composes_trailing_modifications() {
+    // Onakke Catacomb: color + keyword.
+    let def = parse_static_line("All creatures are black and have deathtouch.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::SetColor {
+                colors: vec![ManaColor::Black]
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Deathtouch
+            },
+        ]
+    );
+
+    // The sibling general-subject path must compose the same color and keyword
+    // rather than limiting the fix to the `all creatures` dispatch fast path.
+    let def = parse_static_line("Each nonland permanent you control is all colors and has flying.")
+        .unwrap();
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::SetColor {
+                colors: ManaColor::ALL.to_vec()
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            },
+        ]
+    );
+
+    // Color + pump.
+    let def = parse_static_line("All creatures are white and get +1/+1.").unwrap();
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::SetColor {
+                colors: vec![ManaColor::White]
+            },
+            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddToughness { value: 1 },
+        ]
+    );
+
+    // Color + two keywords (the whole tail composes).
+    let def = parse_static_line("All creatures are green and have trample and haste.").unwrap();
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::SetColor {
+                colors: vec![ManaColor::Green]
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            },
+        ]
+    );
+
+    // Regression: a bare keyword grant (no leading color) still resolves to the
+    // keyword only — the color path declines, so nothing spurious is added.
+    let def = parse_static_line("All creatures have flying.").unwrap();
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying
+        }]
+    );
+
+    // Regression: a solo color static is unchanged (single SetColor, no tail).
+    let def = parse_static_line("All creatures are black.").unwrap();
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetColor {
+            colors: vec![ManaColor::Black]
+        }]
+    );
+
+    // "red dragons" is not a color predicate — the color path must decline so the
+    // line is never mis-claimed as a color static.
+    let def = parse_static_line("All creatures are red dragons.");
+    assert!(
+        def.as_ref().is_none_or(|d| !d
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetColor { .. }))),
+        "'are red dragons' must not parse as a color static, got {def:?}"
+    );
+}
+
 /// CR 205.4b + CR 613.1d (Layer 4): "[subject] is/are [no longer] [supertype]"
 /// supertype-defining statics — the supertype sibling of the color path. Adds a
 /// supertype (Leyline of Singularity, Sixth Stage of Magic Design) or removes one
@@ -20315,6 +20456,256 @@ fn static_all_subject_are_color_falls_through_to_land_type_change() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Multi-zone Oxford compound color statics (#5798) — structural sibling of
+// #5406's compound chosen-type handler (Rukarumel). Painter's Servant /
+// Mycosynth Lattice subject: "All cards that aren't on the battlefield,
+// spells, and permanents are <color predicate>".
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parser_shape_painters_servant_multi_zone_chosen_color_static() {
+    use crate::types::zones::Zone;
+
+    // CR 105.3 + CR 105.4 + CR 611.3a + CR 613.1e: Painter's Servant line →
+    // Or-of-3 affected + AddChosenColor { mode: Add } (CR 105.3 retain).
+    let def = parse_static_line(
+        "All cards that aren't on the battlefield, spells, and permanents are the chosen color in addition to their other colors.",
+    )
+    .expect("Painter's Servant multi-zone chosen-color static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Add,
+            }),
+        "expected AddChosenColor {{ mode: Add }}, got {:?}",
+        def.modifications
+    );
+    match &def.affected {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(
+                filters.len(),
+                3,
+                "expected Or of 3 zone-scoped legs, got {filters:?}"
+            );
+            let has_off_battlefield_cards = filters.iter().any(|f| {
+                matches!(
+                    f,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters.contains(&TypeFilter::Card)
+                            && tf.properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::InAnyZone { zones }
+                                    if zones.contains(&Zone::Hand)
+                                        && zones.contains(&Zone::Library)
+                                        && !zones.contains(&Zone::Battlefield)
+                            ))
+                )
+            });
+            assert!(
+                has_off_battlefield_cards,
+                "missing off-battlefield Card + InAnyZone leg: {filters:?}"
+            );
+            assert!(
+                filters
+                    .iter()
+                    .any(|f| matches!(f, TargetFilter::StackSpell)),
+                "missing StackSpell leg: {filters:?}"
+            );
+            let has_permanents = filters.iter().any(|f| {
+                matches!(
+                    f,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters.contains(&TypeFilter::Permanent)
+                            && tf.properties.is_empty()
+                )
+            });
+            assert!(
+                has_permanents,
+                "missing battlefield Permanent leg: {filters:?}"
+            );
+        }
+        other => panic!("expected Or of 3 legs, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_shape_mycosynth_lattice_multi_zone_colorless_static() {
+    // CR 105.2c + CR 611.3a + CR 613.1e: Lattice's colorless Oxford line.
+    let def = parse_static_line(
+        "All cards that aren't on the battlefield, spells, and permanents are colorless.",
+    )
+    .expect("Mycosynth Lattice multi-zone colorless static must parse");
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetColor { colors: vec![] }]
+    );
+    match &def.affected {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(filters.len(), 3, "expected Or of 3 legs: {filters:?}");
+        }
+        other => panic!("expected Or of 3 legs, got {other:?}"),
+    }
+}
+
+#[test]
+fn multi_zone_color_static_accepts_dual_leg_spells_and_permanents() {
+    // Class coverage: dual-leg compression without the card conjunct.
+    let def = parse_static_line("Spells and permanents are colorless.")
+        .expect("dual-leg multi-zone colorless static must parse");
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetColor { colors: vec![] }]
+    );
+    match &def.affected {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(filters.len(), 2, "expected Or of 2 legs: {filters:?}");
+            assert!(filters
+                .iter()
+                .any(|f| matches!(f, TargetFilter::StackSpell)));
+        }
+        other => panic!("expected Or of 2 legs, got {other:?}"),
+    }
+}
+
+#[test]
+fn single_subject_chosen_color_static_not_hijacked_by_compound_handler() {
+    // No-regression: Shifting Sky / Shimmerwilds single-subject lines must stay
+    // a plain Typed filter (not widened to Or).
+    let def = parse_static_line("All nonland permanents are the chosen color.")
+        .expect("single-subject chosen-color static must still parse");
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Set,
+            }),
+        "expected AddChosenColor {{ mode: Set }}, got {:?}",
+        def.modifications
+    );
+    match &def.affected {
+        Some(TargetFilter::Or { .. }) => {
+            panic!("single-subject chosen-color must not be widened to Or")
+        }
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Permanent),
+                "expected Permanent filter, got {tf:?}"
+            );
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+                "expected Non(Land) filter, got {tf:?}"
+            );
+        }
+        other => panic!("expected Typed filter, got {other:?}"),
+    }
+}
+
+#[test]
+fn single_subject_chosen_color_accepts_additive_retain_suffix() {
+    // CR 105.3: shared additive suffix on a single-subject line (not only the
+    // Oxford compound) — e.g. a hypothetical / reprint "permanents are the
+    // chosen color in addition to their other colors."
+    let def =
+        parse_static_line("Permanents are the chosen color in addition to their other colors.")
+            .expect("single-subject additive chosen-color must parse");
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Add,
+            }),
+        "expected AddChosenColor {{ mode: Add }}, got {:?}",
+        def.modifications
+    );
+    assert!(
+        !matches!(def.affected, Some(TargetFilter::Or { .. })),
+        "single-subject additive must not be claimed as an Or compound"
+    );
+}
+
+#[test]
+fn multi_zone_color_static_declines_non_color_predicate() {
+    // A compound SET type predicate is not claimed as a color static. The
+    // Oxford subject falls outside the single-subject type-addition path, so
+    // the whole line remains unsupported rather than mis-colored.
+    assert!(
+        parse_static_line(
+            "All cards that aren't on the battlefield, spells, and permanents are artifacts in addition to their other types.",
+        )
+        .is_none(),
+        "non-color Oxford type-addition must not be claimed by the color compound handler"
+    );
+}
+
+#[test]
+fn multi_zone_color_static_declines_single_leg_all_permanents() {
+    // Single-leg "All permanents are colorless" belongs to parse_all_subject_are_color.
+    let def = parse_static_line("All permanents are colorless.").unwrap();
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetColor { colors: vec![] }]
+    );
+    assert!(
+        !matches!(def.affected, Some(TargetFilter::Or { .. })),
+        "single-leg All permanents must not be Or-compounded"
+    );
+}
+
+#[test]
+fn painters_servant_full_oracle_adds_multi_zone_color_static() {
+    // Full card: ETB choose-a-color + Oxford additive chosen-color static.
+    let result = crate::parser::oracle::parse_oracle_text(
+        "As this creature enters, choose a color.\nAll cards that aren't on the battlefield, spells, and permanents are the chosen color in addition to their other colors.",
+        "Painter's Servant",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &[],
+    );
+    let has_compound_static = result.statics.iter().any(|def| {
+        matches!(def.affected, Some(TargetFilter::Or { ref filters }) if filters.len() == 3)
+            && def
+                .modifications
+                .contains(&ContinuousModification::AddChosenColor {
+                    mode: ColorChangeMode::Add,
+                })
+    });
+    assert!(
+        has_compound_static,
+        "Painter's Servant must produce the multi-zone AddChosenColor {{ Add }} static: {:?}",
+        result.statics
+    );
+}
+
+#[test]
+fn mycosynth_lattice_full_oracle_keeps_artifact_line_and_parses_colorless() {
+    let result = crate::parser::oracle::parse_oracle_text(
+        "All permanents are artifacts in addition to their other types.\nAll cards that aren't on the battlefield, spells, and permanents are colorless.\nPlayers may spend mana as though it were mana of any color.",
+        "Mycosynth Lattice",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    assert!(
+        result.statics.iter().any(|s| {
+            s.modifications.contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Artifact,
+            })
+        }),
+        "artifact-addition line must still parse: {:?}",
+        result.statics
+    );
+    assert!(
+        result.statics.iter().any(|s| {
+            s.modifications
+                .contains(&ContinuousModification::SetColor { colors: vec![] })
+                && matches!(s.affected, Some(TargetFilter::Or { ref filters }) if filters.len() == 3)
+        }),
+        "Oxford colorless line must parse as Or-of-3 SetColor: {:?}",
+        result.statics
+    );
+}
+
 #[test]
 fn static_self_is_colorless_is_cda_all_zones() {
     // CR 604.3 + CR 604.3a + CR 105.2c: Ghostfire-style self color CDA.
@@ -20578,12 +20969,11 @@ fn parse_chosen_land_type_adds_chosen_basic_land_type() {
     );
 }
 
-// CR 205.1a + CR 607.2d: full Conspiracy oracle. The battlefield SET static must be
-// present (composed RemoveAllSubtypes + AddChosenSubtype) AND the non-battlefield
-// "the same is true for ..." tail must surface as an Unimplemented residual (the
-// multi-zone type application is honestly gapped).
+// CR 205.1a + CR 607.2d + CR 611.3a + CR 613.1d: Conspiracy's full static
+// replaces battlefield creature subtypes and applies the same effect to its
+// controlled creature spells and owned creature cards outside the battlefield.
 #[test]
-fn parse_conspiracy_full_oracle_sets_static_and_gaps_tail() {
+fn parse_conspiracy_full_oracle_models_all_same_is_true_recipients() {
     let oracle = "As this enchantment enters, choose a creature type.\nCreatures you control are the chosen type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.";
     let result = crate::parser::oracle::parse_oracle_text(
         oracle,
@@ -20592,7 +20982,9 @@ fn parse_conspiracy_full_oracle_sets_static_and_gaps_tail() {
         &["Enchantment".to_string()],
         &[],
     );
-    let has_set_static = result.statics.iter().any(|def| {
+    assert_eq!(result.statics.len(), 1, "Conspiracy must have one static");
+    let def = &result.statics[0];
+    assert!(
         def.modifications
             .contains(&ContinuousModification::RemoveAllSubtypes {
                 set: crate::types::card_type::SubtypeSet::Creature,
@@ -20601,32 +20993,27 @@ fn parse_conspiracy_full_oracle_sets_static_and_gaps_tail() {
                 .modifications
                 .contains(&ContinuousModification::AddChosenSubtype {
                     kind: ChosenSubtypeKind::CreatureType,
-                })
-    });
-    assert!(
-        has_set_static,
-        "Conspiracy must produce the composed SET static: {:?}",
-        result.statics
+                }),
+        "Conspiracy must produce the composed SET static: {def:?}"
     );
-    let tail_gapped = result.abilities.iter().any(|ability| {
-        matches!(
-            *ability.effect,
-            crate::types::ability::Effect::Unimplemented { description: Some(ref frag), .. }
-                // allow-noncombinator: test assertion on a gapped Unimplemented fragment, not parser dispatch
-                if frag.contains("creature spells you control")
-        )
-    });
     assert!(
-        tail_gapped,
-        "the 'same is true for ...' multi-zone tail must be gapped as Unimplemented: {:?}",
+        matches!(def.affected, Some(TargetFilter::Or { ref filters }) if filters.len() == 3),
+        "Conspiracy must retain battlefield, spell, and owned-card recipient arms: {def:?}"
+    );
+    assert!(
+        !result.abilities.iter().any(|ability| matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Unimplemented { .. }
+        )),
+        "Conspiracy's continuation must not leave an Unimplemented residual: {:?}",
         result.abilities
     );
 }
 
-// CR 205.1b: full Arcane Adaptation oracle (regression). The additive static must be
-// present (AddChosenSubtype, no RemoveAllSubtypes) AND the tail gapped.
+// CR 205.1b + CR 611.3a + CR 613.1d: Arcane Adaptation's additive static
+// applies to all three complete recipient arms.
 #[test]
-fn parse_arcane_adaptation_full_oracle_adds_static_and_gaps_tail() {
+fn parse_arcane_adaptation_full_oracle_models_all_same_is_true_recipients() {
     let oracle = "As Arcane Adaptation enters, choose a creature type.\nCreatures you control are the chosen type in addition to their other types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.";
     let result = crate::parser::oracle::parse_oracle_text(
         oracle,
@@ -20635,7 +21022,13 @@ fn parse_arcane_adaptation_full_oracle_adds_static_and_gaps_tail() {
         &["Enchantment".to_string()],
         &[],
     );
-    let has_additive_static = result.statics.iter().any(|def| {
+    assert_eq!(
+        result.statics.len(),
+        1,
+        "Arcane Adaptation must have one static"
+    );
+    let def = &result.statics[0];
+    assert!(
         def.modifications
             .contains(&ContinuousModification::AddChosenSubtype {
                 kind: ChosenSubtypeKind::CreatureType,
@@ -20643,24 +21036,19 @@ fn parse_arcane_adaptation_full_oracle_adds_static_and_gaps_tail() {
             && !def
                 .modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. }))
-    });
-    assert!(
-        has_additive_static,
-        "Arcane Adaptation must produce the additive static: {:?}",
-        result.statics
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+        "Arcane Adaptation must produce only the additive chosen-type modification: {def:?}"
     );
-    let tail_gapped = result.abilities.iter().any(|ability| {
-        matches!(
-            *ability.effect,
-            crate::types::ability::Effect::Unimplemented { description: Some(ref frag), .. }
-                // allow-noncombinator: test assertion on a gapped Unimplemented fragment, not parser dispatch
-                if frag.contains("creature spells you control")
-        )
-    });
     assert!(
-        tail_gapped,
-        "the 'same is true for ...' tail must be gapped as Unimplemented: {:?}",
+        matches!(def.affected, Some(TargetFilter::Or { ref filters }) if filters.len() == 3),
+        "Arcane Adaptation must retain battlefield, spell, and owned-card recipient arms: {def:?}"
+    );
+    assert!(
+        !result.abilities.iter().any(|ability| matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Unimplemented { .. }
+        )),
+        "Arcane Adaptation's continuation must not leave an Unimplemented residual: {:?}",
         result.abilities
     );
 }
@@ -20693,12 +21081,11 @@ fn parser_shape_rukarumel_compound_subject_chosen_type_static() {
     }
 }
 
-// Issue #5246: full Rukarumel oracle. The compound-subject additive static must be
-// present AND the trailing "The same is true for ..." (non-battlefield-zone)
-// sentence must surface as an Unimplemented residual — mirroring Arcane
-// Adaptation / Maskwood Nexus, not collapsing the whole line into a strict-fail.
+// CR 205.1b + CR 611.3a + CR 613.1d + issue #5246: Rukarumel's compound
+// battlefield antecedent and two nonbattlefield continuation arms form one
+// additive continuous static.
 #[test]
-fn parse_rukarumel_full_oracle_adds_compound_static_and_gaps_tail() {
+fn parse_rukarumel_full_oracle_models_all_same_is_true_recipients() {
     let oracle = "As Rukarumel enters, choose a creature type.\nSlivers you control and nontoken creatures you control are the chosen type in addition to their other creature types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 1/1 colorless Sliver creature token.";
     let result = crate::parser::oracle::parse_oracle_text(
         oracle,
@@ -20707,34 +21094,30 @@ fn parse_rukarumel_full_oracle_adds_compound_static_and_gaps_tail() {
         &["Legendary".to_string(), "Creature".to_string()],
         &[],
     );
-    let has_compound_static = result.statics.iter().any(|def| {
-        matches!(def.affected, Some(TargetFilter::Or { ref filters }) if filters.len() >= 2)
-            && def
-                .modifications
-                .contains(&ContinuousModification::AddChosenSubtype {
-                    kind: ChosenSubtypeKind::CreatureType,
-                })
+    assert_eq!(result.statics.len(), 1, "Rukarumel must have one static");
+    let def = &result.statics[0];
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            })
             && !def
                 .modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. }))
-    });
-    assert!(
-        has_compound_static,
-        "Rukarumel must produce the compound-subject additive static: {:?}",
-        result.statics
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+        "Rukarumel must produce only the additive chosen-type modification: {def:?}"
     );
-    let tail_gapped = result.abilities.iter().any(|ability| {
-        matches!(
-            *ability.effect,
-            crate::types::ability::Effect::Unimplemented { description: Some(ref frag), .. }
-                // allow-noncombinator: test assertion on a gapped Unimplemented fragment, not parser dispatch
-                if frag.contains("creature spells you control")
-        )
-    });
     assert!(
-        tail_gapped,
-        "the 'same is true for ...' tail must be gapped as Unimplemented: {:?}",
+        matches!(def.affected, Some(TargetFilter::Or { ref filters })
+            if filters.len() == 3 && matches!(&filters[0], TargetFilter::Or { filters } if filters.len() == 2)),
+        "Rukarumel must retain its two-part battlefield antecedent plus spell/card arms: {def:?}"
+    );
+    assert!(
+        !result.abilities.iter().any(|ability| matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Unimplemented { .. }
+        )),
+        "Rukarumel's continuation must not leave an Unimplemented residual: {:?}",
         result.abilities
     );
 }
@@ -20815,9 +21198,9 @@ fn parser_shape_lifecraft_engine_vehicle_chosen_creature_type_static() {
 // CR 613.1d + CR 205.3m: Maskwood Nexus's battlefield static — "Creatures
 // you control are every creature type." — must lower to a Layer 4
 // type-changing effect that adds every creature type (CR 205.3m) to each
-// creature the controller has on the battlefield. The non-battlefield
-// "the same is true for ..." tail is stripped by the dispatcher in
-// `oracle.rs`; this test pins the battlefield-only static directly.
+// creature the controller has on the battlefield. The complete multi-zone
+// grammar is covered above; this direct unit test intentionally pins only the
+// standalone battlefield antecedent parser.
 #[test]
 fn parser_shape_maskwood_nexus_every_creature_type_applies_to_creatures_you_control() {
     let def = parse_static_line("Creatures you control are every creature type.").unwrap();

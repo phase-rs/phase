@@ -640,7 +640,7 @@ fn two_color_options() -> Vec<String> {
 /// `ChosenAttribute::Keyword` entries at resolution.
 ///
 /// INVARIANT: this `", "`-join / split round-trip is only safe because every
-/// keyword admitted by the parser (`parse_keyword_from_oracle`) has a
+/// keyword admitted by the parser (`parse_granted_keyword_fragment`) has a
 /// comma-free `Display` string. A future "choose N abilities" list that admits
 /// a Debug-fallback keyword whose `Display` contains a comma would mis-tokenize
 /// — keep the parser's keyword allowlist comma-free, or persist structured

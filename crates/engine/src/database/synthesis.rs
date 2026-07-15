@@ -5,7 +5,7 @@ use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{
     compute_deck_copy_limit_from_text, oracle_text_allows_commander, parse_oracle_text,
 };
-use crate::parser::oracle_keyword::{keyword_display_name, parse_keyword_from_oracle};
+use crate::parser::oracle_keyword::{keyword_display_name, parse_granted_keyword_fragment};
 use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, BracketMode};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
@@ -7331,7 +7331,7 @@ fn backup_granted_oracle_text(face: &CardFace) -> Option<String> {
             .next()
             .map(str::trim)
             .map(str::to_ascii_lowercase)
-            .and_then(|text| parse_keyword_from_oracle(&text));
+            .and_then(|text| parse_granted_keyword_fragment(&text));
         if matches!(first_keyword, Some(Keyword::Backup(_))) {
             let granted = lines.collect::<Vec<_>>().join("\n");
             return Some(granted);
@@ -7388,7 +7388,7 @@ fn backup_grant_modifications(face: &CardFace) -> Vec<ContinuousModification> {
 
 /// CR 702 + CR 201.5: Collect the keywords the raw Oracle text grants as standalone
 /// keyword lines (e.g. "Flying" or "Flying, vigilance"). A line counts only when EVERY
-/// comma-separated part parses as a real keyword via `parse_keyword_from_oracle`, so
+/// comma-separated part parses as a real keyword via `parse_granted_keyword_fragment`, so
 /// ability lines that merely mention a keyword word ("Whenever Storm attacks, ...") are
 /// excluded. Used to corroborate name-colliding MTGJSON keywords before they are kept.
 fn oracle_corroborated_keywords(raw_oracle_text: &str) -> Vec<Keyword> {
@@ -7406,7 +7406,7 @@ fn oracle_corroborated_keywords(raw_oracle_text: &str) -> Vec<Keyword> {
         let mut line_keywords = Vec::new();
         let mut all_keywords = true;
         for part in parts {
-            match parse_keyword_from_oracle(&part.to_ascii_lowercase()) {
+            match parse_granted_keyword_fragment(&part.to_ascii_lowercase()) {
                 Some(keyword) if !matches!(keyword, Keyword::Unknown(_)) => {
                     line_keywords.push(keyword)
                 }
@@ -7439,7 +7439,7 @@ fn backup_keyword_modifications(granted_text: &str) -> Vec<ContinuousModificatio
         let mut line_keywords = Vec::new();
         for part in parts {
             let lower = part.to_ascii_lowercase();
-            let Some(keyword) = parse_keyword_from_oracle(&lower) else {
+            let Some(keyword) = parse_granted_keyword_fragment(&lower) else {
                 line_keywords.clear();
                 break;
             };
@@ -9844,7 +9844,7 @@ fn build_oracle_face_inner(
     // B8: For multi-face cards, skip MTGJSON-provided keywords entirely.
     // MTGJSON duplicates keywords across both faces of Transform/DFC cards,
     // causing the front face to incorrectly gain back-face keywords.
-    // Parser-extracted keywords from `extract_keyword_line` are face-specific.
+    // Parser-extracted keywords from `extract_granted_keyword_list` are face-specific.
     let mut keywords: Vec<Keyword> = if skip_mtgjson_keywords {
         Vec::new()
     } else {
@@ -9897,10 +9897,10 @@ fn build_oracle_face_inner(
     // it. Drop a name-colliding MTGJSON keyword that the Oracle text does NOT corroborate
     // as a standalone keyword line; corroborated keywords (e.g. Flying on a card literally
     // named "Flying Men") and non-colliding keywords (e.g. Storm's real Flying) are kept.
-    // Corroboration re-scans the raw Oracle lines via `parse_keyword_from_oracle` rather
+    // Corroboration re-scans the raw Oracle lines via `parse_granted_keyword_fragment` rather
     // than reading `extracted_keywords`, because the latter deliberately omits evergreen
     // keywords already present in the MTGJSON list (only multi-instance keywords survive
-    // there — see `extract_keyword_line`). Value-equality (e == kw) matches the
+    // there — see `extract_granted_keyword_list`). Value-equality (e == kw) matches the
     // `merge_extracted_keywords` convention.
     let name_words: std::collections::HashSet<String> = face_name
         .split(|c: char| !c.is_alphanumeric())
@@ -18178,11 +18178,11 @@ mod sorcery_speed_invariant_tests {
     /// the source from exile transformed. RED on main (no ability synthesized).
     #[test]
     fn synthesize_craft_from_oracle_line_builds_sorcery_speed_return_transformed() {
-        use crate::parser::oracle_keyword::parse_keyword_from_oracle;
+        use crate::parser::oracle_keyword::parse_granted_keyword_fragment;
         use crate::types::ability::{CostObjectCount, TargetFilter};
         use crate::types::zones::Zone;
 
-        let kw = parse_keyword_from_oracle("craft with creature {4}{b}")
+        let kw = parse_granted_keyword_fragment("craft with creature {4}{b}")
             .expect("craft Oracle line parses to a keyword");
         let (materials, count) = match &kw {
             Keyword::Craft {

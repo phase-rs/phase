@@ -25,7 +25,9 @@ use super::oracle::{is_draft_matters_sentence, ParsedAbilities};
 use super::oracle_effect::player_lookback_relative_clause_owns_suffix;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use super::oracle_ir::doc::OracleItemIr;
-use super::oracle_ir::feature::{audit_units, scope_to_unit, ItemIdTracks, OracleSemanticFeature};
+use super::oracle_ir::feature::{
+    audit_units, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
+};
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Comparator,
@@ -82,23 +84,42 @@ fn truncate(s: &str, max: usize) -> &str {
     }
 }
 
-/// Stamp the owning item's source line onto everything that item's detectors
-/// emitted.
+/// Stamp the owning unit's provenance — line, span, and evidence items — onto
+/// everything that unit's detectors emitted.
 ///
-/// Detectors are deliberately provenance-agnostic: a detector knows *evidence*,
-/// not line numbers. Attribution belongs to the loop that scoped the item, because
-/// that loop is the only thing that knows which line it scoped. Threading a
-/// `line_index` parameter through all fourteen detectors instead would mean a
-/// single forgotten call site silently keeps `line_index: 0` — which does not read
-/// as "unattributed", it reads as *line 1*.
+/// Detectors are deliberately provenance-agnostic: a detector knows *evidence*, not
+/// where it is. Attribution belongs to the loop that scoped the unit, because that loop
+/// is the only thing that knows which unit it scoped. Threading provenance through all
+/// fifteen detectors instead would mean a single forgotten call site silently keeps the
+/// unattributed default — and `line_index: 0` does not read as "unattributed", it reads
+/// as *line 1*. (That is also why the span is an `Option` and not a zeroed
+/// `OracleSourceSpan`: absence must be expressible.)
+///
+/// The provenance is the UNIT's, not an item's, and that is the honest scope: the
+/// audit's evidence half is the unit's pooled items, so no single item can be named. See
+/// `OracleDiagnostic::SwallowedClause`.
 ///
 /// Exhaustive on purpose: a future audit-emitted diagnostic variant must make a
-/// deliberate decision about how it carries provenance rather than silently
-/// inheriting line 0.
-fn stamp_line(item_diagnostics: &mut [OracleDiagnostic], first_line: usize) {
-    for diagnostic in item_diagnostics {
+/// deliberate decision about how it carries provenance rather than silently inheriting
+/// the unattributed default.
+fn stamp_provenance(unit_diagnostics: &mut [OracleDiagnostic], unit: &AuditUnit<'_>) {
+    for diagnostic in unit_diagnostics {
         match diagnostic {
-            OracleDiagnostic::SwallowedClause { line_index, .. } => *line_index = first_line,
+            OracleDiagnostic::SwallowedClause {
+                line_index,
+                unit_span,
+                items,
+                ..
+            } => {
+                *line_index = unit.first_line;
+                *unit_span = Some(unit.span.clone());
+                *items = unit.item_ids();
+                debug_assert!(
+                    unit.span.first_line <= unit.first_line
+                        && unit.first_line <= unit.span.last_line,
+                    "a unit's attributed line must lie inside the span of the text it owns",
+                );
+            }
             // The swallow audit emits `SwallowedClause` and nothing else. These
             // three are parse-time diagnostics that reach the document's channel by
             // other routes and are never constructed here.
@@ -197,7 +218,7 @@ pub(crate) fn check_swallowed_clauses(
         detect_apnap(&cleaned, fragment, &scoped, &mut found);
         detect_modal_dynamic_max_dropped(&cleaned, fragment, &evidence, &mut found);
 
-        stamp_line(&mut found, unit.first_line);
+        stamp_provenance(&mut found, &unit);
         diagnostics.append(&mut found);
     }
 }
@@ -363,11 +384,10 @@ fn detect_replacement(
     {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::Replacement.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::Replacement.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector A: Replacement_Instead ─────────────────────────────────────
@@ -418,13 +438,10 @@ fn detect_replacement_instead(
     if any_ability_has_replacement_carrier(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ReplacementInstead
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ReplacementInstead.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector B: ActivateOnlyDuring ──────────────────────────────────────
@@ -445,13 +462,10 @@ fn detect_activate_only_during(
     if any_ability_has_constraint(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ActivateOnlyDuring
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ActivateOnlyDuring.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector C: ActivateLimit ───────────────────────────────────────────
@@ -476,11 +490,10 @@ fn detect_activate_limit(
     if any_ability_has_limit(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ActivateLimit.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ActivateLimit.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector D: Duration_UntilEndOfTurn ─────────────────────────────────
@@ -543,13 +556,10 @@ fn detect_duration_until_eot(
     {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::DurationUntilEndOfTurn
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::DurationUntilEndOfTurn.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector E: Optional_YouMay ─────────────────────────────────────────
@@ -624,13 +634,10 @@ fn detect_optional_you_may(
     if any_static_has_granted_trigger_with_optional(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::OptionalYouMay
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::OptionalYouMay.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── AST predicates ──────────────────────────────────────────────────────
@@ -1414,9 +1421,12 @@ fn effect_is_replacement_carrier(effect: &Effect) -> bool {
         // CR 614.1a + CR 901.9c: "if a player would planeswalk as a result of rolling
         // the planar die, [effect] instead" (Fixed Point in Time).
         | Effect::CreatePlaneswalkReplacement { .. }
-        // CR 608.2m: "exile it instead of putting it into its owner's graveyard" — the
-        // variant name IS the replacement, and it takes no parameters to inspect.
-        | Effect::ExileResolvingSpellInsteadOfGraveyard => true,
+        // CR 614.1a + CR 608.2n: "exile it instead of putting it into its owner's
+        // graveyard" replaces the CR 608.2n graveyard-put default — the variant
+        // name IS the replacement, with or without the `on_exile` rider (the
+        // Feather return / Lilah plot parameterization is a second consequence
+        // folded into the same carrier, so it stays exempt either way).
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => true,
         _ => false,
     }
 }
@@ -2288,11 +2298,10 @@ fn detect_dynamic_qty(
             return;
         }
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::DynamicQty.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::DynamicQty.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector M: Modal_DynamicMaxDropped ─────────────────────────────────
@@ -2353,13 +2362,10 @@ fn detect_modal_dynamic_max_dropped(
     if evidence.has_slot("dynamic_max_choices") {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ModalDynamicMaxDropped
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ModalDynamicMaxDropped.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 /// CR 701.38: True when every dynamic-quantity marker in `cleaned` belongs to a
@@ -2629,6 +2635,63 @@ fn any_optional_ability_has_dig(parsed: &ParsedAbilities) -> bool {
 }
 
 fn dig_if_you_do_is_only_if_marker(stripped: &str) -> bool {
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if !stripped.contains("if you do") {
+        return false;
+    }
+    let without_link = stripped.replace("if you do", "");
+    let has_if_marker = without_link.contains(" if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_as_if_marker = without_link.contains(" as if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_even_if_marker = without_link.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !(has_if_marker && !has_as_if_marker && !has_even_if_marker)
+}
+
+/// CR 603.7a + CR 608.2c + CR 702.170c: the exile-instead carrier
+/// (`Effect::ExileResolvingSpellInsteadOfGraveyard`) carries an `on_exile`
+/// rider representing the "If you do, ..." consequence — Feather, the Redeemed's
+/// "return it to your hand at the beginning of the next end step" or Lilah,
+/// Undefeated Slickshot's "it becomes plotted". `on_exile: Some(_)` means the
+/// consequence clause is modelled (the riderless Rod of Absorption form is
+/// `None` and has no "if you do" text to account for).
+fn any_ability_has_exile_resolving_rider(parsed: &ParsedAbilities) -> bool {
+    parsed.triggers.iter().any(|t| {
+        t.execute
+            .as_deref()
+            .is_some_and(def_tree_has_exile_resolving_rider)
+    }) || parsed
+        .abilities
+        .iter()
+        .any(def_tree_has_exile_resolving_rider)
+}
+
+fn def_tree_has_exile_resolving_rider(def: &AbilityDefinition) -> bool {
+    if matches!(
+        &*def.effect,
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: Some(_) }
+    ) {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_exile_resolving_rider(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_exile_resolving_rider(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_exile_resolving_rider)
+}
+
+/// CR 608.2c: the "if you do" linking the exile-instead consequence (Feather's
+/// return, Lilah's plot) to its exile is a back-reference, not an independent
+/// game-state condition — represented by the `on_exile` rider. Suppress only
+/// when "if you do" is the sole bare "if" marker left in the classified text
+/// (mirrors `dig_if_you_do_is_only_if_marker`).
+fn exile_resolving_rider_if_you_do_is_only_if_marker(stripped: &str) -> bool {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !stripped.contains("if you do") {
         return false;
@@ -3040,6 +3103,20 @@ fn detect_condition_if(
     if any_optional_ability_has_dig(parsed) && dig_if_you_do_is_only_if_marker(&stripped) {
         return;
     }
+    // CR 603.7a + CR 608.2c + CR 702.170c: "exile that {card,spell} instead of
+    // putting it into your graveyard as it resolves. If you do, [return it to
+    // your hand at the beginning of the next end step | it becomes plotted]"
+    // (Feather, the Redeemed / Lilah, Undefeated Slickshot). The "if you do" is
+    // the CR 608.2c back-reference linking the consequence to the exile actually
+    // being applied — represented by the typed `on_exile` rider on
+    // `Effect::ExileResolvingSpellInsteadOfGraveyard` (the consequence is
+    // applied only when the replacement applies). Not a swallowed game-state
+    // condition.
+    if any_ability_has_exile_resolving_rider(parsed)
+        && exile_resolving_rider_if_you_do_is_only_if_marker(&stripped)
+    {
+        return;
+    }
     // CR 614.12: "[you may] put a creature card ... If that card is an
     // enchantment card, it enters tapped and attacking" (Summoner's Grimoire).
     // The leading moved-object type condition is represented by the typed
@@ -3239,11 +3316,10 @@ fn detect_condition_if(
     {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ConditionIf.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ConditionIf.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 /// Remove sentences containing CR-implicit "if" phrases. These do not
@@ -3487,13 +3563,10 @@ fn detect_condition_unless(
     {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ConditionUnless
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ConditionUnless.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector I: Condition_AsLongAs ──────────────────────────────────────
@@ -3556,13 +3629,10 @@ fn detect_condition_as_long_as(
     if any_static_has_attached_subject_qualifier_grant(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ConditionAsLongAs
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ConditionAsLongAs.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 /// CR 611.3a + CR 613: an inverted attached-subject grant
@@ -4066,13 +4136,10 @@ fn detect_duration_this_turn(
     }) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::DurationThisTurn
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::DurationThisTurn.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector K: Duration_NextTurn ───────────────────────────────────────
@@ -4115,13 +4182,10 @@ fn detect_duration_next_turn(
     }) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::DurationNextTurn
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::DurationNextTurn.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector L: Optional_MayHave ────────────────────────────────────────
@@ -4164,13 +4228,10 @@ fn detect_optional_may_have(
     }) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::OptionalMayHave
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::OptionalMayHave.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector M: APNAP ───────────────────────────────────────────────────
@@ -4195,11 +4256,10 @@ fn detect_apnap(
     if any_ability_has_apnap_ordering(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::Apnap.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::Apnap.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Cascade-vs-AST structural diff (option 3) ──────────────────────────
@@ -4400,6 +4460,197 @@ mod tests {
                 } if warning_detector == detector
             )
         })
+    }
+
+    /// Every swallow finding on this face, with its stamped unit provenance.
+    fn swallows(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+    ) -> Vec<(
+        &str,
+        usize,
+        &crate::parser::oracle_ir::diagnostic::OracleSourceSpan,
+    )> {
+        parsed
+            .parse_warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                OracleDiagnostic::SwallowedClause {
+                    detector,
+                    line_index,
+                    unit_span,
+                    ..
+                } => Some((
+                    detector.as_str(),
+                    *line_index,
+                    unit_span
+                        .as_ref()
+                        .expect("the audit stamps a unit span on every finding it emits"),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // ── Unit provenance (Plan 02 gate 5, as amended by the t124 ruling) ──────────
+
+    /// THE COLLAPSE, PINNED BY NAME.
+    ///
+    /// Aether Revolt raises TWO swallowed semantics from ONE physical source line: an
+    /// `as long as` revolt condition and an `if … would … instead` replacement condition.
+    /// They are genuinely distinct clauses — and their diagnostics carry the SAME
+    /// `unit_span`, so a consumer cannot locate them separately.
+    ///
+    /// That is NOT a defect in this payload. It is the line-granularity ceiling of the
+    /// span SUBSTRATE: `DocEmitter::exact_span` hands every item on a line the whole
+    /// line's byte range, so `audit_units` groups both clauses into one unit, and one
+    /// unit has exactly one span. Sub-line item spans are the prerequisite that lifts it;
+    /// when they land, the units subdivide on their own and these two spans separate.
+    ///
+    /// Asserted BY NAME so that whoever lands sub-line spans must consciously flip this
+    /// test, rather than leave a silently stale collapse behind.
+    #[test]
+    fn same_line_clauses_share_the_unit_span_until_subline_item_spans_exist() {
+        let text = "Revolt — As long as a permanent left the battlefield under your control \
+                    this turn, if a source you control would deal noncombat damage to an \
+                    opponent or a permanent an opponent controls, it deals that much damage \
+                    plus 2 instead.\nWhenever you get one or more {E}, this enchantment deals \
+                    that much damage to any target.";
+        let parsed = parse_named(text, "Aether Revolt", &["Enchantment"]);
+
+        let found = swallows(&parsed);
+        assert_eq!(
+            found.len(),
+            2,
+            "two clauses on line 0 each swallow a semantic: {found:?}"
+        );
+        assert_ne!(
+            found[0].0, found[1].0,
+            "the two findings are DIFFERENT detectors — distinct clauses, not one clause twice",
+        );
+
+        // Both are attributed to line 0 …
+        assert_eq!((found[0].1, found[1].1), (0, 0));
+        // … and — the ceiling — they SHARE one span. Distinct byte spans for the two
+        // clauses are unreachable until items carry sub-line spans.
+        assert_eq!(
+            found[0].2, found[1].2,
+            "same-line clauses share the unit span; flip this only when items carry sub-line spans",
+        );
+        // The span is the unit's own line, exactly located and card-absolute.
+        let span = found[0].2;
+        assert_eq!((span.first_line, span.last_line), (0, 0));
+        assert_eq!(span.start_byte, 0);
+        assert_eq!(
+            span.end_byte,
+            text.lines().next().expect("line 0").len(),
+            "the unit span is the exact byte extent of the line it owns",
+        );
+    }
+
+    /// NON-VACUITY for the collapse above: the span is not a constant.
+    ///
+    /// Captain Eberhart swallows a `this turn` duration on line 1 AND another on line 2.
+    /// Those are two units, so they must carry DIFFERENT, non-overlapping spans. Without
+    /// this, `same_line_clauses_share_the_unit_span…` would pass just as happily against
+    /// a span that never varied at all.
+    #[test]
+    fn different_units_carry_different_spans() {
+        let text = "Double strike\nSpells cast from among cards you drew this turn cost {1} \
+                    less to cast.\nSpells cast from among cards your opponents drew this turn \
+                    cost {1} more to cast.";
+        let parsed = parse_named(text, "Captain Eberhart", &["Creature"]);
+
+        let found = swallows(&parsed);
+        assert_eq!(found.len(), 2, "one finding per line: {found:?}");
+        assert_eq!(
+            (found[0].1, found[1].1),
+            (1, 2),
+            "attributed to lines 1 and 2"
+        );
+        assert_ne!(
+            found[0].2, found[1].2,
+            "distinct units must carry distinct spans — otherwise the span is inert",
+        );
+        assert!(
+            found[0].2.end_byte <= found[1].2.start_byte,
+            "unit spans are disjoint and in source order: {:?} then {:?}",
+            found[0].2,
+            found[1].2,
+        );
+    }
+
+    /// The evidence set is the unit's POOLED items, and it is honestly `0..N`.
+    /// A finding names every item the audit consulted — never one hand-picked id.
+    #[test]
+    fn findings_carry_the_units_pooled_evidence_items() {
+        let text = "Revolt — As long as a permanent left the battlefield under your control \
+                    this turn, if a source you control would deal noncombat damage to an \
+                    opponent or a permanent an opponent controls, it deals that much damage \
+                    plus 2 instead.\nWhenever you get one or more {E}, this enchantment deals \
+                    that much damage to any target.";
+        let parsed = parse_named(text, "Aether Revolt", &["Enchantment"]);
+
+        let items: Vec<_> = parsed
+            .parse_warnings
+            .iter()
+            .filter(|warning| matches!(warning, OracleDiagnostic::SwallowedClause { .. }))
+            .map(|warning| warning.evidence_items().to_vec())
+            .collect();
+
+        assert_eq!(items.len(), 2);
+        assert!(
+            !items[0].is_empty(),
+            "line 0 lowered an item; the finding must name the evidence it was judged against",
+        );
+        assert_eq!(
+            items[0], items[1],
+            "both findings came from ONE unit, so they carry ONE evidence set",
+        );
+    }
+
+    /// CR 603.7a + CR 608.2c: Feather, the Redeemed's "If you do, return it to
+    /// your hand at the beginning of the next end step" is represented by the
+    /// `on_exile` rider on `Effect::ExileResolvingSpellInsteadOfGraveyard`,
+    /// so Detector G must NOT flag it as a swallowed `Condition_If`. Reverting
+    /// the `any_ability_has_exile_resolving_rider` exemption re-fires the
+    /// swallow (the coverage-honesty regression this guards against).
+    #[test]
+    fn feather_return_rider_is_not_a_swallowed_condition_if() {
+        let parsed = parse_named(
+            "Flying\nWhenever you cast an instant or sorcery spell that targets a creature you \
+             control, exile that card instead of putting it into your graveyard as it resolves. \
+             If you do, return it to your hand at the beginning of the next end step.",
+            "Feather, the Redeemed",
+            &["Legendary", "Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "Feather's folded return rider must not surface as a swallowed Condition_If: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 702.170c + CR 608.2c: Lilah, Undefeated Slickshot's "If you do, it
+    /// becomes plotted" folds onto the same `on_exile` rider (as
+    /// `ExiledSpellRider::BecomePlotted`), so — like Feather — Detector G must
+    /// NOT flag its "if you do" as a swallowed `Condition_If`. This guards the
+    /// coverage-honesty regression that the plot-grant fold could otherwise
+    /// introduce (the folded grant leaves no `GrantCastingPermission { Plotted }`
+    /// node for the `any_ability_has_plotted_grant` suppression to see).
+    #[test]
+    fn lilah_plotted_rider_is_not_a_swallowed_condition_if() {
+        let parsed = parse_named(
+            "Prowess\nWhenever you cast a multicolored instant or sorcery spell from your hand, \
+             exile that spell instead of putting it into your graveyard as it resolves. If you \
+             do, it becomes plotted.",
+            "Lilah, Undefeated Slickshot",
+            &["Legendary", "Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "Lilah's folded plotted rider must not surface as a swallowed Condition_If: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     fn find_search_outside_game(def: &AbilityDefinition) -> Option<&Effect> {
@@ -7996,6 +8247,221 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             has_swallowed_detector(&uncarried, "Replacement"),
             "positive control: an enters-with clause with NO carrier must still be reported \
              — if this goes quiet the detector is dead and the assertions above are vacuous"
+        );
+    }
+
+    // ── Plan 02 step 6: per-unit audit independence, and the two detectors whose
+    //    typed arms were never exercised ───────────────────────────────────────
+
+    /// PLAN 02'S FLAGSHIP CLAIM, and until now it had no true fixture anywhere:
+    /// *an unsupported unit does not suppress the audit of a sibling unit.*
+    ///
+    /// Every existing "does not hide" test pairs a swallowed line with a line that is
+    /// *exempted* (represented, or carved out) — none pairs it with a line that
+    /// genuinely produced `Effect::Unimplemented`. That is the one shape the old
+    /// card-wide suppression actually broke: a single unparseable line silenced every
+    /// detector on the whole card (measured: 2,563 faces).
+    ///
+    /// Line 0 is unsupported. Line 1 is Protection Racket's upkeep trigger, which
+    /// parses cleanly and drops its "in turn order" clause (CR 101.4). The audit must
+    /// still report line 1.
+    ///
+    /// REVERT DISCRIMINATOR: in `check_swallowed_clauses`, pass the card-wide `result`
+    /// instead of the unit-scoped `scoped` to `any_ability_has_unimplemented` (i.e.
+    /// restore the card-wide rule) and line 0's `Unimplemented` suppresses line 1 —
+    /// the `APNAP` assertion below goes red. Watched fail→pass.
+    #[test]
+    fn unsupported_unit_does_not_suppress_the_audit_of_a_sibling_unit() {
+        let parsed = parse_named(
+            "Whenever this enchantment untaps, chronoshift the aetheric weave.\n\
+             At the beginning of your upkeep, repeat the following process for each opponent in turn order. Reveal the top card of your library. That player may pay life equal to that card's mana value. If they do, exile that card. Otherwise, put it into your hand.",
+            "Synthetic Mixed-Support Card",
+            &["Enchantment"],
+        );
+
+        // REACH GUARD 1 (non-vacuity): there must actually BE an unsupported sibling.
+        // Without it the test would pass trivially on a fully-supported card and would
+        // be asserting nothing at all about suppression.
+        let has_unsupported = any_ability_has_unimplemented(&parsed)
+            || parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_ref())
+                .any(|execute| def_tree_has_unimplemented(execute));
+        assert!(
+            has_unsupported,
+            "line 0 must be genuinely UNSUPPORTED for this fixture to test anything; if the \
+             parser learned to model it, swap line 0 for another unsupported line"
+        );
+
+        // REACH GUARD 2 (non-vacuity): the sibling must have REACHED expectation
+        // comparison — it parsed, so its warning cannot be an artifact of its own failure.
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_ref())
+                .any(|execute| !def_tree_has_unimplemented(execute)),
+            "the Protection Racket upkeep trigger must parse without Unimplemented"
+        );
+
+        // THE CLAIM: the supported sibling is still audited even though line 0 is
+        // unsupported. Card-wide suppression would silence exactly this.
+        assert!(
+            has_swallowed_detector(&parsed, "APNAP"),
+            "the unsupported line 0 must NOT suppress the swallowed-clause audit of line 1"
+        );
+
+        // ...and the diagnostic is attributed to the line that raised it, not to line 0.
+        let apnap_line = parsed
+            .parse_warnings
+            .iter()
+            .find_map(|warning| match warning {
+                OracleDiagnostic::SwallowedClause {
+                    detector,
+                    line_index,
+                    ..
+                } if detector == "APNAP" => Some(*line_index),
+                _ => None,
+            })
+            .expect("APNAP diagnostic must exist");
+        assert_eq!(
+            apnap_line, 1,
+            "the swallowed clause belongs to line 1 (the trigger), not to the unsupported line 0"
+        );
+    }
+
+    /// `ActivateOnlyDuring` had ZERO tests of any kind: the detector is wired into
+    /// `check_swallowed_clauses` but nothing exercised it, positively or negatively.
+    ///
+    /// POSITIVE (a): CR 602.5b. "Activate only during your upkeep" IS typed — the timing
+    /// grammar maps it to `ActivationRestriction::DuringYourUpkeep` (verified: the parse
+    /// yields `activation_restrictions == [DuringYourUpkeep]`, no `Unimplemented`). The
+    /// detector must therefore stay SILENT.
+    ///
+    /// NOTE for anyone extending this: task #66 says "activate only during <step>" windows
+    /// are a parser gap. That is true only for steps with no `ActivationRestriction`
+    /// variant. `your upkeep` / `your turn` / `combat` all have one and DO get typed. Do
+    /// not infer from #66 that every phrasing in this family is untyped — this fixture was
+    /// originally written on that assumption and it was wrong.
+    #[test]
+    fn activate_only_during_is_silent_when_the_timing_window_is_typed() {
+        let parsed = parse_named(
+            "{T}: Draw a card. Activate only during your upkeep.",
+            "Synthetic Upkeep-Only Activator",
+            &["Artifact"],
+        );
+
+        // REACH GUARD: the window must actually be TYPED, or the silence below proves
+        // nothing about the evidence arm.
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(|ability| !ability.activation_restrictions.is_empty()),
+            "the upkeep window must be typed onto activation_restrictions"
+        );
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "the line must parse — a self-suppressing Unimplemented would make this vacuous"
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "ActivateOnlyDuring"),
+            "a TYPED timing window must not be reported as swallowed"
+        );
+    }
+
+    /// The OTHER half of the `ActivateOnlyDuring` input space, pinned to what the parser
+    /// ACTUALLY does — which is not what it looks like from the detector alone.
+    ///
+    /// `ActivationRestriction` has variants for `your upkeep`, `your turn`, and `combat`,
+    /// but NOT for `your end step`. An untypeable window does NOT get silently dropped:
+    /// it produces an honest `Effect::Unimplemented`, and the per-unit suppression rule
+    /// (see `check_swallowed_clauses`) then correctly declines to ALSO report it as a
+    /// swallowed clause — the unit already declared its gap explicitly, and
+    /// double-counting one defect is exactly what that rule exists to prevent.
+    ///
+    /// So this is a coverage-honesty pin, not a swallow pin: the semantics are visibly
+    /// red, not invisibly green. If someone ever makes this line parse "successfully"
+    /// without typing the window, the first assertion goes red and the swallow becomes
+    /// silent — which is the regression that matters.
+    ///
+    /// CONSEQUENCE WORTH KNOWING (filed, not claimed): both reachable input classes for
+    /// this detector are silent — a TYPED window supplies evidence, and an UNTYPEABLE one
+    /// self-suppresses via `Unimplemented`. Whether `ActivateOnlyDuring` can fire on ANY
+    /// real card is therefore an open question requiring a corpus scan; it may be a
+    /// zero-hit detector. Not asserted here, because I have not computed that count.
+    #[test]
+    fn untypeable_activation_window_is_an_honest_unimplemented_not_a_silent_swallow() {
+        let parsed = parse_named(
+            "{T}: Draw a card. Activate only during your end step.",
+            "Synthetic End-Step-Only Activator",
+            &["Artifact"],
+        );
+
+        // THE CLAIM: the dropped CR 602.5b window is declared, not hidden.
+        assert!(
+            any_ability_has_unimplemented(&parsed),
+            "an untypeable activation window must surface as an explicit Effect::Unimplemented \
+             (honest red), never as a quietly-accepted line"
+        );
+
+        // ...and because the unit owns an explicit gap, it is not ALSO double-reported as a
+        // swallowed clause. This is the documented per-unit suppression rule, pinned.
+        assert!(
+            !has_swallowed_detector(&parsed, "ActivateOnlyDuring"),
+            "a unit that already declared an Unimplemented must not be double-counted with a \
+             swallowed-clause warning for the same defect"
+        );
+    }
+
+    /// Sibling-negative for the pair above: a LIMIT is not a TIMING window. CR 602.5b's
+    /// "Activate only once each turn" is typed as `ActivationRestriction::OnlyOnceEachTurn`,
+    /// so it must not raise the timing expectation.
+    #[test]
+    fn activate_limit_does_not_raise_the_timing_expectation() {
+        let parsed = parse_named(
+            "{T}: Draw a card. Activate only once each turn.",
+            "Synthetic Once-Each-Turn Activator",
+            &["Artifact"],
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "ActivateOnlyDuring"),
+            "a once-each-turn LIMIT must not raise the 'activate only during' TIMING expectation"
+        );
+    }
+
+    /// The `APNAP` typed-evidence arm (`any_ability_has_apnap_ordering`) had no positive
+    /// fixture: the detector's only test was a pinned KNOWN GAP asserting it FIRES.
+    /// Nothing asserted it stays SILENT when the ordering IS typed — so the evidence arm
+    /// could have been deleted outright and the suite would still have passed. That is
+    /// the vacuous-detector class this campaign keeps getting burned by: a leg only ever
+    /// seen through its failure path is not tested.
+    ///
+    /// REVERT DISCRIMINATOR: make `any_ability_has_apnap_ordering` return `false` (i.e.
+    /// delete the typed `starting_with` arm) and this goes red — the detector would then
+    /// report a card whose ordering the AST actually carries.
+    #[test]
+    fn apnap_typed_starting_with_evidence_arm_is_not_vacuous() {
+        let parsed = parse_named(
+            "Starting with you, each player votes for time or money.",
+            "Synthetic Vote Orderer",
+            &["Sorcery"],
+        );
+
+        // REACH GUARD: the ordering must actually be TYPED on the AST. Without this, the
+        // assertion below could pass for the wrong reason (no expectation raised at all).
+        assert!(
+            super::any_ability_has_apnap_ordering(&parsed),
+            "the vote's starting player must be typed on the AST for this test to be about \
+             the evidence arm at all"
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "APNAP"),
+            "a typed 'starting with' ordering must SILENCE the APNAP detector — if this fires, \
+             the typed evidence arm is not being consulted"
         );
     }
 }
