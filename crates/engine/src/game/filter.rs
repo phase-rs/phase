@@ -223,6 +223,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -462,6 +463,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -3329,6 +3331,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::DistinctFrom { .. }
         | FilterProp::SharesQuality { .. }
         | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -4363,6 +4366,14 @@ fn matches_filter_prop(
             .damage_dealt_this_turn
             .iter()
             .any(|record| matches!(record.target, TargetRef::Object(id) if id == object_id)),
+        // CR 120.1: active-voice counterpart — this object DEALT damage this turn,
+        // i.e. it was the source of a damage event (Red Guardian, Super-Soldier:
+        // "target creature ... that dealt damage this turn"). Reads the same
+        // per-turn ledger the passive arm above does, keyed by `source_id`.
+        FilterProp::DealtDamageThisTurn => state
+            .damage_dealt_this_turn
+            .iter()
+            .any(|record| record.source_id == object_id),
         // CR 400.7: Object entered the battlefield this turn.
         FilterProp::EnteredThisTurn => obj.entered_battlefield_turn == Some(state.turn_number),
         // CR 302.6 + CR 508.1a: controlled continuously since the controller's
@@ -4856,6 +4867,14 @@ fn zone_change_record_matches_property(
             .damage_dealt_this_turn
             .iter()
             .any(|r| matches!(r.target, TargetRef::Object(id) if id == record.object_id)),
+        // CR 120.1: active-voice look-back — the object DEALT damage this turn.
+        // The `damage_dealt_this_turn` ledger is keyed by battlefield ObjectId and
+        // survives the object's zone change, so the LKI snapshot reads it by the
+        // record's `object_id`, mirroring the passive arm above.
+        FilterProp::DealtDamageThisTurn => state
+            .damage_dealt_this_turn
+            .iter()
+            .any(|r| r.source_id == record.object_id),
         // CR 110.5 + CR 110.5d + CR 608.2h: tap status is battlefield-only — once
         // the object has left its public zone it is neither tapped nor untapped, so
         // the live object can't answer a look-back "was tapped" rider (Brackish
@@ -6360,6 +6379,49 @@ mod tests {
         assert!(!matches_target_filter(
             &state, untouched, &filter, untouched
         ));
+    }
+
+    // CR 120.1: `DealtDamageThisTurn` matches the damage SOURCE, not the
+    // recipient — the active-voice counterpart of `WasDealtDamageThisTurn`
+    // (Red Guardian, Super-Soldier). The two must not be confused: the same
+    // damage record makes the source match `DealtDamageThisTurn` and the target
+    // match `WasDealtDamageThisTurn`, never the reverse.
+    #[test]
+    fn dealt_damage_this_turn_matches_source_not_target() {
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = setup();
+        let dealer = add_creature(&mut state, PlayerId(0), "Goblin Piker");
+        let victim = add_creature(&mut state, PlayerId(1), "Grizzly Bears");
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: dealer,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(victim),
+            target_controller: PlayerId(1),
+            amount: 2,
+            is_combat: true,
+            ..Default::default()
+        });
+
+        let dealt = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::DealtDamageThisTurn]),
+        );
+        // The creature that dealt the damage matches; the one that received it does not.
+        assert!(
+            matches_target_filter(&state, dealer, &dealt, dealer),
+            "the damage source must satisfy DealtDamageThisTurn"
+        );
+        assert!(
+            !matches_target_filter(&state, victim, &dealt, victim),
+            "the damage recipient must NOT satisfy DealtDamageThisTurn"
+        );
+
+        // Symmetry check against the passive filter: exactly the opposite.
+        let was_dealt = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::WasDealtDamageThisTurn]),
+        );
+        assert!(matches_target_filter(&state, victim, &was_dealt, victim));
+        assert!(!matches_target_filter(&state, dealer, &was_dealt, dealer));
     }
 
     #[test]

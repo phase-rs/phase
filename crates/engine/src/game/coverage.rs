@@ -943,7 +943,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 };
                 parts.push(format!("{prefix} {name}{suffix}"));
             }
-            FilterProp::WasDealtDamageThisTurn => parts.push("dealt damage this turn".into()),
+            FilterProp::WasDealtDamageThisTurn => parts.push("was dealt damage this turn".into()),
+            FilterProp::DealtDamageThisTurn => parts.push("dealt damage this turn".into()),
             FilterProp::EnteredThisTurn => parts.push("entered this turn".into()),
             FilterProp::ControlledContinuouslySinceTurnBegan => {
                 parts.push("controlled continuously since turn began".into())
