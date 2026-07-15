@@ -340,6 +340,9 @@ fn scan_target_selection_constraint(c: &TargetSelectionConstraint) -> Axes {
 
 fn scan_effect(x: &Effect) -> Axes {
     match x {
+        // CR 612.1: text-change contributes no scan axis (its target/choice are
+        // resolved interactively, carrying no cost/count/zone axis).
+        Effect::ChangeTextWords { .. } => Axes::NONE,
         Effect::StartYourEngines { player_scope } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_player_filter(player_scope));
@@ -4400,6 +4403,8 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
         | Effect::ChooseOneOf { .. }
+        // CR 612.1: raises `WaitingFor::TextWordReplacement` — fail-closed prompt.
+        | Effect::ChangeTextWords { .. }
         | Effect::Unimplemented { .. } => ResolutionChoiceFreedom::MayPrompt,
     }
 }
@@ -4655,6 +4660,8 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
         | Effect::ChooseOneOf { .. }
+        // CR 612.1: text-change draws no RNG.
+        | Effect::ChangeTextWords { .. }
         | Effect::Unimplemented { .. } => false,
     }
 }
@@ -5204,6 +5211,12 @@ mod tests {
                 count: 1,
                 target: TargetFilter::Any,
             }, // discard selection prompt
+            Effect::ChangeTextWords {
+                target: TargetFilter::Any,
+                allowed_categories: Vec::new(),
+                excluded_to: Vec::new(),
+                duration: None,
+            }, // WaitingFor::TextWordReplacement — text_change.rs
         ];
         for e in &rejects {
             assert_eq!(

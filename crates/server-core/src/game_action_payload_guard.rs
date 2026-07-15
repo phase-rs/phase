@@ -487,6 +487,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChooseTopOrBottom { .. }
         | GameAction::ChooseMeldPair { .. }
         | GameAction::ChooseEntryAttackTarget { .. }
+        // CR 612.1: text-word replacement carries a single bounded option index —
+        // nothing client-controlled to bound.
+        | GameAction::ChooseTextWordReplacement { .. }
         // CR 702.140c: mutate merge side carries a single typed enum — nothing
         // client-controlled to bound.
         | GameAction::ChooseMutateMergeSide { .. }

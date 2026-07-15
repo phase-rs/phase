@@ -2716,6 +2716,9 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         // CR 612.8 + 613.1c: Layer-3 name-set from source's chosen name (Psychic
         // Paper); a granted continuous mod, no frozen event-context tag.
         | ContinuousModification::SetChosenName
+        // CR 612.1: Layer-3 text-word replacement; operands are latched at
+        // resolution, so it carries no frozen event-context tag.
+        | ContinuousModification::ReplaceTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
@@ -3326,6 +3329,8 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::ManifestDread
         | Effect::Choose { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        // CR 612.1: operands latched at resolution; no frozen event-context tag.
+        | Effect::ChangeTextWords { .. }
         | Effect::Unimplemented { .. } => false,
     }
 }
@@ -5087,7 +5092,10 @@ fn rw_effect(
             }
             (p, None)
         }
-        Effect::AddTargetReplacement { .. }
+        // CR 612.1: latched text-word replacement — reads no member/event-bound
+        // value and writes no event object; empty profile.
+        Effect::ChangeTextWords { .. }
+        | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }

@@ -1334,6 +1334,15 @@ export type MulliganDecisionPhase =
   | { type: "Declare" }
   | { type: "BottomCards"; count: number; then: PendingMulliganAction };
 
+// CR 612.1 + CR 612.2: one legal text-word substitution offered to the player.
+// `label` is engine-computed; the frontend renders it verbatim.
+export interface TextWordReplacementOption {
+  category: string;
+  from: unknown;
+  to: unknown;
+  label: string;
+}
+
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "MeldPairChoice"; data: { player: PlayerId; choices: MeldSelection[] } }
@@ -1395,6 +1404,8 @@ export type WaitingFor =
   | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source_id: ObjectId; proposition_truth?: boolean } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
+  // CR 612.1: pick one engine-computed text-word substitution to install.
+  | { type: "TextWordReplacement"; data: { player: PlayerId; source: ObjectId; target: ObjectId; options: TextWordReplacementOption[]; duration?: unknown } }
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast; unavailable_modes?: number[] } }
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
@@ -1908,6 +1919,8 @@ export type GameAction =
   | { type: "ChooseBranch"; data: { index: number } }
   | { type: "SubmitLifeRedistribution"; data: { option_index: number } }
   | { type: "ChooseDamageSource"; data: { source: ObjectId } }
+  // CR 612.1: index into the offered TextWordReplacement options.
+  | { type: "ChooseTextWordReplacement"; data: { index: number } }
   | { type: "SelectModes"; data: { indices: number[] } }
   | { type: "DecideOptionalCost"; data: { pay: boolean } }
   | { type: "RespondToSpliceOffer"; data: { card: ObjectId | null } }

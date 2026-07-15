@@ -190,7 +190,9 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
             EffectPolarity::Contextual
         }
         // Contextual: depends on usage context
-        Effect::GainControl { .. }
+        // CR 612.1: a text change can help or hinder depending on the target.
+        Effect::ChangeTextWords { .. }
+        | Effect::GainControl { .. }
         | Effect::GiftDelivery { .. }
         | Effect::Suspect { .. }
         | Effect::GivePlayerCounter { .. }

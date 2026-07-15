@@ -792,6 +792,9 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        // CR 612.1: text-word replacement carries only concrete `TextWord`
+        // operands, no nested ability/effect card-name carriers.
+        | ContinuousModification::ReplaceTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
@@ -1014,7 +1017,8 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
             }
         }
         // Leaf effects with no nested ability/effect carrier.
-        Effect::StartYourEngines { .. }
+        Effect::ChangeTextWords { .. }
+        | Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }

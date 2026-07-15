@@ -84,6 +84,8 @@ impl ContinuousModification {
             // CR 612.8 + CR 613.1c: Setting an object's name to the source's
             // chosen card name is a text-changing effect — Layer 3.
             ContinuousModification::SetChosenName => Layer::Text,
+            // CR 613.1c: Text-changing effects are applied in Layer 3.
+            ContinuousModification::ReplaceTextWord { .. } => Layer::Text,
             ContinuousModification::AddPower { .. }
             | ContinuousModification::AddToughness { .. }
             | ContinuousModification::AddDynamicPower { .. }
@@ -265,6 +267,16 @@ mod tests {
         );
         // CR 612.8 + CR 613.1c: SetChosenName is a text-changing effect (Layer 3).
         assert_eq!(ContinuousModification::SetChosenName.layer(), Layer::Text);
+        // CR 613.1c: ReplaceTextWord is a text-changing effect (Layer 3).
+        assert_eq!(
+            ContinuousModification::ReplaceTextWord {
+                category: crate::types::ability::TextWordCategory::ColorWord,
+                from: crate::types::ability::TextWord::Color(crate::types::mana::ManaColor::Red),
+                to: crate::types::ability::TextWord::Color(crate::types::mana::ManaColor::Blue),
+            }
+            .layer(),
+            Layer::Text
+        );
         assert_eq!(
             ContinuousModification::AddPower { value: 1 }.layer(),
             Layer::ModifyPT

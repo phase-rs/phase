@@ -847,7 +847,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
 }
 
 /// The five basic land types (CR 305.6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BasicLandType {
     Plains,
     Island,
@@ -901,6 +901,55 @@ impl std::str::FromStr for BasicLandType {
             "Mountain" => Ok(Self::Mountain),
             "Forest" => Ok(Self::Forest),
             _ => Err(()),
+        }
+    }
+}
+
+/// CR 612.2: The three kinds of words a text-changing effect can replace — a
+/// Magic color word, a basic land type, or a creature type — each "used in the
+/// correct way". A text-changing effect operates within exactly one category so
+/// that a color word is never confused with a same-spelled land type or name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum TextWordCategory {
+    ColorWord,
+    BasicLandType,
+    CreatureType,
+}
+
+/// CR 612.2: a color word, land type, or creature type used in the correct sense.
+/// A single replaceable word, tagged by its category. The `from`/`to` operands of
+/// a text-changing effect are `TextWord`s of the same category.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum TextWord {
+    Color(ManaColor),
+    BasicLandType(BasicLandType),
+    CreatureType(String),
+}
+
+impl TextWord {
+    /// The category this word belongs to.
+    pub fn category(&self) -> TextWordCategory {
+        match self {
+            TextWord::Color(_) => TextWordCategory::ColorWord,
+            TextWord::BasicLandType(_) => TextWordCategory::BasicLandType,
+            TextWord::CreatureType(_) => TextWordCategory::CreatureType,
+        }
+    }
+
+    /// Human-readable option label shown to the choosing player (the frontend
+    /// renders this string verbatim — the engine computes every label).
+    pub fn label(&self) -> String {
+        match self {
+            TextWord::Color(color) => match color {
+                ManaColor::White => "White",
+                ManaColor::Blue => "Blue",
+                ManaColor::Black => "Black",
+                ManaColor::Red => "Red",
+                ManaColor::Green => "Green",
+            }
+            .to_string(),
+            TextWord::BasicLandType(land) => land.as_subtype_str().to_string(),
+            TextWord::CreatureType(name) => name.clone(),
         }
     }
 }
@@ -9449,6 +9498,22 @@ pub enum ExiledSpellRider {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
 pub enum Effect {
+    /// CR 612.1: interactive text-change; the controller chooses a category ∈
+    /// `allowed_categories`, a `from` word ∈ the words present in the target
+    /// (CR 612.2), and a `to` word ∈ that category's words minus `excluded_to`.
+    /// Creates a Layer-3 text-changing continuous effect keyed to the target.
+    /// `target` defines the spell's target slot (CR 115.1 — "target spell or
+    /// permanent"); the concrete chosen object is read from
+    /// `ResolvedAbility.targets` at resolution (CR 608.2b).
+    ChangeTextWords {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        allowed_categories: Vec<TextWordCategory>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        excluded_to: Vec<TextWord>,
+        #[serde(default)]
+        duration: Option<Duration>,
+    },
     /// CR 702.179a: A player starts their engines, setting speed to 1 if they have no speed.
     StartYourEngines {
         player_scope: PlayerFilter,
@@ -13585,7 +13650,8 @@ impl Effect {
     pub fn target_filter(&self) -> Option<&TargetFilter> {
         match self {
             // --- Effects with a `target: TargetFilter` field ---
-            Effect::DealDamage { target, .. }
+            Effect::ChangeTextWords { target, .. }
+            | Effect::DealDamage { target, .. }
             | Effect::Draw { target, .. }
             | Effect::Scry { target, .. }
             | Effect::Surveil { target, .. }
@@ -14091,6 +14157,526 @@ impl Effect {
         }
     }
 
+    /// CR 612.2: Mutable mirror of [`Effect::target_filter`]. Surfaces the same
+    /// primary target/source `TargetFilter` for in-place rewriting — used by the
+    /// text-substitution walker (`game::text_substitution`) to reach a color
+    /// word / creature type / land type that lives inside an ability's effect
+    /// target filter (e.g. "{T}: Destroy target red creature", "Pump target
+    /// Zombie") so a text-changing effect can offer and change that instance.
+    ///
+    /// Arm classification is kept identical to `target_filter()` so the two stay
+    /// paired — edit both together. Exhaustive match (no wildcard) forces every
+    /// future target-bearing `Effect` variant to be classified here.
+    pub fn target_filter_mut(&mut self) -> Option<&mut TargetFilter> {
+        match self {
+            // --- Effects with a `target: TargetFilter` field ---
+            Effect::ChangeTextWords { target, .. }
+            | Effect::DealDamage { target, .. }
+            | Effect::Draw { target, .. }
+            | Effect::Scry { target, .. }
+            | Effect::Surveil { target, .. }
+            | Effect::Pump { target, .. }
+            | Effect::RememberCard { target }
+            | Effect::PairWith { target }
+            | Effect::Destroy { target, .. }
+            | Effect::Regenerate { target, .. }
+            | Effect::RemoveAllDamage { target, .. }
+            | Effect::Counter { target, .. }
+            | Effect::RemoveCounter { target, .. }
+            | Effect::Sacrifice { target, .. }
+            | Effect::DiscardCard { target, .. }
+            | Effect::Mill { target, .. }
+            | Effect::ChangeZone { target, .. }
+            | Effect::GainControl { target, .. }
+            | Effect::ControlNextTurn { target, .. }
+            | Effect::Attach { target, .. }
+            | Effect::UnattachAll { target, .. }
+            | Effect::Fight { target, .. }
+            | Effect::Bounce { target, .. }
+            | Effect::SwitchPT { target, .. }
+            | Effect::CopySpell { target, .. }
+            | Effect::CastCopyOfCard { target, .. }
+            | Effect::BecomeCopy { target, .. }
+            | Effect::GainActivatedAbilitiesOfTarget { target, .. }
+            | Effect::ChooseCard { target, .. }
+            | Effect::PutCounter { target, .. }
+            // CR 608.2d + CR 122.1: `ChooseCounterKind`/`PutChosenCounter`
+            // surface their `target` (typically `ParentTarget`) so the
+            // member-driven `repeat_for` loop rebinds it to the i-th permanent
+            // per iteration (The Caves of Androzani), mirroring `PutCounter`.
+            | Effect::ChooseCounterKind { target, .. }
+            | Effect::PutChosenCounter { target, .. }
+            | Effect::MultiplyCounter { target, .. }
+            | Effect::DoublePT { target, .. }
+            | Effect::MoveCounters { target, .. }
+            | Effect::Animate { target, .. }
+            | Effect::Discard { target, .. }
+            | Effect::Shuffle { target, .. }
+            | Effect::Transform { target, .. }
+            | Effect::RevealHand { target, .. }
+            | Effect::Reveal { target, .. }
+            | Effect::TargetOnly { target, .. }
+            | Effect::Connive { target, .. }
+            | Effect::PhaseOut { target, .. }
+            | Effect::PhaseIn { target, .. }
+            | Effect::ForceBlock { target, .. }
+            | Effect::ForceAttack { target, .. }
+            | Effect::BecomePrepared { target, .. }
+            | Effect::BecomeUnprepared { target, .. }
+            | Effect::BecomeSaddled { target, .. }
+            | Effect::CastFromZone { target, .. }
+            | Effect::PreventDamage { target, .. }
+            | Effect::Exploit { target, .. }
+            | Effect::GivePlayerCounter { target, .. }
+            | Effect::LoseAllPlayerCounters { target, .. }
+            | Effect::PutAtLibraryPosition { target, .. }
+            | Effect::PutOnTopOrBottom { target, .. }
+            | Effect::Goad { target, .. }
+            | Effect::Detain { target, .. }
+            // CR 708.2a: "Turn target creature face down" (Cyber Conversion)
+            // declares a real target as the spell is cast; surface it so the
+            // cast-time target slot is built and CR 608.2b re-validates it at
+            // resolution.
+            | Effect::TurnFaceDown { target, .. }
+            // CR 709.5f-g: the Room is a real declared target ("target Room you
+            // control"); surface it so the cast/trigger-time target slot is
+            // built and CR 608.2b re-validates it at resolution.
+            | Effect::SetRoomDoorLock { target, .. }
+            | Effect::ExtraTurn { target, .. }
+            | Effect::GrantExtraLoyaltyActivations { target, .. }
+            | Effect::SkipNextTurn { target, .. }
+            | Effect::SkipNextStep { target, .. }
+            | Effect::AdditionalPhase { target, .. }
+            | Effect::Double { target, .. }
+            | Effect::SetLifeTotal { target, .. }
+            | Effect::GiveControl { target, .. }
+            | Effect::RemoveFromCombat { target, .. }
+            | Effect::BecomeBlocked { target, .. }
+            | Effect::PutSticker { target, .. }
+            | Effect::ApplySticker { target, .. }
+            | Effect::ProliferateTarget { target, .. }
+            // CR 115.7 + CR 115.1: "Change the target of target spell or ability"
+            // (Bolt Bend, Redirect, Misdirection) targets the stack spell/ability
+            // it will retarget. That target is chosen as the spell is cast (CR
+            // 115.1), so it must be surfaced here — both to build the cast-time
+            // target slot and so resolution-time re-validation (CR 608.2b) checks
+            // it against the StackSpell/StackAbility filter instead of the
+            // battlefield-only default (which would always fizzle a stack target).
+            | Effect::ChangeTargets { target, .. }
+            // CR 702.55a: Haunt — "exile it haunting target creature". The
+            // haunted creature is a real target chosen as the haunt trigger goes
+            // on the stack, so it must be surfaced for the target-slot path.
+            | Effect::ExileHaunting { target } => Some(target),
+
+            // CR 115.1 / CR 608.2c: a `Shared` recipient is resolved exactly like
+            // `DealDamage::target` — surface it so the same target-slot collection
+            // and event-context hydration build / bind the recipient. The
+            // `EachController` and deferred per-source recipients carry no slot and
+            // fall through to the `None` group below.
+            Effect::EachSourceDealsDamage {
+                recipient: EachDamageRecipient::Shared(filter),
+                ..
+            } => Some(filter),
+
+            Effect::CombineHost { host, .. }
+            | Effect::ChooseAugmentAndCombineWithHost { host, .. } => Some(host.as_mut()),
+            Effect::CrankContraptions { target }
+            | Effect::ReassembleContraption { target, .. }
+            | Effect::ReassembleContraptionOnSprocket { target, .. } => Some(target),
+
+            // CR 702.75a: Hideaway conceal acts on the just-exiled card inherited
+            // from the parent `Dig` continuation (`ParentTarget`); it is never
+            // announced as a target, but surfacing the filter keeps chain-time
+            // resolution consistent.
+            Effect::HideawayConceal { target } => Some(target),
+
+            // Heist targets the opponent whose library is heisted.
+            Effect::Heist { target, .. } => Some(target),
+
+            // CR 109.4 + CR 115.1 + CR 707.2: `CopyTokenOf` has two
+            // potentially-targetable axes — the copy *source* (`target`) and
+            // the token *creator/owner* (`owner`). `target_filter()` surfaces
+            // exactly one as the stack-push target slot:
+            //  * When the copy source is a declared target (`source_filter` is
+            //    `None` and `target` is a real targetable filter, e.g.
+            //    "create a token that's a copy of target creature"), the
+            //    copy-source axis wins — it must keep its slot.
+            //  * Otherwise the copy source is a context ref (`SelfRef` /
+            //    `ParentTarget` — Wedding Ring, Twinflame Strike) or a
+            //    non-targeting `source_filter` set, so the copy-source axis
+            //    needs no slot; the `owner` filter is surfaced instead so
+            //    "target opponent creates a token that's a copy of it" can
+            //    declare the opponent as a target. This mirrors `Effect::Token`
+            //    below, which surfaces its `owner` unconditionally.
+            // No real card targets both axes at once; if one ever exists, the
+            // copy-source axis is surfaced and `owner` resolution falls back to
+            // the controller (documented at `token::resolve_token_owner`).
+            Effect::CopyTokenOf {
+                target,
+                owner,
+                source_filter,
+                ..
+            } => {
+                if source_filter.is_none() && !target.is_context_ref() {
+                    Some(target)
+                } else {
+                    Some(owner)
+                }
+            }
+
+            Effect::Dig { player, .. }
+            | Effect::ExileTop { player, .. }
+            | Effect::ExchangeLifeWithStat { player, .. }
+            | Effect::ExileFromTopUntil { player, .. }
+            // CR 119.3: `GainLife.player` is a TargetFilter. `extract_target_filter_from_effect`
+            // drops context-refs (Controller) via `.filter(|t| !t.is_context_ref())`, so the
+            // default "you gain life" still surfaces no target slot.
+            | Effect::GainLife { player, .. }
+            // CR 701.57a: Discover's discovering player. CR 701.68a: Blight's
+            // blighting player. Both default to `TargetFilter::Controller` (a
+            // context ref), so bare "discover N" / "blight N" surface no target
+            // slot; "Target opponent blights N" surfaces the opponent as a real
+            // target via the same `is_context_ref()` filter the other player-axis
+            // effects use.
+            | Effect::Discover { player, .. }
+            | Effect::BlightEffect { player, .. } => Some(player),
+
+            // Digital-only Alchemy: `ApplyPerpetual.target` selects the modified
+            // object (`~` → Any/source fallback; "that creature"/"the duplicate"
+            // → ParentTarget event/chain anaphor). Context refs surface no
+            // target slot; Any likewise resolves to the source without one.
+            Effect::ApplyPerpetual { target, .. } => {
+                if matches!(target, TargetFilter::Any) {
+                    None
+                } else {
+                    Some(target)
+                }
+            }
+
+            // CR 115.1a + CR 601.2c: "Create a [Role/Aura] token attached to
+            // target creature" targets its host — surface `attach_to` as the
+            // target slot when it is a real targetable filter. CR 303.4 + the
+            // Asinine Antics ruling: a for-each host (`ParentTarget`, a context
+            // ref) is NOT targeted (hexproof can't stop it); it's bound
+            // per-iteration by the member-driven loop, so `owner` is surfaced and
+            // `attach_to` is reached as a hidden parent-ref slot instead. Mirrors
+            // `CopyTokenOf` (two targetable axes; no real card targets both —
+            // `attach_to` wins and `owner` falls back to the controller at resolve
+            // via `token::resolve_token_owner`).
+            //
+            // CR 111.2 + CR 601.2c: "Target player creates ..." token modes
+            // (e.g. Ashling's Command mode 4, Brigid's Command, Prismari Command)
+            // surface their token-creation target as the `owner` filter — the
+            // player who creates the token is its owner. The default
+            // `TargetFilter::Controller` preserves "you create ..." semantics.
+            Effect::Token { owner, attach_to, .. } => match attach_to {
+                Some(f) if !f.is_context_ref() => Some(f),
+                _ => Some(owner),
+            },
+
+            // GenericEffect and LoseLife have Option<TargetFilter>
+            //
+            // CR 104.3e + CR 115.1 + CR 603.7c: `LoseTheGame.target` and
+            // `WinTheGame.target` are Some(filter) when the Oracle text names
+            // a specific subject ("that player loses the game" — Ezio
+            // Auditore da Firenze; the filter resolves to
+            // `TargetFilter::TriggeringPlayer` so the trigger machinery binds
+            // the damaged player into `ability.targets`). When None the
+            // resolver falls back to `ability.controller` (the "you lose the
+            // game" / "you win the game" default).
+            Effect::GenericEffect { target, .. }
+            | Effect::LoseLife { target, .. }
+            | Effect::LoseTheGame { target, .. }
+            | Effect::WinTheGame { target, .. } => target.as_mut(),
+
+            // CR 115.1 + CR 115.7: Mana abilities normally don't target, but a
+            // few spell-only mana effects (Jeska's Will mode 1: "Add {R} for
+            // each card in target opponent's hand") declare a player target so
+            // the `TargetZoneCardCount` quantity in `produced` can resolve
+            // against `ability.targets`. The optional `target` is `None` for
+            // every classic mana ability (Cabal Coffers, Reflecting Pool, etc.).
+            Effect::Mana { target, .. } => target.as_mut(),
+
+            // CR 120.4b: Internal post-replacement damage continuations carry a
+            // concrete target already chosen by an earlier effect; no new target
+            // slot is exposed.
+            Effect::ApplyPostReplacementDamage { .. } => None,
+
+            // CR 701.26a/b: `SetTapState` exposes its target only for the
+            // single-permanent scope (legacy `Tap`/`Untap`). The `All` scope
+            // (legacy `TapAll`/`UntapAll`) is a non-targeting population filter.
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                target,
+                ..
+            } => Some(target),
+            Effect::SetTapState {
+                scope: EffectScope::All,
+                ..
+            } => None,
+
+            // CR 701.60a: `Suspect`/`Unsuspect` expose a target slot only for the
+            // single-permanent scope (targeted/anaphoric "suspect target
+            // creature" / "it's no longer suspected"). The `All` scope ("all
+            // suspected creatures are no longer suspected") is a non-targeting
+            // population filter enumerated at resolution — like `DestroyAll`,
+            // its `target_filter()` is None.
+            Effect::Suspect {
+                scope: EffectScope::Single,
+                target,
+            }
+            | Effect::Unsuspect {
+                scope: EffectScope::Single,
+                target,
+            } => Some(target),
+            Effect::Suspect {
+                scope: EffectScope::All,
+                ..
+            }
+            | Effect::Unsuspect {
+                scope: EffectScope::All,
+                ..
+            } => None,
+
+            // --- Effects with no player-selectable target field ---
+            // These use filters, zone-level operations, or have no targeting at all.
+            Effect::StartYourEngines { .. }
+            // CR 311.7: the chaos anchor swap is a non-targeting per-player effect.
+            | Effect::SwapChosenLabels { .. }
+            // CR 109.4: owner/type_filter are non-targeting resolution-time
+            // filters; the copy source is chosen from the format pool, not
+            // declared as a target.
+            | Effect::CreateTokenCopyFromPool { .. }
+            | Effect::Myriad
+            // CR 702.141a: opponents and per-opponent attack binding are chosen
+            // by the effect, not declared as targets.
+            | Effect::Encore
+            // CR 701.42b: the meld partner is found by name + ownership at
+            // resolution, not declared as a player-selectable target.
+            | Effect::Meld { .. }
+            // CR 508.1: copies are chosen by the effect, not declared as targets.
+            | Effect::CopyTokenBlockingAttacker { .. }
+            | Effect::ChangeSpeed { .. }
+            | Effect::PumpAll { .. }
+            | Effect::DamageAll { .. }
+            | Effect::DamageEachPlayer { .. }
+            | Effect::DestroyAll { .. }
+            // CR 613.1b: GainControlAll's `target` is a mass *population* filter
+            // (enumerated at resolution), not a chosen target slot — like
+            // DestroyAll, its `target_filter()` is None.
+            | Effect::GainControlAll { .. }
+            | Effect::GoadAll { .. }
+            | Effect::BounceAll { .. }
+            | Effect::CounterAll { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::PutCounterAll { .. }
+            | Effect::DoublePTAll { .. }
+            | Effect::Explore
+            | Effect::Investigate
+            | Effect::Tribute { .. }
+            | Effect::BecomeMonarch
+            | Effect::NoOp
+            | Effect::Proliferate
+            | Effect::Populate
+            | Effect::Clash
+            // CR 608.2d: behold's quality is chosen as the effect resolves, not a
+            // declared stack target — target_filter() is None (like Clash/Populate).
+            | Effect::Behold { .. }
+            | Effect::EndTheTurn
+            | Effect::EndCombatPhase
+            | Effect::Vote { .. }
+            | Effect::Cleanup { .. }
+            | Effect::SearchOutsideGame { .. }
+            | Effect::Choose { .. }
+            | Effect::OpponentGuess { .. }
+            | Effect::ChooseDamageSource { .. }
+            | Effect::SolveCase
+            | Effect::SetClassLevel { .. }
+            | Effect::CreateDelayedTrigger { .. }
+            | Effect::AddTargetReplacement { .. }
+            | Effect::AddRestriction { .. }
+            | Effect::ReduceNextSpellCost { .. }
+            | Effect::GrantNextSpellAbility { .. }
+            | Effect::AddPendingETBCounters { .. }
+            | Effect::AddPendingEntersModifications { .. }
+            | Effect::CreateEmblem { .. }
+            | Effect::PayCost { .. }
+            | Effect::GrantCastingPermission { .. }
+            | Effect::RegisterBending { .. }
+            // CR 303.4 + CR 115.1: ReturnAsAura attaches to a CHOICE (not a
+            // target) picked at resolution time via
+            // `WaitingFor::ReturnAsAuraTarget`. No stack-push target slot.
+            | Effect::ReturnAsAura { .. }
+            | Effect::ChooseFromZone { .. }
+            | Effect::ForEachCategory { .. }
+            | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::EachPlayerCopyChosen { .. }
+            | Effect::GainEnergy { .. }
+            | Effect::HeistExile
+            | Effect::Cascade
+            | Effect::Ripple { .. }
+            | Effect::MiracleCast { .. }
+            | Effect::MadnessCast { .. }
+            | Effect::GiftDelivery { .. }
+            | Effect::ExchangeControl { .. }
+            // CR 115.1d + CR 115.1: the source set and the recipient are surfaced
+            // as dual target slots by `ability_utils::collect_target_slots` (the
+            // "up to two" sources slot is driven by the ability's `multi_target`
+            // spec, the recipient is one mandatory slot), not by `target_filter()`.
+            | Effect::EachDealsDamageEqualToPower { .. }
+            // CR 109.4 + CR 120.3a: `EachController` resolves per-source at the
+            // resolver — no player-selectable target slot. Exhaustive match
+            // ensures any future `EachDamageRecipient` variant must be
+            // explicitly decided here rather than silently falling through.
+            | Effect::EachSourceDealsDamage {
+                recipient: EachDamageRecipient::EachController,
+                ..
+            }
+            // CR 701.12a: player targets (player_a/player_b) are surfaced as
+            // dual target slots by ability_utils, not by `target_filter()`.
+            | Effect::ExchangeLifeTotals { .. }
+            // CR 601.2a: candidates gathered by `filter`/`zones` at resolution,
+            // no player-selectable target slot.
+            | Effect::FreeCastFromZones { .. }
+            // CR 614.1a: acts on the triggering spell (the trigger source), not a
+            // player-declared target.
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+            | Effect::Manifest { .. }
+            | Effect::ManifestDread
+            | Effect::Cloak { .. }
+            | Effect::TurnFaceUp { .. }
+            | Effect::RollDie { .. }
+            | Effect::FlipCoin { .. }
+            | Effect::FlipCoins { .. }
+            | Effect::FlipCoinUntilLose { .. }
+            | Effect::RingTemptsYou
+            | Effect::VentureIntoDungeon
+            | Effect::VentureInto { .. }
+            | Effect::TakeTheInitiative
+            | Effect::Planeswalk
+            | Effect::ChaosEnsues
+            | Effect::RedistributeLifeTotals
+            | Effect::ReverseTurnOrder
+            | Effect::OpenAttractions { .. }
+            | Effect::RollToVisitAttractions
+            | Effect::AssembleContraptions { .. }
+            | Effect::AssembleContraptionsFromRollDifference
+            | Effect::AssembleContraptionOnSprocket { .. }
+            | Effect::ProcessRadCounters
+            | Effect::Incubate { .. }
+            | Effect::Amass { .. }
+            | Effect::Monstrosity { .. }
+            | Effect::Specialize
+            | Effect::Renown { .. }
+            | Effect::Bolster { .. }
+            | Effect::Adapt { .. }
+            | Effect::Learn
+            | Effect::Forage
+            | Effect::Harness
+            | Effect::CollectEvidence { .. }
+            | Effect::Endure { .. }
+            | Effect::ExploreAll { .. }
+            | Effect::Seek { .. }
+            | Effect::SetDayNight { .. }
+            | Effect::TimeTravel
+            | Effect::RuntimeHandled { .. }
+            | Effect::Conjure { .. }
+            | Effect::Intensify { .. }
+            | Effect::DraftFromSpellbook { .. }
+            | Effect::ChooseOneOf { .. }
+            // CR 122.1 + CR 608.2d: ChooseCounterAdjustment is slot-less like
+            // ChooseOneOf — its single target arrives via the propagated
+            // `ability.targets` chain, not a cast-time slot, so it must NOT be
+            // surfaced by `collect_target_slots`.
+            | Effect::ChooseCounterAdjustment { .. }
+            | Effect::Unimplemented { .. }
+            // CR 603.7e: ChooseObjectsIntoTrackedSet has no discrete effect-target
+            // slot — `chooser` is a player ref resolved like `PayCost.payer`, and
+            // `filter` constrains the interactive selection, not a targeting slot.
+            | Effect::ChooseObjectsIntoTrackedSet { .. }
+            // CR 700.3b: SeparateIntoPiles has no targeting slot — partitioning
+            // is a resolution-time set computation against `object_filter`.
+            | Effect::SeparateIntoPiles { .. }
+            // CR 701.20a: RevealFromHand implicitly targets the controller's own hand;
+            // it has no discrete `target` field for the generic targeting layer.
+            | Effect::RevealFromHand { .. }
+            // CR 614.9 + CR 115.1: CreateDamageReplacement has no `target:
+            // TargetFilter` field. Its "to target creature" redirect recipient
+            // (Soltari Guerrillas — `redirect_to: ChosenObjectTarget`) is
+            // surfaced through dedicated branches in `ability_utils`
+            // (`collect_target_slots` / `collect_target_slot_specs`), mirroring
+            // `MoveCounters`/`Attach`; all other forms host on the controller or
+            // source and declare no target.
+            // CR 702.50a: EpicCopy carries its targets inside the snapshotted
+            // spell ability, not in a top-level `target` field.
+            | Effect::EpicCopy { .. }
+            | Effect::CreateDamageReplacement { .. }
+            // CR 614.11: CreateDrawReplacement is non-targeted — "you would
+            // draw" scopes via the shield's source-player default, no slot.
+            | Effect::CreateDrawReplacement { .. }
+            // CR 614.1a: CreatePlaneswalkReplacement is non-targeted — "a player
+            // would planeswalk" scopes via the shield's player scope, no slot.
+            | Effect::CreatePlaneswalkReplacement { .. } => None,
+            // CR 115.1 + CR 601.2c: "two target players each reveal the top card of
+            // their library" (Parker Luck) needs a stack-time player target slot so
+            // the multi_target spec expands to one slot per revealer. Scoped to the
+            // bare `Player` filter (NOT the general `!is_context_ref()` that
+            // RevealUntil uses): a `Typed(opponent)` "target opponent reveals … deals
+            // damage to that player" reveal (Cerebral Eruption) additionally depends
+            // on the ParentTarget-after-reveal player binding, which currently
+            // mis-binds to the revealed card via `last_revealed_ids` injection
+            // (measured: damage lands on the revealed library card, not the player).
+            // Surfacing those slots would expose that separate pre-existing runtime
+            // bug, so the `Typed`-opponent reveal-targeting is a documented
+            // follow-up (S25 deferral D8) — do NOT re-broaden this arm to
+            // `!is_context_ref()` without first fixing the ParentTarget binding,
+            // or Cerebral Eruption re-ships damage to the revealed card.
+            Effect::RevealTop {
+                player: player @ TargetFilter::Player,
+                ..
+            } => Some(player),
+            // CR 115.1: every other RevealTop (context-ref `Controller`/`ScopedPlayer`
+            // "your library", `Typed(opponent)`, or `Any`) surfaces no target slot.
+            Effect::RevealTop { .. } => None,
+            // CR 115.1: RevealUntil with a non-context player filter ("target
+            // opponent reveals...") requires a stack-time player target slot.
+            Effect::RevealUntil { player, .. } => {
+                if player.is_context_ref() {
+                    None
+                } else {
+                    Some(player)
+                }
+            }
+            // CR 701.23a: SearchLibrary has an optional player target for opponent
+            // search ("search target opponent's library" → a stack-time slot).
+            // CR 608.2c + CR 108.3 / CR 109.4: an object-relative searched player
+            // ("search ITS controller's/owner's graveyard, hand, and library" —
+            // the name-hate class) is carried as a `Typed` controller context-ref
+            // and resolved at resolution by `resolve_library_owner` (never a
+            // cast-time target). It stays a `Typed` wrapper (not the bare
+            // `ParentTargetController` variant) so `searcher_is_library_owner`
+            // returns false and the caster remains the searcher (CR 701.23a
+            // asymmetric); surface no slot for it, mirroring `RevealUntil`.
+            Effect::SearchLibrary { target_player, .. } => match target_player {
+                Some(TargetFilter::Typed(tf))
+                    if tf.type_filters.is_empty()
+                        && tf.properties.is_empty()
+                        && matches!(
+                            tf.controller,
+                            Some(
+                                ControllerRef::ParentTargetOwner
+                                    | ControllerRef::ParentTargetController
+                            )
+                        ) =>
+                {
+                    None
+                }
+                other => other.as_mut(),
+            },
+            Effect::ChooseDrawnThisTurnPayOrTopdeck { player, .. } => Some(player),
+        }
+    }
+
     /// CR 107.3 + CR 608.2c: Returns the `QuantityExpr` carrying this effect's
     /// primary count/amount, for the full class of count- and amount-bearing
     /// effects (token creation, counters, draws, damage, mill, discard, etc.).
@@ -14107,6 +14693,7 @@ impl Effect {
     /// a new count/amount-bearing Effect variant is added.
     pub fn count_expr(&self) -> Option<&QuantityExpr> {
         match self {
+            Effect::ChangeTextWords { .. } => None,
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
             Effect::Draw { count, .. }
             | Effect::Token { count, .. }
@@ -14359,6 +14946,7 @@ impl Effect {
     /// `count_expr` arm-for-arm.
     pub fn count_expr_mut(&mut self) -> Option<&mut QuantityExpr> {
         match self {
+            Effect::ChangeTextWords { .. } => None,
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
             Effect::Draw { count, .. }
             | Effect::Token { count, .. }
@@ -14609,6 +15197,7 @@ impl Effect {
 /// Production API for GameEvent::EffectResolved api_type strings and logging.
 pub fn effect_variant_name(effect: &Effect) -> &str {
     match effect {
+        Effect::ChangeTextWords { .. } => "ChangeTextWords",
         Effect::StartYourEngines { .. } => "StartYourEngines",
         Effect::ChangeSpeed { .. } => "ChangeSpeed",
         Effect::DealDamage { .. } => "DealDamage",
@@ -14857,6 +15446,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
 /// and trigger-condition placeholders (Reveal, Transform, TurnFaceUp, DayTimeChange).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EffectKind {
+    ChangeTextWords,
     StartYourEngines,
     ChangeSpeed,
     DealDamage,
@@ -15104,6 +15694,7 @@ pub enum EffectKind {
 impl From<&Effect> for EffectKind {
     fn from(effect: &Effect) -> Self {
         match effect {
+            Effect::ChangeTextWords { .. } => EffectKind::ChangeTextWords,
             Effect::StartYourEngines { .. } => EffectKind::StartYourEngines,
             Effect::ChangeSpeed { .. } => EffectKind::ChangeSpeed,
             Effect::DealDamage { .. } => EffectKind::DealDamage,
@@ -19771,6 +20362,18 @@ pub enum ContinuousModification {
     /// sibling of `SetColor`. Used by "its name is the last chosen name" (Psychic
     /// Paper). Unit variant: the read source is implicitly `ChosenAttribute::CardName`.
     SetChosenName,
+    /// CR 612.1 + CR 612.2 + CR 613.1c: Layer-3 text-changing effect; replaces
+    /// every instance of `from` (used as `category`) with `to` across the
+    /// object's derived characteristics (rules text, type line, keyword params,
+    /// embedded filters/conditions). Operands are latched at resolution — the
+    /// controller's `from`/`to` choices are fixed when the effect is created, so
+    /// the modification carries concrete `TextWord`s rather than reading them at
+    /// layer-evaluation time.
+    ReplaceTextWord {
+        category: TextWordCategory,
+        from: TextWord,
+        to: TextWord,
+    },
     /// CR 707.9a: Retain a printed triggered ability from the source object's
     /// printed trigger list at the given index. Used by "becomes a copy of <X>,
     /// except it has this ability" patterns (Irma Part-Time Mutant, Cryptoplasm,

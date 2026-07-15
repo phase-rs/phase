@@ -1748,7 +1748,8 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         | GameAction::ChoosePile { .. }
         | GameAction::ChooseBranch { .. }
         | GameAction::SubmitLifeRedistribution { .. }
-        | GameAction::ChooseDamageSource { .. } => {
+        | GameAction::ChooseDamageSource { .. }
+        | GameAction::ChooseTextWordReplacement { .. } => {
             AvailableActionConversion::Unsupported("local.selection-unsupported")
         }
         GameAction::SubmitPilePartition { .. } => {

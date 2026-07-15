@@ -31,7 +31,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::RetargetChoice { .. }
         | WaitingFor::DistributeAmong { .. }
         | WaitingFor::MoveCountersDistribution { .. }
-        | WaitingFor::RemoveCountersChoice { .. } => DecisionKind::SelectTarget,
+        | WaitingFor::RemoveCountersChoice { .. }
+        // CR 612.1: picking the text-word substitution is a selection choice.
+        | WaitingFor::TextWordReplacement { .. } => DecisionKind::SelectTarget,
         WaitingFor::DeclareAttackers { .. } => DecisionKind::DeclareAttackers,
         WaitingFor::DeclareBlockers { .. } => DecisionKind::DeclareBlockers,
         WaitingFor::UntapChoice { .. } => DecisionKind::ActivateAbility,

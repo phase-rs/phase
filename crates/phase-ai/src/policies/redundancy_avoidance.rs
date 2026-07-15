@@ -364,7 +364,9 @@ fn redundancy_delta(
         // Each arm below explicitly returns `None`. Adding a new `Effect`
         // variant without extending this list is a compile error — that's
         // the coverage tracker at work.
-        Effect::StartYourEngines { .. }
+        // CR 612.1: text change has no redundancy check.
+        Effect::ChangeTextWords { .. }
+        | Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::Destroy { .. }
         | Effect::Regenerate { .. }

@@ -428,6 +428,10 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
         // at `oracle_effect/mod.rs:2701`.
         value((), tag("you may play ")),
         value((), tag("you may cast ")),
+        // CR 612.1: the text-change parser consumes its own trailing duration
+        // ("until end of turn", Crystal Spray) as the effect's duration, so the
+        // shell must not pre-peel it into an outer duration wrapper.
+        value((), tag("change the text of ")),
         // CR 400.7i + CR 118.9 — Gonti, Night Minister third-person impulse
         // play with any-mana conjunct. Same deferral as the first-person forms.
         value((), tag("they may play ")),

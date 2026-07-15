@@ -164,6 +164,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::OpponentGuess { .. }
             | WaitingFor::SpellbookDraft { .. }
             | WaitingFor::DamageSourceChoice { .. }
+            | WaitingFor::TextWordReplacement { .. }
             | WaitingFor::ChooseRingBearer { .. }
             | WaitingFor::ChooseRoomDoor { .. }
             | WaitingFor::ChooseDungeon { .. }
@@ -4240,6 +4241,41 @@ pub(super) fn handle_resolution_choice(
             set_priority(state, player);
             effects::drain_pending_continuation(state, events);
             state.last_chosen_damage_source = None;
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        // CR 612.1 + CR 613.1c: the controller picked one (category, from, to)
+        // substitution; install it as a Layer-3 text-changing continuous effect
+        // keyed to the target, then drain any parked follow-up (Crystal Spray's
+        // "Draw a card").
+        (
+            WaitingFor::TextWordReplacement {
+                player,
+                source,
+                target,
+                options,
+                duration,
+            },
+            GameAction::ChooseTextWordReplacement { index },
+        ) => {
+            let option = options.get(index).ok_or_else(|| {
+                EngineError::InvalidAction("Invalid text-word replacement index".to_string())
+            })?;
+            state.add_transient_continuous_effect(
+                source,
+                player,
+                duration.unwrap_or(crate::types::ability::Duration::Permanent),
+                crate::types::ability::TargetFilter::SpecificObject { id: target },
+                vec![
+                    crate::types::ability::ContinuousModification::ReplaceTextWord {
+                        category: option.category,
+                        from: option.from.clone(),
+                        to: option.to.clone(),
+                    },
+                ],
+                None,
+            );
+            set_priority(state, player);
+            effects::drain_pending_continuation(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (

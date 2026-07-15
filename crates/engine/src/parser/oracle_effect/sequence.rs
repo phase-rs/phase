@@ -19,14 +19,15 @@ use crate::parser::oracle_quantity::{
     parse_cda_quantity, parse_event_context_quantity, parse_for_each_object_filter_clause,
     parse_quantity_ref,
 };
+use crate::types::ability::BasicLandType;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
     Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp,
     ForEachCategoryAction, LibraryPosition, MultiTargetSpec, ObjectScope, PermissionGrantee,
     PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
-    SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
-    TypeFilter, TypedFilter,
+    SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter, TextWord,
+    TextWordCategory, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -4699,6 +4700,19 @@ pub(super) fn apply_clause_continuation(
                 *existing = filter;
             }
         }
+        ContinuationAst::TextChangeExcludedTo { word } => {
+            // CR 612.2: push the excluded word onto the preceding text-changing
+            // effect so the resolver drops it from the `to` option set.
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::ChangeTextWords { excluded_to, .. } = &mut *previous.effect {
+                // allow-noncombinator: Vec membership test, not string dispatch.
+                if !excluded_to.contains(&word) {
+                    excluded_to.push(word);
+                }
+            }
+        }
     }
 }
 
@@ -4877,6 +4891,10 @@ pub(super) fn continuation_absorbs_current(
         // pushes the conceal sub-ability — it emits no sibling def.
         ContinuationAst::ExileOneOfThemFaceDown { .. } => true,
         ContinuationAst::ChooseAndSacrificeRestFilter { .. } => true,
+        // CR 612.2: recognition was already gated on the preceding effect being
+        // ChangeTextWords in parse_followup_continuation_ast, so absorption is
+        // unconditional — the rider never emits a sibling effect.
+        ContinuationAst::TextChangeExcludedTo { .. } => true,
     }
 }
 
@@ -5750,7 +5768,8 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // CR 708.2a: turning a permanent face down is its own resolving effect,
         // not a Dig-lookback-transparent clause.
         Effect::TurnFaceDown { .. } => false,
-        Effect::StartYourEngines { .. }
+        Effect::ChangeTextWords { .. }
+        | Effect::StartYourEngines { .. }
         | Effect::EpicCopy { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
@@ -6958,7 +6977,62 @@ pub(super) fn parse_followup_continuation_ast(
             })
             .or_else(|| try_parse_token_enters_with_counters(&lower))
             .or_else(|| try_parse_put_counters_on_token_followup(&lower)),
+        // CR 612.2 + CR 608.2c: "The new <category> can't be <word>." rider on a
+        // text-changing effect (Artificial Evolution: "The new creature type
+        // can't be Wall."). Gated on the preceding effect being ChangeTextWords
+        // AND the excluded word belonging to a category the effect operates on,
+        // so the parsed word can be pushed into `excluded_to`.
+        Effect::ChangeTextWords {
+            allowed_categories, ..
+        } if let Some(word) = parse_text_change_excluded_to(&lower)
+            // allow-noncombinator: Vec membership test, not string dispatch.
+            .filter(|w| allowed_categories.contains(&w.category())) =>
+        {
+            Some(ContinuationAst::TextChangeExcludedTo { word })
+        }
         _ => None,
+    }
+}
+
+/// CR 612.2 + CR 608.2c: Parse "the new <color word|creature type|basic land
+/// type> can't be <word>[.]" — the excluded-`to` rider on a text-changing
+/// effect. Combinator-only: `tag`/`alt`/`value` dispatch on the category phrase,
+/// then the excluded word is parsed in that same category (colors via
+/// `parse_color`, creature/land types via the canonical subtype matcher). One
+/// `alt` per axis — no permutation enumeration. Returns the parsed [`TextWord`],
+/// or `None` when the sentence is not this rider or the word is unrecognized.
+fn parse_text_change_excluded_to(lower: &str) -> Option<TextWord> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the new ").parse(lower).ok()?;
+    let (rest, category) = alt((
+        value(
+            TextWordCategory::ColorWord,
+            alt((tag::<_, _, OracleError<'_>>("color word"), tag("color"))),
+        ),
+        value(TextWordCategory::BasicLandType, tag("basic land type")),
+        value(TextWordCategory::CreatureType, tag("creature type")),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" can't be ")
+        .parse(rest)
+        .ok()?;
+    let word = rest.trim().trim_end_matches('.').trim();
+    match category {
+        TextWordCategory::ColorWord => {
+            let (_, color) = nom_primitives::parse_color(word).ok()?;
+            Some(TextWord::Color(color))
+        }
+        TextWordCategory::BasicLandType => {
+            let (canonical, _) = crate::parser::oracle_util::parse_subtype(word)?;
+            canonical
+                .parse::<BasicLandType>()
+                .ok()
+                .map(TextWord::BasicLandType)
+        }
+        TextWordCategory::CreatureType => {
+            let (canonical, _) = crate::parser::oracle_util::parse_subtype(word)?;
+            Some(TextWord::CreatureType(canonical))
+        }
     }
 }
 

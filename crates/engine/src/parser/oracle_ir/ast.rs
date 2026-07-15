@@ -7,7 +7,7 @@ use crate::types::ability::{
     CounterSourceRider, DoorLockOp, Duration, Effect, FaceDownProfile, LibraryPosition,
     ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool,
     PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TargetFilter,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TargetFilter, TextWord,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -466,6 +466,13 @@ pub(crate) enum ContinuationAst {
     ChooseAndSacrificeRestFilter {
         sacrifice_filter: Option<TargetFilter>,
     },
+    /// CR 612.2 + CR 608.2c: "The new <color word|creature type|basic land type>
+    /// can't be <word>." rider on a text-changing effect (Artificial Evolution:
+    /// "The new creature type can't be Wall."). Pushes `word` into the preceding
+    /// `Effect::ChangeTextWords.excluded_to`, so the resolver drops that word
+    /// from the `to` option set. Generalized across all three categories; Wall
+    /// (a creature type) is the only printed instance.
+    TextChangeExcludedTo { word: TextWord },
 }
 
 /// CR 701.20e / CR 701.17c: How many cards a "from among [set]" continuation

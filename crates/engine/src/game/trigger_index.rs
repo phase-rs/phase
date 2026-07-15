@@ -696,6 +696,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
 /// matcher in `trigger_matchers.rs` emit keys; all others are no-ops.
 fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey)) {
     match kind {
+        // CR 612.1: text-change installs a continuous effect; no EffectResolved
+        // trigger matcher keys off it.
+        EffectKind::ChangeTextWords => {}
         // Production EffectResolved matchers — see `trigger_matchers.rs` lines
         // 1896, 2072, 2126, 2172, 2198, 2234, 2261, 2313, 2338.
         EffectKind::Attach | EffectKind::AttachAll | EffectKind::Equip => {

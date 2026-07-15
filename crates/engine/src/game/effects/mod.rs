@@ -212,6 +212,7 @@ pub mod suspect;
 pub mod swap_chosen_labels;
 pub mod switch_pt;
 pub mod tap_untap;
+pub mod text_change;
 pub mod time_travel;
 pub mod token;
 pub mod token_copy;
@@ -1998,6 +1999,10 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             // `NamedChoice` / Scry "If you do, Y").
             | WaitingFor::OpponentGuess { .. }
             | WaitingFor::DamageSourceChoice { .. }
+            // CR 612.1: the controller's text-word pick is a deferred resolution
+            // choice, so any follow-up chain (Crystal Spray's "Draw a card")
+            // stashes as pending_continuation rather than firing early.
+            | WaitingFor::TextWordReplacement { .. }
             | WaitingFor::MultiTargetSelection { .. }
             | WaitingFor::ReplacementChoice { .. }
             | WaitingFor::OptionalEffectChoice { .. }
@@ -3200,6 +3205,7 @@ pub fn resolve_effect(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     match &ability.effect {
+        Effect::ChangeTextWords { .. } => text_change::resolve(state, ability, events),
         Effect::StartYourEngines { .. } => speed_effects::resolve_start(state, ability, events),
         Effect::ChangeSpeed { .. } => speed_effects::resolve_change_speed(state, ability, events),
         Effect::DealDamage { .. } => deal_damage::resolve(state, ability, events),

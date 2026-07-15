@@ -2171,6 +2171,12 @@ fn fmt_count_scope(scope: &CountScope) -> &'static str {
 fn effect_details(effect: &Effect) -> Vec<(String, String)> {
     let mut d = Vec::new();
     match effect {
+        // CR 612.1: text-change — record which word categories it may replace.
+        Effect::ChangeTextWords {
+            allowed_categories, ..
+        } => {
+            d.push(("categories".into(), format!("{allowed_categories:?}")));
+        }
         Effect::StartYourEngines { player_scope } => {
             d.push(("players".into(), fmt_player_filter(player_scope)));
         }
@@ -4189,6 +4195,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         }
         ContinuousModification::SetChosenBasicLandType => "set chosen land type".into(),
         ContinuousModification::SetChosenName => "set chosen name".into(),
+        ContinuousModification::ReplaceTextWord { .. } => "replace text word".into(),
         ContinuousModification::AssignNoCombatDamage => "assign no combat damage".into(),
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,

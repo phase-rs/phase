@@ -1549,6 +1549,10 @@
       "title": "Damage Source",
       "subtitle": "Choose a source"
     },
+    "textWordReplacement": {
+      "title": "Change Text",
+      "subtitle": "Choose a word to replace"
+    },
     "manifestDread": {
       "title": "Manifest Dread",
       "subtitle": "Choose a card to manifest face-down. The other goes to your graveyard.",

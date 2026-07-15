@@ -1413,6 +1413,8 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::ApplyPerpetual { .. } => {}
         Effect::Intensify { .. } => {}
         Effect::DraftFromSpellbook { .. } => {}
+        // CR 612.1: text-change carries no printed-slot self-reference.
+        Effect::ChangeTextWords { .. } => {}
         Effect::Unimplemented { .. } => {}
     }
 }

@@ -218,6 +218,8 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
         | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        // CR 612.1: latched text-word replacement carries no X reference.
+        | ContinuousModification::ReplaceTextWord { .. }
         | ContinuousModification::RemoveManaCost => false,
     }
 }

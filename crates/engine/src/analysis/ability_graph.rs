@@ -843,7 +843,8 @@ fn effect_projection(effect: &Effect) -> Projection {
             }
         }
         // ----- UNMODELED (over-approximate candidate stage; no modeled axis) -----
-        Effect::StartYourEngines { .. }
+        Effect::ChangeTextWords { .. }
+        | Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::Pump { .. }

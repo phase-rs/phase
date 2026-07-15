@@ -107,8 +107,8 @@ use crate::types::ability::{
     RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
     SharedQualityRelation, SkipScope, SpellStackToGraveyardReplacement, StaticCondition,
     StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
-    TargetSelectionMode, ThisWayCause, TrackedAnaphorSource, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+    TargetSelectionMode, TextWordCategory, ThisWayCause, TrackedAnaphorSource, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -7802,6 +7802,12 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // CR 612.1 + CR 612.2: "change the text of <target> by replacing all
+    // instances of <category> ..." — text-changing word replacement.
+    if let Some(clause) = try_parse_change_text(tp) {
+        return clause;
+    }
+
     // "it's still a/an [type]" / "that's still a/an [type]" — type-retention clause
     // CR 205.1a: Retains the original type in addition to new types from animation effects
     if let Some(clause) = try_parse_still_a_type(tp) {
@@ -9630,6 +9636,79 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
         optional: false,
         unless_pay: None,
     })
+}
+
+/// CR 612.1 + CR 612.2: Parse "change the text of <target> by replacing all
+/// instances of <category> [or <category>]" — the text-changing word-replacement
+/// class (Mind Bend, Sleight of Mind, Glamerdye, Alter Reality, Magical Hack,
+/// Artificial Evolution, Crystal Spray, Trait Doctoring, Whim of Volrath,
+/// Spectral Shift's modes). Every axis is a single `alt()` — no permutation
+/// enumeration. Composes: prefix → `parse_target` (target axis) → connector →
+/// one or two categories → optional trailing duration.
+fn try_parse_change_text(tp: TextPair) -> Option<ParsedEffectClause> {
+    // CR 115.1: "change the text of <target>". Advance both cases past the prefix,
+    // then let `parse_target` claim the target noun phrase.
+    let (rest_lower, _) = tag::<_, _, OracleError<'_>>("change the text of ")
+        .parse(tp.lower)
+        .ok()?;
+    let prefix_len = tp.lower.len() - rest_lower.len();
+    let rest_orig = &tp.original[prefix_len..];
+    let (target, after_target_orig) = super::oracle_target::parse_target(rest_orig);
+    let after_target_lower = &rest_lower[rest_lower.len() - after_target_orig.len()..];
+
+    // CR 612.2: connector, then one or two category clauses.
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" by replacing all instances of ")
+        .parse(after_target_lower)
+        .ok()?;
+    let (rest, first) = parse_text_word_category(rest).ok()?;
+    let (rest, second) = opt(preceded(
+        tag::<_, _, OracleError<'_>>(" or "),
+        parse_text_word_category,
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // CR 611.2b: optional trailing duration ("until end of turn"); its absence
+    // means the text change lasts indefinitely (Permanent) — the resolver
+    // defaults `None` to `Duration::Permanent`.
+    let rest = rest.trim_start();
+    let (rest, duration) = super::oracle_nom::duration::parse_optional_duration(rest).ok()?;
+    if !rest.trim().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    let mut allowed_categories = vec![first];
+    if let Some(second) = second {
+        if second != first {
+            allowed_categories.push(second);
+        }
+    }
+
+    Some(parsed_clause(Effect::ChangeTextWords {
+        target,
+        allowed_categories,
+        excluded_to: Vec::new(),
+        duration,
+    }))
+}
+
+/// CR 612.2: one replaceable word category, as templated in Oracle text.
+fn parse_text_word_category(input: &str) -> OracleResult<'_, TextWordCategory> {
+    alt((
+        value(
+            TextWordCategory::ColorWord,
+            tag("one color word with another"),
+        ),
+        value(
+            TextWordCategory::BasicLandType,
+            tag("one basic land type with another"),
+        ),
+        value(
+            TextWordCategory::CreatureType,
+            tag("one creature type with another"),
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 614.10a: Parse "[subject] skip[s] [their|your] next [step] step[s]" —

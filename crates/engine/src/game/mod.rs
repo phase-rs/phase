@@ -154,6 +154,7 @@ pub mod stickers;
 #[path = "stickers_tests.rs"]
 mod stickers_tests;
 pub mod targeting;
+pub mod text_substitution;
 pub mod token_presets;
 pub mod topology;
 pub mod transform;

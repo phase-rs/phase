@@ -133,6 +133,12 @@ pub enum GameAction {
     ChooseEntryAttackTarget {
         target: AttackTarget,
     },
+    /// CR 612.1: Response to `WaitingFor::TextWordReplacement` — the controller
+    /// selects one of the pre-computed `(category, from, to)` options by index,
+    /// installing the corresponding Layer-3 text-changing effect on the target.
+    ChooseTextWordReplacement {
+        index: usize,
+    },
     PlayLand {
         object_id: ObjectId,
         card_id: CardId,
@@ -1442,6 +1448,8 @@ impl GameAction {
         match self {
             GameAction::ChooseMeldPair { source_id, .. } => Some(*source_id),
             GameAction::ChooseEntryAttackTarget { .. } => None,
+            // CR 612.1: a resolution-time choice, not tied to a source object.
+            GameAction::ChooseTextWordReplacement { .. } => None,
             GameAction::PlayLand { object_id, .. } => Some(*object_id),
             GameAction::CastSpell { object_id, .. } => Some(*object_id),
             GameAction::Foretell { object_id, .. } => Some(*object_id),

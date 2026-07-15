@@ -1495,6 +1495,19 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
+        // CR 612.1: each pre-computed (category, from, to) option is a legal
+        // indexed choice.
+        WaitingFor::TextWordReplacement {
+            player, options, ..
+        } => (0..options.len())
+            .map(|index| {
+                candidate(
+                    GameAction::ChooseTextWordReplacement { index },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 701.38: Vote — every option is a legal candidate; the AI picks via
         // the standard ChooseOption action. Each remaining vote produces an
         // identical action set (CR 701.38d allows repeats), so emitting one

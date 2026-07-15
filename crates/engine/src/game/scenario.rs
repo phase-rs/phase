@@ -1521,6 +1521,7 @@ impl GameRunner {
     /// Returns the current waiting-state variant name for lightweight assertions.
     pub fn waiting_for_kind(&self) -> &'static str {
         match &self.state.waiting_for {
+            WaitingFor::TextWordReplacement { .. } => "TextWordReplacement",
             WaitingFor::Priority { .. } => "Priority",
             WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
             WaitingFor::MeldAttackTargetChoice { .. } => "MeldAttackTargetChoice",

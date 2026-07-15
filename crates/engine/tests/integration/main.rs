@@ -705,6 +705,7 @@ mod tempt_with_discovery;
 mod terra_herald_optional_prompt;
 mod terra_magical_adept_milled_enchantment;
 mod terror_of_the_peaks_issue_2911;
+mod text_changing_effects;
 mod the_chain_veil_loyalty_grants;
 mod the_fourteenth_doctor_graveyard_copy;
 mod the_kingpin_of_crime_combat_damage;

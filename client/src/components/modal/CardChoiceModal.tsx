@@ -108,6 +108,7 @@ type RevealUntilKeptChoice = Extract<
 type RepeatDecision = Extract<WaitingFor, { type: "RepeatDecision" }>;
 type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
 type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
+type TextWordReplacement = Extract<WaitingFor, { type: "TextWordReplacement" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
 type BeholdChoice = Extract<WaitingFor, { type: "BeholdChoice" }>;
 
@@ -192,6 +193,9 @@ export function CardChoiceModal() {
     case "DamageSourceChoice":
       if (!canActForWaitingState) return null;
       return <DamageSourceModal data={waitingFor.data} />;
+    case "TextWordReplacement":
+      if (!canActForWaitingState) return null;
+      return <TextWordReplacementModal data={waitingFor.data} />;
     case "VoteChoice":
       if (!canActForWaitingState) return null;
       return <VoteChoiceModal data={waitingFor.data} />;
@@ -2884,6 +2888,48 @@ function DamageSourceModal({ data }: { data: DamageSourceChoice["data"] }) {
           );
         })}
       </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+// ── Text-Word Replacement Modal (CR 612.1) ───────────────────────────────
+
+// CR 612.1: the engine pre-computes every legal (category, from, to) option and
+// its display `label`; the frontend renders one button per option and dispatches
+// the chosen index. No game logic is computed here.
+function TextWordReplacementModal({
+  data,
+}: {
+  data: TextWordReplacement["data"];
+}) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+
+  return (
+    <ChoiceOverlay
+      title={t("cardChoice.textWordReplacement.title")}
+      subtitle={t("cardChoice.textWordReplacement.subtitle")}
+    >
+      <div className="flex flex-wrap justify-center gap-2">
+        {data.options.map((option, index) => (
+          <motion.button
+            key={index}
+            className="rounded-lg border border-white/20 bg-white/10 px-4 py-2 text-sm text-white transition hover:bg-white/20"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.05 + index * 0.03, duration: 0.25 }}
+            whileHover={{ scale: 1.05 }}
+            onClick={() =>
+              dispatch({
+                type: "ChooseTextWordReplacement",
+                data: { index },
+              })
+            }
+          >
+            {option.label}
+          </motion.button>
+        ))}
+      </div>
     </ChoiceOverlay>
   );
 }

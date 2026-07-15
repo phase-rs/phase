@@ -1088,6 +1088,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             .first()
             .map(|&source| GameAction::ChooseDamageSource { source }),
 
+        // CR 612.1: pick the first offered text-word substitution.
+        WaitingFor::TextWordReplacement { options, .. } => options
+            .first()
+            .map(|_| GameAction::ChooseTextWordReplacement { index: 0 }),
+
         // CR 709.5f-g: room-door choice — pick the first offered (op, door).
         WaitingFor::ChooseRoomDoor {
             object_id, options, ..

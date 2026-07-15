@@ -502,6 +502,8 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        // CR 612.1: latched text-word replacement carries no dynamic quantity.
+        | ContinuousModification::ReplaceTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::AddSupertype { .. }

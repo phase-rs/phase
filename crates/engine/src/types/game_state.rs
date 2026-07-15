@@ -14,7 +14,8 @@ use super::ability::{
     DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
     LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
     SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
-    TargetFilter, TargetRef, ThisWayCause, TriggerCondition, TriggerDefinition,
+    TargetFilter, TargetRef, TextWord, TextWordCategory, ThisWayCause, TriggerCondition,
+    TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, TokenImageRef};
@@ -5574,6 +5575,37 @@ pub enum WaitingFor {
         /// length of the submitted `Vec<ShardChoice>`.
         shards: Vec<PhyrexianShard>,
     },
+    /// CR 612.1: The controller of a resolving `Effect::ChangeTextWords` picks one
+    /// concrete `(category, from, to)` substitution to install as a Layer-3
+    /// text-changing continuous effect on `target`. The engine pre-computes every
+    /// legal option (each `from` word actually present in the target per CR 612.2,
+    /// paired with each legal `to` word of the same category), so the player simply
+    /// indexes into `options`. Using a flat `options` list keeps the interaction a
+    /// single indexed choice (`GameAction::ChooseTextWordReplacement { index }`);
+    /// even for the creature-type category the product stays small in practice and
+    /// AI/frontend handle `0..options.len()` uniformly, so no two-step choose-then-to
+    /// interaction is needed. `label` is engine-computed; the frontend renders it.
+    TextWordReplacement {
+        player: PlayerId,
+        /// The resolving text-change spell/ability object — recorded as the
+        /// source of the Layer-3 continuous effect installed on `target`.
+        source: ObjectId,
+        target: ObjectId,
+        options: Vec<TextWordReplacementOption>,
+        #[serde(default)]
+        duration: Option<Duration>,
+    },
+}
+
+/// CR 612.1 + CR 612.2: One legal text-word substitution the controller may pick
+/// when resolving `Effect::ChangeTextWords`. `label` is the engine-computed display
+/// string (frontend renders it verbatim — the frontend computes nothing).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextWordReplacementOption {
+    pub category: TextWordCategory,
+    pub from: TextWord,
+    pub to: TextWord,
+    pub label: String,
 }
 
 /// CR 707.10c / CR 722.3c: A target slot on a copied spell, showing the
@@ -5675,6 +5707,7 @@ impl WaitingFor {
     /// in `game/scenario.rs`, which are private and non-exhaustive.
     pub fn variant_name(&self) -> &'static str {
         match self {
+            WaitingFor::TextWordReplacement { .. } => "TextWordReplacement",
             WaitingFor::Priority { .. } => "Priority",
             WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
             WaitingFor::MeldAttackTargetChoice { .. } => "MeldAttackTargetChoice",
@@ -5938,7 +5971,8 @@ impl WaitingFor {
             | WaitingFor::CommanderZoneChoice { player, .. }
             | WaitingFor::SeparatePilesChooseOpponent { player, .. }
             | WaitingFor::SeparatePilesPartition { player, .. }
-            | WaitingFor::SeparatePilesChoice { player, .. } => Some(*player),
+            | WaitingFor::SeparatePilesChoice { player, .. }
+            | WaitingFor::TextWordReplacement { player, .. } => Some(*player),
             // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe
             // cards), the ACTOR is the spell controller, not `player` (the
             // subject being labeled). `VoteActor::resolve` returns the

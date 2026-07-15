@@ -5140,6 +5140,18 @@ fn apply_continuous_effect_filtered(
                     obj.name = name.clone();
                 }
             }
+            // CR 612.1 + CR 613.1c: Layer 3 — replace every instance of `from`
+            // (used as `category`) with `to` across the object's derived
+            // characteristics. Operands are latched at resolution (no pre-read);
+            // relies on the per-pass base re-seed + `mark_full()` re-derivation so
+            // each layer pass starts from printed values and re-applies the swap.
+            ContinuousModification::ReplaceTextWord { category, from, to } => {
+                crate::game::text_substitution::walk_object_words(
+                    obj,
+                    *category,
+                    &mut crate::game::text_substitution::WordCursor::Replace { from, to },
+                );
+            }
             ContinuousModification::AddPower { value } => {
                 if let Some(ref mut p) = obj.power {
                     *p = saturating_pt_add(*p, *value);
