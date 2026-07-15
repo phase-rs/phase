@@ -22549,62 +22549,41 @@ fn static_creature_cards_not_on_battlefield_have_flash() {
 }
 
 // CR 611.3 + CR 205.1b + CR 109.4/CR 109.5: Dune Chanter — the compound-subject
-// off-battlefield-owned land-type static. Same structural gap shape as #5406's
-// compound-subject chosen-type static: "Lands you control" (battlefield,
+// off-battlefield-owned land-type static. "Lands you control" (battlefield,
 // controller-scoped) and "land cards you own that aren't on the battlefield"
-// (off-battlefield, owner-scoped) are two independently-resolvable conjuncts
-// that `parse_land_type_change_subject`'s fixed-arm match can't reach and that
-// `parse_continuous_subject_filter` previously had no branch for at all, so the
-// whole line silently dropped the off-battlefield half of the subject.
+// (off-battlefield, owner-scoped) are independently resolvable subject
+// conjuncts, but the PREDICATE here (CR 613.1d Layer 4 `AddSubtype`) applies
+// through the Layer system, which only iterates battlefield objects.
+// `game/off_zone_characteristics.rs` is the sole off-battlefield continuous-
+// effect path and its allowlist is keyword-only (`AddKeyword` and siblings) —
+// it has no notion of `AddSubtype`. Folding the off-battlefield conjunct into
+// `affected` here would make the static CLAIM a scope the engine cannot
+// realize, silently under-delivering while looking fully parsed — worse than
+// not claiming it at all. So this line must decline entirely rather than
+// produce a partial or over-scoped static (mirrors the established precedent
+// on Arcane Adaptation/Maskwood Nexus/Rukarumel, whose off-battlefield "same
+// is true for..." tail is left as an `Unimplemented` residual for the same
+// engine-capability reason).
 #[test]
-fn parser_shape_dune_chanter_compound_owned_land_type_static() {
-    use crate::types::zones::Zone;
-
-    let def = parse_static_line(
+fn dune_chanter_compound_off_battlefield_type_change_declines_rather_than_misrepresent() {
+    let result = parse_static_line(
         "Lands you control and land cards you own that aren't on the battlefield are Deserts in addition to their other types.",
-    )
-    .expect("Dune Chanter's compound-subject additive land-type static must parse");
-    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
-        panic!("affected must be Or of both conjuncts: {:?}", def.affected);
-    };
-    assert_eq!(filters.len(), 2, "one disjunct per conjunct: {filters:?}");
-    assert!(
-        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
-            if tf.type_filters.contains(&TypeFilter::Land)
-                && tf.controller == Some(ControllerRef::You)
-                && !tf.properties.iter().any(|p| matches!(p, FilterProp::InAnyZone { .. })))),
-        "battlefield conjunct must be a controller-scoped Land filter with no zone property: {:?}",
-        def.affected
     );
     assert!(
-        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
-            if tf.type_filters.contains(&TypeFilter::Land)
-                && tf.controller == Some(ControllerRef::You)
-                && tf.properties.iter().any(|p| matches!(p, FilterProp::InAnyZone { zones }
-                    if zones.contains(&Zone::Hand)
-                        && zones.contains(&Zone::Graveyard)
-                        && zones.contains(&Zone::Exile)
-                        && zones.contains(&Zone::Command))))),
-        "off-battlefield conjunct must be an owner-scoped Land filter with the off-battlefield zone set: {:?}",
-        def.affected
-    );
-    assert_eq!(
-        def.modifications,
-        vec![ContinuousModification::AddSubtype {
-            subtype: "Desert".to_string(),
-        }],
-        "additive Desert subtype grant only (no basic-land-type machinery — Desert isn't a basic land type): {:?}",
-        def.modifications
+        result.is_none(),
+        "must decline rather than silently under-scope or over-claim the off-battlefield conjunct: {result:?}"
     );
 }
 
-// Dune Chanter's full printed oracle text: the compound-subject static must be
-// present AND its sibling single-subject static ("Lands you control have '{T}:
-// Add one mana of any color.'") must parse unchanged, AND the activated mill
-// ability must still parse — proving the fix is additive, not a regression on
-// the rest of the card.
+// Dune Chanter's full printed oracle text: the off-battlefield type-change line
+// must NOT produce any static claiming to cover it (see the test above), but
+// its sibling single-subject static ("Lands you control have '{T}: Add one
+// mana of any color.'") must still parse unchanged, and the activated mill
+// ability must still parse — proving the guard fixes in this PR are additive
+// (removing a silently-wrong parse) rather than a regression on the rest of
+// the card.
 #[test]
-fn parse_dune_chanter_full_oracle_adds_compound_static_and_preserves_siblings() {
+fn parse_dune_chanter_full_oracle_gaps_off_battlefield_line_preserves_siblings() {
     let oracle = "Reach\nLands you control and land cards you own that aren't on the battlefield are Deserts in addition to their other types.\nLands you control have \"{T}: Add one mana of any color.\"\n{T}: Mill two cards. You gain 1 life for each land card milled this way.";
     let result = crate::parser::oracle::parse_oracle_text(
         oracle,
@@ -22613,16 +22592,14 @@ fn parse_dune_chanter_full_oracle_adds_compound_static_and_preserves_siblings() 
         &["Creature".to_string()],
         &[],
     );
-    let has_compound_static = result.statics.iter().any(|def| {
-        matches!(def.affected, Some(TargetFilter::Or { ref filters }) if filters.len() == 2)
-            && def.modifications
-                == vec![ContinuousModification::AddSubtype {
-                    subtype: "Desert".to_string(),
-                }]
+    let has_wrong_desert_static = result.statics.iter().any(|def| {
+        def.modifications.iter().any(
+            |m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Desert"),
+        )
     });
     assert!(
-        has_compound_static,
-        "Dune Chanter must produce the compound-subject Desert static: {:?}",
+        !has_wrong_desert_static,
+        "must not claim the Desert grant at all until off-battlefield type-changing effects are realizable: {:?}",
         result.statics
     );
 
@@ -22697,6 +22674,36 @@ fn spells_have_keyword_pattern2_owned_off_battlefield_filter_shape_preserved() {
         }
         other => panic!("Expected Some(Typed filter), got {other:?}"),
     }
+}
+
+// `parse_owned_off_battlefield_subject_filter` must be all-consuming: it is
+// reached (indirectly) by scanning for its fixed suffix, so it must verify the
+// suffix is the END of the subject rather than merely present somewhere within
+// it. A trailing qualifier after "battlefield" is not this grammar and must
+// decline rather than silently truncate.
+#[test]
+fn owned_off_battlefield_subject_filter_declines_trailing_garbage() {
+    assert!(
+        parse_owned_off_battlefield_subject_filter(
+            "Creature cards you own that aren't on the battlefield or in your library"
+        )
+        .is_none(),
+        "trailing text after the fixed suffix must not be silently dropped"
+    );
+    assert!(
+        parse_owned_off_battlefield_subject_filter(
+            "some other text creature cards you own that aren't on the battlefield"
+        )
+        .is_none(),
+        "leading noise before the type phrase must not be silently dropped either"
+    );
+    assert!(
+        parse_owned_off_battlefield_subject_filter(
+            "Creature cards you own that aren't on the battlefield."
+        )
+        .is_some(),
+        "a trailing period is still a clean match"
+    );
 }
 
 // No-regression: `parse_typed_you_control`'s leaky "<X> you control" positional

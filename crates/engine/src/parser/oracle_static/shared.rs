@@ -3388,20 +3388,23 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
         return Some(filter);
     }
 
-    // CR 109.4 + CR 109.5: "<type> cards you own that aren't on the
-    // battlefield" — an off-battlefield-scoped conjunct (Dune Chanter: "Lands
-    // you control and land cards you own that aren't on the battlefield are
-    // Deserts in addition to their other types."). Without this branch, the
-    // generic `parse_type_phrase` fallback below only consumes the leading
-    // type word and leaves "cards you own that aren't on the battlefield"
-    // unconsumed, so it (and `parse_rule_static_subject_filter`'s identical
-    // fallback) both decline — which starves
-    // `parse_controlled_compound_continuous_subject_filter`'s "X and Y"
-    // splitter of a resolvable second conjunct and silently drops the
-    // off-battlefield half of the compound subject.
-    if let Some(filter) = parse_owned_off_battlefield_subject_filter(trimmed) {
-        return Some(filter);
-    }
+    // NOTE: deliberately NOT wiring `parse_owned_off_battlefield_subject_filter`
+    // in here as a general fallback. It's safe under
+    // `parse_spells_have_keyword`'s `CastWithKeyword` mode (casting is checked
+    // directly against the zone a card sits in, so an off-battlefield filter is
+    // meaningful there), but every OTHER caller of this function feeds a
+    // `Continuous` static whose modifications apply through the Layer system —
+    // which only iterates battlefield objects. `game/off_zone_characteristics.rs`
+    // is the sole off-battlefield continuous-effect path, and its
+    // `supports_off_zone_keyword_query` allowlist is keyword-only (`AddKeyword`
+    // and its siblings) — it has no notion of `AddSubtype`/`AddType`/etc. Folding
+    // an off-battlefield conjunct into a general filter here would let a
+    // type-changing static (e.g. Dune Chanter's "land cards you own that aren't
+    // on the battlefield are Deserts...") claim an `affected` scope the engine
+    // cannot actually realize, which is worse than leaving the line
+    // `Unimplemented` — it would silently under-deliver while looking parsed.
+    // Revisit once an off-zone characteristics path exists for non-keyword
+    // modifications.
 
     let (filter, rest) = parse_type_phrase(trimmed);
     if rest.trim().is_empty() {
@@ -3431,22 +3434,36 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
 ///
 /// Extracted from [`super::keyword_grant::parse_spells_have_keyword`]'s Pattern
 /// 2 (Leyline of Anticipation: "Creature cards you own that aren't on the
-/// battlefield have flash.") so the same off-battlefield-ownership grammar is
-/// reusable outside the casting-keyword family — e.g. by a land type-changing
-/// compound subject (Dune Chanter: "Lands you control and land cards you own
-/// that aren't on the battlefield are Deserts..."). Behavior-preserving
-/// extraction: the type-phrase slice and filter construction are unchanged from
-/// the original inline logic.
+/// battlefield have flash.") as a standalone, fully-anchored subject parser —
+/// still used only by that caller today. `CastWithKeyword` statics are checked
+/// directly against a card's actual zone (casting inherently happens from
+/// off-battlefield zones), so this filter's off-battlefield scope is realized
+/// there; `Continuous`-mode statics are not (see the caller-side note in
+/// [`parse_continuous_subject_filter`]), so do NOT wire this into that
+/// function's general dispatch chain until an off-zone characteristics path
+/// exists for non-keyword modifications.
+///
+/// All-consuming: the ENTIRE (trimmed, period-stripped) subject must be exactly
+/// `<type phrase>` + `"cards you own that aren't on the battlefield"`, with
+/// nothing before the type phrase and nothing after the fixed suffix. A
+/// partial/substring match (trailing qualifier, leading noise) declines rather
+/// than silently truncating.
 pub(crate) fn parse_owned_off_battlefield_subject_filter(subject: &str) -> Option<TargetFilter> {
-    let lower = subject.to_lowercase();
-    if !nom_primitives::scan_contains(&lower, "cards you own that aren't on the battlefield") {
+    let trimmed = subject.trim().trim_end_matches('.');
+    let lower = trimmed.to_lowercase();
+    let (prefix, remainder) = nom_primitives::scan_split_at_phrase(&lower, |i| {
+        tag::<_, _, OracleError<'_>>("cards you own that aren't on the battlefield").parse(i)
+    })?;
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "cards you own that aren't on the battlefield",
+    ))
+    .parse(remainder)
+    .ok()?;
+    let type_part = &trimmed[..prefix.len()];
+    let (base_filter, rest) = parse_type_phrase(type_part);
+    if !rest.trim().is_empty() {
         return None;
     }
-    let (prefix, _) = nom_primitives::scan_split_at_phrase(&lower, |i| {
-        tag::<_, _, OracleError<'_>>("cards").parse(i)
-    })?;
-    let type_part = &subject[..prefix.len()];
-    let (base_filter, _) = parse_type_phrase(type_part);
     // A bare, untyped "cards you own that aren't on the battlefield" (empty
     // type_part) doesn't resolve to a `Typed` filter — pass it through unscoped
     // rather than force a controller/zone property onto a non-Typed variant.
