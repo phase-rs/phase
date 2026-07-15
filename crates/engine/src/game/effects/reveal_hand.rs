@@ -690,7 +690,7 @@ mod tests {
             PlayerId(0),
         );
         continuation.kind = AbilityKind::Spell;
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation), &state));
 
         let mut events = Vec::new();
         handle_resolution_choice(

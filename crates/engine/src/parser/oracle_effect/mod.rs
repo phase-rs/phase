@@ -7275,6 +7275,23 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     if let Some(effect) = try_parse_cant_become_untapped_target_rider(&lower) {
         return parsed_clause(effect);
     }
+    // CR 702.170c: "it becomes plotted" / "that card becomes plotted" as a
+    // standalone anaphoric clause — the exiled card becomes plotted. The
+    // sequence splitter's continuation path only patches this onto a directly
+    // preceding Exile `ChangeZone`; when the designation stands alone (e.g. as
+    // the body of an "if you do, it becomes plotted" reflexive rider — Lilah,
+    // Undefeated Slickshot), it reaches this dispatch instead and must lower to
+    // the Plotted casting-permission grant rather than falling through to
+    // `Effect::Unimplemented`. The anaphoric "it" binds to the parent target
+    // (falling back to the source), granted to the card's owner (CR 702.170d),
+    // matching `ContinuationAst::BecomesPlotted`.
+    if try_parse_becomes_plotted_clause(&lower) {
+        return parsed_clause(Effect::GrantCastingPermission {
+            permission: CastingPermission::Plotted { turn_plotted: 0 },
+            target: TargetFilter::ParentTarget,
+            grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
+        });
+    }
     // CR 614.1a + CR 608.2n + CR 607.2b: "exile it instead of putting it into a
     // graveyard as it resolves" — the resolving-spell exile rider applied by a
     // `WhenAPlayerCasts` trigger to the triggering spell (Rod of Absorption).
@@ -7282,7 +7299,11 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // to a no-op `ChangeZone { origin: Graveyard }` that never finds the spell
     // (it is on the stack, not in a graveyard, when the trigger resolves).
     if try_parse_exile_resolving_spell_instead_of_graveyard(&lower) {
-        return parsed_clause(Effect::ExileResolvingSpellInsteadOfGraveyard);
+        // CR 603.7a + CR 702.170c: the "If you do, ..." continuation (Feather's
+        // return-to-hand, Lilah's become-plotted) is folded onto `on_exile`
+        // later by `fold_exile_resolving_rider` in the assembly pass; the bare
+        // clause always lowers with no consequence rider.
+        return parsed_clause(Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: None });
     }
     // CR 614.1a + CR 514.2: Global "If [source] would deal damage this turn,
     // it deals that much damage plus N instead" pattern (Rankle and Torbran,
@@ -16664,16 +16685,19 @@ fn parse_spell_graveyard_replacement_rider(
 
 /// CR 614.1a + CR 608.2n + CR 607.2b: Detect the resolving-spell exile rider —
 /// "exile it instead of putting it into a graveyard as it resolves". This is the
-/// trigger BODY of a `WhenAPlayerCasts` trigger (Rod of Absorption), distinct
+/// trigger BODY of a `WhenAPlayerCasts` trigger (Rod of Absorption) or a
+/// `WhenYouCast` trigger ("exile that card instead of putting it into your
+/// graveyard as it resolves" — the Feather, the Redeemed class), distinct
 /// from the post-cast rider clause `parse_spell_graveyard_replacement_rider`
 /// ("if that spell would be put into a graveyard, exile it instead") that trails
 /// a `CastFromZone`/`Counter` effect.
 ///
 /// Composed as a single nom chain over the independent axes: the bare anaphor
 /// ("it" / "that spell") and the graveyard determiner. "a graveyard" /
-/// "its owner's graveyard" / "a player's graveyard" are leaf variants of the
-/// same slot. The trailing "as it resolves" is the resolution-timing marker that
-/// distinguishes this from the immediate "exile it" zone-move.
+/// "its owner's graveyard" / "a player's graveyard" / "your graveyard" are leaf
+/// variants of the same slot. The trailing "as it resolves" is the
+/// resolution-timing marker that distinguishes this from the immediate
+/// "exile it" zone-move.
 fn try_parse_exile_resolving_spell_instead_of_graveyard(lower: &str) -> bool {
     use nom::branch::alt;
     use nom::bytes::complete::tag;
@@ -16690,9 +16714,37 @@ fn try_parse_exile_resolving_spell_instead_of_graveyard(lower: &str) -> bool {
             tag("its owner's graveyard"),
             tag("a player's graveyard"),
             tag("their graveyard"),
+            tag("your graveyard"),
         )),
         tag(" as it resolves"),
     ))
+    .parse(trimmed)
+    .is_ok()
+}
+
+/// CR 702.170c: Detect a standalone anaphoric "becomes plotted" designation
+/// clause — "it becomes plotted" / "that {card,spell} becomes plotted" / "they
+/// become plotted". The exiled card is designated plotted (castable from exile
+/// without paying its mana cost on a later turn, CR 702.170d).
+///
+/// Mirrors the tag set of `sequence::parse_becomes_plotted_continuation` (the
+/// continuation-patch path used after an Exile `ChangeZone`); this standalone
+/// form covers the same designation when it is NOT a continuation — e.g. the
+/// body of an "if you do, it becomes plotted" reflexive rider (Lilah). The "if
+/// you do" gate is stripped before this runs (it becomes the sub-ability's
+/// condition), so no optional-prefix arm is needed here.
+fn try_parse_becomes_plotted_clause(lower: &str) -> bool {
+    use nom::branch::alt;
+    use nom::bytes::complete::tag;
+    use nom::combinator::{all_consuming, value};
+    use nom::Parser;
+    let trimmed = lower.trim().trim_end_matches('.').trim();
+    all_consuming(alt((
+        value((), tag::<_, _, OracleError<'_>>("it becomes plotted")),
+        value((), tag("that card becomes plotted")),
+        value((), tag("that spell becomes plotted")),
+        value((), tag("they become plotted")),
+    )))
     .parse(trimmed)
     .is_ok()
 }
@@ -22118,7 +22170,7 @@ fn chain_clause_is_exile_producer(effect: &Effect) -> bool {
         )
         || matches!(effect, Effect::HeistExile)
         || matches!(effect, Effect::ExileHaunting { .. })
-        || matches!(effect, Effect::ExileResolvingSpellInsteadOfGraveyard)
+        || matches!(effect, Effect::ExileResolvingSpellInsteadOfGraveyard { .. })
         || matches!(
             effect,
             Effect::RevealUntil {

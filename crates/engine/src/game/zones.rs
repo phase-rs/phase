@@ -224,6 +224,11 @@ pub(crate) fn apply_zone_exit_cleanup(
         // transient marker on the spell object. The stack resolver snapshots it
         // before moving the spell, so all zone exits can clear the field here.
         obj_mut.exile_from_stack_linked_source = None;
+        // CR 400.7 + CR 603.7a + CR 702.170c: the exile-instead consequence
+        // rider clears in lockstep — a spell that leaves the stack any other
+        // way (countered, fizzled) never takes the consequence (Feather's
+        // return, Lilah's plot).
+        obj_mut.exile_from_stack_rider = None;
 
         // CR 400.7 + CR 730.3c: a component split out of a merged permanent is a
         // new object on every zone change, so its survivor back-link is

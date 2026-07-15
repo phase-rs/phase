@@ -10,7 +10,7 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    GameState, PendingCounterPostAction, TokenEntryEventEmission, WaitingFor,
+    GameState, PendingCostMoveResume, PendingCounterPostAction, TokenEntryEventEmission, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -674,7 +674,14 @@ pub(super) fn handle_replacement_choice(
             state.waiting_for = waiting_for.clone();
 
             let mut replacement_ctx = None;
-            if let Some(ctx) = state.pending_spell_resolution.take() {
+            if zone_change_object_id
+                .zip(state.pending_spell_resolution.as_ref())
+                .is_some_and(|(object_id, ctx)| object_id == ctx.object_id)
+            {
+                let ctx = state
+                    .pending_spell_resolution
+                    .take()
+                    .expect("matching spell-resolution context was checked above");
                 if enters_battlefield {
                     apply_pending_spell_resolution(state, &ctx, events);
                 }
@@ -913,8 +920,34 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
-            // CR 601.2h + CR 602.2b + CR 616.1: Resume cast/activation cost payment paused for a
-            // replacement choice during discard or sacrifice cost payment.
+            // CR 601.2h + CR 602.2b + CR 616.1: Resume a cast or activation
+            // cost move after the replacement delivered its current object.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && matches!(
+                    state.pending_cost_move_resume,
+                    Some(PendingCostMoveResume::Cast { .. })
+                )
+            {
+                waiting_for = super::casting_costs::resume_interrupted_cost_payment(
+                    state,
+                    events,
+                    Some(replacement_action_event_start),
+                )?;
+            }
+
+            // CR 614.12a + CR 616.1: Finish the inner forced MayCost moves
+            // before re-entering the optional outer replacement they paid for.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && matches!(
+                    state.pending_cost_move_resume,
+                    Some(PendingCostMoveResume::ReplacementMayCost { .. })
+                )
+            {
+                waiting_for = super::costs::resume_replacement_may_cost_move(state, events)?;
+            }
+
+            // CR 601.2h + CR 602.2b + CR 616.1: Resume a non-move cast or
+            // activation cost payment paused during discard or sacrifice.
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
             {
@@ -1080,6 +1113,29 @@ pub(super) fn handle_replacement_choice(
                 };
                 crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
                 return Ok(state.waiting_for.clone());
+            }
+            // CR 601.2h + CR 602.2b + CR 614.12a + CR 616.1: A fully
+            // substituted cost move still completes that cost-payment step.
+            // No fresh prompt remains at this point, so restore the normal
+            // reducer boundary before draining its typed continuation.
+            state.waiting_for = WaitingFor::Priority {
+                player: state.active_player,
+            };
+            if matches!(
+                state.pending_cost_move_resume,
+                Some(PendingCostMoveResume::Cast { .. })
+            ) {
+                return super::casting_costs::resume_interrupted_cost_payment(
+                    state,
+                    events,
+                    Some(replacement_action_event_start),
+                );
+            }
+            if matches!(
+                state.pending_cost_move_resume,
+                Some(PendingCostMoveResume::ReplacementMayCost { .. })
+            ) {
+                return super::costs::resume_replacement_may_cost_move(state, events);
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,
             // the permanent goes to the graveyard instead.

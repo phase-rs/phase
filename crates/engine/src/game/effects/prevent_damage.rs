@@ -303,7 +303,7 @@ pub fn resolve(
                     choose_damage_source::damage_source_options(state, ability, &prompt_filter);
                 if !options.is_empty() {
                     state.pending_continuation =
-                        Some(PendingContinuation::new(Box::new(ability.clone())));
+                        Some(PendingContinuation::new(Box::new(ability.clone()), state));
                     state.waiting_for = WaitingFor::DamageSourceChoice {
                         player: ability.controller,
                         source_filter: prompt_filter,

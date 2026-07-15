@@ -243,7 +243,7 @@ pub fn resolve(
     // `resolve_tally`, then drains this continuation to run any post-Vote
     // chained effects. Mirrors clash::stash_sub.
     if let Some(sub) = ability.sub_ability.as_ref() {
-        state.pending_continuation = Some(PendingContinuation::new(sub.clone()));
+        state.pending_continuation = Some(PendingContinuation::new(sub.clone(), state));
     }
 
     Ok(())

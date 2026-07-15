@@ -8060,6 +8060,7 @@ mod tests {
         );
         state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
             Box::new(create_tokens),
+            &state,
         ));
 
         // Decline each replacement; each returned card still enters (tapped).

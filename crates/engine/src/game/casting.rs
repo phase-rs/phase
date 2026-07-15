@@ -13740,10 +13740,8 @@ fn apply_mana_spell_grants(
 // (Phase 1 of the cost-payment unification plan). These `pub use` shims keep
 // every existing `casting::*` / `super::casting::*` call site compiling
 // unchanged while the implementation lives in `game/costs.rs`.
-pub use super::costs::pay_ability_cost;
-pub(crate) use super::costs::{
-    pause_cost_payment_for_replacement_choice, pay_ability_cost_for_activation, PaymentOutcome,
-};
+pub use super::costs::pay_ability_cost_for_activation;
+pub(crate) use super::costs::{pause_cost_payment_for_replacement_choice, PaymentOutcome};
 
 fn pending_activation_after_cost_pause(
     source_id: ObjectId,
@@ -14273,6 +14271,77 @@ pub(super) fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Optio
     }
 }
 
+/// Removes the one return-to-hand leg currently represented by a
+/// `WaitingFor::PayCost` selection. Later return legs remain in the residual so
+/// each one receives its own choice after the preceding cost is paid.
+pub(super) fn remove_selected_return_to_hand_cost(cost: AbilityCost) -> Option<AbilityCost> {
+    match cost {
+        AbilityCost::ReturnToHand {
+            from_zone: None | Some(Zone::Battlefield),
+            ..
+        } => None,
+        AbilityCost::Composite { costs } => {
+            let mut removed = false;
+            let remaining = costs
+                .into_iter()
+                .filter_map(|cost| {
+                    if !removed && find_return_to_hand_cost(&cost).is_some() {
+                        removed = true;
+                        remove_selected_return_to_hand_cost(cost)
+                    } else {
+                        Some(cost)
+                    }
+                })
+                .collect();
+            combine_cost_legs(remaining)
+        }
+        other => Some(other),
+    }
+}
+
+/// Splits delayed return-to-hand legs from automatic activation-cost legs.
+/// The former must go back through `WaitingFor::PayCost`; the latter may be
+/// paid by the activation-cost authority before the selected move happens.
+pub(super) fn split_return_to_hand_cost_legs(
+    cost: AbilityCost,
+) -> (Option<AbilityCost>, Option<AbilityCost>) {
+    match cost {
+        cost @ AbilityCost::ReturnToHand { .. } => (None, Some(cost)),
+        AbilityCost::Composite { costs } => {
+            let mut automatic = Vec::new();
+            let mut returns = Vec::new();
+            for cost in costs {
+                let (automatic_leg, return_leg) = split_return_to_hand_cost_legs(cost);
+                automatic.extend(automatic_leg);
+                returns.extend(return_leg);
+            }
+            (combine_cost_legs(automatic), combine_cost_legs(returns))
+        }
+        cost => (Some(cost), None),
+    }
+}
+
+/// True only for a residual composed entirely of return-to-hand legs. A full
+/// activation cost may still contain a return leg after another chooser paid a
+/// different component; that legacy path continues through the cost authority.
+pub(super) fn has_only_return_to_hand_cost_legs(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::ReturnToHand { .. } => true,
+        AbilityCost::Composite { costs } => {
+            !costs.is_empty() && costs.iter().all(has_only_return_to_hand_cost_legs)
+        }
+        _ => false,
+    }
+}
+
+fn combine_cost_legs(costs: Vec<AbilityCost>) -> Option<AbilityCost> {
+    match costs.len() {
+        0 => None,
+        1 => costs.into_iter().next(),
+        _ => Some(AbilityCost::Composite { costs }),
+    }
+}
+
 pub(crate) fn find_eligible_return_to_hand_targets(
     state: &GameState,
     player: PlayerId,
@@ -14580,6 +14649,7 @@ pub(crate) fn can_pay_ability_cost_now(
         &super::costs::PaymentScope::Activation {
             excluded_sources: &excluded_sources,
             ability_tag,
+            cost_move_handling: super::costs::ActivationCostMoveHandling::OutcomeAware,
         },
     )
 }
@@ -15685,12 +15755,17 @@ pub fn handle_activate_ability(
                     activation_ability_tag(state, source_id, ability_index),
                     events,
                 )? {
-                    state.pending_cast = Some(Box::new(pending_activation_after_cost_pause(
+                    let pending = pending_activation_after_cost_pause(
                         source_id,
                         resolved.clone(),
                         ability_index,
                         remaining_cost,
-                    )));
+                    );
+                    if let Some(pending) =
+                        casting_costs::attach_pending_cast_to_cost_move(state, Box::new(pending))
+                    {
+                        state.pending_cast = Some(pending);
+                    }
                     return Ok(state.waiting_for.clone());
                 }
             }
@@ -15807,12 +15882,17 @@ pub fn handle_activate_ability(
             activation_ability_tag(state, source_id, ability_index),
             events,
         )? {
-            state.pending_cast = Some(Box::new(pending_activation_after_cost_pause(
+            let pending = pending_activation_after_cost_pause(
                 source_id,
                 resolved.clone(),
                 ability_index,
                 remaining_cost,
-            )));
+            );
+            if let Some(pending) =
+                casting_costs::attach_pending_cast_to_cost_move(state, Box::new(pending))
+            {
+                state.pending_cast = Some(pending);
+            }
             return Ok(state.waiting_for.clone());
         }
     }

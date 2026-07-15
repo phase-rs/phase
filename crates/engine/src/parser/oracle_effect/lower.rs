@@ -30,11 +30,11 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, CastPermissionConstraint, CastingPermission, Comparator, ConjureSource,
     ContinuousModification, ControllerRef, DamageChannel, DamageSource, DelayedTriggerCondition,
-    Duration, Effect, EffectScope, FilterProp, GameRestriction, LibraryPosition,
-    ManaSpendPermission, MultiTargetSpec, ObjectScope, PlayerFilter, PreventionAmount,
-    PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    Duration, Effect, EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
+    ManaSpendPermission, MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter,
+    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
+    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -1879,6 +1879,164 @@ pub(super) fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
     if let Some(sub) = def.sub_ability.as_mut() {
         fold_enters_this_way_counter_rider(sub);
     }
+}
+
+/// CR 603.7a + CR 608.2c + CR 702.170c: fold the "If you do, ..." continuation
+/// of an "exile [the resolving spell] instead of putting it into [a/your]
+/// graveyard as it resolves" clause into the carrier effect's typed `on_exile`
+/// rider (`ExiledSpellRider`). Two members:
+///   - Feather, the Redeemed: "return it to your hand at the beginning of the
+///     next end step" → `ReturnTo { Hand, AtNextPhase { End } }`.
+///   - Lilah, Undefeated Slickshot: "it becomes plotted" → `BecomePlotted`.
+///
+/// The generic at-trigger-resolution lowering is wrong for this class: per
+/// CR 603.7a a consequence created "as the result of a replacement effect being
+/// applied" exists only once the replacement is APPLIED — i.e. when the spell
+/// actually lands in exile during its own stack resolution — not when the
+/// trigger resolves. Leaving Feather's `CreateDelayedTrigger` (or Lilah's
+/// `GrantCastingPermission { Plotted }`) as an ordinary chained effect would
+/// apply it to a spell that was later countered in response (the replacement
+/// never applied). The rider routes through the per-object marker so the stack
+/// router applies the consequence at replacement-application time.
+///
+/// Deliberately conservative: any structural mismatch leaves the sub-ability
+/// unfolded, so `swallow_check` keeps flagging unrepresented text instead of
+/// silently dropping it.
+pub(super) fn fold_exile_resolving_rider(def: &mut AbilityDefinition) {
+    if matches!(
+        *def.effect,
+        Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+    ) {
+        if let Some(sub) = def.sub_ability.take() {
+            if let Some(rider) = detect_exile_resolving_rider(&sub) {
+                if let Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile } = &mut *def.effect
+                {
+                    *on_exile = Some(rider);
+                }
+                // The continuation is fully represented by the typed rider —
+                // consume the sub.
+            } else {
+                def.sub_ability = Some(sub);
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        fold_exile_resolving_rider(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        fold_exile_resolving_rider(else_branch);
+    }
+}
+
+/// CR 603.7a + CR 702.170c: classify the exile-instead continuation sub-ability
+/// into its typed rider, or `None` if it is not a recognized consequence. The
+/// per-member matchers stay conservative so unrecognized text is left unfolded
+/// for `swallow_check` to flag.
+fn detect_exile_resolving_rider(sub: &AbilityDefinition) -> Option<ExiledSpellRider> {
+    if is_exile_resolving_return_rider(sub) {
+        // CR 603.7a: Feather's return axes — owner's hand, at the beginning of
+        // the next end step.
+        return Some(ExiledSpellRider::ReturnTo {
+            destination: Zone::Hand,
+            timing: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+        });
+    }
+    if is_exile_resolving_plotted_rider(sub) {
+        // CR 702.170c: Lilah's "it becomes plotted".
+        return Some(ExiledSpellRider::BecomePlotted);
+    }
+    None
+}
+
+/// Structural match for Lilah's plotted rider: an optionally "if you do"-gated
+/// `GrantCastingPermission { Plotted }` on the resolving spell (the
+/// `ParentTarget`/`SelfRef` anaphor), granting to the card's owner.
+///
+/// CR 608.2c: the "if you do" back-reference is absorbed by the plotted-grant
+/// continuation grammar (see `parse_becomes_plotted_continuation`), so the
+/// grant may carry either no condition or a duplicate optional-effect-performed
+/// gate — but never an independent game-state condition, which would make the
+/// plot genuinely conditional and wrong to fold to an unconditional rider.
+fn is_exile_resolving_plotted_rider(sub: &AbilityDefinition) -> bool {
+    if !sub
+        .condition
+        .as_ref()
+        .is_none_or(AbilityCondition::is_optional_effect_performed)
+    {
+        return false;
+    }
+    if sub.sub_ability.is_some() || sub.else_ability.is_some() {
+        return false;
+    }
+    matches!(
+        &*sub.effect,
+        Effect::GrantCastingPermission {
+            permission: CastingPermission::Plotted { .. },
+            target: TargetFilter::ParentTarget | TargetFilter::SelfRef,
+            grantee: PermissionGrantee::ObjectOwner,
+        }
+    )
+}
+
+/// Structural match for the return rider: an "if you do"-gated
+/// `CreateDelayedTrigger` at the next end step whose sole body returns the
+/// resolving spell (the `ParentTarget`/`SelfRef` anaphor) to its owner's hand.
+fn is_exile_resolving_return_rider(sub: &AbilityDefinition) -> bool {
+    // CR 608.2c: "If you do" — the optional-effect-performed gate on the rider.
+    if !sub
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_optional_effect_performed)
+    {
+        return false;
+    }
+    if sub.sub_ability.is_some() || sub.else_ability.is_some() {
+        return false;
+    }
+    let Effect::CreateDelayedTrigger {
+        condition,
+        effect: inner,
+        uses_tracked_set,
+    } = &*sub.effect
+    else {
+        return false;
+    };
+    if *uses_tracked_set {
+        return false;
+    }
+    // CR 603.7a: "at the beginning of the next end step".
+    if !matches!(
+        condition,
+        DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+    ) {
+        return false;
+    }
+    // CR 603.7a: the fold produces an UNCONDITIONAL return — a delayed-trigger
+    // body carrying its own condition, else-branch, or continuation would be
+    // silently promoted to unconditional if folded, so bail. One tolerated
+    // exception: the assembly-pass wrapper lift CLONES (not moves) the outer
+    // "if you do" gate, so the inner body legitimately carries a duplicate
+    // `is_optional_effect_performed` condition — already enforced on the sub
+    // above, hence unconditional once folded.
+    if inner.sub_ability.is_some() || inner.else_ability.is_some() {
+        return false;
+    }
+    if !inner
+        .condition
+        .as_ref()
+        .is_none_or(AbilityCondition::is_optional_effect_performed)
+    {
+        return false;
+    }
+    // "return it to your hand" — the anaphoric return-to-hand of the spell.
+    matches!(
+        &*inner.effect,
+        Effect::Bounce {
+            target: TargetFilter::ParentTarget | TargetFilter::SelfRef,
+            destination: None | Some(Zone::Hand),
+            ..
+        }
+    )
 }
 
 pub(super) fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
@@ -7460,6 +7618,133 @@ fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) ->
     }
 }
 
+/// CR 608.2c + CR 615.1a + CR 615.4: Collapse the "deal N damage … then prevent X
+/// of that damage" idiom (Power Leak, Errant Minion) into a single computed-amount
+/// `DealDamage` node.
+///
+/// Why collapse rather than reorder: prevention effects must already exist as a
+/// replacement shield *before* the damage event, and cannot retroactively unwind
+/// damage that has already been dealt (CR 615.1a / CR 615.4 — "can't go back in
+/// time"). A `DealDamage` immediately followed by a `SequentialSibling`
+/// `PreventDamage` deals its damage first and leaves a dangling, mistimed shield;
+/// worse, a numeric `PreventionAmount::Next(n)` shield deplete per damage event
+/// (CR 615.7), so any unconsumed capacity leaks onto a later, unrelated damage
+/// event to the same recipient this turn. Folding the arithmetic into the damage
+/// amount up front (max(N − X, 0)) is the only shape that yields the printed net
+/// damage with no residual shield. This mirrors the shipped precedent of folding
+/// "Destroy … It can't be regenerated" into one `Effect::Destroy { cant_regenerate }`
+/// node rather than two effect nodes (CR 608.2c: later text modifies earlier text).
+///
+/// The rewrite fires ONLY on the exact structural shape — all five guards must hold
+/// together, so it is a category rewrite (any "deal N then prevent the paid-mana
+/// amount" card), never a card-name special case:
+/// 1. this node's effect is `DealDamage { amount: Fixed(n), .. }`;
+/// 2. its `sub_ability` is a `SequentialSibling`;
+/// 3. that sub's effect is a blanket where-X prevention shield:
+///    `PreventDamage { target: Any, damage_source_filter: None,
+///    prevention_duration: None, scope: AllDamage, amount_dynamic: Some(expr), .. }`.
+///
+/// On a match the damage amount becomes `max(n − X, 0)` (`ClampMin { Offset {
+/// Multiply(-1, expr), n }, 0 }` — CR 107.1b: a negative computed result uses 0),
+/// the original `target`/`damage_source`/`excess` are preserved unchanged, and the
+/// prevention node is spliced out, promoting anything that followed it (none exists
+/// for Power Leak/Errant Minion today, but a future trailing rider is not dropped).
+/// Recurses so the idiom is folded wherever it sits in the chain (e.g. beneath the
+/// "that player may pay any amount of mana" `PayCost` head for Power Leak).
+pub(super) fn fold_deal_damage_then_prevent_into_computed_amount(def: &mut AbilityDefinition) {
+    // Guard 1: this node deals a fixed amount of damage.
+    let n = match def.effect.as_ref() {
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value },
+            ..
+        } => *value,
+        _ => {
+            recurse_fold_deal_damage_then_prevent(def);
+            return;
+        }
+    };
+
+    // Guards 2 + 3: an immediately-following SequentialSibling that is the exact
+    // blanket where-X prevention shield. Extract its dynamic prevention amount.
+    let folded_expr = match def.sub_ability.as_ref() {
+        Some(next) if next.sub_link == SubAbilityLink::SequentialSibling => {
+            match next.effect.as_ref() {
+                Effect::PreventDamage {
+                    target: TargetFilter::Any,
+                    damage_source_filter: None,
+                    prevention_duration: None,
+                    scope: PreventionScope::AllDamage,
+                    amount_dynamic: Some(expr),
+                    ..
+                } => Some(expr.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
+    let Some(expr) = folded_expr else {
+        recurse_fold_deal_damage_then_prevent(def);
+        return;
+    };
+
+    // CR 615.1a + CR 107.1b: net damage is max(n − X, 0). Preserve every other
+    // DealDamage field (target already correctly TriggeringPlayer, plus
+    // damage_source / excess) by mutating only the amount in place.
+    if let Effect::DealDamage { amount, .. } = def.effect.as_mut() {
+        *amount = QuantityExpr::ClampMin {
+            inner: Box::new(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(expr),
+                }),
+                offset: n,
+            }),
+            minimum: 0,
+        };
+    }
+
+    // Splice out the PreventDamage node, promoting whatever followed it (if any).
+    let promoted = def
+        .sub_ability
+        .as_mut()
+        .and_then(|prevent_node| prevent_node.sub_ability.take());
+    def.sub_ability = promoted;
+
+    // Continue walking: the promoted chain (or any nested branch) may itself
+    // contain the idiom.
+    recurse_fold_deal_damage_then_prevent(def);
+}
+
+/// Recurse the fold into a definition's `sub_ability` chain. Kept separate so the
+/// early-return arms above and the post-rewrite tail all share one walk.
+fn recurse_fold_deal_damage_then_prevent(def: &mut AbilityDefinition) {
+    if let Some(sub) = def.sub_ability.as_mut() {
+        fold_deal_damage_then_prevent_into_computed_amount(sub);
+    }
+}
+
+/// CR 601.2h + CR 106.4: Recognize the "the [total ]amount of mana [<payer> ]paid
+/// this way" where-X binding phrase across its known surface variants. Composed
+/// along its grammar axes rather than enumerating one `tag()` literal per card:
+///
+/// - fixed `"the "` lead,
+/// - optional `"total "` qualifier (Join Forces cards),
+/// - fixed `"amount of mana "` head — deliberately mana-scoped so it can never
+///   match the `{E}` (energy) "paid this way" family (CR 106 vs CR 122),
+/// - optional payer-subject clause (`"that player "` / `"they "` / bare),
+/// - fixed `"paid this way"` tail.
+///
+/// Operates on already-lowercased input. Callers require an empty remainder.
+fn parse_amount_of_mana_paid_this_way(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("the ").parse(input)?;
+    let (input, _) = opt(tag("total ")).parse(input)?;
+    let (input, _) = tag("amount of mana ").parse(input)?;
+    let (input, _) = opt(alt((tag("that player "), tag("they ")))).parse(input)?;
+    let (input, _) = tag("paid this way").parse(input)?;
+    Ok((input, ()))
+}
+
 pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
     let expression = where_x_expression.trim().trim_end_matches('.');
     let expression_lower = expression.to_ascii_lowercase();
@@ -7474,9 +7759,20 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     // do the rest — this is also the one-line fix that unblocks Collective
     // Voyage (#131), Alliance of Arms, Shared Trauma, and Mana-Charged
     // Dragon, since all five Join Forces cards share this binding phrase.
-    if tag::<_, _, OracleError<'_>>("the total amount of mana paid this way")
-        .parse(expression_lower.as_str())
-        .is_ok_and(|(rest, _)| rest.is_empty())
+    // CR 601.2h + CR 106.4: The "amount of mana … paid this way" family binds X
+    // to the mana accumulated by the upstream `PayAmountChoice` loop regardless
+    // of the surface phrasing. Rather than one literal per card, compose the
+    // shared structural axes: the fixed "the " lead, an optional "total "
+    // qualifier (Join Forces cards — Alliance of Arms, Collective Voyage,
+    // Mana-Charged Dragon, Minds Aglow, Shared Trauma), the fixed
+    // "amount of mana " head, an optional payer-subject clause ("that player " —
+    // Power Leak / Errant Minion; "they " — Liege of the Hollows; or bare), and
+    // the fixed "paid this way" tail. The head is deliberately kept mana-scoped
+    // ("amount of mana", never a resource-generic capture) so it structurally
+    // cannot match the energy variants ("amount of {E} paid this way" — CR 106
+    // vs CR 122), which are handled elsewhere.
+    if parse_amount_of_mana_paid_this_way(expression_lower.as_str())
+        .is_ok_and(|(rest, ())| rest.is_empty())
     {
         return Some(QuantityExpr::Ref {
             qty: QuantityRef::Variable {

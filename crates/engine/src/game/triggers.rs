@@ -127,6 +127,7 @@ pub(super) struct TriggerEventContextSnapshot {
     current_trigger_event: Option<GameEvent>,
     current_trigger_events: Vec<GameEvent>,
     current_trigger_match_count: Option<u32>,
+    die_result_this_resolution: Option<i32>,
 }
 
 pub(super) fn push_trigger_event_context(
@@ -139,6 +140,7 @@ pub(super) fn push_trigger_event_context(
         current_trigger_event: state.current_trigger_event.clone(),
         current_trigger_events: state.current_trigger_events.clone(),
         current_trigger_match_count: state.current_trigger_match_count,
+        die_result_this_resolution: state.die_result_this_resolution,
     };
     state.current_trigger_event = trigger_event
         .cloned()
@@ -159,6 +161,21 @@ pub(super) fn restore_trigger_event_context(
     state.current_trigger_event = snapshot.current_trigger_event;
     state.current_trigger_events = snapshot.current_trigger_events;
     state.current_trigger_match_count = snapshot.current_trigger_match_count;
+    state.die_result_this_resolution = snapshot.die_result_this_resolution;
+}
+
+/// CR 608.2: Push a PendingContinuation's captured ResolvingTriggerContext
+/// as the live trigger context for a continuation drain, returning a
+/// snapshot to restore via restore_trigger_event_context once the drain
+/// completes.
+pub(super) fn push_resolving_trigger_context(
+    state: &mut GameState,
+    ctx: &crate::types::game_state::ResolvingTriggerContext,
+) -> TriggerEventContextSnapshot {
+    let snapshot =
+        push_trigger_event_context(state, ctx.event.as_ref(), &ctx.events, ctx.match_count);
+    state.die_result_this_resolution = ctx.die_result;
+    snapshot
 }
 
 /// CR 702.21a + CR 118.12: Convert a WardCost to an `AbilityCost` for the
@@ -23202,8 +23219,8 @@ pub mod tests {
             make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
             make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
         ];
-        state.pending_continuation =
-            Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
+        state.pending_continuation = Some(PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
@@ -23211,7 +23228,9 @@ pub mod tests {
                 vec![],
                 ObjectId(9999),
                 PlayerId(0),
-            ))));
+            )),
+            &state,
+        ));
         let mut events = Vec::new();
 
         assert!(

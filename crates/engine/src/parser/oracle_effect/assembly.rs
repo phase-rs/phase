@@ -33,7 +33,8 @@ use super::lower::{
     effect_publishes_revealed_subject, extract_bounded_target_multi_target,
     extract_exact_target_multi_target, extract_optional_target_multi_target,
     extract_verb_up_to_multi_target, fold_copy_spell_gains_haste_and_quoted_grant,
-    fold_enters_this_way_counter_rider, fold_search_choose_type_conditional_destination,
+    fold_deal_damage_then_prevent_into_computed_amount, fold_enters_this_way_counter_rider,
+    fold_exile_resolving_rider, fold_search_choose_type_conditional_destination,
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
     gate_reflexive_rider_on_declined_optional_target, is_exile_until_cast_bottom_cleanup,
     is_land_enters_tapped_rider, is_linked_exile_cast_bottom_cleanup,
@@ -2347,6 +2348,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     }
 
     collapse_ephemeral_color_choice_mana(&mut result);
+    // CR 608.2c + CR 615.1a + CR 615.4: Fold "deal N damage … prevent X of that
+    // damage" (Power Leak, Errant Minion) into one computed-amount DealDamage
+    // (max(N − X, 0)). Must run after where-X binding has populated the
+    // prevention node's `amount_dynamic`, which happens during IR lowering above.
+    fold_deal_damage_then_prevent_into_computed_amount(&mut result);
     // CR 105.4 + CR 702.16: inject a color choice ahead of a "gains
     // protection/hexproof from the color of your choice" grant so the source
     // carries a chosen color for the layer applier to bake in.
@@ -2381,6 +2387,12 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // attaching object.
     rewire_result_anchored_subchain(&mut result);
     fold_enters_this_way_counter_rider(&mut result);
+    // CR 603.7a + CR 608.2c + CR 702.170c: fold the exile-instead "If you do,
+    // ..." continuation (Feather's return-to-hand, Lilah's become-plotted) onto
+    // the exile-resolving carrier's typed `on_exile` rider so the consequence is
+    // applied when the replacement is APPLIED (spell lands in exile), not when
+    // the trigger resolves.
+    fold_exile_resolving_rider(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
     retarget_counter_additional_cost_to_target(&mut result);
     // CR 608.2c: two-target "put a counter on the you-control creature, then those

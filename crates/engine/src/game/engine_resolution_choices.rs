@@ -1327,7 +1327,8 @@ pub(super) fn handle_resolution_choice(
                             state.pending_continuation.is_none(),
                             "Learn rummage overwriting pending_continuation"
                         );
-                        state.pending_continuation = Some(PendingContinuation::new(Box::new(draw)));
+                        state.pending_continuation =
+                            Some(PendingContinuation::new(Box::new(draw), state));
                         events.push(GameEvent::EffectResolved {
                             kind: EffectKind::Learn,
                             source_id: ObjectId(0),
