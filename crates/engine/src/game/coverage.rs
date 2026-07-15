@@ -9967,8 +9967,6 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("had no cards in hand")
             // "if no permanents left the battlefield" — turn-event check
             || lower.contains("no permanents left")
-            // "if [this card is] the only creature card in your graveyard" — zone state check
-            || lower.contains("only creature card in your graveyard")
             // "if you discarded a card this turn" — turn-event action check
             || lower.contains("if you discarded")
             // "if 4 or more damage was dealt" — turn-event damage check

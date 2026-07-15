@@ -1462,6 +1462,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,

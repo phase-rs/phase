@@ -1127,6 +1127,7 @@ fn finish_pending_cost_or_cast(
             pending.ability,
             pending.activation_cost.as_ref(),
             pending.activation_residual,
+            pending.pending_loyalty_activation_player,
             events,
         )?;
         return Ok(drain_deferred_triggers_after_stack_object_announcement(
@@ -1788,6 +1789,7 @@ pub(crate) fn resume_interrupted_cost_payment(
             pending.ability,
             pending.activation_cost.as_ref(),
             pending.activation_residual,
+            pending.pending_loyalty_activation_player,
             events,
         );
     }
@@ -3454,6 +3456,7 @@ pub(super) fn push_activated_ability_to_stack(
     // the non-X mana-leg detour (`ManaLeg` → re-surface the residual non-self
     // battlefield-removal: Sacrifice / battlefield Exile / ReturnToHand).
     activation_residual: ActivationResidual,
+    mut pending_loyalty_activation_player: Option<PlayerId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 702.170b: Plot is a special action that never uses the stack. A Moved
@@ -3528,6 +3531,7 @@ pub(super) fn push_activated_ability_to_stack(
             let mut pending_discard =
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_discard.activation_ability_index = Some(ability_index);
+            pending_discard.pending_loyalty_activation_player = pending_loyalty_activation_player;
             return Ok(WaitingFor::PayCost {
                 player,
                 kind: PayCostKind::Discard,
@@ -3569,6 +3573,7 @@ pub(super) fn push_activated_ability_to_stack(
                     PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
                 pending_sac.activation_cost = Some(cost.clone());
                 pending_sac.activation_ability_index = Some(ability_index);
+                pending_sac.pending_loyalty_activation_player = pending_loyalty_activation_player;
                 return Ok(WaitingFor::PayCost {
                     player,
                     kind: PayCostKind::Sacrifice,
@@ -3605,6 +3610,7 @@ pub(super) fn push_activated_ability_to_stack(
                     PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
                 pending_exile.activation_cost = Some(cost.clone());
                 pending_exile.activation_ability_index = Some(ability_index);
+                pending_exile.pending_loyalty_activation_player = pending_loyalty_activation_player;
                 return Ok(WaitingFor::PayCost {
                     player,
                     kind: PayCostKind::ExilePermanent {
@@ -3637,6 +3643,8 @@ pub(super) fn push_activated_ability_to_stack(
                     PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
                 pending_return.activation_cost = Some(cost.clone());
                 pending_return.activation_ability_index = Some(ability_index);
+                pending_return.pending_loyalty_activation_player =
+                    pending_loyalty_activation_player;
                 return Ok(WaitingFor::PayCost {
                     player,
                     kind: PayCostKind::ReturnToHand,
@@ -3746,6 +3754,9 @@ pub(super) fn push_activated_ability_to_stack(
             let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending.activation_cost = remaining_cost;
             pending.activation_ability_index = Some(ability_index);
+            pending.pending_loyalty_activation_player = should_record_loyalty
+                .then_some(player)
+                .or(pending_loyalty_activation_player);
             if let Some(pending) = attach_pending_cast_to_cost_move(state, Box::new(pending)) {
                 state.pending_cast = Some(pending);
             }
@@ -3753,6 +3764,7 @@ pub(super) fn push_activated_ability_to_stack(
         }
         if should_record_loyalty {
             super::planeswalker::record_loyalty_activation(state, source_id, player);
+            pending_loyalty_activation_player = None;
         }
     }
 
@@ -3771,7 +3783,15 @@ pub(super) fn push_activated_ability_to_stack(
         && (assigned_targets.len() >= target_slots.len() || resolved.distribution.is_some())
     {
         emit_targeting_events(state, &assigned_targets, source_id, player, events);
-        return push_ability_entry(state, player, source_id, ability_index, resolved, events);
+        return push_ability_entry(
+            state,
+            player,
+            source_id,
+            ability_index,
+            resolved,
+            pending_loyalty_activation_player,
+            events,
+        );
     }
     if !target_slots.is_empty() {
         // CR 115.1 + CR 701.9b: Random-target activated abilities — game picks
@@ -3787,7 +3807,15 @@ pub(super) fn push_activated_ability_to_stack(
             let assigned_targets = flatten_targets_in_chain(&resolved);
             emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
-            return push_ability_entry(state, player, source_id, ability_index, resolved, events);
+            return push_ability_entry(
+                state,
+                player,
+                source_id,
+                ability_index,
+                resolved,
+                pending_loyalty_activation_player,
+                events,
+            );
         }
 
         if let Some(targets) =
@@ -3799,7 +3827,15 @@ pub(super) fn push_activated_ability_to_stack(
             let assigned_targets = flatten_targets_in_chain(&resolved);
             emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
-            return push_ability_entry(state, player, source_id, ability_index, resolved, events);
+            return push_ability_entry(
+                state,
+                player,
+                source_id,
+                ability_index,
+                resolved,
+                pending_loyalty_activation_player,
+                events,
+            );
         }
 
         // Targets need interactive selection
@@ -3819,6 +3855,7 @@ pub(super) fn push_activated_ability_to_stack(
         // cost here — it was already consumed above (issue #897 class).
         pending_act.activation_cost = None;
         pending_act.activation_ability_index = Some(ability_index);
+        pending_act.pending_loyalty_activation_player = pending_loyalty_activation_player;
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending_act),
@@ -3830,7 +3867,15 @@ pub(super) fn push_activated_ability_to_stack(
 
     emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
-    push_ability_entry(state, player, source_id, ability_index, resolved, events)
+    push_ability_entry(
+        state,
+        player,
+        source_id,
+        ability_index,
+        resolved,
+        pending_loyalty_activation_player,
+        events,
+    )
 }
 
 fn concretize_chosen_x_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
@@ -3872,6 +3917,7 @@ fn push_ability_entry(
     source_id: ObjectId,
     ability_index: usize,
     mut resolved: ResolvedAbility,
+    pending_loyalty_activation_player: Option<PlayerId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let entry_id = ObjectId(state.next_object_id);
@@ -3902,6 +3948,9 @@ fn push_ability_entry(
         },
         events,
     );
+    if let Some(activation_player) = pending_loyalty_activation_player {
+        super::planeswalker::record_loyalty_activation(state, source_id, activation_player);
+    }
 
     restrictions::record_ability_activation(state, source_id, ability_index);
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
@@ -9750,6 +9799,7 @@ pub fn finalize_mana_payment(
                 pending.ability,
                 pending.activation_cost.as_ref(),
                 pending.activation_residual,
+                pending.pending_loyalty_activation_player,
                 events,
             );
         }
@@ -10042,6 +10092,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 pending.ability,
                 pending.activation_cost.as_ref(),
                 pending.activation_residual,
+                pending.pending_loyalty_activation_player,
                 events,
             );
         }
@@ -10964,6 +11015,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: Some(0),
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
@@ -15954,6 +16006,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
@@ -16085,6 +16138,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
@@ -16185,6 +16239,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
@@ -16274,6 +16329,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
@@ -16396,6 +16452,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
             cast_timing_permission: None,
@@ -19410,6 +19467,7 @@ its replicate cost was paid.)\nDraw a card.";
             resolved,
             Some(&residual),
             ActivationResidual::XMana,
+            None,
             &mut events,
         );
     }

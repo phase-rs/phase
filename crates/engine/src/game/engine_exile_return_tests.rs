@@ -1028,3 +1028,270 @@ fn journey_to_nowhere_two_trigger_oracle_returns_exiled_creature() {
     assert!(!state.exile.contains(&creature_id));
     assert!(state.exile_links.is_empty());
 }
+
+/// CR 603.2 + CR 603.3: A creature returned to the battlefield by an
+/// "until this leaves" exile-return (Fiend Hunter's leaves-the-battlefield
+/// trigger) enters the battlefield, so its OWN enters-the-battlefield trigger
+/// must fire. Regression test for issue #3673: Wall of Omens, returned when
+/// Fiend Hunter dies, was not drawing a card because `check_exile_returns`
+/// appended the enter event without scanning it for triggers.
+#[test]
+fn exile_return_fires_returned_creatures_etb_trigger() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::game_state::StackEntryKind;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Fiend Hunter on P0's battlefield (source of the exile). We register the
+    // UntilSourceLeaves link directly rather than resolving Fiend Hunter's ETB
+    // exile — the return path, not the exile path, is under test here.
+    let hunter_id = scenario.add_creature(P0, "Fiend Hunter", 1, 3).id();
+
+    // Wall of Omens, owned by P0, with its real ETB draw trigger. It is placed
+    // on the battlefield so the parser installs the trigger, then relocated to
+    // exile below (a returned card comes back under its owner's control).
+    let wall_id = scenario
+        .add_creature(P0, "Wall of Omens", 0, 4)
+        .from_oracle_text("Defender\nWhen this creature enters, draw a card.")
+        .id();
+
+    // A card for the ETB draw to reveal.
+    scenario.with_library_top(P0, &["Plains"]);
+
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+
+    // Sanity-check the parser: Wall of Omens must have an ETB (ChangesZone to
+    // Battlefield) trigger. If this fails, the parser regressed, not the engine.
+    let wall = state.objects.get(&wall_id).expect("Wall on battlefield");
+    assert!(
+        wall.trigger_definitions.iter_all().any(|t| {
+            matches!(t.mode, crate::types::TriggerMode::ChangesZone)
+                && t.destination == Some(Zone::Battlefield)
+        }),
+        "Wall of Omens must have an ETB trigger for this regression to be meaningful"
+    );
+
+    // Move Wall to exile and register the return link, mirroring the state after
+    // Fiend Hunter's ETB has resolved.
+    let mut relocate_events: Vec<GameEvent> = Vec::new();
+    crate::game::zones::move_to_zone(state, wall_id, Zone::Exile, &mut relocate_events);
+    state.exile_links.push(ExileLink {
+        exiled_id: wall_id,
+        source_id: hunter_id,
+        kind: ExileLinkKind::UntilSourceLeaves {
+            return_zone: Zone::Battlefield,
+        },
+    });
+
+    let hand_before = state.players[0].hand.len();
+
+    // Fiend Hunter leaves the battlefield; the post-action pipeline returns Wall
+    // of Omens and must fire its ETB.
+    let mut events: Vec<GameEvent> = Vec::new();
+    crate::game::zones::move_to_zone(state, hunter_id, Zone::Graveyard, &mut events);
+    let default_wf = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    crate::game::engine_priority::run_post_action_pipeline(
+        state,
+        &mut events,
+        &default_wf,
+        false,
+        false,
+    )
+    .unwrap();
+
+    // Wall of Omens is back on the battlefield ...
+    assert!(
+        state.battlefield.contains(&wall_id),
+        "Wall of Omens should return to the battlefield"
+    );
+    assert!(
+        state.exile_links.is_empty(),
+        "return link should be consumed"
+    );
+
+    // ... and its ETB trigger is on the stack (the bug: it never triggered).
+    let etb_on_stack = state.stack.iter().any(|entry| {
+        matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == wall_id
+        )
+    });
+    assert!(
+        etb_on_stack,
+        "returned Wall of Omens' ETB trigger must be on the stack; stack={:?}",
+        state.stack,
+    );
+
+    // Resolving it draws a card for P0.
+    let mut resolve_events: Vec<GameEvent> = Vec::new();
+    crate::game::stack::resolve_top(state, &mut resolve_events);
+    assert_eq!(
+        state.players[0].hand.len(),
+        hand_before + 1,
+        "resolving the returned creature's ETB must draw a card"
+    );
+}
+
+/// CR 603.2 + CR 603.3b + CR 603.7: If an exile-return event creates ordinary
+/// ETB triggers and also satisfies a delayed trigger, all of those simultaneous
+/// triggers are ordered as one batch. Regression for PR 5773 review: the return
+/// path used to process normal ETBs and delayed triggers in separate batches,
+/// so the same-controller ordering prompt could omit one side of the batch.
+#[test]
+fn exile_return_combines_normal_and_delayed_triggers_in_one_ordering_prompt() {
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, QuantityExpr,
+        ResolvedAbility, TargetFilter, TriggerDefinition,
+    };
+    use crate::types::game_state::DelayedTrigger;
+
+    fn gain_life_definition(description: &str) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .description(description.to_string())
+    }
+
+    fn etb_observer_trigger(description: &str) -> TriggerDefinition {
+        TriggerDefinition::new(crate::types::TriggerMode::ChangesZone)
+            .destination(Zone::Battlefield)
+            .valid_card(TargetFilter::Any)
+            .execute(gain_life_definition(description))
+            .description(description.to_string())
+    }
+
+    let mut state = GameState::new_two_player(42);
+    state.turn_number = 2;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+
+    let host_id = create_object(
+        &mut state,
+        CardId(10),
+        PlayerId(0),
+        "Fiend Hunter".to_string(),
+        Zone::Battlefield,
+    );
+    let returned_id = create_object(
+        &mut state,
+        CardId(11),
+        PlayerId(0),
+        "Returned Bear".to_string(),
+        Zone::Exile,
+    );
+    let observer_a = create_object(
+        &mut state,
+        CardId(12),
+        PlayerId(0),
+        "First ETB Observer".to_string(),
+        Zone::Battlefield,
+    );
+    let observer_b = create_object(
+        &mut state,
+        CardId(13),
+        PlayerId(0),
+        "Second ETB Observer".to_string(),
+        Zone::Battlefield,
+    );
+    let delayed_source = create_object(
+        &mut state,
+        CardId(14),
+        PlayerId(0),
+        "Delayed Return Watcher".to_string(),
+        Zone::Battlefield,
+    );
+
+    state
+        .objects
+        .get_mut(&observer_a)
+        .unwrap()
+        .trigger_definitions
+        .push(etb_observer_trigger("First observer gains 1 life"));
+    state
+        .objects
+        .get_mut(&observer_b)
+        .unwrap()
+        .trigger_definitions
+        .push(etb_observer_trigger("Second observer gains 1 life"));
+
+    state.delayed_triggers.push(DelayedTrigger {
+        condition: DelayedTriggerCondition::WhenEntersBattlefield {
+            filter: TargetFilter::Any,
+        },
+        ability: ResolvedAbility::new(
+            *gain_life_definition("Delayed watcher gains 1 life").effect,
+            vec![],
+            delayed_source,
+            PlayerId(0),
+        ),
+        controller: PlayerId(0),
+        source_id: delayed_source,
+        one_shot: true,
+    });
+    state.exile_links.push(ExileLink {
+        exiled_id: returned_id,
+        source_id: host_id,
+        kind: ExileLinkKind::UntilSourceLeaves {
+            return_zone: Zone::Battlefield,
+        },
+    });
+
+    let mut events = Vec::new();
+    crate::game::zones::move_to_zone(&mut state, host_id, Zone::Graveyard, &mut events);
+    let default_wf = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    let waiting_for = crate::game::engine_priority::run_post_action_pipeline(
+        &mut state,
+        &mut events,
+        &default_wf,
+        true,
+        false,
+    )
+    .unwrap();
+
+    assert!(
+        state.battlefield.contains(&returned_id),
+        "returned card must be back on the battlefield"
+    );
+    assert!(
+        state.delayed_triggers.is_empty(),
+        "matching one-shot delayed trigger must be consumed"
+    );
+
+    let WaitingFor::OrderTriggers { player, triggers } = waiting_for else {
+        panic!("expected combined OrderTriggers prompt, got {waiting_for:?}");
+    };
+    assert_eq!(player, PlayerId(0));
+    assert_eq!(
+        triggers.len(),
+        3,
+        "normal ETBs plus delayed return trigger must share one ordering prompt: {triggers:?}"
+    );
+    assert!(triggers
+        .iter()
+        .any(|summary| summary.source_id == observer_a));
+    assert!(triggers
+        .iter()
+        .any(|summary| summary.source_id == observer_b));
+    assert!(triggers
+        .iter()
+        .any(|summary| summary.source_id == delayed_source));
+}
