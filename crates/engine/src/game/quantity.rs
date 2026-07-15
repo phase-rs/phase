@@ -1112,10 +1112,10 @@ pub fn detection_trigger_event() -> Option<crate::types::events::GameEvent> {
 // never the enclosing trigger whose event/context is still live on
 // `GameState` while that enclosing ability's resolution is paused mid-flight
 // (e.g. a `PendingContinuation` resume restores the enclosing trigger's event
-// before the reflexive's own target slots are built). This suppresses only
-// the two "read the enclosing trigger's own event" tiers of the cascade
-// (`current_trigger_event` and its detection-time fallback
-// `detection_trigger_event()`) for the duration of
+// before the reflexive's own target slots are built). This suppresses every
+// enclosing-trigger tier of the cascade: the batched match count,
+// `current_trigger_event`, and its detection-time fallback
+// `detection_trigger_event()`, for the duration of
 // `try_begin_reflexive_target_selection`'s entire body — covering target-slot
 // construction (`build_target_slots`) and subject-count freezing
 // (`freeze_reflexive_event_count`) in one shot, regardless of which of the
@@ -1127,7 +1127,7 @@ std::thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
-/// CR 603.12: Run `f` with the enclosing trigger's own event amount
+/// CR 603.12: Run `f` with the enclosing trigger's own event context
 /// suppressed from the `EventContextAmount` cascade. Mirrors
 /// `with_detection_trigger_event`'s save/restore-previous-value discipline
 /// (not a hard reset to `false`) so nested reflexive-in-reflexive
@@ -1143,21 +1143,27 @@ fn enclosing_trigger_event_amount_suppressed() -> bool {
     SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT.with(|c| c.get())
 }
 
-/// CR 603.12 + CR 603.2c/603.4: The enclosing trigger's own scalar amount —
-/// the "read the enclosing event" tiers of the `EventContextAmount` cascade.
-/// Suppressed inside `with_reflexive_resolution_scope`.
-fn enclosing_trigger_event_amount(state: &GameState) -> Option<i32> {
+/// CR 603.12 + CR 603.2c/603.4: The enclosing trigger's own count or scalar
+/// amount — the trigger-context tiers of the `EventContextAmount` cascade.
+/// Suppressed inside `with_reflexive_resolution_scope` so a reflexive trigger
+/// falls through to the action that created it.
+fn enclosing_trigger_context_amount(state: &GameState) -> Option<i32> {
     if enclosing_trigger_event_amount_suppressed() {
         return None;
     }
     state
-        .current_trigger_event
-        .as_ref()
-        .and_then(crate::game::targeting::extract_amount_from_event)
+        .current_trigger_match_count
+        .map(u32_to_i32_saturating)
         .or_else(|| {
-            detection_trigger_event()
+            state
+                .current_trigger_event
                 .as_ref()
                 .and_then(crate::game::targeting::extract_amount_from_event)
+                .or_else(|| {
+                    detection_trigger_event()
+                        .as_ref()
+                        .and_then(crate::game::targeting::extract_amount_from_event)
+                })
         })
 }
 
@@ -2569,7 +2575,7 @@ fn resolve_ref(
             // continuation resolves (Moonlit Meditation); `None` otherwise, so it
             // falls straight through to the existing trigger/effect cascade.
             .post_replacement_token_substitution_count
-            .or(state.current_trigger_match_count.map(u32_to_i32_saturating))
+            .or_else(|| enclosing_trigger_context_amount(state))
             // CR 706.4: Die results recorded earlier in THIS resolution
             // outrank the triggering event's own amount, so "roll one or more
             // dice. <effect> equal to the result(s)" consumes the roll total,
@@ -2582,7 +2588,6 @@ fn resolve_ref(
             // suppressed inside `with_reflexive_resolution_scope` (CR 603.12) so
             // a reflexive ability's "that many" never reads the enclosing
             // trigger's event while that trigger's resolution is paused.
-            .or_else(|| enclosing_trigger_event_amount(state))
             .or_else(|| {
                 ctx.scoped_player.and_then(|player| {
                     (!state.last_effect_counts_by_player.is_empty()).then(|| {
@@ -11316,6 +11321,35 @@ mod tests {
             inner, 2,
             "inside reflexive scope the enclosing event is suppressed and \
              last_effect_count (the sacrifice count) is read instead"
+        );
+    }
+
+    /// CR 603.2c + CR 603.12: A reflexive ability created while a batched
+    /// enclosing trigger is resolving must not inherit that outer trigger's
+    /// subject count. Its "that many" instead refers to the action that caused
+    /// the reflexive trigger, represented here by `last_effect_count`.
+    #[test]
+    fn event_context_amount_suppressed_inside_reflexive_scope_ignores_enclosing_match_count() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = Some(1);
+        state.last_effect_count = Some(2);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            1,
+            "outside reflexive scope the enclosing batched trigger count wins"
+        );
+
+        let inner = with_reflexive_resolution_scope(|| {
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1))
+        });
+        assert_eq!(
+            inner, 2,
+            "inside reflexive scope the enclosing batched trigger count must not \
+             shadow the count from the reflexive action"
         );
     }
 
