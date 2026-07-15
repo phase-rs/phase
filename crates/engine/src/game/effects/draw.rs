@@ -5,7 +5,7 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{DrawSequenceOrigin, GameState};
 use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
 use crate::types::statics::StaticMode;
 #[cfg(test)]
@@ -172,7 +172,14 @@ pub(crate) fn start_draw_sequence(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
-    start_draw_sequence_with_replacement_applied(state, player, count, HashSet::new(), events)
+    start_draw_sequence_with_origin(
+        state,
+        player,
+        count,
+        HashSet::new(),
+        DrawSequenceOrigin::Plain,
+        events,
+    )
 }
 
 /// CR 614.5 + CR 121.2: Begin a draw instruction with replacements that have
@@ -187,9 +194,30 @@ fn start_draw_sequence_with_replacement_applied(
     applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
+    start_draw_sequence_with_origin(
+        state,
+        player,
+        count,
+        applied,
+        DrawSequenceOrigin::Plain,
+        events,
+    )
+}
+
+/// CR 121.2 + CR 121.6b: Begin a draw instruction with its completion origin.
+/// The origin is retained across any per-unit replacement choice so the frame's
+/// completion runs the correct post-draw tail after the final unit settles.
+pub(crate) fn start_draw_sequence_with_origin(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    count: u32,
+    applied: HashSet<AppliedReplacementKey>,
+    origin: DrawSequenceOrigin,
+    events: &mut Vec<GameEvent>,
+) -> replacement::ReplacementResult {
     let frame_id = state
         .draw_sequences
-        .push_with_replacement_applied(player, count, applied);
+        .push_with_replacement_applied_and_origin(player, count, applied, origin);
     resume_draw_sequence(state, frame_id, events)
 }
 
@@ -273,48 +301,29 @@ pub(crate) fn resume_draw_sequence(
         return ReplacementResult::Prevented;
     };
     state.last_effect_count = Some(frame.accumulated as i32);
+
+    match frame.origin {
+        DrawSequenceOrigin::Plain => {
+            // Intentionally no `EffectResolved { Draw }`: no trigger matcher consumes
+            // `EffectKind::Draw` today, so wiring that event is out of scope here.
+        }
+        DrawSequenceOrigin::ConniveTail { conniver, count } => {
+            super::connive::apply_connive_tail(state, conniver, count, events);
+        }
+        DrawSequenceOrigin::ScryCompletion { source_id } => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Scry,
+                source_id,
+                subject: None,
+            });
+        }
+    }
+
     ReplacementResult::Execute(ProposedEvent::Draw {
         player_id: frame.player,
         count: 0,
         applied: HashSet::new(),
     })
-}
-
-/// CR 614.6 + CR 614.11 + CR 704.3: Single authority for the
-/// "propose Draw → replace → apply → drain post-replacement continuation"
-/// sequence. Every site that proposes a `ProposedEvent::Draw` MUST call this
-/// helper — otherwise a substituted mandatory-post-effect (Jace WinTheGame,
-/// Abundance reveal-until) leaks past the resolution step and drains against
-/// the wrong player on a later priority pass.
-///
-/// `apply_executed` is invoked on the `Execute` arm with the (possibly
-/// pre-zeroed by `apply_single_replacement`) replaced event, so callers can
-/// layer their own bookkeeping — miracle tracking (`effects/draw.rs`,
-/// `effects/connive.rs`, `effects/gift_delivery.rs`), draw-step
-/// `has_drawn_this_turn` flag (`turns.rs`), or the chain's discard step
-/// (connive). The continuation drain runs immediately after `apply_executed`
-/// returns, inside the same resolution step so SBAs (CR 704.5b
-/// draw-from-empty-library loss) and priority never fall between the
-/// (possibly pre-zeroed) draw and its substitute.
-///
-/// On `NeedsChoice`, sets `state.waiting_for` to the replacement-choice
-/// prompt before returning so callers only need to bail. On `Prevented`,
-/// `apply_executed` is not called.
-pub(crate) fn draw_through_replacement(
-    state: &mut GameState,
-    player_id: crate::types::player::PlayerId,
-    count: u32,
-    events: &mut Vec<GameEvent>,
-    apply_executed: impl FnOnce(&mut GameState, ProposedEvent, &mut Vec<GameEvent>),
-) -> replacement::ReplacementResult {
-    draw_through_replacement_with_applied(
-        state,
-        player_id,
-        count,
-        HashSet::new(),
-        events,
-        apply_executed,
-    )
 }
 
 /// CR 614.5: Propose a draw while preserving replacements already applied to

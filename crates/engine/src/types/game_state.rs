@@ -9146,6 +9146,18 @@ pub struct PendingMultiDraw {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DrawSequenceFrameId(pub u64);
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DrawSequenceOrigin {
+    #[default]
+    Plain,
+    /// CR 701.50a/701.50d: after the connive draws settle, discard `count` cards and
+    /// put +1/+1 counters equal to nonland cards discarded on `conniver`.
+    ConniveTail { conniver: ObjectId, count: u32 },
+    /// CR 701.22d-adjacent bookkeeping: a scry replaced into a draw completes by
+    /// emitting EffectResolved{Scry} for `source_id` once the draws settle.
+    ScryCompletion { source_id: ObjectId },
+}
+
 /// CR 121.2: "Cards may only be drawn one at a time. If a player is instructed to
 /// draw multiple cards, that player performs that many individual card draws."
 ///
@@ -9163,6 +9175,9 @@ pub struct DrawSequenceFrame {
     /// replacement cannot apply to its own substitute draw.
     #[serde(default)]
     pub applied: HashSet<AppliedReplacementKey>,
+    /// The instruction's completion behavior. Old saves default to [`DrawSequenceOrigin::Plain`].
+    #[serde(default)]
+    pub origin: DrawSequenceOrigin,
     /// CR 121.6b: individual draws of this instruction not yet attempted. "If an
     /// effect replaces a draw within a sequence of card draws, the replacement
     /// effect is completed before resuming the sequence."
@@ -9240,12 +9255,30 @@ impl DrawSequenceStack {
         count: u32,
         applied: HashSet<AppliedReplacementKey>,
     ) -> DrawSequenceFrameId {
+        self.push_with_replacement_applied_and_origin(
+            player,
+            count,
+            applied,
+            DrawSequenceOrigin::Plain,
+        )
+    }
+
+    /// Push a draw instruction carrying its originating replacement identities and
+    /// completion behavior.
+    pub fn push_with_replacement_applied_and_origin(
+        &mut self,
+        player: PlayerId,
+        count: u32,
+        applied: HashSet<AppliedReplacementKey>,
+        origin: DrawSequenceOrigin,
+    ) -> DrawSequenceFrameId {
         let frame_id = DrawSequenceFrameId(self.next_frame_id);
         self.next_frame_id += 1;
         self.frames.push(DrawSequenceFrame {
             frame_id,
             player,
             applied,
+            origin,
             remaining: count,
             accumulated: 0,
         });
@@ -9280,7 +9313,9 @@ impl DrawSequenceStack {
     /// over its lifetime are the same position, so the monotonic `next_frame_id`
     /// allocator and the per-frame `frame_id` (both pure identity) are excluded.
     /// What remains is exactly what the predecessor `Option<PendingMultiDraw>`
-    /// compared: who is drawing, how many units are owed, how many have landed.
+    /// compared: who is drawing, how many units are owed, how many have landed,
+    /// and the completion origin. Origin is included because different origins
+    /// produce different eventual game states when their frames complete.
     ///
     /// This must NOT be the derived `PartialEq`. Comparing the allocator would
     /// mean two identical positions never compare equal, and CR 104.4b loop
@@ -9292,7 +9327,10 @@ impl DrawSequenceStack {
     pub(crate) fn loop_equal(&self, other: &Self) -> bool {
         self.frames.len() == other.frames.len()
             && self.frames.iter().zip(&other.frames).all(|(a, b)| {
-                a.player == b.player && a.remaining == b.remaining && a.accumulated == b.accumulated
+                a.player == b.player
+                    && a.remaining == b.remaining
+                    && a.accumulated == b.accumulated
+                    && a.origin == b.origin
             })
     }
 
