@@ -239,11 +239,7 @@ fn resolution_choice_cardinality(
     eligible_count: usize,
     up_to: bool,
 ) -> (usize, usize, bool) {
-    let Some(spec) = ability
-        .multi_target
-        .as_ref()
-        .filter(|_| matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution))
-    else {
+    let Some(spec) = ability.multi_target.as_ref() else {
         return (1, 0, up_to);
     };
 
@@ -253,7 +249,13 @@ fn resolution_choice_cardinality(
         spec,
         eligible_count,
     ) {
-        Ok(bounds) => (bounds.max, bounds.min, bounds.min != bounds.max),
+        Ok(bounds)
+            if bounds.max == 0
+                || matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution) =>
+        {
+            (bounds.max, bounds.min, bounds.min != bounds.max)
+        }
+        Ok(_) => (1, 0, up_to),
         Err(_) => (0, 0, up_to),
     }
 }
