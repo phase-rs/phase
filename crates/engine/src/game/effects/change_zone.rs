@@ -256,7 +256,10 @@ fn resolution_choice_cardinality(
             (bounds.max, bounds.min, bounds.min != bounds.max)
         }
         Ok(_) => (1, 0, up_to),
-        Err(_) => (0, 0, up_to),
+        Err(_) if matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution) => {
+            (0, 0, up_to)
+        }
+        Err(_) => (1, 0, up_to),
     }
 }
 
