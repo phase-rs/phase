@@ -48,6 +48,217 @@ pub enum Chooser {
     Opponent,
 }
 
+#[cfg(test)]
+mod search_found_definition_invariant_tests {
+    use super::*;
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
+
+    fn modifier(destination: Zone, play_mode: CardPlayMode) -> SearchFoundModifier {
+        SearchFoundModifier {
+            destination,
+            play_mode,
+            mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+        }
+    }
+
+    fn valid_definition() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::SearchFound).execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ApplySearchFoundReplacement {
+                modifier: modifier(Zone::Exile, CardPlayMode::Play),
+            },
+        ))
+    }
+
+    fn definition_with_modifier(modifier: SearchFoundModifier) -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::SearchFound).execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ApplySearchFoundReplacement { modifier },
+        ))
+    }
+
+    #[test]
+    fn search_found_modifier_is_an_iff_and_requires_exile_play() {
+        assert!(ReplacementDefinition::new(ReplacementEvent::SearchFound)
+            .validate_search_found_modifier()
+            .is_err());
+        assert!(ReplacementDefinition::new(ReplacementEvent::Draw)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ApplySearchFoundReplacement {
+                    modifier: modifier(Zone::Exile, CardPlayMode::Play),
+                },
+            ))
+            .validate_search_found_modifier()
+            .is_ok());
+        assert!(
+            definition_with_modifier(modifier(Zone::Hand, CardPlayMode::Play))
+                .validate_search_found_modifier()
+                .is_err()
+        );
+        assert!(
+            definition_with_modifier(modifier(Zone::Exile, CardPlayMode::Cast))
+                .validate_search_found_modifier()
+                .is_err()
+        );
+        assert!(
+            definition_with_modifier(modifier(Zone::Exile, CardPlayMode::Play))
+                .validate_search_found_modifier()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn canonical_search_found_roundtrips_without_legacy_field() {
+        let valid = valid_definition();
+        let json = serde_json::to_value(&valid).expect("serialize replacement");
+        assert!(json.get("search_found_modifier").is_none());
+        assert_eq!(
+            json["execute"]["effect"]["type"],
+            serde_json::json!("ApplySearchFoundReplacement")
+        );
+        let restored: ReplacementDefinition =
+            serde_json::from_value(json).expect("canonical replacement should deserialize");
+        assert_eq!(restored, valid);
+    }
+
+    #[test]
+    fn legacy_search_found_field_migrates_and_never_reserializes() {
+        let valid = valid_definition();
+        let mut json = serde_json::to_value(&valid).expect("serialize replacement");
+        json.as_object_mut()
+            .expect("replacement JSON is an object")
+            .remove("execute");
+        json["search_found_modifier"] =
+            serde_json::to_value(modifier(Zone::Exile, CardPlayMode::Play))
+                .expect("serialize modifier");
+
+        let restored: ReplacementDefinition =
+            serde_json::from_value(json).expect("legacy field should migrate");
+        assert_eq!(restored, valid);
+        let canonical = serde_json::to_value(restored).expect("serialize migrated replacement");
+        assert!(canonical.get("search_found_modifier").is_none());
+        assert_eq!(
+            canonical["execute"]["effect"]["type"],
+            serde_json::json!("ApplySearchFoundReplacement")
+        );
+    }
+
+    #[test]
+    fn duplicate_legacy_and_canonical_search_found_payload_is_rejected() {
+        let mut json = serde_json::to_value(valid_definition()).expect("serialize replacement");
+        json["search_found_modifier"] =
+            serde_json::to_value(modifier(Zone::Exile, CardPlayMode::Play))
+                .expect("serialize modifier");
+
+        let error = serde_json::from_value::<ReplacementDefinition>(json)
+            .expect_err("ambiguous duplicate representations must fail closed");
+        assert!(error.to_string().contains("both legacy"), "{error}");
+    }
+
+    #[test]
+    fn ordinary_replacement_execute_roundtrips_unchanged() {
+        let ordinary = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .execute(AbilityDefinition::new(AbilityKind::Database, Effect::NoOp));
+        let json = serde_json::to_value(&ordinary).expect("serialize ordinary replacement");
+        assert!(json.get("search_found_modifier").is_none());
+        let restored: ReplacementDefinition =
+            serde_json::from_value(json).expect("ordinary replacement should deserialize");
+        assert_eq!(restored, ordinary);
+    }
+
+    #[test]
+    fn search_found_rejects_unimplemented_generic_replacement_semantics() {
+        let no_op = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        let mut runtime_execute = valid_definition();
+        runtime_execute.runtime_execute = Some(Box::new(ResolvedAbility::new(
+            Effect::NoOp,
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )));
+        let mut consume_on_apply = valid_definition();
+        consume_on_apply.consume_on_apply = true;
+        let mut legacy_consumed = valid_definition();
+        legacy_consumed.is_consumed = true;
+
+        let invalid = [
+            valid_definition().execute(no_op.clone()),
+            runtime_execute,
+            valid_definition().mode(ReplacementMode::Optional {
+                decline: Some(Box::new(no_op)),
+            }),
+            valid_definition().mode(ReplacementMode::MayCost {
+                cost: AbilityCost::Tap,
+                decline: None,
+            }),
+            consume_on_apply,
+            legacy_consumed,
+        ];
+        for definition in invalid {
+            assert!(
+                definition.validate_search_found_modifier().is_err(),
+                "unsupported SearchFound semantics must fail validation: {definition:?}"
+            );
+        }
+
+        assert!(valid_definition()
+            .mode(ReplacementMode::Optional { decline: None })
+            .validate_search_found_modifier()
+            .is_ok());
+    }
+
+    #[test]
+    fn search_found_rejects_every_event_specific_modifier_family() {
+        let invalid = [
+            {
+                let mut definition = valid_definition();
+                definition.destination_zone = Some(Zone::Hand);
+                ("destination_zone", definition)
+            },
+            {
+                let mut definition = valid_definition();
+                definition.damage_modification = Some(DamageModification::Double);
+                ("damage_modification", definition)
+            },
+            {
+                let mut definition = valid_definition();
+                definition.quantity_modification = Some(QuantityModification::DOUBLE);
+                ("quantity_modification", definition)
+            },
+            {
+                let mut definition = valid_definition();
+                definition.token_owner_scope = Some(ControllerRef::You);
+                ("token_owner_scope", definition)
+            },
+            {
+                let mut definition = valid_definition();
+                definition.mana_modification = Some(ManaModification::ReplaceWith {
+                    mana_type: ManaType::Black,
+                });
+                ("mana_modification", definition)
+            },
+            {
+                let mut definition = valid_definition();
+                definition.counter_match = Some(CounterMatch::Any);
+                ("counter_match", definition)
+            },
+        ];
+
+        for (field, definition) in invalid {
+            let error = definition
+                .validate_search_found_modifier()
+                .expect_err("event-specific fields must be rejected");
+            assert!(
+                error.contains(field),
+                "validation error must identify {field}: {error}"
+            );
+        }
+    }
+}
+
 /// CR 400.1 + CR 608.2c: Which player's zone supplies cards for a direct
 /// zone choice during resolution.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -2721,6 +2932,19 @@ pub enum ManaSpendPermission {
     /// payment. This preserves the Oracle distinction without changing the
     /// actual mana spent.
     AnyTypeOrColor,
+    /// CR 609.4b: Mana may be spent as any WUBRG color for colored
+    /// requirements; this does not relax explicit colorless or snow costs.
+    AnyColor,
+}
+
+/// CR 701.23a + CR 614.1: Typed modification applied to each card found by a
+/// search. Its associated play permission is inseparable from the replacement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchFoundModifier {
+    pub destination: Zone,
+    pub play_mode: CardPlayMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_spend_permission: Option<ManaSpendPermission>,
 }
 
 /// CR 611.2a + CR 108.3: Identifies which player a `CastingPermission` is granted
@@ -12320,6 +12544,13 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 701.23a + CR 614.1 + CR 611.3d: Canonical payload for replacing a
+    /// card found during a search. This is not resolved through the ordinary
+    /// effect pipeline; the replacement engine snapshots and applies it to the
+    /// corresponding `SearchFound` proposed event.
+    ApplySearchFoundReplacement {
+        modifier: SearchFoundModifier,
+    },
     /// Marker for abilities whose resolution is handled by a dedicated engine path
     /// rather than the normal effect resolution pipeline.
     /// CR 702.49: NinjutsuFamily abilities are resolved via GameAction::ActivateNinjutsu.
@@ -13993,6 +14224,7 @@ impl Effect {
             | Effect::Seek { .. }
             | Effect::SetDayNight { .. }
             | Effect::TimeTravel
+            | Effect::ApplySearchFoundReplacement { .. }
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
             | Effect::Intensify { .. }
@@ -14332,6 +14564,7 @@ impl Effect {
             | Effect::RingTemptsYou
             | Effect::Ripple { .. }
             | Effect::RollToVisitAttractions
+            | Effect::ApplySearchFoundReplacement { .. }
             | Effect::RuntimeHandled { .. }
             | Effect::SetClassLevel { .. }
             | Effect::SetDayNight { .. }
@@ -14584,6 +14817,7 @@ impl Effect {
             | Effect::RingTemptsYou
             | Effect::Ripple { .. }
             | Effect::RollToVisitAttractions
+            | Effect::ApplySearchFoundReplacement { .. }
             | Effect::RuntimeHandled { .. }
             | Effect::SetClassLevel { .. }
             | Effect::SetDayNight { .. }
@@ -14820,6 +15054,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SkipNextStep { .. } => "SkipNextStep",
         Effect::AdditionalPhase { .. } => "AdditionalPhase",
         Effect::Double { .. } => "Double",
+        Effect::ApplySearchFoundReplacement { .. } => "ApplySearchFoundReplacement",
         Effect::RuntimeHandled { handler } => match handler {
             RuntimeHandler::NinjutsuFamily => "RuntimeHandled:NinjutsuFamily",
         },
@@ -15339,7 +15574,9 @@ impl From<&Effect> for EffectKind {
             Effect::SkipNextStep { .. } => EffectKind::SkipNextStep,
             Effect::AdditionalPhase { .. } => EffectKind::AdditionalPhase,
             Effect::Double { .. } => EffectKind::Double,
-            Effect::RuntimeHandled { .. } => EffectKind::RuntimeHandled,
+            Effect::ApplySearchFoundReplacement { .. } | Effect::RuntimeHandled { .. } => {
+                EffectKind::RuntimeHandled
+            }
             Effect::Learn => EffectKind::Learn,
             Effect::Forage => EffectKind::Forage,
             Effect::Harness => EffectKind::Harness,
@@ -19001,7 +19238,7 @@ pub enum PostReplacementContinuation {
 }
 
 /// Replacement effect definition with typed fields. Zero params HashMap.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReplacementDefinition {
     pub event: ReplacementEvent,
     #[serde(default)]
@@ -19172,6 +19409,127 @@ pub struct ReplacementDefinition {
     pub source_controller: Option<crate::types::player::PlayerId>,
 }
 
+/// Deserialize-only compatibility mirror. The legacy
+/// `search_found_modifier` member is accepted at this boundary and immediately
+/// migrated into the canonical direct `execute` effect; it is never serialized
+/// again.
+#[derive(Deserialize)]
+struct ReplacementDefinitionDe {
+    event: ReplacementEvent,
+    #[serde(default)]
+    execute: Option<Box<AbilityDefinition>>,
+    #[serde(default)]
+    runtime_execute: Option<Box<ResolvedAbility>>,
+    #[serde(default)]
+    mode: ReplacementMode,
+    #[serde(default)]
+    valid_card: Option<TargetFilter>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    condition: Option<ReplacementCondition>,
+    #[serde(default)]
+    destination_zone: Option<Zone>,
+    #[serde(default)]
+    damage_modification: Option<DamageModification>,
+    #[serde(default)]
+    damage_source_filter: Option<TargetFilter>,
+    #[serde(default)]
+    damage_target_filter: Option<DamageTargetFilter>,
+    #[serde(default)]
+    combat_scope: Option<CombatDamageScope>,
+    #[serde(default)]
+    draw_scope: Option<DrawReplacementScope>,
+    #[serde(default)]
+    shield_kind: ShieldKind,
+    #[serde(default)]
+    quantity_modification: Option<QuantityModification>,
+    #[serde(default)]
+    token_owner_scope: Option<ControllerRef>,
+    #[serde(default)]
+    token_owner_redirect: Option<ControllerRef>,
+    #[serde(default)]
+    valid_player: Option<ReplacementPlayerScope>,
+    #[serde(default)]
+    consume_on_apply: bool,
+    #[serde(default)]
+    is_consumed: bool,
+    #[serde(default)]
+    expiry: Option<RestrictionExpiry>,
+    #[serde(default)]
+    redirect_target: Option<TargetFilter>,
+    #[serde(default)]
+    mana_modification: Option<ManaModification>,
+    #[serde(default)]
+    mana_replacement_scope: ManaReplacementScope,
+    #[serde(default)]
+    additional_token_spec: Option<Box<crate::types::proposed_event::TokenSpec>>,
+    #[serde(default)]
+    ensure_token_specs: Option<Vec<crate::types::proposed_event::TokenSpec>>,
+    #[serde(default)]
+    counter_match: Option<CounterMatch>,
+    #[serde(default)]
+    enters_under: Option<ControllerRef>,
+    #[serde(default)]
+    source_controller: Option<PlayerId>,
+    #[serde(default)]
+    search_found_modifier: Option<SearchFoundModifier>,
+}
+
+impl<'de> Deserialize<'de> for ReplacementDefinition {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let de = ReplacementDefinitionDe::deserialize(deserializer)?;
+        if de.search_found_modifier.is_some() && de.execute.is_some() {
+            return Err(de::Error::custom(
+                "replacement contains both legacy search_found_modifier and execute",
+            ));
+        }
+        if de.search_found_modifier.is_some() && de.event != ReplacementEvent::SearchFound {
+            return Err(de::Error::custom(
+                "legacy search_found_modifier is valid only for SearchFound replacements",
+            ));
+        }
+        let execute = match de.search_found_modifier {
+            Some(modifier) => Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ApplySearchFoundReplacement { modifier },
+            ))),
+            None => de.execute,
+        };
+        Ok(Self {
+            event: de.event,
+            execute,
+            runtime_execute: de.runtime_execute,
+            mode: de.mode,
+            valid_card: de.valid_card,
+            description: de.description,
+            condition: de.condition,
+            destination_zone: de.destination_zone,
+            damage_modification: de.damage_modification,
+            damage_source_filter: de.damage_source_filter,
+            damage_target_filter: de.damage_target_filter,
+            combat_scope: de.combat_scope,
+            draw_scope: de.draw_scope,
+            shield_kind: de.shield_kind,
+            quantity_modification: de.quantity_modification,
+            token_owner_scope: de.token_owner_scope,
+            token_owner_redirect: de.token_owner_redirect,
+            valid_player: de.valid_player,
+            consume_on_apply: de.consume_on_apply,
+            is_consumed: de.is_consumed,
+            expiry: de.expiry,
+            redirect_target: de.redirect_target,
+            mana_modification: de.mana_modification,
+            mana_replacement_scope: de.mana_replacement_scope,
+            additional_token_spec: de.additional_token_spec,
+            ensure_token_specs: de.ensure_token_specs,
+            counter_match: de.counter_match,
+            enters_under: de.enters_under,
+            source_controller: de.source_controller,
+        })
+    }
+}
+
 impl ReplacementDefinition {
     pub fn fix_legacy_parse_time_consumed_flag(&mut self) {
         if self.is_consumed && self.shield_kind.is_none() {
@@ -19222,6 +19580,148 @@ impl ReplacementDefinition {
             )),
             _ => Ok(()),
         }
+    }
+
+    /// Search-found replacement definitions have one inseparable typed
+    /// payload. The event and modifier are an iff invariant: accepting either
+    /// half alone would make card-data claim support while runtime silently
+    /// performs the original search instruction. This implementation supports
+    /// the `play` permission (spells and lands), and rejects a narrower `cast`
+    /// payload rather than silently widening it to land play.
+    pub fn validate_search_found_modifier(&self) -> Result<(), String> {
+        // Exhaustive by design: every shared replacement field must be
+        // classified here. Adding a field to `ReplacementDefinition` must fail
+        // compilation until SearchFound explicitly supports or forbids it.
+        let ReplacementDefinition {
+            event,
+            execute,
+            runtime_execute,
+            mode,
+            valid_card: _,
+            description: _,
+            condition: _,
+            destination_zone,
+            damage_modification,
+            damage_source_filter,
+            damage_target_filter,
+            combat_scope,
+            draw_scope,
+            shield_kind,
+            quantity_modification,
+            token_owner_scope,
+            token_owner_redirect,
+            valid_player: _,
+            consume_on_apply,
+            is_consumed,
+            expiry,
+            redirect_target,
+            mana_modification,
+            mana_replacement_scope,
+            additional_token_spec,
+            ensure_token_specs,
+            counter_match,
+            enters_under,
+            source_controller,
+        } = self;
+
+        let is_search_found = *event == ReplacementEvent::SearchFound;
+        if !is_search_found {
+            return Ok(());
+        }
+        let Some(execute) = execute.as_deref() else {
+            return Err("SearchFound replacement has no canonical execute".to_string());
+        };
+        let Effect::ApplySearchFoundReplacement { modifier } = execute.effect.as_ref() else {
+            return Err(
+                "SearchFound replacement execute must be ApplySearchFoundReplacement".to_string(),
+            );
+        };
+        let canonical = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ApplySearchFoundReplacement {
+                modifier: modifier.clone(),
+            },
+        );
+        if execute != &canonical {
+            return Err(
+                "SearchFound execute must be the exact minimal direct canonical effect".to_string(),
+            );
+        }
+        if modifier.destination != Zone::Exile {
+            return Err(format!(
+                "SearchFound play permission requires Exile destination, got {:?}",
+                modifier.destination
+            ));
+        }
+        if modifier.play_mode != CardPlayMode::Play {
+            return Err(
+                "SearchFound currently supports CardPlayMode::Play only; refusing to widen Cast into land play"
+                    .to_string(),
+            );
+        }
+        if runtime_execute.is_some() {
+            return Err(
+                "SearchFound replacement carries an unsupported runtime execute payload"
+                    .to_string(),
+            );
+        }
+        match mode {
+            ReplacementMode::Mandatory | ReplacementMode::Optional { decline: None } => {}
+            ReplacementMode::Optional { decline: Some(_) } => {
+                return Err(
+                    "SearchFound optional replacement carries an unsupported decline payload"
+                        .to_string(),
+                );
+            }
+            ReplacementMode::MayCost { .. } => {
+                return Err(
+                    "SearchFound replacement does not support MayCost optionality".to_string(),
+                );
+            }
+        }
+        if *consume_on_apply || *is_consumed {
+            return Err(
+                "SearchFound replacement does not support one-shot consumed state".to_string(),
+            );
+        }
+
+        // SearchFound has a deliberately closed payload. The shared replacement
+        // definition carries fields for many unrelated event classes, and the
+        // generic applicability scan either ignores or rejects those fields on a
+        // found-card event. Accepting one here would let serialized card data claim
+        // support for behavior the SearchFound applier can never perform. The only
+        // supported generic fields are the source applicability gates
+        // (`valid_card`, `valid_player`, `condition`) and UI `description`; every
+        // event-specific axis below must retain its constructor default.
+        let unsupported_field = [
+            ("destination_zone", destination_zone.is_some()),
+            ("damage_modification", damage_modification.is_some()),
+            ("damage_source_filter", damage_source_filter.is_some()),
+            ("damage_target_filter", damage_target_filter.is_some()),
+            ("combat_scope", combat_scope.is_some()),
+            ("draw_scope", draw_scope.is_some()),
+            ("shield_kind", !shield_kind.is_none()),
+            ("quantity_modification", quantity_modification.is_some()),
+            ("token_owner_scope", token_owner_scope.is_some()),
+            ("token_owner_redirect", token_owner_redirect.is_some()),
+            ("expiry", expiry.is_some()),
+            ("redirect_target", redirect_target.is_some()),
+            ("mana_modification", mana_modification.is_some()),
+            ("mana_replacement_scope", !mana_replacement_scope.is_any()),
+            ("additional_token_spec", additional_token_spec.is_some()),
+            ("ensure_token_specs", ensure_token_specs.is_some()),
+            ("counter_match", counter_match.is_some()),
+            ("enters_under", enters_under.is_some()),
+            ("source_controller", source_controller.is_some()),
+        ]
+        .into_iter()
+        .find_map(|(field, is_present)| is_present.then_some(field));
+        if let Some(field) = unsupported_field {
+            return Err(format!(
+                "SearchFound replacement carries unsupported event-specific field `{field}`"
+            ));
+        }
+        Ok(())
     }
 
     /// Create a new replacement definition with only the required event field.
@@ -19286,6 +19786,11 @@ impl ReplacementDefinition {
 
     pub fn valid_card(mut self, filter: TargetFilter) -> Self {
         self.valid_card = Some(filter);
+        self
+    }
+
+    pub fn valid_player(mut self, player: ReplacementPlayerScope) -> Self {
+        self.valid_player = Some(player);
         self
     }
 
@@ -19406,6 +19911,28 @@ impl ReplacementDefinition {
     pub fn mana_replacement_scope(mut self, scope: ManaReplacementScope) -> Self {
         self.mana_replacement_scope = scope;
         self
+    }
+
+    pub fn search_found_modifier(&self) -> Option<&SearchFoundModifier> {
+        if self.event != ReplacementEvent::SearchFound {
+            return None;
+        }
+        let execute = self.execute.as_deref()?;
+        match execute.effect.as_ref() {
+            Effect::ApplySearchFoundReplacement { modifier }
+                if execute
+                    == &AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ApplySearchFoundReplacement {
+                            modifier: modifier.clone(),
+                        },
+                    ) =>
+            {
+                Some(modifier)
+            }
+            Effect::ApplySearchFoundReplacement { .. } => None,
+            _ => None,
+        }
     }
 
     /// CR 614.1a + CR 111.1: Attach an additional-token spec emitted alongside

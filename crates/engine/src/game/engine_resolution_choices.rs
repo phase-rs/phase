@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChosenAttribute, Effect, EffectKind, GuessOutcome, LibraryPosition,
-    QuantityExpr, QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
+    AbilityCost, CastingPermission, ChoiceType, ChosenAttribute, Duration, Effect, EffectKind,
+    GuessOutcome, LibraryPosition, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
+    ThisWayCause,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -19,6 +20,328 @@ use super::engine::EngineError;
 use super::turns;
 use super::zones;
 use super::{casting, casting_costs, mana_abilities};
+
+/// CR 701.23a + CR 614.1: offer every found card as its own replaceable event.
+/// Original survivors remain in the printed search continuation; modified cards
+/// are delivered independently and therefore cannot be consumed by that
+/// continuation's destination or found-card riders.
+pub(crate) fn apply_search_found_replacements(
+    state: &mut GameState,
+    searcher: crate::types::player::PlayerId,
+    chosen: &[ObjectId],
+    continuation: crate::types::game_state::PendingSearchFoundContinuation,
+    reveal: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<Vec<ObjectId>, Box<WaitingFor>> {
+    // A SearchFound ordering pause must not expose the pre-replacement choice
+    // through stale reveal memory. The terminal survivor set repopulates this
+    // only after every original-disposition event has finished.
+    state.last_revealed_ids.clear();
+    let library_owner = state
+        .library_search_control
+        .as_ref()
+        .filter(|binding| binding.searcher == searcher)
+        .map(|binding| binding.library_owner);
+    let batch = crate::types::game_state::PendingSearchFoundBatch {
+        searcher,
+        library_owner,
+        remaining: chosen.to_vec(),
+        survivors: Vec::with_capacity(chosen.len()),
+        continuation,
+        reveal,
+    };
+    let batch = process_search_found_batch(state, batch, events)?;
+    reveal_search_found_survivors(state, &batch, events);
+    Ok(batch.survivors)
+}
+
+/// CR 614.6 + CR 701.23a: reveal only cards whose original found event still
+/// occurs. A replacement-modified card is delivered independently and never
+/// becomes part of the printed search instruction's reveal event or public
+/// reveal memory.
+fn reveal_search_found_survivors(
+    state: &mut GameState,
+    batch: &crate::types::game_state::PendingSearchFoundBatch,
+    events: &mut Vec<GameEvent>,
+) {
+    if !batch.reveal {
+        state.last_revealed_ids.clear();
+        return;
+    }
+
+    state.last_revealed_ids = batch.survivors.clone();
+    for &card_id in &batch.survivors {
+        state.revealed_cards.insert(card_id);
+    }
+    if !batch.survivors.is_empty() {
+        let card_names = batch
+            .survivors
+            .iter()
+            .filter_map(|id| state.objects.get(id).map(|object| object.name.clone()))
+            .collect();
+        events.push(GameEvent::CardsRevealed {
+            player: batch.searcher,
+            card_ids: batch.survivors.clone(),
+            card_names,
+        });
+    }
+}
+
+/// CR 616.1 + CR 701.23a: Process the exact unhandled suffix of a found-card
+/// batch. Both the SearchFound replacement choice and the modified card's
+/// resulting zone move can pause independently; in either case the serialized
+/// batch owns every card that has not completed this stage.
+fn process_search_found_batch(
+    state: &mut GameState,
+    mut batch: crate::types::game_state::PendingSearchFoundBatch,
+    events: &mut Vec<GameEvent>,
+) -> Result<crate::types::game_state::PendingSearchFoundBatch, Box<WaitingFor>> {
+    let remaining = std::mem::take(&mut batch.remaining);
+    for (index, object_id) in remaining.iter().copied().enumerate() {
+        let owner = state
+            .objects
+            .get(&object_id)
+            .map(|object| object.owner)
+            .unwrap_or(batch.searcher);
+        let proposed = crate::types::proposed_event::ProposedEvent::SearchFound {
+            searcher: batch.searcher,
+            library_owner: batch.library_owner,
+            object_id,
+            owner,
+            disposition: crate::types::proposed_event::SearchFoundDisposition::Original,
+            applied: Default::default(),
+        };
+        match super::replacement::replace_event(state, proposed, events) {
+            super::replacement::ReplacementResult::Execute(event) => {
+                if deliver_search_found_event(state, event, &mut batch.survivors, events) {
+                    batch.remaining = remaining[index + 1..].to_vec();
+                    state.pending_search_found_batch = Some(batch);
+                    return Err(Box::new(state.waiting_for.clone()));
+                }
+            }
+            super::replacement::ReplacementResult::NeedsChoice(player) => {
+                batch.remaining = remaining[index + 1..].to_vec();
+                state.pending_search_found_batch = Some(batch);
+                let waiting = super::replacement::replacement_choice_waiting_for(player, state);
+                state.waiting_for = waiting.clone();
+                return Err(Box::new(waiting));
+            }
+            super::replacement::ReplacementResult::Prevented => {}
+        }
+    }
+    Ok(batch)
+}
+
+/// Deliver one terminal SearchFound disposition. Returns `true` when the
+/// resulting zone move parked an inner choice; the typed batch completion will
+/// grant permission (only after a successful exile) and resume the suffix.
+fn deliver_search_found_event(
+    state: &mut GameState,
+    event: crate::types::proposed_event::ProposedEvent,
+    survivors: &mut Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let crate::types::proposed_event::ProposedEvent::SearchFound {
+        object_id,
+        disposition,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    let crate::types::proposed_event::SearchFoundDisposition::Modified(modifier) = disposition
+    else {
+        survivors.push(object_id);
+        return false;
+    };
+    let move_result = super::zone_pipeline::move_object(
+        state,
+        super::zone_pipeline::ZoneMoveRequest::effect(
+            object_id,
+            modifier.destination,
+            modifier.source.object_id,
+        ),
+        events,
+    );
+    match move_result {
+        super::zone_pipeline::ZoneMoveResult::Done => {
+            grant_search_found_play_permission(state, object_id, &modifier);
+            false
+        }
+        super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+        | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            super::zone_pipeline::defer_completion_on_pause(
+                state,
+                crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
+                    object_id,
+                    modifier,
+                },
+            );
+            true
+        }
+    }
+}
+
+/// CR 611.3d + CR 400.7: A static ability may grant permission to play or cast
+/// a card for the stated duration. That permission remains bound to the same
+/// object in exile; `zones::move_to_zone` removes it when the card leaves exile
+/// and becomes a new object.
+fn grant_search_found_play_permission(
+    state: &mut GameState,
+    object_id: ObjectId,
+    modifier: &crate::types::proposed_event::BoundSearchFoundModifier,
+) {
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.zone == Zone::Exile)
+    {
+        if let Some(object) = state.objects.get_mut(&object_id) {
+            object
+                .casting_permissions
+                .push(CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    granted_to: modifier.granted_to,
+                    frequency: crate::types::statics::CastFrequency::Unlimited,
+                    source_id: Some(modifier.source.object_id),
+                    invalidation: None,
+                    exiled_by_ability_controller: Some(modifier.granted_to),
+                    mana_spend_permission: modifier.mana_spend_permission,
+                    card_filter: None,
+                    single_use_group: None,
+                    single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                });
+        }
+    }
+}
+
+/// CR 616.1 + CR 701.23a: Resume a parked per-card found-event batch from the
+/// exact serialized suffix. The accepted event is already fully bound by the
+/// replacement pipeline; it is delivered without a new candidate scan.
+pub(crate) fn resume_search_found_after_replacement(
+    state: &mut GameState,
+    event: crate::types::proposed_event::ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(mut batch) = state.pending_search_found_batch.take() else {
+        return Err(EngineError::InvalidAction(
+            "missing SearchFound batch resume".to_string(),
+        ));
+    };
+    if deliver_search_found_event(state, event, &mut batch.survivors, events) {
+        state.pending_search_found_batch = Some(batch);
+        return Ok(state.waiting_for.clone());
+    }
+
+    let Ok(batch) = process_search_found_batch(state, batch, events) else {
+        return Ok(state.waiting_for.clone());
+    };
+    finish_search_found_batch(state, batch, events)
+}
+
+/// CR 616.1 + CR 701.23a: Complete a modified found card's inner zone move,
+/// then continue the exact saved found-card suffix. Called from the generic
+/// zone-batch completion drain after the replacement-selected move delivers.
+fn resume_search_found_after_zone_delivery(
+    state: &mut GameState,
+    object_id: ObjectId,
+    modifier: crate::types::proposed_event::BoundSearchFoundModifier,
+    events: &mut Vec<GameEvent>,
+) {
+    grant_search_found_play_permission(state, object_id, &modifier);
+    let Some(batch) = state.pending_search_found_batch.take() else {
+        return;
+    };
+    if let Ok(batch) = process_search_found_batch(state, batch, events) {
+        let _ = finish_search_found_batch(state, batch, events);
+    }
+}
+
+fn finish_search_found_batch(
+    state: &mut GameState,
+    batch: crate::types::game_state::PendingSearchFoundBatch,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if matches!(
+        &batch.continuation,
+        crate::types::game_state::PendingSearchFoundContinuation::Scoped
+    ) && state.pending_scoped_library_search.is_none()
+    {
+        state.pending_search_found_batch = Some(batch);
+        return Err(EngineError::InvalidAction(
+            "scoped SearchFound resume: missing scoped search resume".to_string(),
+        ));
+    }
+    reveal_search_found_survivors(state, &batch, events);
+    state.library_search_control = None;
+
+    let player = batch.searcher;
+    match &batch.continuation {
+        crate::types::game_state::PendingSearchFoundContinuation::Scoped => {
+            let retry_batch = batch.clone();
+            if let Err(error) = effects::scoped_library_search::complete_replaced_selection(
+                state,
+                batch.searcher,
+                batch.survivors,
+                events,
+            ) {
+                state.pending_search_found_batch = Some(retry_batch);
+                return Err(EngineError::InvalidAction(format!(
+                    "scoped SearchFound resume: {error}"
+                )));
+            }
+            return Ok(state.waiting_for.clone());
+        }
+        crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None } => {}
+        crate::types::game_state::PendingSearchFoundContinuation::Standard {
+            split: Some(split),
+        } => {
+            let split = split.clone();
+            let source_id = state
+                .pending_continuation
+                .as_ref()
+                .map(|continuation| continuation.chain.source_id)
+                .or_else(|| batch.survivors.first().copied())
+                .unwrap_or(ObjectId(0));
+            if batch.survivors.len() > split.primary_count as usize {
+                set_priority(state, player);
+                state.waiting_for = WaitingFor::SearchPartitionChoice {
+                    player,
+                    cards: batch.survivors,
+                    primary_destination: split.primary_destination,
+                    primary_count: split.primary_count,
+                    primary_enter_tapped: split.primary_enter_tapped,
+                    rest_destination: split.rest_destination,
+                    source_id,
+                };
+                return Ok(state.waiting_for.clone());
+            }
+            let _ = apply_search_partition(
+                state,
+                &batch.survivors,
+                &[],
+                &split,
+                source_id,
+                player,
+                events,
+            );
+            set_priority(state, player);
+            effects::drain_pending_continuation(state, events);
+            return Ok(state.waiting_for.clone());
+        }
+    }
+
+    Ok(
+        match finalize_standard_search_selection(state, player, &batch.survivors, events) {
+            ResolutionChoiceOutcome::WaitingFor(waiting)
+            | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(waiting)
+            | ResolutionChoiceOutcome::WaitingForWithParkedObservers(waiting) => waiting,
+            ResolutionChoiceOutcome::ActionResult(result) => result.waiting_for,
+        },
+    )
+}
 
 pub(super) enum ResolutionChoiceOutcome {
     WaitingFor(WaitingFor),
@@ -352,6 +675,59 @@ fn continuation_exiles_found_set(chain: &ResolvedAbility) -> bool {
         cursor = def.sub_ability.as_deref();
     }
     false
+}
+
+/// Finalize the ordinary (non-partitioned) SearchChoice continuation. This is
+/// the single authority for both the synchronous selection path and a
+/// SearchFound batch resumed after one or more nested replacement pauses.
+fn finalize_standard_search_selection(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> ResolutionChoiceOutcome {
+    set_priority(state, player);
+    let events_before_drain = events.len();
+    // CR 608.2c: Count cards still in hand immediately before a
+    // found-set exile continuation. SearchFound replacements removed from the
+    // survivor set are intentionally excluded.
+    let continuation_exiles_set = state
+        .pending_continuation
+        .as_ref()
+        .is_some_and(|cont| continuation_exiles_found_set(&cont.chain));
+    if continuation_exiles_set {
+        let hand_exiles = chosen
+            .iter()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Hand)
+            })
+            .count() as u32;
+        state.exiled_from_hand_this_resolution = state
+            .exiled_from_hand_this_resolution
+            .saturating_add(hand_exiles);
+    }
+    if let Some(mut continuation) = state.pending_continuation.take() {
+        continuation.search_attach_host =
+            effects::change_zone::resolve_search_continuation_attach_host(
+                state,
+                &continuation.chain,
+            );
+        state.search_continuation_attach_host = continuation.search_attach_host;
+        let mut targets: Vec<_> = chosen.iter().copied().map(TargetRef::Object).collect();
+        // CR 701.23a + CR 701.24a: propagate the semantic searcher for
+        // library-owner-sensitive shuffle and tail instructions.
+        if player != continuation.chain.controller {
+            targets.push(TargetRef::Player(player));
+        }
+        continuation.chain.targets = targets.clone();
+        propagate_targets_through_search_shuffle(&mut continuation.chain, &targets);
+        state.pending_continuation = Some(continuation);
+    }
+    effects::drain_pending_continuation(state, events);
+    park_search_observer_triggers(state, events, events_before_drain)
 }
 
 /// `change_zone::resolve` ETB pipeline (carrying `enter_tapped` so ETB-tapped
@@ -2316,23 +2692,22 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
-            if reveal {
-                state.last_revealed_ids = chosen.clone();
-                for &card_id in &chosen {
-                    state.revealed_cards.insert(card_id);
+            let chosen = match apply_search_found_replacements(
+                state,
+                player,
+                &chosen,
+                crate::types::game_state::PendingSearchFoundContinuation::Standard {
+                    split: split.clone(),
+                },
+                reveal,
+                events,
+            ) {
+                Ok(chosen) => chosen,
+                Err(waiting) => {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(*waiting));
                 }
-                let card_names: Vec<String> = chosen
-                    .iter()
-                    .filter_map(|id| state.objects.get(id).map(|obj| obj.name.clone()))
-                    .collect();
-                events.push(GameEvent::CardsRevealed {
-                    player,
-                    card_ids: chosen.clone(),
-                    card_names,
-                });
-            } else {
-                state.last_revealed_ids.clear();
-            }
+            };
+            state.library_search_control = None;
 
             // CR 701.23a + CR 608.2c: Cultivate-class split destination. The
             // found set was just chosen; now partition it. Up to two prompts
@@ -2380,60 +2755,7 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
-            set_priority(state, player);
-            let events_before_drain = events.len();
-            // CR 400.7 + CR 608.2c: Count found-set cards exiled from a hand so
-            // the shared "That player ... draws a card for each card exiled from
-            // their hand this way" rider (The End, Deadly Cover-Up, Test of
-            // Talents) resolves. The interactive found-set exile runs through the
-            // pending continuation's single ChangeZone, which bypasses the
-            // mass-move counter at change_zone.rs:1422. Count here, before the
-            // drain runs the Draw, and gate on the continuation actually exiling
-            // the set so a tutor-to-hand never increments it. The count is taken
-            // just before the move (a rare replacement that prevents an exile
-            // would over-count — the plan's completion-site pin).
-            let continuation_exiles_set = state
-                .pending_continuation
-                .as_ref()
-                .is_some_and(|cont| continuation_exiles_found_set(&cont.chain));
-            if continuation_exiles_set {
-                let hand_exiles = chosen
-                    .iter()
-                    .filter(|id| {
-                        state
-                            .objects
-                            .get(id)
-                            .is_some_and(|obj| obj.zone == Zone::Hand)
-                    })
-                    .count() as u32;
-                state.exiled_from_hand_this_resolution = state
-                    .exiled_from_hand_this_resolution
-                    .saturating_add(hand_exiles);
-            }
-            if let Some(mut cont) = state.pending_continuation.take() {
-                cont.search_attach_host =
-                    effects::change_zone::resolve_search_continuation_attach_host(
-                        state,
-                        &cont.chain,
-                    );
-                state.search_continuation_attach_host = cont.search_attach_host;
-                let mut continuation_targets: Vec<_> =
-                    chosen.iter().map(|&id| TargetRef::Object(id)).collect();
-                // CR 701.23a + CR 701.24a: When the searcher is not the caster
-                // (e.g., "its controller may search their library, ..., then
-                // shuffle" for Assassin's Trophy), propagate the searcher's
-                // PlayerId into the continuation chain's targets so downstream
-                // untargeted-Shuffle / Library-owner-sensitive effects pick up
-                // the correct player via `ability.target_player()`.
-                if player != cont.chain.controller {
-                    continuation_targets.push(TargetRef::Player(player));
-                }
-                cont.chain.targets = continuation_targets.clone();
-                propagate_targets_through_search_shuffle(&mut cont.chain, &continuation_targets);
-                state.pending_continuation = Some(cont);
-            }
-            effects::drain_pending_continuation(state, events);
-            park_search_observer_triggers(state, events, events_before_drain)
+            finalize_standard_search_selection(state, player, &chosen, events)
         }
         (
             WaitingFor::SearchPartitionChoice {
@@ -5229,6 +5551,12 @@ pub(crate) fn run_batch_completion(
             )
             .expect("scoped library search batch completion must resolve");
         }
+        BatchCompletion::SearchFoundZoneDelivery {
+            object_id,
+            modifier,
+        } => {
+            resume_search_found_after_zone_delivery(state, object_id, modifier, events);
+        }
         BatchCompletion::MeldExile { context } => {
             crate::game::meld::finish_meld_exile(state, context, events);
         }
@@ -5282,6 +5610,15 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
+
+    fn search_found_execute(
+        modifier: crate::types::ability::SearchFoundModifier,
+    ) -> crate::types::ability::AbilityDefinition {
+        crate::types::ability::AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            crate::types::ability::Effect::ApplySearchFoundReplacement { modifier },
+        )
+    }
 
     /// CR 401.5 + CR 611.3a production-path harness: a battlefield permanent whose
     /// continuous static grants itself Flying as long as the top card of player
@@ -5538,5 +5875,226 @@ mod tests {
                 .is_empty(),
             "transient land/nonland kind choices should not render source labels"
         );
+    }
+
+    #[test]
+    fn opposition_agent_replaces_found_card_and_grants_play_permission() {
+        use crate::types::ability::{
+            CardPlayMode, ManaSpendPermission, ReplacementDefinition, ReplacementPlayerScope,
+            SearchFoundModifier, StaticDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::statics::{ProhibitionScope, StaticMode};
+
+        let controller = PlayerId(0);
+        let searcher = PlayerId(1);
+        let mut state = GameState::new_two_player(42);
+        let agent = create_object(
+            &mut state,
+            CardId(90),
+            controller,
+            "Opposition Agent".to_string(),
+            Zone::Battlefield,
+        );
+        let found = create_object(
+            &mut state,
+            CardId(91),
+            searcher,
+            "Found card".to_string(),
+            Zone::Library,
+        );
+        {
+            let object = state.objects.get_mut(&agent).expect("agent exists");
+            object.static_definitions.push(StaticDefinition::new(
+                StaticMode::ControlPlayersDuringOwnLibrarySearch {
+                    who: ProhibitionScope::Opponents,
+                },
+            ));
+            object.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::SearchFound)
+                    .valid_player(ReplacementPlayerScope::Opponent)
+                    .execute(search_found_execute(SearchFoundModifier {
+                        destination: Zone::Exile,
+                        play_mode: CardPlayMode::Play,
+                        mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                    })),
+            );
+        }
+        state.library_search_control =
+            Some(crate::types::game_state::LibrarySearchControlBinding {
+                searcher,
+                library_owner: searcher,
+            });
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: searcher,
+            cards: vec![found],
+            count: 1,
+            reveal: false,
+            up_to: false,
+            allows_partial_find: false,
+            constraint: crate::types::ability::SearchSelectionConstraint::None,
+            split: None,
+        };
+        assert_eq!(
+            crate::game::turn_control::authorized_submitter_for_player(&state, searcher),
+            controller
+        );
+
+        let survivors = apply_search_found_replacements(
+            &mut state,
+            searcher,
+            &[found],
+            crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
+            false,
+            &mut Vec::new(),
+        )
+        .expect("single mandatory replacement does not pause");
+        assert!(survivors.is_empty());
+        let found_object = state
+            .objects
+            .get(&found)
+            .expect("found card remains tracked");
+        assert_eq!(found_object.zone, Zone::Exile);
+        assert!(found_object
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(
+                permission,
+                CastingPermission::PlayFromExile {
+                    granted_to,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                    ..
+                } if *granted_to == controller
+            )));
+        assert!(casting::player_can_spend_as_any_color_for_optional_spell(
+            &state,
+            controller,
+            Some(found),
+        ));
+
+        let mut pool = crate::types::mana::ManaPool::default();
+        pool.add(crate::types::mana::ManaUnit::new(
+            crate::types::mana::ManaType::Blue,
+            ObjectId(999),
+            false,
+            Vec::new(),
+        ));
+        let permissions =
+            crate::game::static_abilities::build_cost_permission_context(&state, controller, true);
+        for (shard, payable) in [
+            (crate::types::mana::ManaCostShard::Red, true),
+            (crate::types::mana::ManaCostShard::Colorless, false),
+            (crate::types::mana::ManaCostShard::Snow, false),
+        ] {
+            let cost = crate::types::mana::ManaCost::Cost {
+                shards: vec![shard],
+                generic: 0,
+            };
+            assert_eq!(
+                crate::game::mana_payment::can_pay_for_spell(&pool, &cost, None, permissions,),
+                payable,
+                "AnyColor table mismatch for {shard:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_found_choice_snapshot_survives_serde_and_source_mutation() {
+        use crate::game::replacement::{continue_replacement, ReplacementResult};
+        use crate::types::ability::{
+            CardPlayMode, ManaSpendPermission, ReplacementDefinition, ReplacementPlayerScope,
+            SearchFoundModifier, StaticDefinition,
+        };
+        use crate::types::format::FormatConfig;
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::statics::{ProhibitionScope, StaticMode};
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let searcher = PlayerId(1);
+        let found = create_object(
+            &mut state,
+            CardId(200),
+            searcher,
+            "Found card".to_string(),
+            Zone::Library,
+        );
+        for (card_id, controller, timestamp) in [(201, PlayerId(0), 10), (202, PlayerId(2), 20)] {
+            let agent = create_object(
+                &mut state,
+                CardId(card_id),
+                controller,
+                format!("Agent {card_id}"),
+                Zone::Battlefield,
+            );
+            let object = state.objects.get_mut(&agent).unwrap();
+            object.timestamp = timestamp;
+            object.static_definitions.push(StaticDefinition::new(
+                StaticMode::ControlPlayersDuringOwnLibrarySearch {
+                    who: ProhibitionScope::Opponents,
+                },
+            ));
+            object.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::SearchFound)
+                    .valid_player(ReplacementPlayerScope::Opponent)
+                    .execute(search_found_execute(SearchFoundModifier {
+                        destination: Zone::Exile,
+                        play_mode: CardPlayMode::Play,
+                        mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                    })),
+            );
+        }
+        state.library_search_control =
+            Some(crate::types::game_state::LibrarySearchControlBinding {
+                searcher,
+                library_owner: searcher,
+            });
+
+        let waiting = apply_search_found_replacements(
+            &mut state,
+            searcher,
+            &[found],
+            crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
+            false,
+            &mut Vec::new(),
+        )
+        .expect_err("two Agents require CR 616 ordering");
+        assert!(matches!(*waiting, WaitingFor::ReplacementChoice { .. }));
+        assert_eq!(
+            crate::game::turn_control::authorized_submitter_for_player(&state, searcher),
+            PlayerId(2),
+            "the newest Agent controls the replacement-order decision"
+        );
+        let json = serde_json::to_string(&state).expect("serialize paused search");
+        let mut restored: GameState = serde_json::from_str(&json).expect("restore paused search");
+        let snapshots = restored
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .search_found_candidates
+            .clone();
+        assert_eq!(snapshots.len(), 2);
+        let selected_index = snapshots
+            .iter()
+            .position(|candidate| candidate.modifier.granted_to == PlayerId(0))
+            .unwrap();
+        let selected_source = snapshots[selected_index].modifier.source.object_id;
+        restored.objects.remove(&selected_source);
+        restored.battlefield.retain(|id| *id != selected_source);
+
+        let event = match continue_replacement(&mut restored, selected_index, &mut Vec::new()) {
+            ReplacementResult::Execute(event) => event,
+            _ => panic!("bound SearchFound choice must execute"),
+        };
+        resume_search_found_after_replacement(&mut restored, event, &mut Vec::new())
+            .expect("bound SearchFound choice resumes");
+        assert_eq!(restored.objects[&found].zone, Zone::Exile);
+        assert!(restored.objects[&found]
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(
+                permission,
+                CastingPermission::PlayFromExile { granted_to, source_id: Some(source_id), .. }
+                    if *granted_to == PlayerId(0) && *source_id == selected_source
+            )));
     }
 }

@@ -3520,6 +3520,10 @@ pub fn resolve_effect(
         Effect::SkipNextStep { .. } => skip_next_step::resolve(state, ability, events),
         Effect::SkipNextTurn { .. } => skip_next_turn::resolve(state, ability, events),
         Effect::Double { .. } => double::resolve(state, ability, events),
+        Effect::ApplySearchFoundReplacement { .. } => Err(EffectError::InvalidParam(
+            "ApplySearchFoundReplacement is valid only as the canonical SearchFound execute"
+                .to_string(),
+        )),
         Effect::RuntimeHandled { .. } => Ok(()), // Handled by dedicated engine path
         Effect::Learn => learn::resolve(state, ability, events),
         Effect::BlightEffect { .. } => blight::resolve(state, ability, events),
@@ -7730,7 +7734,7 @@ fn resolve_chain_body(
                     // resolution, mirroring the drain-path resume at depth 1.
                     let _ = resolve_ability_chain(state, iter_effective, events, depth.max(1));
                 } else {
-                    let _ = resolve_effect(state, iter_effective, events);
+                    resolve_effect(state, iter_effective, events)?;
                 }
                 // CR 608.2c + CR 109.5: When the inner effect enters an
                 // interactive WaitingFor (e.g. SearchChoice), stash the
@@ -10045,12 +10049,13 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
-        CardPredicateChoice, CastingPermission, ChoiceType, ChoiceValue, Chooser, ChosenAttribute,
-        Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration,
-        EffectScope, FilterProp, ManaSpendPermission, ObjectProperty, PermissionGrantee,
-        PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, SpellContext,
-        StaticDefinition, TapStateChange, TargetFilter, TargetRef, TargetSelectionMode, TypeFilter,
-        TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+        CardPlayMode, CardPredicateChoice, CastingPermission, ChoiceType, ChoiceValue, Chooser,
+        ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
+        DelayedTriggerCondition, Duration, EffectScope, FilterProp, ManaSpendPermission,
+        ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        QuantityRef, SearchFoundModifier, SpellContext, StaticDefinition, TapStateChange,
+        TargetFilter, TargetRef, TargetSelectionMode, TypeFilter, TypedFilter, UnlessPayModifier,
+        UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -10069,6 +10074,65 @@ mod tests {
     use crate::types::statics::CastFrequency;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn search_found_runtime_effect_rejects_direct_resolution() {
+        let ability = ResolvedAbility::new(
+            Effect::ApplySearchFoundReplacement {
+                modifier: SearchFoundModifier {
+                    destination: Zone::Exile,
+                    play_mode: CardPlayMode::Play,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                },
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+
+        let error = resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect_err("SearchFound runtime effect is not directly resolvable");
+
+        assert_eq!(
+            error,
+            EffectError::InvalidParam(
+                "ApplySearchFoundReplacement is valid only as the canonical SearchFound execute"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn repeated_search_found_runtime_effect_propagates_direct_resolution_error() {
+        let mut ability = ResolvedAbility::new(
+            Effect::ApplySearchFoundReplacement {
+                modifier: SearchFoundModifier {
+                    destination: Zone::Exile,
+                    play_mode: CardPlayMode::Play,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                },
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.repeat_for = Some(QuantityExpr::Fixed { value: 1 });
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+
+        let error = resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect_err("repeated SearchFound runtime effect error must escape the loop");
+
+        assert_eq!(
+            error,
+            EffectError::InvalidParam(
+                "ApplySearchFoundReplacement is valid only as the canonical SearchFound execute"
+                    .to_string()
+            )
+        );
+    }
 
     /// CR 608.2c: a single tapped creature becomes the resolution's anaphoric
     /// referent, so a later "that creature's power" (Enlist) reads it.

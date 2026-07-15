@@ -3,7 +3,7 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{opt, peek, value, verify};
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_nom::primitives as nom_primitives;
@@ -485,6 +485,12 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
         return false;
     }
 
+    if scan_contains(lower, "while they're searching their libraries")
+        || scan_contains(lower, "while they are searching their libraries")
+    {
+        return true;
+    }
+
     if super::oracle_static::is_tiered_enters_with_additional_counters_static(lower) {
         return true;
     }
@@ -730,7 +736,30 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     "enters under the control of",
 ];
 
+fn is_search_found_replacement_pattern(lower: &str) -> bool {
+    fn parse_pattern(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = tag("while ").parse(input)?;
+        let (input, _) = alt((
+            pair(tag("an opponent"), tag(" is searching")),
+            pair(tag("one or more opponents"), tag(" are searching")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" their library").parse(input)?;
+        let (input, _) = preceded(
+            take_until("each card they find"),
+            tag("each card they find"),
+        )
+        .parse(input)?;
+        Ok((input, ()))
+    }
+
+    parse_pattern(lower).is_ok()
+}
+
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
+    if is_search_found_replacement_pattern(lower) {
+        return true;
+    }
     // CR 608.2c: reflexive "enters this way" riders on triggered abilities
     // (Winter Soldier, Reborn Avenger) contain "enters" + "counter" but are
     // not CR 614.1c ETB replacements.

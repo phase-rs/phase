@@ -1734,6 +1734,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::CantBeActivated { .. }
         | StaticMode::CantSearchLibrary { .. }
         | StaticMode::RestrictLibrarySearchToTop { .. }
+        | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
         | StaticMode::CantCauseSacrificeOrExile { .. }
         | StaticMode::CastWithFlash
         | StaticMode::GrantsExtraVote
@@ -2283,6 +2284,7 @@ fn replacement_event_matches_life(event: &ReplacementEvent) -> Option<LifeEventC
         | ReplacementEvent::Destroy
         | ReplacementEvent::Discard
         | ReplacementEvent::Draw
+        | ReplacementEvent::SearchFound
         | ReplacementEvent::TurnFaceUp
         | ReplacementEvent::Counter
         | ReplacementEvent::ChangeZone

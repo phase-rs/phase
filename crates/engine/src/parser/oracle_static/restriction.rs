@@ -543,6 +543,36 @@ pub(crate) fn parse_restrict_search_to_top(
     )
 }
 
+/// CR 723.2 + CR 723.5: Parse Opposition Agent's limited control of a player's
+/// decisions specifically while that player searches their own library. The
+/// scope is parameterized so the same building block can represent future
+/// player scopes.
+pub(crate) fn parse_control_players_during_own_library_search(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    fn parse_clause(input: &str) -> OracleResult<'_, ProhibitionScope> {
+        let (input, _) = tag::<_, _, OracleError<'_>>("you control ").parse(input)?;
+        let (input, who) = alt((
+            value(ProhibitionScope::Opponents, tag("your opponents")),
+            value(ProhibitionScope::AllPlayers, tag("players")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" while ").parse(input)?;
+        let (input, _) = alt((tag("they're "), tag("they are "))).parse(input)?;
+        let (input, _) = tag("searching their libraries").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof(input)?;
+        Ok((input, who))
+    }
+
+    let (who, _) = nom_on_lower(tp.original, tp.lower, parse_clause)?;
+    Some(
+        StaticDefinition::new(StaticMode::ControlPlayersDuringOwnLibrarySearch { who })
+            .description(text.to_string()),
+    )
+}
+
 /// CR 603.2 + CR 101.2: Parse "Triggered abilities <scope> can't cause you to
 /// sacrifice or exile <affected>." statics (The Master, Multiplied class). The
 /// "can't" effect takes precedence over the triggered ability directing the action.

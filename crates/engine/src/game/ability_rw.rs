@@ -3317,6 +3317,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::SetDayNight { .. }
         | Effect::Conjure { .. }
         | Effect::DraftFromSpellbook { .. }
+        | Effect::ApplySearchFoundReplacement { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -5477,7 +5478,8 @@ fn rw_effect(
         | Effect::AssembleContraptionOnSprocket { .. }
         | Effect::ReassembleContraptionOnSprocket { .. }
         | Effect::ApplySticker { .. }
-        | Effect::ProcessRadCounters => (RwProfile::conservative(), None),
+        | Effect::ProcessRadCounters
+        | Effect::ApplySearchFoundReplacement { .. } => (RwProfile::conservative(), None),
     }
 }
 

@@ -177,6 +177,11 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // `count`. Runtime enforcement is in
             // game/effects/search_library.rs::library_search_top_limit.
             | StaticMode::RestrictLibrarySearchToTop { .. }
+            // CR 723.1a: the newest applicable player-controlling effect wins;
+            // player scope is runtime data, and the functioning source's
+            // controller/timestamp are consumed directly by search-decision
+            // authorization in turn_control.
+            | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
             // CR 603.2 + CR 609.3: CantCauseSacrificeOrExile carries `cause`.
             | StaticMode::CantCauseSacrificeOrExile { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
@@ -3574,6 +3579,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ChooseOneOf { .. }
         | Effect::ChooseCounterAdjustment { .. }
         | Effect::ReturnAsAura { .. }
+        | Effect::ApplySearchFoundReplacement { .. }
         | Effect::Specialize => {}
     }
     d
@@ -4346,6 +4352,9 @@ fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
     }
     if let Some(scope) = &repl.draw_scope {
         d.push(("draw scope".into(), format!("{scope:?}")));
+    }
+    if let Some(modifier) = repl.search_found_modifier() {
+        d.push(("search found".into(), format!("{modifier:?}")));
     }
     if let Some(scope) = &repl.token_owner_scope {
         d.push(("token owner scope".into(), format!("{scope:?}")));
@@ -5957,6 +5966,12 @@ fn truncate_label(text: &str, max: usize) -> &str {
 
 fn check_replacements(replacements: &[ReplacementDefinition], missing: &mut Vec<String>) {
     for def in replacements {
+        if let Err(problem) = def.validate_search_found_modifier() {
+            let label = format!("ReplacementInvariant:{}", truncate_label(&problem, 60));
+            if !missing.contains(&label) {
+                missing.push(label);
+            }
+        }
         if let Some(execute) = &def.execute {
             collect_ability_missing_parts(execute, missing);
         }
@@ -13489,6 +13504,25 @@ mod tests {
             gaps.is_empty(),
             "Data-carrying combat statics should be fully supported, but got gaps: {:?}",
             gaps
+        );
+    }
+
+    /// CR 723.1a: the newest applicable search-control static is enforced by
+    /// the production authorization seam rather than the nullary registry.
+    #[test]
+    fn search_control_static_has_no_coverage_gap() {
+        let trigger_registry = build_trigger_registry();
+        let static_registry = build_static_registry();
+        let definition = StaticDefinition::new(StaticMode::ControlPlayersDuringOwnLibrarySearch {
+            who: crate::types::statics::ProhibitionScope::Opponents,
+        })
+        .description(
+            "You control your opponents while they're searching their libraries.".to_string(),
+        );
+
+        assert!(
+            is_static_supported(&definition, &trigger_registry, &static_registry),
+            "the data-carrying search-control static must be covered"
         );
     }
 

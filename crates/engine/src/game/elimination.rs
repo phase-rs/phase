@@ -1071,6 +1071,7 @@ mod tests {
             },
             sacrifice_provenance: None,
             candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,
@@ -1196,6 +1197,7 @@ mod tests {
             },
             sacrifice_provenance: None,
             candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,
@@ -1883,6 +1885,8 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: owner,
                 controller,
+                timestamp: 1,
+                lifecycle: crate::types::game_state::ScheduledTurnControlLifecycle::Active,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -1894,6 +1898,8 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: other_owner,
                 controller: other_controller,
+                timestamp: 2,
+                lifecycle: crate::types::game_state::ScheduledTurnControlLifecycle::Pending,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });

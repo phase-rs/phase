@@ -2338,6 +2338,10 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    if let Some(def) = parse_control_players_during_own_library_search(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "If an opponent/a player would search a library, that player searches the top N cards ... instead" ---
     // CR 701.23f + CR 614.1a: Aven Mindcensor class. Replaces a SEARCHER-scoped
     // library search with a top-N search. `who` scopes which searcher is

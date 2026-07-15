@@ -539,6 +539,9 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
             scheduled.window == ControlWindow::NextCombatPhase
                 && Some(scheduled.controller) == state.turn_decision_controller
                 && scheduled.target_player == active_key
+                && (scheduled.lifecycle
+                    == crate::types::game_state::ScheduledTurnControlLifecycle::Active
+                    || scheduled.timestamp == 0)
         }) {
             turn_control::release_control_at(state, idx);
         }
@@ -550,16 +553,11 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     if next == Phase::BeginCombat {
         let active_key =
             super::topology::normalize_shared_turn_recipient(state, state.active_player);
-        if let Some(scheduled) = state
-            .scheduled_turn_controls
-            .iter()
-            .rfind(|scheduled| {
-                scheduled.window == ControlWindow::NextCombatPhase
-                    && scheduled.target_player == active_key
-            })
-            .copied()
-        {
-            state.turn_decision_controller = Some(scheduled.controller);
+        if let Some(idx) = state.scheduled_turn_controls.iter().rposition(|scheduled| {
+            scheduled.window == ControlWindow::NextCombatPhase
+                && scheduled.target_player == active_key
+        }) {
+            turn_control::activate_control_at(state, idx);
         }
     }
 
@@ -630,6 +628,9 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
                 .position(|scheduled| {
                     scheduled.window == ControlWindow::NextTurn
                         && scheduled.target_player == completed_turn_key
+                        && (scheduled.lifecycle
+                            == crate::types::game_state::ScheduledTurnControlLifecycle::Active
+                            || scheduled.timestamp == 0)
                 })
             {
                 let entry = scratch.scheduled_turn_controls.remove(idx);
@@ -684,14 +685,18 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
         // actually begins. Newest matching scheduled control wins.
         let active_turn_key =
             super::topology::normalize_shared_turn_recipient(&scratch, scratch.active_player);
-        scratch.turn_decision_controller = scratch
+        let scheduled_idx = scratch
             .scheduled_turn_controls
             .iter()
-            .rfind(|scheduled| {
+            .rposition(|scheduled| {
                 scheduled.window == ControlWindow::NextTurn
                     && scheduled.target_player == active_turn_key
-            })
-            .map(|scheduled| scheduled.controller);
+            });
+        if let Some(idx) = scheduled_idx {
+            turn_control::activate_control_at(&mut scratch, idx);
+        } else {
+            scratch.turn_decision_controller = None;
+        }
     }
 
     slots
@@ -722,6 +727,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         while let Some(idx) = state.scheduled_turn_controls.iter().position(|scheduled| {
             scheduled.window == ControlWindow::NextTurn
                 && scheduled.target_player == completed_turn_key
+                && (scheduled.lifecycle
+                    == crate::types::game_state::ScheduledTurnControlLifecycle::Active
+                    || scheduled.timestamp == 0)
         }) {
             let entry = turn_control::release_control_at(state, idx);
             if Some(entry.controller) == completed_controller {
@@ -809,17 +817,12 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 723.1: activate a full-turn control when its target begins their turn.
     // A NextCombatPhase entry is NOT activated here — it binds at the target's
     // next BeginCombat (CR 723.2), handled in `finish_enter_phase`.
-    if let Some(scheduled) = state
-        .scheduled_turn_controls
-        .iter()
-        .rfind(|scheduled| {
-            scheduled.window == ControlWindow::NextTurn
-                && scheduled.target_player
-                    == super::topology::normalize_shared_turn_recipient(state, state.active_player)
-        })
-        .copied()
-    {
-        state.turn_decision_controller = Some(scheduled.controller);
+    if let Some(idx) = state.scheduled_turn_controls.iter().rposition(|scheduled| {
+        scheduled.window == ControlWindow::NextTurn
+            && scheduled.target_player
+                == super::topology::normalize_shared_turn_recipient(state, state.active_player)
+    }) {
+        turn_control::activate_control_at(state, idx);
     }
 
     // Reset priority
@@ -7618,6 +7621,8 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(0),
+                timestamp: 1,
+                lifecycle: crate::types::game_state::ScheduledTurnControlLifecycle::Pending,
                 grant_extra_turn_after: true,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -7718,6 +7723,8 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(2),
+                timestamp: 1,
+                lifecycle: crate::types::game_state::ScheduledTurnControlLifecycle::Active,
                 grant_extra_turn_after: true,
                 window: ControlWindow::NextTurn,
             });
@@ -7743,6 +7750,8 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(2),
+                timestamp: 1,
+                lifecycle: crate::types::game_state::ScheduledTurnControlLifecycle::Pending,
                 grant_extra_turn_after: true,
                 window: ControlWindow::NextTurn,
             });
@@ -7776,6 +7785,8 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(0),
                 controller: PlayerId(2),
+                timestamp: 1,
+                lifecycle: crate::types::game_state::ScheduledTurnControlLifecycle::Active,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -7804,6 +7815,8 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(0),
+                timestamp: 1,
+                lifecycle: crate::types::game_state::ScheduledTurnControlLifecycle::Pending,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -7812,6 +7825,8 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(1),
+                timestamp: 2,
+                lifecycle: crate::types::game_state::ScheduledTurnControlLifecycle::Pending,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -7836,11 +7851,14 @@ mod tests {
         target: PlayerId,
         controller: PlayerId,
     ) {
+        let timestamp = state.next_timestamp();
         state
             .scheduled_turn_controls
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: target,
                 controller,
+                timestamp,
+                lifecycle: crate::types::game_state::ScheduledTurnControlLifecycle::Pending,
                 grant_extra_turn_after: false,
                 window: ControlWindow::NextCombatPhase,
             });

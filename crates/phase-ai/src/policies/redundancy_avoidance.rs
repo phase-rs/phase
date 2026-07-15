@@ -660,6 +660,7 @@ fn redundancy_delta(
         | Effect::Heist { .. }
         | Effect::PutSticker { .. }
         | Effect::ApplySticker { .. }
+        | Effect::ApplySearchFoundReplacement { .. }
         | Effect::RememberCard { .. }
         // CR 608.2d + CR 122.1: the counter-kind choice + its consume carry no
         // static redundancy signal (the value depends on the runtime choice).

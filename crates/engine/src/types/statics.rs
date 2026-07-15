@@ -899,6 +899,11 @@ pub enum StaticMode {
         who: ProhibitionScope,
         count: u32,
     },
+    /// CR 723.1a + CR 723.5: The newest functioning source controls scoped
+    /// players while those players search their own libraries.
+    ControlPlayersDuringOwnLibrarySearch {
+        who: ProhibitionScope,
+    },
     /// CR 603.2 + CR 609.3: "Triggered abilities <scope> can't cause you to
     /// sacrifice or exile <affected>." E.g., The Master, Multiplied — triggered
     /// abilities you control can't cause you to sacrifice or exile creature
@@ -1993,6 +1998,7 @@ pub enum StaticModeKind {
     CantBeActivated,
     CantSearchLibrary,
     RestrictLibrarySearchToTop,
+    ControlPlayersDuringOwnLibrarySearch,
     CantCauseSacrificeOrExile,
     CastWithFlash,
     GrantsExtraVote,
@@ -2123,6 +2129,9 @@ impl StaticMode {
             StaticMode::CantSearchLibrary { .. } => StaticModeKind::CantSearchLibrary,
             StaticMode::RestrictLibrarySearchToTop { .. } => {
                 StaticModeKind::RestrictLibrarySearchToTop
+            }
+            StaticMode::ControlPlayersDuringOwnLibrarySearch { .. } => {
+                StaticModeKind::ControlPlayersDuringOwnLibrarySearch
             }
             StaticMode::CantCauseSacrificeOrExile { .. } => {
                 StaticModeKind::CantCauseSacrificeOrExile
@@ -2495,6 +2504,7 @@ impl StaticMode {
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantSearchLibrary { .. }
             | StaticMode::RestrictLibrarySearchToTop { .. }
+            | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
             | StaticMode::CantCauseSacrificeOrExile { .. }
             | StaticMode::CastWithFlash
             | StaticMode::GrantsExtraVote
@@ -2622,6 +2632,9 @@ impl fmt::Display for StaticMode {
             StaticMode::CantSearchLibrary { cause } => write!(f, "CantSearchLibrary({cause})"),
             StaticMode::RestrictLibrarySearchToTop { who, count } => {
                 write!(f, "RestrictLibrarySearchToTop({who},{count})")
+            }
+            StaticMode::ControlPlayersDuringOwnLibrarySearch { who } => {
+                write!(f, "ControlPlayersDuringOwnLibrarySearch({who})")
             }
             StaticMode::CantCauseSacrificeOrExile { cause } => {
                 write!(f, "CantCauseSacrificeOrExile({cause})")

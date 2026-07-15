@@ -1,6 +1,6 @@
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, ScheduledTurnControl};
+use crate::types::game_state::{GameState, ScheduledTurnControl, ScheduledTurnControlLifecycle};
 
 pub fn resolve(
     state: &mut GameState,
@@ -29,12 +29,16 @@ pub fn resolve(
     let target_player =
         crate::game::topology::normalize_shared_turn_recipient(state, *target_player);
 
-    state
-        .scheduled_turn_controls
-        .retain(|scheduled| scheduled.target_player != target_player);
+    state.scheduled_turn_controls.retain(|scheduled| {
+        scheduled.target_player != target_player
+            || scheduled.lifecycle == ScheduledTurnControlLifecycle::Active
+    });
+    let timestamp = state.next_timestamp();
     state.scheduled_turn_controls.push(ScheduledTurnControl {
         target_player,
         controller: ability.controller,
+        timestamp,
+        lifecycle: ScheduledTurnControlLifecycle::Pending,
         grant_extra_turn_after: *grant_extra_turn_after,
         // CR 723.1 / CR 723.2: schedule under the parsed window regardless of
         // window — the dedup `retain` above keeps one entry per target (CR 723.1a).
@@ -64,6 +68,8 @@ mod tests {
         state.scheduled_turn_controls.push(ScheduledTurnControl {
             target_player: PlayerId(1),
             controller: PlayerId(0),
+            timestamp: 0,
+            lifecycle: ScheduledTurnControlLifecycle::Pending,
             grant_extra_turn_after: false,
             window: ControlWindow::NextTurn,
         });
@@ -88,6 +94,8 @@ mod tests {
             ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(1),
+                timestamp: 1,
+                lifecycle: ScheduledTurnControlLifecycle::Pending,
                 grant_extra_turn_after: true,
                 window: ControlWindow::NextTurn,
             }

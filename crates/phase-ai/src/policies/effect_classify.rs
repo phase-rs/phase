@@ -349,6 +349,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::RollDie { .. }
         | Effect::RollToVisitAttractions
         | Effect::RuntimeHandled { .. }
+        | Effect::ApplySearchFoundReplacement { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::Seek { .. }
         | Effect::SeparateIntoPiles { .. }

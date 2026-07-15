@@ -32,14 +32,14 @@ use super::oracle_util::{
     strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
-    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
-    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope,
-    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaModification,
-    ManaReplacementScope, PlayerFilter, PreventionAmount, QuantityExpr, QuantityModification,
-    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
-    TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CastVariantPaid, ChoiceType,
+    CombatDamageScope, Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit,
+    DamageModification, DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope,
+    DrawReplacementScope, Duration, Effect, EffectScope, FilterProp, LibraryPosition,
+    ManaModification, ManaReplacementScope, ManaSpendPermission, PlayerFilter, PreventionAmount,
+    QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, ReplacementPlayerScope, SearchFoundModifier, StaticCondition,
+    StaticDefinition, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -88,6 +88,10 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     let lower = text.to_lowercase();
     let normalized = replace_self_refs(&text, card_name);
     let norm_lower = normalized.to_lowercase();
+
+    if let Some(definition) = parse_search_found_replacement(&text, &lower) {
+        return Some(definition);
+    }
 
     // --- Krark's Thumb: "If you would flip a coin, instead flip two coins and
     //     ignore one." (CR 705.1 + CR 614.1a) ---
@@ -847,6 +851,49 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     None
+}
+
+/// CR 701.23a + CR 614.1 + CR 611.3d: replace every card found during an
+/// opponent's library search with exile and a permission lasting for as long
+/// as that card remains exiled.
+fn parse_search_found_replacement(original: &str, lower: &str) -> Option<ReplacementDefinition> {
+    fn parse_clause(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = tag::<_, _, OracleError<'_>>("while ").parse(input)?;
+        let (input, _) = alt((
+            pair(tag("an opponent"), tag(" is searching")),
+            pair(tag("one or more opponents"), tag(" are searching")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" their library, ").parse(input)?;
+        let (input, _) = alt((tag("they exile "), tag("that player exiles "))).parse(input)?;
+        let (input, _) = tag("each card they find. ").parse(input)?;
+        let (input, _) = tag("you may ").parse(input)?;
+        let (input, _) = tag("play ").parse(input)?;
+        let (input, _) = tag("those cards for as long as they remain exiled, and ").parse(input)?;
+        let (input, _) =
+            tag("you may spend mana as though it were mana of any color ").parse(input)?;
+        let (input, _) = tag("to cast them").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof(input)?;
+        Ok((input, ()))
+    }
+
+    nom_on_lower(original, lower, parse_clause)?;
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::SearchFound)
+            .valid_player(ReplacementPlayerScope::Opponent)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ApplySearchFoundReplacement {
+                    modifier: SearchFoundModifier {
+                        destination: Zone::Exile,
+                        play_mode: CardPlayMode::Play,
+                        mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                    },
+                },
+            ))
+            .description(original.to_string()),
+    )
 }
 
 /// CR 614.1a + CR 614.6: Library of Leng — when an effect causes the controller
@@ -19807,5 +19854,135 @@ mod snapshot_tests {
             None,
             "the 'to you' player shield must not be flipped to SelfRef"
         );
+    }
+}
+#[cfg(test)]
+mod opposition_agent_tests {
+    use super::*;
+    use crate::types::statics::StaticMode;
+
+    #[test]
+    fn search_found_replacement_is_typed() {
+        let definition = crate::parser::oracle_replacement::parse_replacement_line(
+            "While an opponent is searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
+            "Opposition Agent",
+        )
+        .expect("Opposition Agent replacement paragraph should parse atomically");
+        assert_eq!(definition.event, ReplacementEvent::SearchFound);
+        assert_eq!(
+            definition.valid_player,
+            Some(ReplacementPlayerScope::Opponent)
+        );
+        assert_eq!(
+            definition.search_found_modifier(),
+            Some(&SearchFoundModifier {
+                destination: Zone::Exile,
+                play_mode: CardPlayMode::Play,
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+            })
+        );
+    }
+
+    #[test]
+    fn search_found_replacement_pairs_subject_number_with_search_verb() {
+        for text in [
+            "While an opponent is searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
+            "While one or more opponents are searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
+        ] {
+            assert!(
+                crate::parser::oracle_replacement::parse_replacement_line(
+                    text,
+                    "Search Interceptor",
+                )
+                .is_some(),
+                "paired subject and verb should parse: {text}"
+            );
+        }
+
+        for text in [
+            "While an opponent are searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
+            "While one or more opponents is searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
+        ] {
+            assert!(
+                crate::parser::oracle_replacement::parse_replacement_line(
+                    text,
+                    "Search Interceptor",
+                )
+                .is_none(),
+                "hostile subject/verb mismatch must fail closed: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_found_replacement_reaches_canonical_spell_through_full_oracle_parser() {
+        for text in [
+            "While an opponent is searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
+            "While one or more opponents are searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
+        ] {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                text,
+                "Search Interceptor",
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            let definition = parsed
+                .replacements
+                .iter()
+                .find(|definition| definition.event == ReplacementEvent::SearchFound)
+                .unwrap_or_else(|| panic!("full parser must route SearchFound replacement: {text}"));
+
+            assert_eq!(
+                definition.valid_player,
+                Some(ReplacementPlayerScope::Opponent)
+            );
+            assert_eq!(
+                definition.search_found_modifier(),
+                Some(&SearchFoundModifier {
+                    destination: Zone::Exile,
+                    play_mode: CardPlayMode::Play,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                })
+            );
+            let execute = definition
+                .execute
+                .as_deref()
+                .expect("SearchFound replacement must have canonical execute ability");
+            assert_eq!(execute.kind, AbilityKind::Spell);
+            assert!(matches!(
+                execute.effect.as_ref(),
+                Effect::ApplySearchFoundReplacement { .. }
+            ));
+            assert!(!parsed
+                .abilities
+                .iter()
+                .any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })));
+        }
+    }
+
+    #[test]
+    fn opposition_agent_full_oracle_routes_without_unimplemented() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Flash\nYou control your opponents while they're searching their libraries.\nWhile an opponent is searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
+            "Opposition Agent",
+            &["Flash".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Rogue".to_string()],
+        );
+        assert!(parsed.statics.iter().any(|definition| matches!(
+            &definition.mode,
+            StaticMode::ControlPlayersDuringOwnLibrarySearch {
+                who: crate::types::statics::ProhibitionScope::Opponents
+            }
+        )));
+        assert!(parsed.replacements.iter().any(|definition| {
+            definition.event == ReplacementEvent::SearchFound
+                && definition.search_found_modifier().is_some()
+        }));
+        assert!(!parsed
+            .abilities
+            .iter()
+            .any(|ability| matches!(*ability.effect, Effect::Unimplemented { .. })));
     }
 }

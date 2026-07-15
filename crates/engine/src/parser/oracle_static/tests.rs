@@ -23831,6 +23831,19 @@ fn restrict_search_to_top_does_not_claim_plain_search_effect() {
     );
 }
 
+#[test]
+fn control_opponents_during_own_library_search() {
+    let def =
+        parse_static_line("You control your opponents while they're searching their libraries.")
+            .expect("Opposition Agent control sentence should parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ControlPlayersDuringOwnLibrarySearch {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+}
+
 // --- CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers (Torpor Orb / Hushbringer) ---
 
 #[test]

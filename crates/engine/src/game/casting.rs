@@ -2637,7 +2637,9 @@ pub(super) fn player_can_spend_as_any_color_for_optional_spell(
                         permission,
                         CastingPermission::PlayFromExile {
                             granted_to,
-                            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                            mana_spend_permission: Some(
+                                ManaSpendPermission::AnyTypeOrColor | ManaSpendPermission::AnyColor
+                            ),
                             ..
                         } if *granted_to == player
                     )

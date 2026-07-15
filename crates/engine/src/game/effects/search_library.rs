@@ -351,6 +351,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    state.library_search_control = None;
     // CR 107.3a + CR 601.2b: Resolve the count expression against the ability so
     // `Variable("X")` picks up the caster's announced X. Fixed counts are unaffected.
     // CR 107.1c + CR 701.23d: Peel `UpTo` from the count expression to derive
@@ -430,6 +431,20 @@ pub fn resolve(
         _ => ability.controller,
     };
 
+    // CR 701.23a: Snapshot the semantic searcher and library owner for every
+    // search whose effective zone set still contains Library. SearchFound uses
+    // this generic activity identity to recognize an own-library search;
+    // Opposition Agent's independent static controls authorization only when a
+    // functioning source actually applies. Multi-zone searches retain the
+    // identity for every card found by the one search instruction.
+    if searched_library {
+        state.library_search_control =
+            Some(crate::types::game_state::LibrarySearchControlBinding {
+                searcher: searcher_id,
+                library_owner: library_owner_id,
+            });
+    }
+
     // CR 701.23a: Library search drives the `CantSearchLibrary` muzzle and the
     // per-turn "searched a library" tracking (Aven Mindcensor, Opposition
     // Agent, Archive Trap). Only emit the event / set the flag when the library
@@ -493,6 +508,7 @@ pub fn resolve(
         .collect();
 
     if matching.is_empty() {
+        state.library_search_control = None;
         // CR 701.23b: A player searching a hidden zone isn't required to find
         // cards even if they're present ("fail to find"). Resolve immediately.
         events.push(GameEvent::EffectResolved {

@@ -1459,7 +1459,8 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(target));
             acc
         }
-        Effect::RuntimeHandled { handler: _ } => Axes::NONE,
+        Effect::ApplySearchFoundReplacement { modifier: _ }
+        | Effect::RuntimeHandled { handler: _ } => Axes::NONE,
         Effect::Incubate { count } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(count));
@@ -4369,6 +4370,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
         | Effect::EachSourceDealsDamage { .. }
+        | Effect::ApplySearchFoundReplacement { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
@@ -4625,6 +4627,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
         | Effect::EachSourceDealsDamage { .. }
+        | Effect::ApplySearchFoundReplacement { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }

@@ -622,6 +622,7 @@ mod obliterate_regression;
 mod officious_interrogation_bare_strive_surcharge;
 mod old_growth_troll_return_as_aura;
 mod omo_queen_of_vesuva;
+mod opposition_agent;
 mod oracle_parser;
 mod overload_no_legal_target;
 mod oversimplify_per_player_fractal;

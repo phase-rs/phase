@@ -1558,6 +1558,49 @@ pub struct PendingScopedLibrarySearch {
     pub after_scope: Option<Box<ResolvedAbility>>,
 }
 
+/// CR 616.1 + CR 701.23a: A per-card found-event batch parked while the
+/// affected card's owner orders multiple applicable replacement effects. The
+/// current event itself lives in `pending_replacement`; this record preserves
+/// the already-processed survivors and the exact unprocessed suffix so resume
+/// never rescans earlier cards.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingSearchFoundBatch {
+    pub searcher: PlayerId,
+    /// Library owner captured from the active search instruction. `None` means
+    /// the effective searched zones did not include a library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_owner: Option<PlayerId>,
+    pub remaining: Vec<ObjectId>,
+    pub survivors: Vec<ObjectId>,
+    pub continuation: PendingSearchFoundContinuation,
+    #[serde(default)]
+    pub reveal: bool,
+}
+
+/// The mutually exclusive continuation protocols available after every
+/// SearchFound event in a batch reaches its terminal disposition. Encoding the
+/// protocol as an enum prevents a malformed `scoped = true, split = Some(_)`
+/// state from being serialized or resumed.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PendingSearchFoundContinuation {
+    Standard {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        split: Option<crate::types::ability::SearchDestinationSplit>,
+    },
+    Scoped,
+}
+
+/// CR 701.23a: Exact semantic search activity shared by found-card replacement
+/// matching and search-decision authorization. The source is deliberately not
+/// latched: authorization re-evaluates functioning player-control effects live
+/// so source departure hands off to the newest remaining effect or falls back
+/// to the searcher.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LibrarySearchControlBinding {
+    pub searcher: PlayerId,
+    pub library_owner: PlayerId,
+}
+
 /// CR 608.2c + CR 105.1 / CR 205.2a: Per-category-member
 /// `Effect::ForEachCategoryExile` iteration paused by the current member's
 /// interactive choice. Mirrors [`PendingPerPlayerZoneChoice`], but the
@@ -1844,6 +1887,14 @@ pub enum BatchCompletion {
         source_id: ObjectId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after_scope: Option<Box<ResolvedAbility>>,
+    },
+    /// CR 701.23a + CR 616.1: Opposition Agent's found-card replacement sent
+    /// the card through a zone move that itself paused for replacement ordering.
+    /// Grant its play permission only after that move actually finishes in exile,
+    /// then resume the serialized suffix of the search's found-card batch.
+    SearchFoundZoneDelivery {
+        object_id: ObjectId,
+        modifier: crate::types::proposed_event::BoundSearchFoundModifier,
     },
     /// CR 701.42 + CR 616.1: both selected meld referents have completed their
     /// simultaneous exile attempts. The typed context survives any replacement
@@ -3650,6 +3701,7 @@ impl TrustedGameStateEnvelope {
     pub fn into_game_state(self) -> GameState {
         let mut state = self.state;
         state.precast_shortcut_runtime = self.precast_shortcut_runtime;
+        crate::game::turn_control::migrate_legacy_turn_controller_latch(&mut state);
         crate::game::precast_copy_shortcut::rekey_after_trusted_restore(&mut state);
         state
     }
@@ -3694,6 +3746,7 @@ impl PersistedGameState {
         match self {
             Self::Raw(state) => {
                 let mut state = *state;
+                crate::game::turn_control::migrate_legacy_turn_controller_latch(&mut state);
                 crate::game::precast_copy_shortcut::normalize_untrusted_restore(&mut state);
                 state
             }
@@ -8520,6 +8573,11 @@ pub struct GameState {
     /// so the action phase cannot begin before every player has chosen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_scoped_library_search: Option<PendingScopedLibrarySearch>,
+    /// CR 616.1: search-found replacement batch parked across a choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_search_found_batch: Option<PendingSearchFoundBatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_search_control: Option<LibrarySearchControlBinding>,
     /// CR 608.2c + CR 105.1 / CR 205.2a: Per-category-member
     /// `Effect::ForEachCategoryExile` iteration paused by the current member's
     /// interactive choice ("for each color/card type, you may exile a card of
@@ -9790,6 +9848,11 @@ pub struct PendingReplacement {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sacrifice_provenance: Option<PendingSacrificeProvenance>,
     pub candidates: Vec<ReplacementId>,
+    /// CR 616.1: SearchFound choices snapshot the selected source
+    /// incarnation, controller/grantee, modifier, and display data at offer
+    /// time. Empty for every other replacement event.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub search_found_candidates: Vec<crate::types::proposed_event::BoundSearchFoundCandidate>,
     pub depth: u16,
     /// When true, the replacement is Optional — index 0 = accept, index 1 = decline.
     /// `candidates` has exactly one entry (the real replacement); decline is synthetic.
@@ -9933,10 +9996,28 @@ pub struct PendingMutateMerge {
     pub controller: PlayerId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ScheduledTurnControlLifecycle {
+    /// The effect has resolved, but its turn/phase window has not begun.
+    #[default]
+    Pending,
+    /// The controlled turn/phase is currently in progress.
+    Active,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledTurnControl {
     pub target_player: PlayerId,
     pub controller: PlayerId,
+    /// CR 723.1a: Creation time of the player-control effect. Uses the same
+    /// monotonic allocator as continuous-effect source timestamps so effects
+    /// from different authorities can be ordered directly.
+    #[serde(default)]
+    pub timestamp: u64,
+    /// Explicit lifecycle prevents a merely scheduled future control effect
+    /// from authorizing decisions before its window begins.
+    #[serde(default)]
+    pub lifecycle: ScheduledTurnControlLifecycle,
     #[serde(default)]
     pub grant_extra_turn_after: bool,
     /// CR 723.1 / CR 723.2: which window this control binds to. `NextTurn` is
@@ -10424,6 +10505,8 @@ impl GameState {
             pending_per_player_zone_choice: None,
             pending_player_scope_sacrifice_choice: None,
             pending_scoped_library_search: None,
+            pending_search_found_batch: None,
+            library_search_control: None,
             pending_per_category_zone_choice: None,
             pending_counter_moves: None,
             pending_counter_removals: None,
@@ -11526,6 +11609,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     copy-token loop, so COMPARING never suppresses a legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
         pending_scoped_library_search: _,
+        pending_search_found_batch: _,
+        library_search_control: _,
         post_replacement_token_substitution_count: _,
         //   - `last_recast_context` (PR-7 Phase 4d-ii object-growth recast snapshot):
         //     EXCLUDED from `impl PartialEq for GameState` (a transient decision context, not
@@ -11747,6 +11832,8 @@ impl PartialEq for GameState {
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search
+            && self.pending_search_found_batch == other.pending_search_found_batch
+            && self.library_search_control == other.library_search_control
             && self.pending_counter_moves == other.pending_counter_moves
             && self.pending_counter_removals == other.pending_counter_removals
             && self.pending_batch_deliveries == other.pending_batch_deliveries

@@ -1413,6 +1413,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::ApplyPerpetual { .. } => {}
         Effect::Intensify { .. } => {}
         Effect::DraftFromSpellbook { .. } => {}
+        Effect::ApplySearchFoundReplacement { .. } => {}
         Effect::Unimplemented { .. } => {}
     }
 }

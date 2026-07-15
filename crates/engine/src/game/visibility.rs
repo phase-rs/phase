@@ -709,6 +709,33 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             }
         }
     }
+    if let Some(batch) = filtered.pending_search_found_batch.as_mut() {
+        if !can_view_private_for_player(batch.searcher) {
+            batch.remaining = batch.remaining.iter().map(|_| ObjectId(0)).collect();
+            batch.survivors = batch.survivors.iter().map(|_| ObjectId(0)).collect();
+        }
+    }
+    // CR 400.2 + CR 723.4: A nested zone-change replacement can park the
+    // currently found hidden-library card in the batch completion sidecar.
+    // Apply the same searcher/private-access boundary as the owning
+    // `PendingSearchFoundBatch`; filtering mutates only this viewer copy.
+    if state
+        .pending_search_found_batch
+        .as_ref()
+        .is_some_and(|batch| !can_view_private_for_player(batch.searcher))
+    {
+        if let Some(crate::types::game_state::PendingBatchDeliveries {
+            completion:
+                Some(crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
+                    object_id,
+                    ..
+                }),
+            ..
+        }) = filtered.pending_batch_deliveries.as_mut()
+        {
+            *object_id = ObjectId(0);
+        }
+    }
 
     // CR 701.23a: The cultivate-class partition pick exposes the found set only
     // to the searcher; opponents see opaque ids (mirrors SearchChoice above).
@@ -1422,7 +1449,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BeholdCostAction, Effect, ReplacementDefinition,
-        ResolvedAbility, TargetFilter,
+        ResolvedAbility, StaticDefinition, TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType};
@@ -1431,12 +1458,13 @@ mod tests {
     use crate::types::game_state::{
         AutoMayChoice, CastPaymentMode, CastingVariant, CostResume, ManaAbilityResume,
         MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingBeginGameAbility, PendingCast,
-        PendingManaAbility, PendingScopedLibrarySearch,
+        PendingManaAbility, PendingScopedLibrarySearch, PendingSearchFoundBatch,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
     use crate::types::proposed_event::ProposedEvent;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::{ProhibitionScope, StaticMode};
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
 
@@ -1603,6 +1631,55 @@ mod tests {
         let filtered = filter_state_for_viewer(&state, PlayerId(0));
         assert!(filtered.liminal_entries.is_empty());
         assert!(filtered.pending_liminal_entry_resume.is_none());
+    }
+
+    #[test]
+    fn search_found_batch_is_visible_only_to_searcher_and_search_controller() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let agent = create_object(
+            &mut state,
+            CardId(90_000),
+            PlayerId(0),
+            "Opposition Agent".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&agent)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::ControlPlayersDuringOwnLibrarySearch {
+                    who: ProhibitionScope::Opponents,
+                },
+            ));
+        state.library_search_control =
+            Some(crate::types::game_state::LibrarySearchControlBinding {
+                searcher: PlayerId(1),
+                library_owner: PlayerId(1),
+            });
+        state.pending_search_found_batch = Some(PendingSearchFoundBatch {
+            searcher: PlayerId(1),
+            library_owner: Some(PlayerId(1)),
+            remaining: vec![ObjectId(101)],
+            survivors: vec![ObjectId(102)],
+            continuation: crate::types::game_state::PendingSearchFoundContinuation::Standard {
+                split: None,
+            },
+            reveal: false,
+        });
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let batch = filter_state_for_viewer(&state, viewer)
+                .pending_search_found_batch
+                .expect("authorized viewer retains batch");
+            assert_eq!(batch.remaining, vec![ObjectId(101)]);
+            assert_eq!(batch.survivors, vec![ObjectId(102)]);
+        }
+        let third_view = filter_state_for_viewer(&state, PlayerId(2));
+        let batch = third_view.pending_search_found_batch.unwrap();
+        assert_eq!(batch.remaining, vec![ObjectId(0)]);
+        assert_eq!(batch.survivors, vec![ObjectId(0)]);
     }
 
     #[test]

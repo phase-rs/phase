@@ -1024,6 +1024,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         // runtime choice) — Unmodeled, like the other choice effects.
         | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
+        | Effect::ApplySearchFoundReplacement { .. }
         | Effect::Unimplemented { .. } => return Projection::Unmodeled,
     }
     b.finish()

@@ -30,12 +30,13 @@ use super::oracle_ir::feature::{
 };
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Comparator,
-    ContinuousModification, CopyRetargetPermission, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope, ParsedCondition,
-    PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementMode,
-    RestrictionExpiry, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, UnlessPayScaling,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, CardPlayMode, CastingPermission,
+    Comparator, ContinuousModification, CopyRetargetPermission, DelayedTriggerCondition, Duration,
+    Effect, FilterProp, ManaProduction, ManaSpendPermission, ModalSelectionConstraint,
+    OpponentMayScope, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementMode, RestrictionExpiry, SearchFoundModifier, StaticCondition,
+    StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    UnlessPayScaling,
 };
 use crate::types::game_state::RetargetScope;
 use crate::types::keywords::Keyword;
@@ -564,23 +565,36 @@ fn detect_duration_until_eot(
 
 // ── Detector E: Optional_YouMay ─────────────────────────────────────────
 
-/// CR 117.3a: "you may [verb]" — optional effect. The triggered/activated
-/// ability that contains this phrase must have its `optional` flag set.
+/// Audits "you may" instructions against their typed semantic carrier. Choices
+/// made while an effect resolves are represented under CR 608.2d, while play/cast
+/// permissions (CR 305.1 / CR 601.3) and mana-spend permissions (CR 609.4b) may
+/// live in dedicated typed fields rather than an ability-level optional flag.
 fn detect_optional_you_may(
     cleaned: &str,
     original: &str,
     parsed: &ParsedAbilities,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
-    // Only the bare "you may [verb]" optional-effect form. "you may cast" is
-    // NOT excluded at this scan level — the optionality is satisfied on the
-    // AST-walk side via `any_ability_is_optional` checking `casting_options`,
-    // `CastFromZone`, `GrantCastingPermission`, and `CastCopyOfCard`.
+    // "You may" can introduce either a CR 608.2d resolving choice or a typed
+    // permission. The evidence side accepts the relevant carrier rather than
+    // requiring every form to lower to `AbilityDefinition::optional`.
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains("you may ") {
         return;
     }
-    if any_ability_is_optional(parsed) {
+    // A SearchFound unit's inseparable modifier is authoritative for both
+    // permissions. Its generic replacement mode cannot stand in for a missing
+    // exile/play/mana field; non-SearchFound units keep the generic evidence walk.
+    let has_search_found_replacement = parsed
+        .replacements
+        .iter()
+        .any(|replacement| replacement.event == ReplacementEvent::SearchFound);
+    let has_typed_carrier = if has_search_found_replacement {
+        has_search_found_exile_play_any_color_permission(parsed)
+    } else {
+        any_ability_is_optional(parsed)
+    };
+    if has_typed_carrier {
         return;
     }
     // CR 700.2a / CR 601.2b: "you may choose both instead" grants a modal
@@ -638,6 +652,39 @@ fn detect_optional_you_may(
         OracleSemanticFeature::OptionalYouMay.detector_label(),
         truncate(original, 140),
     ));
+}
+
+/// CR 601.3 + CR 305.1 + CR 609.4b: Opposition Agent-class search replacements
+/// carry both permissions inside one typed payload: found cards are exiled with
+/// permission to cast spells or play lands, and mana may be spent as though it
+/// were mana of any color for those casts. Keep this exact so an incomplete
+/// payload cannot silence the `Optional_YouMay` detector.
+fn has_search_found_exile_play_any_color_permission(parsed: &ParsedAbilities) -> bool {
+    search_found_exile_modifiers(parsed).any(|modifier| {
+        modifier.play_mode == CardPlayMode::Play
+            && modifier.mana_spend_permission == Some(ManaSpendPermission::AnyColor)
+    })
+}
+
+/// CR 611.3d + CR 400.7: an exile-scoped play or cast permission carries its
+/// stated duration only for the object that remains in exile. The narrower
+/// `CardPlayMode` does not change whether that duration is represented.
+fn has_search_found_exile_permission(parsed: &ParsedAbilities) -> bool {
+    search_found_exile_modifiers(parsed).next().is_some()
+}
+
+fn search_found_exile_modifiers(
+    parsed: &ParsedAbilities,
+) -> impl Iterator<Item = &SearchFoundModifier> {
+    parsed.replacements.iter().filter_map(|replacement| {
+        if replacement.event == ReplacementEvent::SearchFound {
+            replacement
+                .search_found_modifier()
+                .filter(|modifier| modifier.destination == Zone::Exile)
+        } else {
+            None
+        }
+    })
 }
 
 // ── AST predicates ──────────────────────────────────────────────────────
@@ -3584,11 +3631,10 @@ fn detect_condition_as_long_as(
     if !cleaned.contains("as long as ") {
         return;
     }
-    // CR 400.7i + CR 609.4b: "play/cast that card for as long as it remains
-    // exiled, and mana ..." is represented as a zone-scoped PlayFromExile
-    // permission on the exiled object. The permission is stored with
-    // Duration::Permanent because zones::apply_zone_exit_cleanup removes it
-    // when the card stops being the exiled object this effect refers to.
+    // CR 611.3d: the stated duration belongs to the play/cast permission. The
+    // typed permission is attached to the object in exile and removed when it
+    // changes zones and becomes a new object (CR 400.7). The accompanying
+    // any-color mana rider is represented separately under CR 609.4b.
     let exile_duration_clause_recognized = [
         "as long as it remains exiled",
         "as long as that card remains exiled",
@@ -3597,10 +3643,11 @@ fn detect_condition_as_long_as(
     ]
     .iter()
     .any(|phrase| cleaned.contains(phrase));
+    let effect_permission_carries_duration = evidence
+        .any::<CastingPermission>(|c| matches!(c, CastingPermission::PlayFromExile { .. }))
+        && evidence.any_duration(|d| matches!(d, Duration::Permanent));
     if exile_duration_clause_recognized
-        && evidence
-            .any::<CastingPermission>(|c| matches!(c, CastingPermission::PlayFromExile { .. }))
-        && evidence.any_duration(|d| matches!(d, Duration::Permanent))
+        && (effect_permission_carries_duration || has_search_found_exile_permission(parsed))
     {
         return;
     }
@@ -4422,10 +4469,14 @@ mod tests {
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-    use crate::types::ability::{AbilityDefinition, Effect, OutsideGameSourcePool, TargetFilter};
+    use crate::types::ability::{
+        AbilityDefinition, CardPlayMode, Effect, ManaSpendPermission, OutsideGameSourcePool,
+        ReplacementMode, SearchFoundModifier, TargetFilter,
+    };
     use crate::types::identifiers::TrackedSetId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;
 
@@ -5089,6 +5140,141 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Condition_AsLongAs"));
+    }
+
+    #[test]
+    fn opposition_agent_search_found_payload_accounts_for_both_permission_markers() {
+        const REPLACEMENT_PARAGRAPH: &str = "While an opponent is searching their library, \
+            they exile each card they find. You may play those cards for as long as they \
+            remain exiled, and you may spend mana as though it were mana of any color to \
+            cast them.";
+        let parsed = parse_oracle_text(
+            &format!(
+                "Flash\nYou control your opponents while they're searching their libraries.\n\
+                 {REPLACEMENT_PARAGRAPH}"
+            ),
+            "Opposition Agent",
+            &["Flash".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Rogue".to_string()],
+        );
+
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "reach guard: Opposition Agent must route past Unimplemented: {:#?}",
+            parsed
+        );
+        let replacement = parsed
+            .replacements
+            .iter()
+            .find(|replacement| replacement.event == ReplacementEvent::SearchFound)
+            .expect("reach guard: expected typed SearchFound replacement");
+        assert_eq!(
+            replacement.search_found_modifier(),
+            Some(&SearchFoundModifier {
+                destination: Zone::Exile,
+                play_mode: CardPlayMode::Play,
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+            }),
+            "reach guard: both optional permission clauses must live in the typed payload"
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+        assert!(!has_swallowed_detector(&parsed, "Condition_AsLongAs"));
+
+        fn search_found_modifier_mut(
+            parsed: &mut crate::parser::oracle::ParsedAbilities,
+        ) -> &mut SearchFoundModifier {
+            parsed
+                .replacements
+                .iter_mut()
+                .find(|replacement| replacement.event == ReplacementEvent::SearchFound)
+                .and_then(|replacement| replacement.execute.as_deref_mut())
+                .and_then(|ability| match ability.effect.as_mut() {
+                    Effect::ApplySearchFoundReplacement { modifier } => Some(modifier),
+                    _ => None,
+                })
+                .expect("hostile probe requires the positive reach-guard payload")
+        }
+
+        fn permission_diagnostics(
+            parsed: &crate::parser::oracle::ParsedAbilities,
+            paragraph: &str,
+        ) -> Vec<OracleDiagnostic> {
+            let cleaned = paragraph.to_ascii_lowercase();
+            let mut diagnostics = Vec::new();
+            super::detect_optional_you_may(&cleaned, paragraph, parsed, &mut diagnostics);
+            let evidence = UnitEvidence::of(parsed);
+            super::detect_condition_as_long_as(
+                &cleaned,
+                paragraph,
+                &evidence,
+                parsed,
+                &mut diagnostics,
+            );
+            diagnostics
+        }
+
+        fn has_detector(diagnostics: &[OracleDiagnostic], expected: &str) -> bool {
+            diagnostics.iter().any(|diagnostic| {
+                matches!(
+                    diagnostic,
+                    OracleDiagnostic::SwallowedClause { detector, .. } if detector == expected
+                )
+            })
+        }
+
+        // The exemption is evidence-driven, not a text/card-name allowlist. Each
+        // typed field is independently load-bearing for the semantics it carries.
+        let mut wrong_destination = parsed.clone();
+        search_found_modifier_mut(&mut wrong_destination).destination = Zone::Hand;
+        let diagnostics = permission_diagnostics(&wrong_destination, REPLACEMENT_PARAGRAPH);
+        assert!(has_detector(&diagnostics, "Optional_YouMay"));
+        assert!(has_detector(&diagnostics, "Condition_AsLongAs"));
+
+        let mut cast_only = parsed.clone();
+        search_found_modifier_mut(&mut cast_only).play_mode = CardPlayMode::Cast;
+        let diagnostics = permission_diagnostics(&cast_only, REPLACEMENT_PARAGRAPH);
+        assert!(has_detector(&diagnostics, "Optional_YouMay"));
+        assert!(
+            !has_detector(&diagnostics, "Condition_AsLongAs"),
+            "the stated duration still scopes the narrower cast permission"
+        );
+
+        let mut any_type_or_color = parsed.clone();
+        search_found_modifier_mut(&mut any_type_or_color).mana_spend_permission =
+            Some(ManaSpendPermission::AnyTypeOrColor);
+        let diagnostics = permission_diagnostics(&any_type_or_color, REPLACEMENT_PARAGRAPH);
+        assert!(has_detector(&diagnostics, "Optional_YouMay"));
+        assert!(
+            !has_detector(&diagnostics, "Condition_AsLongAs"),
+            "the duration detector is satisfied by Exile + Play; the mana rider is audited separately"
+        );
+
+        let mut missing_mana_permission = parsed.clone();
+        let replacement = missing_mana_permission
+            .replacements
+            .iter_mut()
+            .find(|replacement| replacement.event == ReplacementEvent::SearchFound)
+            .expect("hostile probe requires the positive reach-guard replacement");
+        let modifier = replacement
+            .execute
+            .as_deref_mut()
+            .and_then(|ability| match ability.effect.as_mut() {
+                Effect::ApplySearchFoundReplacement { modifier } => Some(modifier),
+                _ => None,
+            })
+            .expect("hostile probe requires the positive reach-guard modifier");
+        modifier.mana_spend_permission = None;
+        replacement.mode = ReplacementMode::Optional { decline: None };
+        let diagnostics = permission_diagnostics(&missing_mana_permission, REPLACEMENT_PARAGRAPH);
+        assert!(
+            has_detector(&diagnostics, "Optional_YouMay"),
+            "generic replacement optionality must not mask an incomplete SearchFound payload"
+        );
+        assert!(
+            !has_detector(&diagnostics, "Condition_AsLongAs"),
+            "the missing mana permission must not erase the independent exile duration carrier"
+        );
     }
 
     #[test]
