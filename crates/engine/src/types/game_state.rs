@@ -2765,7 +2765,7 @@ pub struct TargetSelectionSlot {
     /// this slot. `None` (the default) means the spell/ability's controller — the
     /// CR-601.2c default announcer. `Some(player)` is set only when the slot's
     /// Oracle text routes the announcement to another player ("of an opponent's
-    /// choice" / "of a player's choice", e.g. Volcanic Offering). The spell is
+    /// choice", e.g. Volcanic Offering). The spell is
     /// still controlled, paid for, and put on the stack by its controller
     /// (CR 115.1) regardless of who announced a slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
