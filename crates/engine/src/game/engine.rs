@@ -3274,7 +3274,10 @@ fn apply_action(
                 // allows undo — painlands (damage on resolution), pay-life
                 // sources, and sacrifice sources all commit irreversible
                 // state atomically with CR 605.3b resolution.
-                if is_land && mana_sources::mana_ability_penalty(&ability_def).is_undoable() {
+                if is_land
+                    && mana_sources::object_mana_ability_penalty(state, source_id, &ability_def)
+                        .is_undoable()
+                {
                     state
                         .lands_tapped_for_mana
                         .entry(state.priority_player)

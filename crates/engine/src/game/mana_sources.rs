@@ -457,6 +457,86 @@ pub(crate) fn mana_ability_penalty(ability: &AbilityDefinition) -> ManaSourcePen
     ManaSourcePenalty::None
 }
 
+/// CR 603.2e + CR 701.26: Controller-harm amount from a self-referential
+/// `TriggerMode::Taps` sibling trigger on `object_id` — City of Brass and
+/// Tarnished Citadel print their self-damage as a *separate* "Whenever this
+/// land becomes tapped, it deals 1 damage to you" triggered ability (fires on
+/// ANY tap, not only a mana activation), rather than folding the damage into
+/// the mana ability's own resolution chain the way painlands do (Adarkar
+/// Wastes: "{T}: Add {W} or {U}. This land deals 1 damage to you." is ONE
+/// ability). `mana_ability_penalty` only walks the mana ability's own chain,
+/// so it never sees this sibling trigger.
+///
+/// Returns `Some(amount)` when at least one such trigger is found (summed the
+/// same way `chain_harms_controller_amount` sums a single chain), `None` when
+/// the object carries no self-referential harmful `Taps` trigger.
+fn object_self_tap_harm_amount(state: &GameState, object_id: ObjectId) -> Option<Option<u16>> {
+    let obj = state.objects.get(&object_id)?;
+    let mut found = false;
+    let mut total = Some(0_u16);
+    for trigger in obj.trigger_definitions.iter_all() {
+        if trigger.mode != TriggerMode::Taps {
+            continue;
+        }
+        let self_referential = match &trigger.valid_card {
+            None => true,
+            Some(filter) => super::trigger_matchers::target_filter_matches_object(
+                state, object_id, filter, object_id,
+            ),
+        };
+        if !self_referential {
+            continue;
+        }
+        let Some(execute) = trigger.execute.as_deref() else {
+            continue;
+        };
+        if let Some(amount) = chain_harms_controller_amount(execute) {
+            found = true;
+            total = fold_amount(total, amount);
+        }
+    }
+    found.then_some(total)
+}
+
+/// CR 605.3b: Single classification authority for a mana-source OBJECT's full
+/// penalty axis — [`mana_ability_penalty`]'s ability-chain classification
+/// merged with any self-referential `Taps` sibling trigger that harms the
+/// controller ([`object_self_tap_harm_amount`]). This is the version every
+/// real consumer (auto-tap sort, the priority-meaningful gate,
+/// `UntapLandForMana` undoability) must call instead of `mana_ability_penalty`
+/// directly, so a City-of-Brass-shaped card can never be misclassified as
+/// `None` just because its damage lives on a sibling trigger instead of the
+/// mana ability's own chain.
+///
+/// A `Sacrifices`/`PaysLifeOnActivation` classification from the ability's own
+/// chain is already worse than or equal to anything a sibling `Taps` trigger
+/// could add, so those short-circuit unchanged. Otherwise, a sibling harm
+/// amount folds into (or replaces) `DealsDamageOnResolution`.
+pub(crate) fn object_mana_ability_penalty(
+    state: &GameState,
+    object_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> ManaSourcePenalty {
+    let own = mana_ability_penalty(ability);
+    if matches!(
+        own,
+        ManaSourcePenalty::Sacrifices | ManaSourcePenalty::PaysLifeOnActivation { .. }
+    ) {
+        return own;
+    }
+    match object_self_tap_harm_amount(state, object_id) {
+        Some(sibling_amount) => ManaSourcePenalty::DealsDamageOnResolution {
+            fixed_amount: match own {
+                ManaSourcePenalty::DealsDamageOnResolution { fixed_amount } => {
+                    fold_amount(fixed_amount, sibling_amount)
+                }
+                _ => sibling_amount,
+            },
+        },
+        None => own,
+    }
+}
+
 /// CR 119.3 (life) / CR 120.3 (damage → life loss): The benefit twin of
 /// [`effect_controller_harm_amount`]. Returns `true` iff a single `Effect`
 /// favors the player who caused the trigger (the tapper): opponent-scoped
@@ -1677,7 +1757,7 @@ fn scan_mana_abilities(
             continue;
         }
 
-        let penalty = mana_ability_penalty(ability);
+        let penalty = object_mana_ability_penalty(state, object_id, ability);
         let source_could_produce_two_or_more_colors =
             source_could_produce_two_or_more_colors(state, object_id, controller);
         for row in emit_source_rows(state, controller, object_id, ability_index, ability) {
@@ -3266,6 +3346,104 @@ mod tests {
         assert!(
             penalty.priority_amount() > fixed_max.priority_amount(),
             "unknown amount (None) must sort strictly worse than any known amount (conservative worst)"
+        );
+    }
+
+    /// Issue #5912: City of Brass prints its self-damage as a *separate*
+    /// "Whenever this land becomes tapped, it deals 1 damage to you" trigger
+    /// (`TriggerMode::Taps`, `valid_card: SelfRef`), NOT folded into the
+    /// `{T}: Add one mana of any color.` ability's own resolution chain like a
+    /// painland. `mana_ability_penalty` only walks the ability's own chain, so
+    /// it misclassifies this shape as `None` (byte-identical to a basic land) —
+    /// this is the reach-guard proving the gap exists before the fix.
+    #[test]
+    fn city_of_brass_ability_alone_misclassifies_as_none() {
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: ManaColor::ALL.to_vec(),
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+
+        assert_eq!(
+            mana_ability_penalty(&ability),
+            ManaSourcePenalty::None,
+            "the ability's own chain is pure Effect::Mana with no embedded damage"
+        );
+    }
+
+    /// Issue #5912: [`object_mana_ability_penalty`] must see past the ability
+    /// chain and classify a City-of-Brass-shaped object (mana ability + sibling
+    /// self-referential `Taps` damage trigger) as `DealsDamageOnResolution`, so
+    /// auto-tap sorts it worse than a truly free source (Island) for the same
+    /// generic-mana slot.
+    #[test]
+    fn object_mana_ability_penalty_sees_city_of_brass_self_tap_damage_trigger() {
+        let mut state = GameState::new_two_player(42);
+        let city_of_brass = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "City of Brass".to_string(),
+            Zone::Battlefield,
+        );
+        let ability_index;
+        {
+            let obj = state.objects.get_mut(&city_of_brass).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            let ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: ManaColor::ALL.to_vec(),
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap);
+            ability_index = obj.abilities.len();
+            Arc::make_mut(&mut obj.abilities).push(ability);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Taps)
+                    .valid_card(TargetFilter::SelfRef)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::DealDamage {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                            damage_source: None,
+                            excess: None,
+                        },
+                    )),
+            );
+        }
+
+        let ability = state.objects.get(&city_of_brass).unwrap().abilities[ability_index].clone();
+        let penalty = object_mana_ability_penalty(&state, city_of_brass, &ability);
+        assert_eq!(
+            penalty,
+            ManaSourcePenalty::DealsDamageOnResolution {
+                fixed_amount: Some(1)
+            },
+            "the sibling self-tap damage trigger must be folded into the classification"
+        );
+        assert!(
+            penalty.priority_amount() > ManaSourcePenalty::None.priority_amount(),
+            "must sort strictly worse than a truly free source (Island) in the same tier_byte"
         );
     }
 

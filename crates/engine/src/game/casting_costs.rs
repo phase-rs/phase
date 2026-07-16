@@ -10949,7 +10949,8 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
         ManaProduction, PtStat, PtValue, PtValueScope, QuantityExpr, ReplacementDefinition,
-        ReplacementMode, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        ReplacementMode, StaticDefinition, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -10958,6 +10959,7 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
+    use crate::types::triggers::TriggerMode;
 
     #[test]
     fn announcing_opponent_preflight_ignores_scoped_player_chooser() {
@@ -13524,6 +13526,97 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::LifeChanged { amount: -1, .. })),
             "auto-pay should not emit a life payment when an equivalent non-life line exists"
+        );
+    }
+
+    /// Issue #5912: City of Brass prints its self-damage as a *separate*
+    /// "Whenever this land becomes tapped, it deals 1 damage to you" trigger
+    /// (`TriggerMode::Taps`), not folded into the `{T}: Add one mana of any
+    /// color.` ability's own resolution chain like a painland. Before
+    /// `object_mana_ability_penalty` accounted for this sibling trigger,
+    /// City of Brass classified byte-identically to a basic land (`None`
+    /// penalty), so auto-tap could pick it over a truly free Island for the
+    /// same generic slot. Auto-tap must prefer the Island.
+    #[test]
+    fn auto_tap_prefers_free_land_over_city_of_brass_self_damage_trigger() {
+        let mut state = GameState::new_two_player(42);
+        let city_of_brass = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "City of Brass".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&city_of_brass).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: ManaColor::ALL.to_vec(),
+                            contribution: crate::types::ability::ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Taps)
+                    .valid_card(TargetFilter::SelfRef)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::DealDamage {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                            damage_source: None,
+                            excess: None,
+                        },
+                    )),
+            );
+        }
+        let island = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&island).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Island".to_string());
+        }
+
+        let mut events = Vec::new();
+        auto_tap_mana_sources(
+            &mut state,
+            PlayerId(0),
+            &ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            },
+            &mut events,
+            None,
+        );
+
+        assert!(
+            state.objects.get(&island).unwrap().tapped,
+            "the free Island must be tapped for the generic cost"
+        );
+        assert!(
+            !state.objects.get(&city_of_brass).unwrap().tapped,
+            "City of Brass must NOT be tapped when a truly free source can pay the same cost"
+        );
+        assert_eq!(
+            state.players[0].life, 20,
+            "auto-pay must avoid the self-damage source when an equivalent free line exists"
         );
     }
 
