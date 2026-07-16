@@ -1041,6 +1041,19 @@ pub(super) fn handle_replacement_choice(
                 waiting_for = super::casting::resume_foretell_cost_move(state, events);
             }
 
+            // CR 702.66a + CR 614.1 + CR 616.1: A delivered or redirected
+            // Delve fuel move still pays one generic component. Its delivery
+            // tail linked only an actual exile destination; resume must restore
+            // ManaPayment rather than finish the pending cast.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && matches!(
+                    state.pending_cost_move_resume,
+                    Some(PendingCostMoveResume::DelveManaPayment { .. })
+                )
+            {
+                waiting_for = super::engine::resume_delve_mana_payment(state);
+            }
+
             // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: The selected
             // replacement has delivered the interrupted mana-ability cost move.
             // Resume only its unpaid cursor suffix; it owns production and the
@@ -1266,6 +1279,16 @@ pub(super) fn handle_replacement_choice(
                 Some(PendingCostMoveResume::Foretell { .. })
             ) {
                 return Ok(super::casting::resume_foretell_cost_move(state, events));
+            }
+            // CR 702.66a + CR 614.1 + CR 616.1: A prevented Delve move still
+            // pays its generic component, but has no delivered exile link.
+            if matches!(
+                state.pending_cost_move_resume,
+                Some(PendingCostMoveResume::DelveManaPayment { .. })
+            ) {
+                let waiting_for = super::engine::resume_delve_mana_payment(state);
+                state.waiting_for = waiting_for.clone();
+                return Ok(waiting_for);
             }
             // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A fully
             // prevented or substituted mana-ability cost move still pays that

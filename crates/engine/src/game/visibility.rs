@@ -4243,6 +4243,10 @@ mod tests {
                 cost: ManaCost::generic(1),
                 turn_foretold: 7,
             },
+            PendingCostMoveResume::DelveManaPayment {
+                player: PlayerId(0),
+                fuel_id: hidden,
+            },
             mana_resume,
         ];
 

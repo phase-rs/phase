@@ -12,7 +12,7 @@ use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, P
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
     ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode, MayTriggerAutoChoiceKey,
-    PayCostKind, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
+    PayCostKind, PendingCostMoveResume, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -52,6 +52,8 @@ use super::splice;
 use super::triggers;
 use super::turn_control;
 use super::turns;
+use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+#[cfg(test)]
 use super::zones;
 
 pub use super::engine_resolve_batch::{
@@ -2185,13 +2187,47 @@ pub(super) fn resume_pending_continuation_if_priority(
         if matches!(state.waiting_for, WaitingFor::Priority { .. })
             && matches!(
                 state.pending_cost_move_resume,
-                Some(crate::types::game_state::PendingCostMoveResume::ManaAbilityPayment { .. })
+                Some(PendingCostMoveResume::DelveManaPayment { .. })
+            )
+        {
+            state.waiting_for = resume_delve_mana_payment(state);
+        }
+        if matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && matches!(
+                state.pending_cost_move_resume,
+                Some(PendingCostMoveResume::ManaAbilityPayment { .. })
             )
         {
             state.waiting_for = mana_abilities::resume_mana_ability_cost_move(state, events)?;
         }
     }
     Ok(())
+}
+
+/// CR 702.66a: Finish one Delve payment after its graveyard-to-exile cost move
+/// was delivered or fully replaced. The move's `TrackBySource` delivery tail
+/// records only cards actually delivered to exile; this typed root restores the
+/// exact Delve payment prompt and its one-generic cost reduction without
+/// finalizing the pending cast.
+pub(super) fn resume_delve_mana_payment(state: &mut GameState) -> WaitingFor {
+    let Some(PendingCostMoveResume::DelveManaPayment { player, fuel_id }) =
+        state.pending_cost_move_resume.take()
+    else {
+        unreachable!("delve cost-move resume requires its typed continuation")
+    };
+    // CR 118.3a: The generic-only marker is consumed by the shared mana-payment
+    // finalizer and cannot be pinned or spent on a colored cost.
+    state.add_mana_to_pool(
+        player,
+        crate::types::mana::ManaUnit::convoke_payment(
+            crate::types::mana::ManaType::Colorless,
+            fuel_id,
+        ),
+    );
+    WaitingFor::ManaPayment {
+        player,
+        convoke_mode: Some(ConvokeMode::Delve),
+    }
 }
 
 /// Decision emitted by the auto-pass loop's per-iteration check.
@@ -5169,9 +5205,7 @@ fn apply_action(
         // generic mana. Unlike convoke/improvise (which tap a permanent), the
         // source is a graveyard card that is exiled. The contribution is a
         // generic-only colorless marker (like Improvise) that can't leak into the
-        // pool. (Tracking which cards were exiled — for Murktide Regent's "+1/+1
-        // for each card exiled with it" — is a follow-up that also needs the
-        // QuantityRef/parser wiring; the core payment is independent of it.)
+        // pool.
         (
             WaitingFor::ManaPayment {
                 player,
@@ -5197,24 +5231,32 @@ fn apply_action(
                     "Can only delve a card from your own graveyard".to_string(),
                 ));
             }
-            zones::move_to_zone(state, object_id, Zone::Exile, &mut events);
-            // CR 702.66a + CR 607.2a: Delved cards are exiled "with" the spell
-            // being cast (Murktide Regent ETB counters — issue #1322).
-            if let Some(spell_id) = state.pending_cast.as_ref().map(|p| p.object_id) {
-                crate::game::exile_links::push_tracked_by_source(state, object_id, spell_id);
-            }
-            // CR 118.3a: route through the stamping authority (delve marker is a
-            // generic-only convoke marker, never pinned).
-            state.add_mana_to_pool(
+            let spell_id = state
+                .pending_cast
+                .as_ref()
+                .map(|pending| pending.object_id)
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No pending cast for delve".to_string())
+                })?;
+            state.pending_cost_move_resume = Some(PendingCostMoveResume::DelveManaPayment {
                 player,
-                crate::types::mana::ManaUnit::convoke_payment(
-                    crate::types::mana::ManaType::Colorless,
-                    object_id,
-                ),
-            );
-            WaitingFor::ManaPayment {
-                player,
-                convoke_mode: Some(ConvokeMode::Delve),
+                fuel_id: object_id,
+            });
+            // CR 702.66a + CR 614.1 + CR 616.1: The cost move must consult Moved
+            // replacements. `track_exiled_by_source` carries
+            // `ExileLinkSpec { duration: None, tracking: TrackBySource }`, so the
+            // delivery tail links only fuel that actually reaches exile.
+            match zone_pipeline::move_object(
+                state,
+                ZoneMoveRequest::cost(object_id, Zone::Exile, spell_id)
+                    .track_exiled_by_source(),
+                &mut events,
+            ) {
+                ZoneMoveResult::Done => resume_delve_mana_payment(state),
+                ZoneMoveResult::NeedsChoice(_) => state.waiting_for.clone(),
+                ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    unreachable!("a delve cost move to exile cannot require an Aura attachment")
+                }
             }
         }
         (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { choice }) => {

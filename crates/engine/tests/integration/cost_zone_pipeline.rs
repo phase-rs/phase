@@ -5088,3 +5088,183 @@ fn optional_post_effect_settles_before_resuming_the_parked_mana_root() {
         "the outer cast resumes exactly once after the optional post-effect"
     );
 }
+
+#[test]
+fn delve_mana_payment_honors_moved_redirect_without_linking_redirected_fuel() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Delve Redirect Payment Witness", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .with_keyword(Keyword::Delve)
+        .id();
+    let fuel = scenario
+        .add_spell_to_graveyard(P0, "Redirected Delve Fuel", true)
+        .id();
+    for name in ["First Delve Exile Redirect", "Second Delve Exile Redirect"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    }
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    let announced = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("delve spell reaches its mana-payment window");
+    assert!(matches!(
+        announced.waiting_for,
+        WaitingFor::ManaPayment {
+            player: P0,
+            convoke_mode: Some(engine::types::game_state::ConvokeMode::Delve),
+        }
+    ));
+
+    let paused = runner
+        .act(GameAction::TapForConvoke {
+            object_id: fuel,
+            mana_type: engine::types::mana::ManaType::Colorless,
+        })
+        .expect("delve fuel must consult competing Moved redirects");
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("redirected delve fuel restores the mana-payment root");
+    assert_eq!(runner.state().objects[&fuel].zone, Zone::Hand);
+    assert!(
+        !runner
+            .state()
+            .exile_links
+            .iter()
+            .any(|link| link.exiled_id == fuel && link.source_id == spell),
+        "fuel redirected away from exile must not be linked as exiled with the spell"
+    );
+    assert!(matches!(
+        resumed.waiting_for,
+        WaitingFor::ManaPayment {
+            player: P0,
+            convoke_mode: Some(engine::types::game_state::ConvokeMode::Delve),
+        }
+    ));
+
+    let completed = runner
+        .act(GameAction::PassPriority)
+        .expect("redirected delve fuel still pays its generic cost component");
+    assert!(matches!(
+        completed.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+}
+
+#[test]
+fn delve_murktide_link_tracks_only_fuel_delivered_to_exile() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Murktide Regent", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .with_keyword(Keyword::Delve)
+        .id();
+    let delivered_fuel = scenario
+        .add_spell_to_graveyard(P0, "Delivered Delve Fuel", true)
+        .id();
+    let redirected_fuel = scenario
+        .add_spell_to_graveyard(P0, "Redirected Murktide Fuel", true)
+        .id();
+    let first_redirect = scenario
+        .add_creature(P0, "First Murktide Exile Redirect", 0, 0)
+        .as_enchantment()
+        .id();
+    let second_redirect = scenario
+        .add_creature(P0, "Second Murktide Exile Redirect", 0, 0)
+        .as_enchantment()
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("Murktide-shaped delve spell reaches mana payment");
+    runner
+        .act(GameAction::TapForConvoke {
+            object_id: delivered_fuel,
+            mana_type: engine::types::mana::ManaType::Colorless,
+        })
+        .expect("first delve fuel is delivered to exile");
+
+    for redirect in [first_redirect, second_redirect] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&redirect)
+            .expect("redirect source remains on the battlefield")
+            .replacement_definitions = vec![redirect_moved_to(Zone::Exile, Zone::Hand)].into();
+    }
+
+    let paused = runner
+        .act(GameAction::TapForConvoke {
+            object_id: redirected_fuel,
+            mana_type: engine::types::mana::ManaType::Colorless,
+        })
+        .expect("second delve fuel must consult competing Moved redirects");
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("redirected fuel resumes the Murktide-shaped mana payment");
+    assert!(matches!(
+        resumed.waiting_for,
+        WaitingFor::ManaPayment {
+            player: P0,
+            convoke_mode: Some(engine::types::game_state::ConvokeMode::Delve),
+        }
+    ));
+    assert_eq!(runner.state().objects[&delivered_fuel].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&redirected_fuel].zone, Zone::Hand);
+    let tracked_ids: Vec<_> = runner
+        .state()
+        .exile_links
+        .iter()
+        .filter(|link| link.source_id == spell)
+        .map(|link| link.exiled_id)
+        .collect();
+    assert_eq!(tracked_ids, vec![delivered_fuel]);
+    assert_eq!(
+        runner
+            .state()
+            .cards_exiled_with_source_this_turn
+            .get(&spell)
+            .cloned()
+            .unwrap_or_default(),
+        vec![delivered_fuel],
+        "Murktide's tracked set contains precisely its delivered exile"
+    );
+
+    let completed = runner
+        .act(GameAction::PassPriority)
+        .expect("both delve components pay the generic mana after redirect");
+    assert!(matches!(
+        completed.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+}
