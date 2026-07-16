@@ -128,6 +128,7 @@ mod exchange_life_totals_cards;
 mod exhibition_tidecaller_target_player_mill;
 mod export_runtime_canaries;
 mod exquisite_blood_routing;
+mod eyetwitch_learn_decline_lesson;
 mod fact_or_fiction_pile_separation;
 mod fateful_handoff_target_mana_value_draw;
 mod festival_of_embers_graveyard_additional_cost;
