@@ -7422,6 +7422,7 @@ fn finalize_cast_pre_payment_checks(
                 Some(cast_transformed)
             }
             CascadeCheck::Rejected {
+                source_id,
                 exiled_misses,
                 reject_action,
             } => {
@@ -7429,6 +7430,7 @@ fn finalize_cast_pre_payment_checks(
                     state,
                     player,
                     object_id,
+                    source_id,
                     exiled_misses,
                     reject_action,
                     events,
@@ -8247,6 +8249,7 @@ enum CascadeCheck {
     /// `handle_resolution_cast_rejection`, which sends the hit to its
     /// `reject_action` destination.
     Rejected {
+        source_id: ObjectId,
         exiled_misses: Vec<ObjectId>,
         reject_action: crate::types::ability::ResolutionMvRejectAction,
     },
@@ -8375,7 +8378,9 @@ fn evaluate_cascade_constraint_with_resulting_mv(
             player,
             object_id,
             resulting_mv,
+            cleanup.source_id,
             cleanup.exiled_misses,
+            cleanup.reject_action,
             cleanup.success_action,
             events,
         );
@@ -8391,18 +8396,22 @@ fn evaluate_cascade_constraint_with_resulting_mv(
             .casting_permissions
             .remove(index);
         CascadeCheck::Rejected {
+            source_id: cleanup.source_id,
             exiled_misses: cleanup.exiled_misses,
             reject_action: cleanup.reject_action,
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_resolution_cast_success(
     state: &mut GameState,
     player: PlayerId,
     cast_object: ObjectId,
     resulting_mv: u32,
+    source_id: ObjectId,
     exiled_misses: Vec<ObjectId>,
+    reject_action: crate::types::ability::ResolutionMvRejectAction,
     success_action: crate::types::ability::ResolutionCastSuccessAction,
     events: &mut Vec<GameEvent>,
 ) -> Option<Box<WaitingFor>> {
@@ -8412,15 +8421,44 @@ fn handle_resolution_cast_success(
         // CR 702.85a / CR 701.57a: the hit is being cast, so only the misses
         // bottom-shuffle.
         ResolutionCastSuccessAction::BottomMisses => {
-            crate::game::effects::cascade::shuffle_to_bottom(state, &exiled_misses, events);
-            None
+            let completion = match reject_action {
+                crate::types::ability::ResolutionMvRejectAction::BottomWithMisses => None,
+                crate::types::ability::ResolutionMvRejectAction::ToHand => Some(
+                    crate::types::game_state::BatchCompletion::DiscoverPlacementComplete {
+                        source_id,
+                    },
+                ),
+                crate::types::ability::ResolutionMvRejectAction::RemainExiled => None,
+            };
+            match crate::game::effects::cascade::shuffle_to_bottom(
+                state,
+                &exiled_misses,
+                source_id,
+                completion,
+                events,
+            ) {
+                crate::game::zone_pipeline::BatchMoveResult::Done => None,
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                    Some(Box::new(state.waiting_for.clone()))
+                }
+            }
         }
         ResolutionCastSuccessAction::RippleOfferRemaining { mut remaining_hits } => {
             if remaining_hits.is_empty() {
                 // CR 702.60a: after the last accepted hit, put the revealed
                 // cards not cast this way on the library bottom.
-                crate::game::effects::cascade::shuffle_to_bottom(state, &exiled_misses, events);
-                None
+                match crate::game::effects::cascade::shuffle_to_bottom(
+                    state,
+                    &exiled_misses,
+                    source_id,
+                    None,
+                    events,
+                ) {
+                    crate::game::zone_pipeline::BatchMoveResult::Done => None,
+                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                        Some(Box::new(state.waiting_for.clone()))
+                    }
+                }
             } else {
                 let hit_card = remaining_hits.remove(0);
                 Some(Box::new(WaitingFor::CastOffer {
@@ -8429,6 +8467,7 @@ fn handle_resolution_cast_success(
                         hit_card,
                         remaining_hits,
                         revealed_misses: exiled_misses,
+                        source_id,
                     },
                 }))
             }
@@ -8589,6 +8628,7 @@ fn handle_resolution_cast_rejection(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
+    source_id: ObjectId,
     exiled_misses: Vec<ObjectId>,
     reject_action: crate::types::ability::ResolutionMvRejectAction,
     events: &mut Vec<GameEvent>,
@@ -8602,25 +8642,52 @@ fn handle_resolution_cast_rejection(
         state.stack.remove(pos);
     }
 
-    match reject_action {
+    let needs_choice = match reject_action {
         // CR 702.85a: Cascade — misses + the hit (declined at cast time) all
         // bottom-shuffle together in a random order.
         ResolutionMvRejectAction::BottomWithMisses => {
             let mut all_to_bottom = exiled_misses;
             all_to_bottom.push(object_id);
-            crate::game::effects::cascade::shuffle_to_bottom(state, &all_to_bottom, events);
+            matches!(
+                crate::game::effects::cascade::shuffle_to_bottom(
+                    state,
+                    &all_to_bottom,
+                    source_id,
+                    None,
+                    events,
+                ),
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice
+            )
         }
         // CR 701.57a: Discover — the misses go to the library bottom in a
         // random order; the hit goes to its owner's hand.
         ResolutionMvRejectAction::ToHand => {
-            crate::game::effects::cascade::shuffle_to_bottom(state, &exiled_misses, events);
-            super::zones::move_to_zone(state, object_id, Zone::Hand, events);
+            matches!(
+                crate::game::effects::cascade::shuffle_to_bottom(
+                    state,
+                    &exiled_misses,
+                    source_id,
+                    Some(
+                        crate::types::game_state::BatchCompletion::ResolutionCastRejectedToHand {
+                            player,
+                            hit_card: object_id,
+                            source_id,
+                        },
+                    ),
+                    events,
+                ),
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice
+            )
         }
         // CR 702.62a / CR 702.88a: Suspend / Rebound — no dig misses and no
         // resulting-MV gate, so this path is unreachable in practice. "If you
         // don't [cast it], it remains exiled": the card simply stays in exile
         // (the announcement-time stack entry was already removed above).
-        ResolutionMvRejectAction::RemainExiled => {}
+        ResolutionMvRejectAction::RemainExiled => false,
+    };
+
+    if needs_choice {
+        return Ok(state.waiting_for.clone());
     }
 
     // CR 601.2a: Priority returns to the would-be caster.
@@ -16095,6 +16162,7 @@ mod tests {
                     }),
                     granted_to: None,
                     resolution_cleanup: Some(ResolutionCastCleanup {
+                        source_id: hit,
                         exiled_misses: vec![miss_a, miss_b],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::BottomMisses,
@@ -16208,6 +16276,7 @@ mod tests {
                     constraint: None,
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: Some(ResolutionCastCleanup {
+                        source_id: hit,
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::RippleOfferRemaining {
@@ -16243,6 +16312,7 @@ mod tests {
                                 hit_card,
                                 remaining_hits,
                                 revealed_misses,
+                                ..
                             },
                     } => {
                         assert_eq!(player, PlayerId(0));
@@ -16277,6 +16347,7 @@ mod tests {
                     constraint: None,
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: Some(ResolutionCastCleanup {
+                        source_id: hit,
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::RippleOfferRemaining {
@@ -16538,6 +16609,7 @@ mod tests {
                     }),
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: Some(ResolutionCastCleanup {
+                        source_id: hit,
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::BottomMisses,
@@ -16595,6 +16667,7 @@ mod tests {
                     }),
                     granted_to: Some(PlayerId(1)),
                     resolution_cleanup: Some(ResolutionCastCleanup {
+                        source_id: hit,
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::BottomMisses,
@@ -16734,6 +16807,7 @@ mod tests {
             let waiting_for = handle_resolution_cast_rejection(
                 &mut state,
                 PlayerId(0),
+                hit,
                 hit,
                 misses.clone(),
                 ResolutionMvRejectAction::BottomWithMisses,
