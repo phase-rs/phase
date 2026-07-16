@@ -768,6 +768,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
         | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         // CR 302.6: per-turn control-continuity marker — a turn/history-relative
         // predicate like the siblings here (POISON for memoization).

@@ -5017,6 +5017,89 @@ mod tests {
         assert!(validate_attackers(&state, &[akron, plain_creature]).is_err());
     }
 
+    /// CR 508.1c + CR 509.1b: Storm, Windrider's compound static is enforced
+    /// through the parser and combat pipeline. The restriction applies to all
+    /// flying creatures, not only Storm, and it distinguishes the source's
+    /// controller from another defending player.
+    #[test]
+    fn storm_windrider_compound_static_scopes_attack_and_block_restrictions() {
+        let defs = parse_static_line_multi(
+            "Creatures with flying can't attack you or block creatures you control.",
+        );
+        assert_eq!(
+            defs.len(),
+            2,
+            "compound static must parse to two definitions"
+        );
+
+        let mut attack_state = setup_multiplayer_combat(3);
+        attack_state.active_player = PlayerId(1);
+        let storm = create_creature(&mut attack_state, PlayerId(0), "Storm, Windrider", 3, 3);
+        let storm_definitions = &mut attack_state
+            .objects
+            .get_mut(&storm)
+            .unwrap()
+            .static_definitions;
+        for definition in defs.clone() {
+            storm_definitions.push(definition);
+        }
+        let flyer = create_creature(&mut attack_state, PlayerId(1), "Sky Drake", 2, 2);
+        attack_state
+            .objects
+            .get_mut(&flyer)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+
+        assert!(
+            declare_attackers(
+                &mut attack_state,
+                &[(flyer, AttackTarget::Player(PlayerId(0)))],
+                &mut vec![],
+            )
+            .is_err(),
+            "a flying creature cannot attack Storm's controller"
+        );
+        assert!(
+            declare_attackers(
+                &mut attack_state,
+                &[(flyer, AttackTarget::Player(PlayerId(2)))],
+                &mut vec![],
+            )
+            .is_ok(),
+            "the same flyer may attack another defending player"
+        );
+
+        let mut block_state = setup_multiplayer_combat(3);
+        let storm = create_creature(&mut block_state, PlayerId(0), "Storm, Windrider", 3, 3);
+        let storm_definitions = &mut block_state
+            .objects
+            .get_mut(&storm)
+            .unwrap()
+            .static_definitions;
+        for definition in defs {
+            storm_definitions.push(definition);
+        }
+        let flyer = create_creature(&mut block_state, PlayerId(1), "Sky Drake", 2, 2);
+        block_state
+            .objects
+            .get_mut(&flyer)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let protected_attacker = create_creature(&mut block_state, PlayerId(0), "Bear", 2, 2);
+        let other_attacker = create_creature(&mut block_state, PlayerId(2), "Wolf", 2, 2);
+
+        assert!(
+            validate_blockers(&block_state, &[(flyer, protected_attacker)]).is_err(),
+            "a flying creature cannot block a creature Storm's controller controls"
+        );
+        assert!(
+            validate_blockers(&block_state, &[(flyer, other_attacker)]).is_ok(),
+            "the same flyer may block a creature another player controls"
+        );
+    }
+
     #[test]
     fn tapped_creature_cannot_attack() {
         let mut state = setup();

@@ -589,6 +589,20 @@ pub enum ProposedEvent {
         player_id: PlayerId,
         applied: HashSet<AppliedReplacementKey>,
     },
+    /// CR 701.3a + CR 614.1a: An Aura, Equipment, or Fortification is about to
+    /// become attached to an object via `Effect::Attach` (Equip activation, or
+    /// any other "attach ~ to" effect). Carried through the replacement
+    /// pipeline so "as it becomes attached, choose …" replacements
+    /// (`ReplacementEvent::Attached`, Psychic Paper) can bind their choice as
+    /// the attachment resolves, mirroring the "as ~ enters, choose" ETB
+    /// analogue. Auras attaching to a PLAYER host use `attach_to_player`
+    /// directly and never propose this event — only object hosts route
+    /// through `Effect::Attach::resolve`.
+    Attach {
+        attachment_id: ObjectId,
+        target_id: ObjectId,
+        applied: HashSet<AppliedReplacementKey>,
+    },
 }
 
 fn default_produce_mana_count() -> u32 {
@@ -719,7 +733,8 @@ impl ProposedEvent {
             | ProposedEvent::BeginPhase { applied, .. }
             | ProposedEvent::ProduceMana { applied, .. }
             | ProposedEvent::EmptyManaPool { applied, .. }
-            | ProposedEvent::Planeswalk { applied, .. } => applied,
+            | ProposedEvent::Planeswalk { applied, .. }
+            | ProposedEvent::Attach { applied, .. } => applied,
         }
     }
 
@@ -751,7 +766,8 @@ impl ProposedEvent {
             | ProposedEvent::BeginPhase { applied, .. }
             | ProposedEvent::ProduceMana { applied, .. }
             | ProposedEvent::EmptyManaPool { applied, .. }
-            | ProposedEvent::Planeswalk { applied, .. } => applied,
+            | ProposedEvent::Planeswalk { applied, .. }
+            | ProposedEvent::Attach { applied, .. } => applied,
         }
     }
 
@@ -849,6 +865,15 @@ impl ProposedEvent {
                 .get(entry_ref)
                 .map(|entry| entry.object.controller)
                 .unwrap_or(PlayerId(0)),
+            // CR 701.3a: The attaching Aura/Equipment's controller is the
+            // affected player — they are the one who would choose a
+            // replacement order (CR 616.1) and bind any "as it becomes
+            // attached, choose" continuation.
+            ProposedEvent::Attach { attachment_id, .. } => state
+                .objects
+                .get(attachment_id)
+                .map(|o| o.controller)
+                .unwrap_or(PlayerId(0)),
         }
     }
 
@@ -899,6 +924,10 @@ impl ProposedEvent {
             // CR 701.31: a planeswalk has no affected object — the planar deck
             // rotation is not an object-scoped event.
             | ProposedEvent::Planeswalk { .. } => None,
+            // CR 701.3a: the attaching Aura/Equipment is the object
+            // `valid_card` filters (and "as it becomes attached" replacements)
+            // match against.
+            ProposedEvent::Attach { attachment_id, .. } => Some(*attachment_id),
         }
     }
 }
@@ -1055,8 +1084,13 @@ mod tests {
                 units: Vec::new(),
                 applied: HashSet::new(),
             },
+            ProposedEvent::Attach {
+                attachment_id: ObjectId(1),
+                target_id: ObjectId(2),
+                applied: HashSet::new(),
+            },
         ];
-        assert_eq!(events.len(), 23);
+        assert_eq!(events.len(), 24);
     }
 
     #[test]

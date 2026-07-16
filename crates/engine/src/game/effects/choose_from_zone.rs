@@ -4,7 +4,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::players;
 use crate::types::ability::{
     ChooseFromZoneConstraint, Chooser, Effect, EffectError, EffectKind, ForEachCategoryAction,
-    ResolvedAbility, TargetFilter, TargetRef, ZoneOwner,
+    ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetRef, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -79,7 +79,7 @@ pub fn resolve(
     // CR 608.2d: If there are no objects to choose from, skip the choice
     // (a player can't choose an option that's illegal or impossible).
     if cards.is_empty() || count == 0 {
-        state.last_choose_from_zone_found_nothing = true;
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,
@@ -453,7 +453,7 @@ pub(crate) fn resolve_random_in_chain(
     // CR 609.3: An empty pool (or count 0) does nothing; the chain then skips
     // any continuation that depends on the missing pick.
     if cards.is_empty() || count == 0 {
-        state.last_choose_from_zone_found_nothing = true;
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,

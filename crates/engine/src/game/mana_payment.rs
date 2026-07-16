@@ -695,7 +695,7 @@ pub fn can_pay_for_spell(
                     }
                     // CR 107.4h: Snow mana {S} — paid with mana from a snow source.
                     ShardRequirement::Snow => {
-                        if !spend_snow(&mut sim, &[]) {
+                        if !spend_snow(&mut sim, spell, &[]) {
                             return false;
                         }
                     }
@@ -931,7 +931,7 @@ pub(crate) fn reduce_cost_by_pool(
                 }
             }
             // CR 107.4h: Snow mana only from snow sources.
-            ShardRequirement::Snow => spend_snow_unit(&mut scratch, &[]).is_some(),
+            ShardRequirement::Snow => spend_snow_unit(&mut scratch, spell, &[]).is_some(),
             ShardRequirement::TwoOrMoreColorSource => {
                 spend_two_or_more_color_source_eligible(&mut scratch, spell, &[]).is_some()
             }
@@ -1214,8 +1214,8 @@ fn pay_cost_with_demand_and_choices_once(
                     }
                     // CR 107.4h: Snow mana {S} — paid with mana from a snow source.
                     ShardRequirement::Snow => {
-                        let unit =
-                            spend_snow_unit(pool, pins).ok_or(PaymentError::InsufficientMana)?;
+                        let unit = spend_snow_unit(pool, spell, pins)
+                            .ok_or(PaymentError::InsufficientMana)?;
                         spent.push(unit);
                     }
                     ShardRequirement::TwoOrMoreColorSource => {
@@ -1542,7 +1542,7 @@ pub fn compute_phyrexian_shards(
                 }
             }
             ShardRequirement::Snow => {
-                let _ = spend_snow_unit(&mut sim, &[]);
+                let _ = spend_snow_unit(&mut sim, spell, &[]);
             }
             ShardRequirement::TwoOrMoreColorSource => {
                 let _ = spend_two_or_more_color_source_eligible(&mut sim, spell, &[]);
@@ -1853,6 +1853,25 @@ pub fn land_subtype_to_mana_type(subtype: &str) -> Option<ManaType> {
 /// CR 106.6: Restricted mana can only be spent on spells/abilities that match the restriction.
 /// Prefers non-`{Z}`-eligible mana for ordinary colored/colorless requirements
 /// so later source-quality-constrained shards are not starved.
+/// CR 601.2g / CR 118.3: "You can't spend mana to cast this spell" (Hogaak,
+/// Arisen Necropolis). Under such a spell-payment context, real pool mana is
+/// ineligible — only convoke/delve stand-in units may pay. Layered on top of the
+/// unit's own spend restrictions so both gates apply.
+fn ctx_permits_unit(ctx: &PaymentContext<'_>, unit: &ManaUnit) -> bool {
+    if let PaymentContext::Spell(meta) = ctx {
+        if meta.cant_spend_mana && !unit.is_convoke_payment() {
+            return false;
+        }
+    }
+    unit.restrictions.iter().all(|r| r.allows(ctx))
+}
+
+/// `ctx_permits_unit` lifted over an optional context: no context means every
+/// unit is eligible (CR 106.6 restrictions only bite when a context is supplied).
+fn spell_permits_unit(spell: Option<&PaymentContext<'_>>, unit: &ManaUnit) -> bool {
+    spell.is_none_or(|ctx| ctx_permits_unit(ctx, unit))
+}
+
 fn spend_eligible(
     pool: &mut ManaPool,
     color: ManaType,
@@ -1864,9 +1883,7 @@ fn spend_eligible(
             if color == ManaType::Colorless && unit.is_convoke_payment() {
                 return false;
             }
-            unit.restrictions
-                .iter()
-                .all(|restriction| restriction.allows(ctx))
+            ctx_permits_unit(ctx, unit)
         }),
         None => spend_color_prefer_non_z(pool, color, pins, |unit| {
             !(color == ManaType::Colorless && unit.is_convoke_payment())
@@ -2111,11 +2128,7 @@ fn eligible_color_count(
 ) -> usize {
     pool.mana
         .iter()
-        .filter(|m| {
-            m.color == color
-                && !m.is_convoke_payment()
-                && spell.is_none_or(|ctx| m.restrictions.iter().all(|r| r.allows(ctx)))
-        })
+        .filter(|m| m.color == color && !m.is_convoke_payment() && spell_permits_unit(spell, m))
         .count()
 }
 
@@ -2136,7 +2149,7 @@ fn spend_any_eligible(
         if let Some(pos) = pool.mana.iter().position(|unit| {
             pins.contains(&unit.pip_id)
                 && !unit.is_convoke_payment()
-                && spell.is_none_or(|ctx| unit.restrictions.iter().all(|r| r.allows(ctx)))
+                && spell_permits_unit(spell, unit)
         }) {
             return Some(pool.mana.swap_remove(pos));
         }
@@ -2191,11 +2204,7 @@ fn spend_any_eligible(
             }
             best.and_then(|(color, _, _)| {
                 spend_color_prefer_non_z(pool, color, pins, |unit| {
-                    !unit.is_convoke_payment()
-                        && unit
-                            .restrictions
-                            .iter()
-                            .all(|restriction| restriction.allows(ctx))
+                    !unit.is_convoke_payment() && ctx_permits_unit(ctx, unit)
                 })
             })
         }
@@ -2219,7 +2228,7 @@ fn spend_any_for_required_colors(
             pins.contains(&unit.pip_id)
                 && required_colors.contains(&unit.color)
                 && !unit.is_convoke_payment()
-                && spell.is_none_or(|ctx| unit.restrictions.iter().all(|r| r.allows(ctx)))
+                && spell_permits_unit(spell, unit)
         }) {
             return Some(pool.mana.swap_remove(pos));
         }
@@ -2264,10 +2273,10 @@ fn spend_generic_non_demanded(
     // Convoke payment units are creature-tap stand-ins, not floated colored mana;
     // they are never reserved for an outer colored shard, so prefer them first
     // (mirrors `spend_generic_eligible`'s convoke-first ordering).
-    let convoke_pos = pool.mana.iter().position(|unit| {
-        unit.is_convoke_payment()
-            && spell.is_none_or(|ctx| unit.restrictions.iter().all(|r| r.allows(ctx)))
-    });
+    let convoke_pos = pool
+        .mana
+        .iter()
+        .position(|unit| unit.is_convoke_payment() && spell_permits_unit(spell, unit));
     if let Some(pos) = convoke_pos {
         return Some(pool.mana.swap_remove(pos));
     }
@@ -2288,7 +2297,7 @@ fn spend_generic_non_demanded(
             return false;
         }
         if let Some(ctx) = spell {
-            if !unit.restrictions.iter().all(|r| r.allows(ctx)) {
+            if !ctx_permits_unit(ctx, unit) {
                 return false;
             }
         }
@@ -2329,20 +2338,18 @@ fn spend_generic_eligible(
         if let Some(pos) = pool.mana.iter().position(|unit| {
             pins.contains(&unit.pip_id)
                 && !unit.is_convoke_payment()
-                && spell.is_none_or(|ctx| unit.restrictions.iter().all(|r| r.allows(ctx)))
+                && spell_permits_unit(spell, unit)
         }) {
             return Some(pool.mana.swap_remove(pos));
         }
     }
 
     if let Some(ctx) = spell {
-        if let Some(pos) = pool.mana.iter().position(|unit| {
-            unit.is_convoke_payment()
-                && unit
-                    .restrictions
-                    .iter()
-                    .all(|restriction| restriction.allows(ctx))
-        }) {
+        if let Some(pos) = pool
+            .mana
+            .iter()
+            .position(|unit| unit.is_convoke_payment() && ctx_permits_unit(ctx, unit))
+        {
             return Some(pool.mana.swap_remove(pos));
         }
     } else if let Some(pos) = pool.mana.iter().position(|unit| unit.is_convoke_payment()) {
@@ -2408,18 +2415,30 @@ fn spend_any_unit(pool: &mut ManaPool, pins: &[ManaPipId]) -> Option<ManaUnit> {
     })
 }
 
-fn spend_snow(pool: &mut ManaPool, pins: &[ManaPipId]) -> bool {
-    spend_snow_unit(pool, pins).is_some()
+fn spend_snow(pool: &mut ManaPool, spell: Option<&PaymentContext<'_>>, pins: &[ManaPipId]) -> bool {
+    spend_snow_unit(pool, spell, pins).is_some()
 }
 
 /// CR 107.4h: Snow mana {S} — paid with one mana of any type from a snow source.
-fn spend_snow_unit(pool: &mut ManaPool, pins: &[ManaPipId]) -> Option<ManaUnit> {
+/// CR 601.2g: honors the spell context so a "can't spend mana" spell (Hogaak)
+/// cannot pay a {S} shard from real pool snow mana.
+fn spend_snow_unit(
+    pool: &mut ManaPool,
+    spell: Option<&PaymentContext<'_>>,
+    pins: &[ManaPipId],
+) -> Option<ManaUnit> {
     // CR 118.3a: prefer a pinned snow unit before the first available one.
     let pos = pick_position(
         pool,
         pins,
-        |unit| unit.is_snow(),
-        |pool| pool.mana.iter().position(|m| m.is_snow()),
+        |unit| unit.is_snow() && spell_permits_unit(spell, unit),
+        |pool| match spell {
+            Some(ctx) => pool
+                .mana
+                .iter()
+                .position(|m| m.is_snow() && ctx_permits_unit(ctx, m)),
+            None => pool.mana.iter().position(|m| m.is_snow()),
+        },
     );
     pos.map(|pos| pool.mana.swap_remove(pos))
 }
@@ -2433,17 +2452,10 @@ fn spend_two_or_more_color_source_eligible(
     let pos = pick_position(
         pool,
         pins,
-        |unit| {
-            unit.source_could_produce_two_or_more_colors
-                && spell.is_none_or(|ctx| unit.restrictions.iter().all(|r| r.allows(ctx)))
-        },
+        |unit| unit.source_could_produce_two_or_more_colors && spell_permits_unit(spell, unit),
         |pool| match spell {
             Some(ctx) => pool.mana.iter().position(|unit| {
-                unit.source_could_produce_two_or_more_colors
-                    && unit
-                        .restrictions
-                        .iter()
-                        .all(|restriction| restriction.allows(ctx))
+                unit.source_could_produce_two_or_more_colors && ctx_permits_unit(ctx, unit)
             }),
             None => pool
                 .mana
@@ -2607,6 +2619,65 @@ mod tests {
             source_could_produce_two_or_more_colors: true,
             ..make_unit(color)
         }
+    }
+
+    fn make_snow_unit(color: ManaType) -> ManaUnit {
+        ManaUnit {
+            supertype: Some(crate::types::mana::ManaSupertype::Snow),
+            ..make_unit(color)
+        }
+    }
+
+    fn spell_meta(cant_spend_mana: bool) -> SpellMeta {
+        SpellMeta {
+            types: Vec::new(),
+            subtypes: Vec::new(),
+            keyword_kinds: Vec::new(),
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+            has_x_in_cost: false,
+            is_face_down: false,
+            cant_spend_mana,
+        }
+    }
+
+    /// CR 601.2g / CR 107.4h: the {S} (snow) payment route must honor the spell
+    /// context — a "can't spend mana" spell (Hogaak) cannot pay a snow shard from
+    /// real pool snow mana, though an ordinary spell still can.
+    #[test]
+    fn snow_shard_respects_cant_spend_mana() {
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Snow],
+            generic: 0,
+        };
+
+        // Control: an ordinary spell CAN pay {S} from a real snow unit.
+        let ordinary = spell_meta(false);
+        let mut pool = ManaPool::default();
+        pool.add(make_snow_unit(ManaType::Blue));
+        assert!(can_pay_for_spell(
+            &pool,
+            &cost,
+            Some(&PaymentContext::Spell(&ordinary)),
+            crate::types::mana::CostPermissionContext::default(),
+        ));
+
+        // CR 601.2g: a "can't spend mana" spell CANNOT — real snow mana is
+        // ineligible, so the {S} shard is unpayable from the pool.
+        let forbid = spell_meta(true);
+        let mut pool = ManaPool::default();
+        pool.add(make_snow_unit(ManaType::Blue));
+        assert!(!can_pay_for_spell(
+            &pool,
+            &cost,
+            Some(&PaymentContext::Spell(&forbid)),
+            crate::types::mana::CostPermissionContext::default(),
+        ));
+
+        // The live spend also refuses to consume the snow unit under the restriction.
+        assert!(spend_snow_unit(&mut pool, Some(&PaymentContext::Spell(&forbid)), &[]).is_none());
+        assert_eq!(pool.total(), 1, "the real snow unit must be left unspent");
     }
 
     #[test]
@@ -3566,6 +3637,7 @@ mod tests {
             color_count: None,
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let elf_ctx = PaymentContext::Spell(&elf);
         assert!(can_pay_for_spell(
@@ -3589,6 +3661,7 @@ mod tests {
             color_count: None,
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let goblin_ctx = PaymentContext::Spell(&goblin);
         assert!(!can_pay_for_spell(
@@ -3638,6 +3711,7 @@ mod tests {
             color_count: None,
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let thought_knot_ctx = PaymentContext::Spell(&thought_knot);
         assert!(can_pay_for_spell(
@@ -3660,6 +3734,7 @@ mod tests {
             color_count: None,
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let colored_eldrazi_ctx = PaymentContext::Spell(&colored_eldrazi);
         assert!(!can_pay_for_spell(
@@ -3718,6 +3793,7 @@ mod tests {
             color_count: None,
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let colored_spell_ctx = PaymentContext::Spell(&colored_spell);
         assert!(!can_pay_for_spell(
@@ -3795,6 +3871,7 @@ mod tests {
             color_count: None,
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         assert!(
             !can_pay_for_spell(
@@ -3834,6 +3911,7 @@ mod tests {
             color_count: None,
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         assert!(
             can_pay_for_spell(
@@ -3934,6 +4012,7 @@ mod tests {
             color_count: None,
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let flashback_ctx = PaymentContext::Spell(&flashback_spell);
         assert!(can_pay_for_spell(
@@ -3956,6 +4035,7 @@ mod tests {
             color_count: None,
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let normal_ctx = PaymentContext::Spell(&normal_spell);
         assert!(!can_pay_for_spell(
@@ -4001,6 +4081,7 @@ mod tests {
             color_count: None,
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let gy_ctx = PaymentContext::Spell(&graveyard_flashback_spell);
         assert!(can_pay_for_spell(
@@ -4023,6 +4104,7 @@ mod tests {
             color_count: None,
             has_x_in_cost: false,
             is_face_down: false,
+            cant_spend_mana: false,
         };
         let hand_ctx = PaymentContext::Spell(&hand_flashback_spell);
         assert!(!can_pay_for_spell(
