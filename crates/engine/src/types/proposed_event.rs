@@ -907,7 +907,14 @@ impl ProposedEvent {
             | ProposedEvent::ProduceMana { player_id, .. }
             | ProposedEvent::EmptyManaPool { player_id, .. }
             | ProposedEvent::Planeswalk { player_id, .. } => *player_id,
-            ProposedEvent::SearchFound { searcher, .. } => *searcher,
+            // CR 616.1: a card in a library has no controller, so its owner
+            // chooses among applicable replacements. `None` is reserved for a
+            // nonlibrary selection, where no SearchFound replacement applies.
+            ProposedEvent::SearchFound {
+                searcher,
+                library_owner,
+                ..
+            } => library_owner.unwrap_or(*searcher),
             ProposedEvent::CreateToken { owner, .. } => *owner,
             ProposedEvent::TokenEntry { entry_ref, .. } => state
                 .liminal_entries

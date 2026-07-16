@@ -5628,6 +5628,79 @@ mod tests {
     }
 
     #[test]
+    fn search_choice_action_routes_found_card_through_replacement_before_printed_destination() {
+        let mut state = GameState::new_two_player(42);
+        let source = install_search_found_redirect(&mut state, PlayerId(0), 90_010, Zone::Exile);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions[0]
+            .mode = ReplacementMode::Optional { decline: None };
+        let found = create_object(
+            &mut state,
+            CardId(90_011),
+            PlayerId(1),
+            "Found card".to_string(),
+            Zone::Library,
+        );
+        let printed_destination = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+            Box::new(printed_destination),
+            &state,
+        ));
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(1),
+            cards: vec![found],
+            count: 1,
+            reveal: false,
+            up_to: false,
+            allows_partial_find: false,
+            constraint: crate::types::ability::SearchSelectionConstraint::None,
+            split: None,
+        };
+
+        super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards { cards: vec![found] },
+        )
+        .expect("the public SearchChoice boundary offers the optional replacement");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+
+        super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("accepting the redirect resumes the printed search continuation");
+
+        assert_eq!(state.objects[&found].zone, Zone::Exile);
+        assert!(state.pending_continuation.is_none());
+        assert!(state.pending_search_found_batch.is_none());
+    }
+
+    #[test]
     fn search_found_redirect_ignores_cards_selected_outside_a_library() {
         let mut state = GameState::new_two_player(42);
         install_search_found_redirect(&mut state, PlayerId(0), 90_008, Zone::Exile);

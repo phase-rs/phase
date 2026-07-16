@@ -498,7 +498,29 @@ fn do_eliminate(
     // remaining players (not field-nulling), tracked as a separate follow-up. This
     // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
     // `pending_replacement` guard.
-    if state.pending_replacement.is_some() && state.waiting_for.acting_player() == Some(player) {
+    let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
+    // CR 800.4a + CR 616.1: SearchFound owns an outer per-card batch, and a
+    // replacement-selected zone move may own a nested batch completion. The
+    // inner pause can be either replacement ordering or another zone-delivery
+    // choice, so this teardown is keyed to the batch plus its latched chooser,
+    // independently of `pending_replacement`.
+    if state.pending_search_found_batch.is_some() && leaving_is_latched_chooser {
+        state.pending_search_found_batch = None;
+        if state
+            .pending_batch_deliveries
+            .as_ref()
+            .and_then(|pending| pending.completion.as_ref())
+            .is_some_and(|completion| {
+                matches!(
+                    completion,
+                    crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery { .. }
+                )
+            })
+        {
+            state.pending_batch_deliveries = None;
+        }
+    }
+    if state.pending_replacement.is_some() && leaving_is_latched_chooser {
         state.pending_replacement = None;
         state.replacement_may_cost_paused = false;
         super::replacement::abandon_post_replacement_continuation(state);
@@ -1126,6 +1148,28 @@ mod tests {
             count: 1,
             applied: HashSet::new(),
         });
+        state.pending_search_found_batch =
+            Some(crate::types::game_state::PendingSearchFoundBatch {
+                searcher: PlayerId(2),
+                remaining: vec![o],
+                survivors: Vec::new(),
+                continuation: crate::types::game_state::PendingSearchFoundContinuation::Standard {
+                    split: None,
+                },
+                visibility: crate::types::game_state::SearchFoundVisibility::Private,
+            });
+        state.pending_batch_deliveries = Some(crate::types::game_state::PendingBatchDeliveries {
+            remaining: Vec::new(),
+            destination: Zone::Exile,
+            source_id: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: Some(
+                crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery { object_id: o },
+            ),
+            replacement_applied: HashSet::new(),
+        });
         // CR 121.2: a paused draw instruction owned by the LEAVING chooser (P2) —
         // single-player-scoped, must clear alongside its siblings via
         // `abandon_post_replacement_continuation` (replacement.rs).
@@ -1171,6 +1215,14 @@ mod tests {
              applied seed, not just its established siblings (issue #4886, review #6)"
         );
         assert!(state.pending_connive_reentry.is_none());
+        assert!(
+            state.pending_search_found_batch.is_none(),
+            "the eliminated chooser's outer found-card batch must be abandoned"
+        );
+        assert!(
+            state.pending_batch_deliveries.is_none(),
+            "the eliminated chooser's nested found-card zone completion must be abandoned"
+        );
         assert!(
             state.draw_sequences.is_empty(),
             "CR 121.2: the leaving chooser's paused draw instruction must be \

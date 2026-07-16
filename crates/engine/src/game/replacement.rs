@@ -3874,17 +3874,18 @@ fn planeswalk_applier(
 
 fn search_found_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     let ProposedEvent::SearchFound {
-        library_owner: Some(_),
+        searcher,
+        library_owner: Some(library_owner),
         disposition: SearchFoundDisposition::Original,
         ..
     } = event
     else {
         return false;
     };
-    // The event is generic to every card found in a searched library. Player
-    // relation and own-library predicates belong on the replacement definition,
-    // not in this event matcher.
-    true
+    // CR 701.23a: this surface is the own-library search class. The replacement
+    // definition supplies the source-controller relation (You/Opponent), while
+    // the event supplies the independent searched-library ownership relation.
+    searcher == library_owner
 }
 
 /// CR 614.1 + CR 701.23a: Lower the existing `ChangeZone` building block into
@@ -8158,10 +8159,21 @@ mod tests {
     /// mismatched You.
     #[test]
     fn search_found_matcher_composes_with_generic_player_scopes() {
-        for (scope, searcher, expected) in [
-            (ReplacementPlayerScope::You, PlayerId(0), true),
-            (ReplacementPlayerScope::You, PlayerId(1), false),
-            (ReplacementPlayerScope::AnyPlayer, PlayerId(1), true),
+        for (scope, searcher, library_owner, expected) in [
+            (ReplacementPlayerScope::You, PlayerId(0), PlayerId(0), true),
+            (ReplacementPlayerScope::You, PlayerId(1), PlayerId(1), false),
+            (
+                ReplacementPlayerScope::AnyPlayer,
+                PlayerId(1),
+                PlayerId(1),
+                true,
+            ),
+            (
+                ReplacementPlayerScope::AnyPlayer,
+                PlayerId(1),
+                PlayerId(2),
+                false,
+            ),
         ] {
             let mut replacement = ReplacementDefinition::new(ReplacementEvent::SearchFound)
                 .execute(search_found_execute(Zone::Exile));
@@ -8171,7 +8183,7 @@ mod tests {
             let state = test_state_with_object(source, Zone::Battlefield, vec![replacement]);
             let proposed = ProposedEvent::SearchFound {
                 searcher,
-                library_owner: Some(PlayerId(1)),
+                library_owner: Some(library_owner),
                 object_id: found,
                 disposition: SearchFoundDisposition::Original,
                 applied: HashSet::new(),
@@ -8180,8 +8192,9 @@ mod tests {
             assert_eq!(
                 !find_applicable_replacements(&state, &proposed, replacement_registry()).is_empty(),
                 expected,
-                "unexpected SearchFound applicability for {scope:?} and {searcher:?}"
+                "unexpected SearchFound applicability for {scope:?}, {searcher:?}, and {library_owner:?}"
             );
+            assert_eq!(proposed.affected_player(&state), library_owner);
         }
     }
 
