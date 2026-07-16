@@ -26,22 +26,16 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (allowed_categories, excluded_to, duration) = match &ability.effect {
-        Effect::ChangeTextWords {
-            allowed_categories,
-            excluded_to,
-            duration,
-            ..
-        } => (
-            allowed_categories.clone(),
-            excluded_to.clone(),
-            duration.clone(),
-        ),
-        _ => {
-            return Err(EffectError::InvalidParam(
-                "expected ChangeTextWords effect".to_string(),
-            ))
-        }
+    let Effect::ChangeTextWords {
+        allowed_categories,
+        excluded_to,
+        duration,
+        ..
+    } = &ability.effect
+    else {
+        return Err(EffectError::InvalidParam(
+            "expected ChangeTextWords effect".to_string(),
+        ));
     };
 
     // CR 608.2b: the effect needs a legal object target still in its zone.
@@ -54,7 +48,7 @@ pub fn resolve(
         return Ok(());
     };
 
-    let options = build_options(state, target, &allowed_categories, &excluded_to);
+    let options = build_options(state, target, allowed_categories, excluded_to);
 
     // CR 609.3: no legal substitution exists — do as much as possible (nothing).
     if options.is_empty() {
@@ -67,7 +61,7 @@ pub fn resolve(
         source: ability.source_id,
         target,
         options,
-        duration,
+        duration: duration.clone(),
     };
     events.push(resolved_event(ability));
     Ok(())

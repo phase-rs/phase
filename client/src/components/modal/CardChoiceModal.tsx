@@ -2914,7 +2914,7 @@ function TextWordReplacementModal({
         {data.options.map((option, index) => (
           <motion.button
             key={index}
-            className="rounded-lg border border-white/20 bg-white/10 px-4 py-2 text-sm text-white transition hover:bg-white/20"
+            className="min-h-11 rounded-lg border border-white/20 bg-white/10 px-4 py-2 text-sm text-white transition hover:bg-white/20"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.05 + index * 0.03, duration: 0.25 }}

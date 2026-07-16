@@ -30,12 +30,20 @@ use std::sync::Arc;
 
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityDefinition, BasicLandType, ContinuousModification, DevotionColors, Effect, FilterProp,
-    ObjectProperty, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
-    TextWord, TextWordCategory, TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction,
+    AttackersDeclaredCountSubject, BasicLandType, CardTypeSetSource, ContinuousModification,
+    CostReduction, CounterSourceRider, DelayedTriggerCondition, DevotionColors, Duration, Effect,
+    ExiledSpellRider, FilterProp, ObjectProperty, ParsedCondition, PlayerFilter, PtValue,
+    QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, StaticCondition, StaticDefinition, TargetFilter, TextWord, TextWordCategory,
+    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, UntilCondition, VoteSubject,
 };
 use crate::types::keywords::{HexproofFilter, Keyword, ProtectionTarget};
 use crate::types::mana::ManaColor;
+use crate::types::statics::{
+    BlockExceptionKind, CostPaymentProhibition, HandSizeModification, StaticMode,
+};
 
 /// Direction of a text-word walk.
 pub enum WordCursor<'a> {
@@ -154,11 +162,115 @@ pub fn collect_present_words(obj: &GameObject, category: TextWordCategory) -> BT
 /// (post-layer) word-bearing roots in place. Never descends into name / color /
 /// mana-cost roots (CR 612.2 structural exclusion).
 ///
-/// Ability *costs* and non-`affected`/`condition`/`modifications` static fields
-/// (e.g. `StaticMode`, `attack_defended`) and `AbilityCondition` bodies are an
-/// intentional coverage gap: no covered card changes a word buried there, and
-/// leaving them out keeps the traversal to the roots CR 612 actually reaches for
-/// this class. A future card needing them extends the roots here.
+/// CR 612.1 + CR 118.12: ability *costs* (`AbilityDefinition.cost` — Goblin
+/// Chirurgeon's "Sacrifice a Goblin"), the resolution `condition`
+/// (`AbilityCondition` — "if you control a Goblin"), the `unless_pay` modifier,
+/// the `repeat_until` loop predicate, the self-referential `cost_reduction`
+/// (count + `ParsedCondition` gate), the `activation_restrictions`
+/// (`ParsedCondition` gates), the `activator_filter` / `player_scope`
+/// (`PlayerFilter` roots), and the `target_chooser` / `announced_x` roots ARE
+/// walked (see [`walk_ability_cost`] / [`walk_ability_condition`] /
+/// [`walk_cost_reduction`] / [`walk_activation_restriction`] /
+/// [`walk_player_filter`]). Trigger event-shape filters (`valid_card` and its
+/// `valid_target` / `valid_source` / `valid_subject_player` siblings), a
+/// trigger's `unless_pay`, its intervening-if `condition` (`TriggerCondition`),
+/// and its rate-limit `constraint` (`TriggerConstraint`) are walked too. The
+/// `PlayerFilter` root is descended into wherever it appears
+/// (`AbilityCondition::ScopedPlayerMatches`, `TriggerCondition::DuringPlayersTurn`,
+/// `player_scope`, `activator_filter`, and nested self-composed anchors). The
+/// static `per_player_condition` (`ParsedCondition`) is walked
+/// (see [`walk_static_definition`] / [`walk_parsed_condition`]).
+///
+/// CR 614.1: replacement effects (`replacement_definitions`, Root 6) are walked —
+/// their event filter, applicability `ReplacementCondition`, resulting ability,
+/// damage source / redirect filters, AND their `mode`'s optional/pay-cost
+/// `decline` continuation (see [`walk_replacement_definition`] /
+/// [`walk_replacement_mode`]).
+/// CR 611.2b: a "for as long as [condition]" `Duration` (on `AbilityDefinition`
+/// and on the duration-bearing `Effect` variants) is walked via [`walk_duration`].
+///
+/// CR 603.7 + CR 611.2: cross-referenced wrapper enums that embed a walked carrier
+/// are recursed too — a delayed trigger's firing `condition`
+/// (`DelayedTriggerCondition`, on `CreateDelayedTrigger` and the Feather-style
+/// `ExiledSpellRider` return timing) and a counter effect's `source_rider`
+/// (`CounterSourceRider::LosesAbilities` — the installed `StaticDefinition` +
+/// `Duration`) name their object class in a filter / granted static.
+///
+/// Every reachable word-bearing carrier field on a battlefield `GameObject`'s
+/// live characteristics is now recursed (a mechanical per-carrier-type sweep of
+/// the AST — see the module test-suite). The surfaces below are the ONLY roots
+/// left un-walked, and each is genuinely wordless (a pip / marker / core-type,
+/// not a color/land/creature WORD used as such), structurally excluded by CR 612,
+/// unreachable for battlefield permanents, or a deliberately-red secondary filter:
+/// - STRUCTURAL (CR 612.2): the object's name / base name, its Layer-5 `color`
+///   field, and its mana cost / mana-symbol pips — not descended into;
+/// - PIPS, not color WORDS (CR 107.4): `QuantityRef::ManaSymbolsInManaCost`,
+///   `FilterProp::ManaSymbolCount`, `StaticMode::PayLifeAsColoredMana`, the
+///   replacement `mana_modification`, and every `AbilityCost::Mana` / keyword
+///   mana-symbol cost — a `{R}` symbol is not the word "red";
+/// - MARKER / KIND enums, not printed words: `KeywordKind`
+///   (`FilterProp::HasKeywordKind`, `AbilityCost::KeywordCostOfCastSpell`,
+///   `StaticMode::AlternativeKeywordCost`), `CoreType`
+///   (`TriggerCondition::WasType`, `ReplacementCondition::TokenCoreTypeMatches`),
+///   counter kinds (CR 122.1), `SubtypeSet` / `ChosenSubtypeKind` (bulk "all
+///   creature types" markers, no single spelled subtype);
+/// - the `base_*` printed baselines (`base_abilities`, `base_keywords`,
+///   `base_card_types`, `base_trigger/replacement/static_definitions`, …): the
+///   layer system re-seeds the live roots from these each pass and re-applies the
+///   swap on the live copy (CR 613.1c), so walking the baselines would double-
+///   apply — they are deliberately not descended into;
+/// - alternate-face / alternate-cast characteristic sets that are NOT the object's
+///   current battlefield characteristics: `back_face` (DFC other face),
+///   `specialize_faces` (Alchemy specialize faces), `cleave_variant` (spell-only
+///   alternate ability set, always `None` on a battlefield permanent) — CR 612
+///   changes the current characteristics only;
+/// - `perpetual_mods` (digital-only Alchemy perpetual edits), `stickers`
+///   (name/art/P-T stickers — no color/land/creature WORD), and
+///   `token_rules_text` (display-only alt text);
+/// - EVERY leaf-`Effect` word carrier IS now walked ([`walk_effect`] is an
+///   exhaustive `_`-free per-variant match): a leaf effect's own declared
+///   target/source filter (via `Effect::target_filter_mut`) AND all its SECONDARY
+///   carriers — a secondary `TargetFilter` (`Fight.subject`, `Attach.attachment`,
+///   `Behold.filter`, `SearchLibrary.filter`, `MoveCounters.source`, `PayCost.payer`,
+///   `ExchangeControl.target_a/b`, `ReturnAsAura.enchant_filter`, …), a subtype
+///   `String`/`Vec<String>` (`Amass.subtype`, `Animate.types`/`remove_types`), a
+///   `Keyword` (`Animate.keywords`), a `Vec<ContinuousModification>`
+///   (`CopySpell.additional_modifications`, `ReturnAsAura.grants`,
+///   `AddPendingEntersModifications`, `EachPlayerCopyChosen.copy_modifications`),
+///   an `AbilityCost` (`PayCost.cost` — "Sacrifice a Goblin"), a `PlayerFilter`
+///   (`StartYourEngines`/`ChangeSpeed.player_scope`, `DamageEachPlayer.player_filter`,
+///   `Conjure.library_players`, `ChooseOneOf.chooser`), a `QuantityExpr`
+///   count/amount (`Draw.count`, `DealDamage.amount`, `Discover.mana_value_limit`,
+///   …) or `PtValue`-wrapped quantity (`Pump.power/toughness`, `Animate.power`),
+///   and `UntilCondition::NextMatches` (`ExileFromTopUntil.until`);
+/// - the ONLY deliberately-red `Effect` surfaces (coverage stays red rather than
+///   silently mis-substituting; no covered card changes a word inside one):
+///   the mass-population object `target`/`filter` of every `*All` /
+///   population effect (`DestroyAll`/`PumpAll`/`DamageAll.target`/
+///   `ChangeZoneAll.target`/`BounceAll.target`/`CounterAll`/`GainControlAll`/
+///   `GoadAll`/`ExploreAll`/… — but a non-object carrier on the SAME effect, e.g.
+///   `PumpAll.power`/`DamageAll.amount`/`ChangeZoneAll.enter_with_counters`, IS
+///   walked), `PreventDamage.damage_source_filter`, `CastFromZone.alt_ability_cost`,
+///   the token / `CopyTokenOf` / face-down (`FaceDownProfile`) creation-spec fields,
+///   the `EpicCopy` resolved-spell snapshot, the specialized non-listed sub-enums
+///   (`DamageTargetFilter`/`DamageRedirectTarget`, `GuessSubject`,
+///   `PerpetualModification`, `IntensityScope`, `ForEachCategoryAction`,
+///   name/label `String`s), and the replacement token-spec / `runtime_execute`
+///   fields (see [`walk_replacement_definition`]);
+/// - alternative / additional CAST-cost riders on keywords and statics
+///   (`AbilityCost` on Evoke/Bestow/…, `StaticMode::CastWithAlternativeCost` /
+///   `ImposeAdditionalCost.cost` / `AlternativeKeywordCost.cost` / permission
+///   `alt_cost` / `extra_cost`) — a casting cost no covered card text-changes;
+/// - the static `attack_defended` field and `StaticCondition::UnlessPay.defended`
+///   (an `AttackTargetFilter` — a player / planeswalker / battle defended-scope,
+///   no color/land/creature WORD). The static `mode` (`StaticMode`) IS walked
+///   (see [`walk_static_mode`]), so its evasion / protection / cost-filter / color
+///   params — including a granted `AddStaticMode` and a dynamic `MaximumHandSize`
+///   — are covered;
+/// - the `CastingRestriction` / `SpellCastingOption` / `CastingPermission`
+///   `ParsedCondition` / `Duration` roots, which live on card-level casting
+///   options rather than on any battlefield-`GameObject` ability/trigger/static/
+///   replacement walked here (unreachable for this class).
 pub fn walk_object_words(
     obj: &mut GameObject,
     category: TextWordCategory,
@@ -189,6 +301,18 @@ pub fn walk_object_words(
             walk_static_definition(static_def, category, cursor);
         }
     }
+    // Root 6: replacement effects (CR 614). Their event filter (`valid_card`),
+    // applicability `condition` (`ReplacementCondition`), resulting `execute`
+    // ability, and damage source / redirect filters are all rules-text carriers
+    // ("if you control a Forest", "unless you control a Plains", "whenever a
+    // Goblin would enter"). Re-seeded from `base_replacement_definitions` on each
+    // layer pass (`GameObject::revert_layered_characteristics_to_base`), exactly
+    // like the other live roots.
+    for i in 0..obj.replacement_definitions.len() {
+        if let Some(replacement) = obj.replacement_definitions.get_mut(i) {
+            walk_replacement_definition(replacement, category, cursor);
+        }
+    }
 }
 
 fn walk_keyword(keyword: &mut Keyword, category: TextWordCategory, cursor: &mut WordCursor) {
@@ -199,7 +323,39 @@ fn walk_keyword(keyword: &mut Keyword, category: TextWordCategory, cursor: &mut 
         Keyword::HexproofFrom(filter) => walk_hexproof_filter(filter, category, cursor),
         // CR 702.14: landwalk names a land type.
         Keyword::Landwalk(land) => cursor.landwalk(category, land),
-        // Every other keyword carries no color/land/creature WORD used as such.
+        // CR 702.5a: "Enchant [quality]" names the object class the Aura attaches
+        // to — a `TargetFilter` that can carry a creature/land type or color word.
+        Keyword::Enchant(filter) => walk_target_filter(filter, category, cursor),
+        // CR 702.167b: "Craft with [type]" — the materials filter names a type.
+        Keyword::Craft { materials, .. } => walk_target_filter(materials, category, cursor),
+        // CR 702.41a: "Affinity for [type]" names a permanent type/subtype
+        // (e.g. Affinity for Plains — a basic land type).
+        Keyword::Affinity(filter) => walk_typed_filter(filter, category, cursor),
+        // CR 702.29 / 702.47a / 702.72a / 702.22 / 702.48a: keyword parameters that
+        // ARE a subtype word used as such — "{subtype}cycling" (Plainscycling names
+        // a basic land type, Slivercycling a creature type), "Splice onto [subtype]",
+        // "Champion a [type]", "Bands with other [quality]", "[creature type]
+        // offering" (Offering — CR 702.48a, "Fox offering" names a creature type).
+        // All route through the category-disambiguating subtype cursor (the same one
+        // used for type-line subtypes and `Landwalk`).
+        Keyword::Typecycling { subtype, .. }
+        | Keyword::Splice { subtype, .. }
+        | Keyword::Champion(subtype)
+        | Keyword::BandsWithOther(subtype)
+        | Keyword::Offering(subtype) => cursor.subtype(category, subtype),
+        // CR 702.181a / CR 702.189: Mobilize N / Firebending N carry a dynamic
+        // count quantity (usually `Fixed`, but a granted "where X is its power"
+        // form embeds a `QuantityExpr` whose typed `ObjectCount` filter can name a
+        // creature/land/color word).
+        Keyword::Mobilize(count) | Keyword::Firebending(count) => {
+            walk_quantity_expr(count, category, cursor)
+        }
+        // The remaining keywords carry no color/land/creature WORD used as such in
+        // any parameter. A keyword's activation / alternative *cost* (mana pips, or
+        // an embedded `AbilityCost` on Evoke/Echo/Bestow/Escalate/Cumulative
+        // upkeep/…) is a secondary carrier left intentionally red — consistent with
+        // the secondary-cost/filter exclusion documented on [`walk_object_words`];
+        // no covered card changes a color/land/creature word inside a keyword cost.
         Keyword::Flying
         | Keyword::FirstStrike
         | Keyword::DoubleStrike
@@ -258,7 +414,6 @@ fn walk_keyword(keyword: &mut Keyword, category: TextWordCategory, cursor: &mut 
         | Keyword::Unleash
         | Keyword::Riot
         | Keyword::Afterlife(..)
-        | Keyword::Enchant(..)
         | Keyword::EtbCounter { .. }
         | Keyword::Reconfigure(..)
         | Keyword::LivingWeapon
@@ -311,14 +466,11 @@ fn walk_keyword(keyword: &mut Keyword, category: TextWordCategory, cursor: &mut 
         | Keyword::Fortify(..)
         | Keyword::Prototype { .. }
         | Keyword::Plot(..)
-        | Keyword::Craft { .. }
         | Keyword::Offspring(..)
         | Keyword::Impending { .. }
         | Keyword::LevelUp(..)
-        | Keyword::Affinity(..)
         | Keyword::CumulativeUpkeep(..)
         | Keyword::Banding
-        | Keyword::BandsWithOther(..)
         | Keyword::Epic
         | Keyword::Fuse
         | Keyword::Gravestorm
@@ -340,7 +492,6 @@ fn walk_keyword(keyword: &mut Keyword, category: TextWordCategory, cursor: &mut 
         | Keyword::Warp(..)
         | Keyword::Sneak(..)
         | Keyword::WebSlinging(..)
-        | Keyword::Mobilize(..)
         | Keyword::Gift(..)
         | Keyword::Discover(..)
         | Keyword::Spree
@@ -366,12 +517,8 @@ fn walk_keyword(keyword: &mut Keyword, category: TextWordCategory, cursor: &mut 
         | Keyword::Soulshift(..)
         | Keyword::Backup(..)
         | Keyword::Squad(..)
-        | Keyword::Typecycling { .. }
-        | Keyword::Firebending(..)
-        | Keyword::Splice { .. }
         | Keyword::Bargain
         | Keyword::Sunburst
-        | Keyword::Champion(..)
         | Keyword::Training
         | Keyword::Assist
         | Keyword::Augment
@@ -393,7 +540,6 @@ fn walk_keyword(keyword: &mut Keyword, category: TextWordCategory, cursor: &mut 
         | Keyword::Freerunning(..)
         | Keyword::Increment
         | Keyword::Specialize(..)
-        | Keyword::Offering(..)
         | Keyword::Unknown(..) => {}
     }
 }
@@ -443,6 +589,18 @@ fn walk_target_filter(
                 walk_target_filter(f, category, cursor);
             }
         }
+        // CR 609.7b: "a [color] source of your choice" — the optional legality
+        // filter can name a color / type word used as such.
+        TargetFilter::ChosenDamageSource { filter } => {
+            if let Some(f) = filter {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        // CR 612.2: a tracked set refined by a typed filter (`Typed(Land)`, …)
+        // carries that nested filter's type word used as such.
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            walk_target_filter(filter, category, cursor)
+        }
         TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
@@ -453,6 +611,7 @@ fn walk_target_filter(
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
+        // NB: `ChosenDamageSource` / `TrackedSetFiltered` are carriers above.
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::Neighbor { .. }
@@ -463,7 +622,6 @@ fn walk_target_filter(
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
-        | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -484,7 +642,6 @@ fn walk_target_filter(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         | TargetFilter::AllPlayers => {}
@@ -543,13 +700,34 @@ fn walk_filter_prop(prop: &mut FilterProp, category: TextWordCategory, cursor: &
         FilterProp::Counters { count, .. } => walk_quantity_expr(count, category, cursor),
         FilterProp::Cmc { value, .. } => walk_quantity_expr(value, category, cursor),
         FilterProp::PtComparison { value, .. } => walk_quantity_expr(value, category, cursor),
+        // CR 109.5: "controlled by a player who controls a Goblin" nests a
+        // `PlayerFilter` whose control sub-filter can name a type/color word.
+        FilterProp::ControllerMatches { player } => {
+            walk_player_filter(player, category, cursor)
+        }
+        // CR 609.7: "shares a [quality] with [reference]" — the optional reference
+        // filter can name a creature type / land type / color word.
+        FilterProp::SharesQuality { reference, .. } => {
+            if let Some(f) = reference {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        // CR 115.x: "that targets only [filter]" / "that targets [filter]" nests a
+        // spell-target filter that can name a type.
+        FilterProp::TargetsOnly { filter } | FilterProp::Targets { filter } => {
+            walk_target_filter(filter, category, cursor)
+        }
+        // CR 201.5 + CR 609.7: the object-identity duals of `SharesQuality` — the
+        // referenced filter ("with a different name than target Goblin", "distinct
+        // from target Forest") can name a creature type / land type / color word.
+        FilterProp::DifferentNameFrom { filter } => walk_target_filter(filter, category, cursor),
+        FilterProp::DistinctFrom { reference } => walk_target_filter(reference, category, cursor),
         // CR 612.2 + CR 107.4: `ColorCount` / `ManaSymbolCount` measure set size or
         // mana pips, not color WORDS — not text-changed. `IsChosenColor` reads a
         // chosen ref, not a printed word.
         FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::ControllerChoseLabel { .. }
-        | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
@@ -601,10 +779,7 @@ fn walk_filter_prop(prop: &mut FilterProp, category: TextWordCategory, cursor: &
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::NotHistoric
-        | FilterProp::DifferentNameFrom { .. }
-        | FilterProp::DistinctFrom { .. }
         | FilterProp::InAnyZone { .. }
-        | FilterProp::SharesQuality { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
@@ -615,8 +790,6 @@ fn walk_filter_prop(prop: &mut FilterProp, category: TextWordCategory, cursor: &
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
         | FilterProp::Transformed
-        | FilterProp::TargetsOnly { .. }
-        | FilterProp::Targets { .. }
         | FilterProp::CouldBeTargetedByTriggeringSpell
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
@@ -669,8 +842,10 @@ fn walk_static_condition(
         | StaticCondition::RecipientMatchesFilter { filter } => {
             walk_target_filter(filter, category, cursor)
         }
-        StaticCondition::ChosenColorIs { .. }
-        | StaticCondition::ChosenLabelIs { .. }
+        // CR 105 + CR 612.2: "the chosen color is [color]" spells a color WORD used
+        // as such (sibling to `DevotionGE.colors` / `ManaColorSpent.color`).
+        StaticCondition::ChosenColorIs { color } => cursor.color(category, color),
+        StaticCondition::ChosenLabelIs { .. }
         | StaticCondition::HasMaxSpeed
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::DayNightIs { .. }
@@ -746,6 +921,44 @@ fn walk_quantity_expr(
     }
 }
 
+/// CR 613.4 + CR 612.1: Walk the word-bearing children of a `PtValue`. Only the
+/// `Quantity` variant wraps a `QuantityExpr` whose typed `ObjectCount` /
+/// `Devotion` reference can name a creature/land/color word ("gets +X/+X where X
+/// is the number of Goblins you control"). `Fixed`/`Variable` carry a scalar / an
+/// X marker, not a printed word. No `_` wildcard — a future word-bearing `PtValue`
+/// variant fails to compile until classified.
+fn walk_pt_value(value: &mut PtValue, category: TextWordCategory, cursor: &mut WordCursor) {
+    match value {
+        PtValue::Quantity(q) => walk_quantity_expr(q, category, cursor),
+        PtValue::Fixed(_) | PtValue::Variable(_) => {}
+    }
+}
+
+/// CR 701.13a + CR 612.1: Walk the word-bearing children of an `UntilCondition`
+/// (the `until` axis of `Effect::ExileFromTopUntil`). `NextMatches` carries a
+/// `TargetFilter` that can name a creature/land/color word ("exile ... until you
+/// exile a Goblin card"); `CumulativeThreshold` carries a `QuantityExpr` threshold
+/// and an `ObjectProperty` (the CR-612.2 no-op — power/toughness/mana value).
+/// No `_` wildcard — a future word-bearing `UntilCondition` variant fails to
+/// compile until classified.
+fn walk_until_condition(
+    until: &mut UntilCondition,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    match until {
+        UntilCondition::NextMatches { filter } => walk_target_filter(filter, category, cursor),
+        UntilCondition::CumulativeThreshold {
+            property,
+            threshold,
+            ..
+        } => {
+            walk_object_property(property, category, cursor);
+            walk_quantity_expr(threshold, category, cursor);
+        }
+    }
+}
+
 fn walk_quantity_ref(qty: &mut QuantityRef, category: TextWordCategory, cursor: &mut WordCursor) {
     match qty {
         // CR 700.5: devotion to fixed colors spells color WORDS.
@@ -813,13 +1026,30 @@ fn walk_quantity_ref(qty: &mut QuantityRef, category: TextWordCategory, cursor: 
                 walk_target_filter(f, category, cursor);
             }
         }
+        // CR 101.2 + CR 109.5: "the number of players who control a Goblin" nests a
+        // `PlayerFilter` whose control sub-filter can name a type/color word.
+        QuantityRef::PlayerCount { filter } => walk_player_filter(filter, category, cursor),
+        // CR 612.2: "unspent [color] mana" spells the color WORD used as such —
+        // consistent with `StaticMode::StepEndUnspentMana` (`None` is the any-color
+        // form; contrast the `ManaSymbolsInManaCost` pip-count no-op below).
+        QuantityRef::UnspentMana { color } => {
+            if let Some(c) = color {
+                cursor.color(category, c);
+            }
+        }
+        // CR 205.2a / CR 205.3: distinct-card-type / distinct-subtype counts scan a
+        // parameterized `CardTypeSetSource` whose `Objects` variant nests a
+        // `TargetFilter` that can name a type/color word (mirrors `ZoneCardCount`).
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. } => {
+            walk_card_type_set_source(source, category, cursor)
+        }
         QuantityRef::HandSize { .. }
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
-        | QuantityRef::PlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }
@@ -834,8 +1064,6 @@ fn walk_quantity_ref(qty: &mut QuantityRef, category: TextWordCategory, cursor: 
         | QuantityRef::ManaSymbolsInManaCost { .. }
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
-        | QuantityRef::DistinctCardTypes { .. }
-        | QuantityRef::DistinctSubtypes { .. }
         | QuantityRef::CardsExiledBySource
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
@@ -844,7 +1072,6 @@ fn walk_quantity_ref(qty: &mut QuantityRef, category: TextWordCategory, cursor: 
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::PartySize { .. }
-        | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
@@ -876,6 +1103,25 @@ fn walk_quantity_ref(qty: &mut QuantityRef, category: TextWordCategory, cursor: 
     }
 }
 
+/// CR 205.2a / CR 205.3 + CR 612.1: Walk the word-bearing children of a
+/// `CardTypeSetSource` scan axis. Only the `Objects` variant nests a battlefield
+/// `TargetFilter` that can name a creature type / land type / color word; the
+/// zone / linked-exile / tracked-set axes carry no printed word. No `_` wildcard —
+/// a future word-bearing `CardTypeSetSource` variant fails to compile until
+/// classified.
+fn walk_card_type_set_source(
+    source: &mut CardTypeSetSource,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    match source {
+        CardTypeSetSource::Objects { filter } => walk_target_filter(filter, category, cursor),
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. } => {}
+    }
+}
+
 /// CR 612.2 + CR 107.4: object properties reference power/toughness/mana value or
 /// a mana SYMBOL count — none is a color/land/creature WORD. All no-op; exists so
 /// a future word-bearing `ObjectProperty` variant must be classified.
@@ -892,12 +1138,639 @@ fn walk_object_property(
     }
 }
 
+/// CR 612.1 + CR 612.2: Walk the word-bearing children of an activated / additional
+/// ability *cost*. A creature type / basic land type / color word can appear in a
+/// cost's object filter (CR 701.21 "Sacrifice a Goblin" — Goblin Chirurgeon), in a
+/// dynamic quantity (`ManaDynamic` / `PayLife` over a typed `ObjectCount`), or in a
+/// nested effect / sub-cost. Filters recurse through the shared [`walk_target_filter`];
+/// quantities through [`walk_quantity_expr`]; nested effects through [`walk_effect`];
+/// the aggregate `ObjectProperty` through the CR-612.2 no-op [`walk_object_property`].
+/// Every variant is classified with no `_` wildcard — a future word-bearing cost
+/// variant fails to compile until handled.
+fn walk_ability_cost(cost: &mut AbilityCost, category: TextWordCategory, cursor: &mut WordCursor) {
+    match cost {
+        // CR 701.21: "Sacrifice a [creature type]" — the sacrifice filter names a
+        // creature-type / land-type / color word used as such (Goblin Chirurgeon).
+        AbilityCost::Sacrifice(sac) => walk_target_filter(&mut sac.target, category, cursor),
+        AbilityCost::Discard { count, filter, .. } => {
+            walk_quantity_expr(count, category, cursor);
+            if let Some(f) = filter {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        // Optional-filter costs (`RemoveCounter`'s `target` is the same Option<TargetFilter> shape).
+        AbilityCost::Exile { filter, .. }
+        | AbilityCost::ReturnToHand { filter, .. }
+        | AbilityCost::Reveal { filter, .. }
+        | AbilityCost::RemoveCounter { target: filter, .. } => {
+            if let Some(f) = filter {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        // Required-filter costs.
+        AbilityCost::ExileMaterials {
+            materials: filter, ..
+        }
+        | AbilityCost::TapCreatures { filter, .. }
+        | AbilityCost::UnattachFrom { filter, .. }
+        | AbilityCost::Behold { filter, .. } => walk_target_filter(filter, category, cursor),
+        AbilityCost::ExileWithAggregate {
+            filter, property, ..
+        } => {
+            walk_target_filter(filter, category, cursor);
+            walk_object_property(property, category, cursor);
+        }
+        AbilityCost::ManaDynamic { quantity } => walk_quantity_expr(quantity, category, cursor),
+        AbilityCost::PayLife { amount }
+        | AbilityCost::PayEnergy { amount }
+        | AbilityCost::PaySpeed { amount } => walk_quantity_expr(amount, category, cursor),
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            for c in costs.iter_mut() {
+                walk_ability_cost(c, category, cursor);
+            }
+        }
+        AbilityCost::PerCounter { target, base, .. } => {
+            walk_target_filter(target, category, cursor);
+            walk_ability_cost(base, category, cursor);
+        }
+        AbilityCost::EffectCost { effect } => walk_effect(effect, category, cursor),
+        // CR 612.2 + CR 107.4: mana pips ({R}), tap/untap, loyalty, evidence value,
+        // a keyword-derived cost, and Waterbend/Ninjutsu mana carry no color / land /
+        // creature WORD used as such.
+        AbilityCost::Mana { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::Unimplemented { .. } => {}
+    }
+}
+
+/// CR 612.1 + CR 612.2: Walk the word-bearing children of an ability's resolution
+/// `condition`. A creature type / land type / color word can live inside an anaphoric
+/// filter ("if this permanent is a Goblin", "if you control a Goblin"), a keyword
+/// param ("if it has islandwalk"), a color-spent gate ("if white mana was spent"), or
+/// a nested compound. All filters recurse through [`walk_target_filter`]; keywords
+/// through [`walk_keyword`]; quantities through [`walk_quantity_expr`]. No `_`
+/// wildcard — a future word-bearing condition variant fails to compile until handled.
+fn walk_ability_condition(
+    condition: &mut AbilityCondition,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    match condition {
+        // CR 612.2: "if white mana was spent to cast this spell" spells a color WORD.
+        AbilityCondition::ManaColorSpent { color, .. } => cursor.color(category, color),
+        // Anaphoric / control / zone-change object filters that can name a type.
+        AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target: filter }
+        | AbilityCondition::TargetMatchesFilter { filter, .. }
+        | AbilityCondition::TriggeringSpellTargetsFilter { filter }
+        | AbilityCondition::SourceMatchesFilter { filter }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+        | AbilityCondition::ControllerControlsMatching { filter }
+        | AbilityCondition::ControllerControlledMatchingAsCast { filter }
+        | AbilityCondition::ZoneChangedThisWay { filter }
+        | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+            walk_target_filter(filter, category, cursor)
+        }
+        AbilityCondition::ObjectsShareQuality {
+            subject, reference, ..
+        } => {
+            walk_target_filter(subject, category, cursor);
+            walk_target_filter(reference, category, cursor);
+        }
+        // CR 205.3m: the revealed-card gate can carry a subtype filter and an extra
+        // filter prop (e.g. a "Kraken … creature card" constraint).
+        AbilityCondition::RevealedHasCardType {
+            additional_filter,
+            subtype_filter,
+            ..
+        } => {
+            if let Some(fp) = additional_filter {
+                walk_filter_prop(fp, category, cursor);
+            }
+            if let Some(f) = subtype_filter {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        // CR 702.14 / 702.16 / 702.11d: a keyword param may name a land type / color.
+        AbilityCondition::TargetHasKeywordInstead { keyword }
+        | AbilityCondition::SourceLacksKeyword { keyword } => {
+            walk_keyword(keyword, category, cursor)
+        }
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            walk_quantity_expr(lhs, category, cursor);
+            walk_quantity_expr(rhs, category, cursor);
+        }
+        AbilityCondition::PreviousEffectAmount { rhs, .. } => {
+            walk_quantity_expr(rhs, category, cursor)
+        }
+        AbilityCondition::ConditionInstead { inner } => {
+            walk_ability_condition(inner, category, cursor)
+        }
+        // CR 101.2 + CR 109.5: the scoped `PlayerFilter` can embed a
+        // controls-count / player-attribute sub-filter naming a type/color word
+        // ("each opponent who controls a Goblin").
+        AbilityCondition::ScopedPlayerMatches { filter } => {
+            walk_player_filter(filter, category, cursor)
+        }
+        AbilityCondition::Not { condition } => walk_ability_condition(condition, category, cursor),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            for c in conditions.iter_mut() {
+                walk_ability_condition(c, category, cursor);
+            }
+        }
+        // No color / land / creature WORD used as such: payment flags, phase / timing,
+        // controller designations, mana-symbol (`ManaCost`) kicker cost, and coin /
+        // outcome signals.
+        AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::WhenYouDo
+        | AbilityCondition::WasCast { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CurrentPhaseIs { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::IsRingBearer
+        | AbilityCondition::CompletedDungeon { .. }
+        | AbilityCondition::HasObjectTarget
+        | AbilityCondition::IsYourTurn
+        | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::NthResolutionThisTurn { .. } => {}
+    }
+}
+
+/// CR 118.12: an "unless [player] pays [cost]" modifier bundles a payment cost
+/// (whose object filter can name a type) and a `payer` filter — both walked.
+fn walk_unless_pay(
+    modifier: &mut UnlessPayModifier,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    walk_ability_cost(&mut modifier.cost, category, cursor);
+    walk_target_filter(&mut modifier.payer, category, cursor);
+}
+
+/// CR 608.2c: a "repeat this process" loop predicate. Only the `WhileCondition`
+/// shape carries a filter word (via its `AbilityCondition`); the others hold none.
+fn walk_repeat_continuation(
+    cont: &mut RepeatContinuation,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    match cont {
+        RepeatContinuation::WhileCondition { condition, .. } => {
+            walk_ability_condition(condition, category, cursor)
+        }
+        RepeatContinuation::ControllerChoice | RepeatContinuation::UntilStopConditions { .. } => {}
+    }
+}
+
+/// CR 612.1 + CR 612.2: Walk the word-bearing children of a `PlayerFilter` root.
+/// CR 109.5: a player filter's control-count / player-attribute sub-filters can
+/// name a creature type / land type / color word ("each opponent who controls a
+/// Goblin", "each player who controls more Elves than you"); its damage-source
+/// gate and its self-composed `AllExcept` anchor are recursion points too. Every
+/// non-filter designation (controller / opponent / attacking / triggering
+/// anchors) is an explicit no-op. No `_` wildcard — a future word-bearing
+/// `PlayerFilter` variant fails to compile until classified.
+fn walk_player_filter(pf: &mut PlayerFilter, category: TextWordCategory, cursor: &mut WordCursor) {
+    match pf {
+        // CR 120.9: the damage-source qualifier is a `TargetFilter` and can name a type.
+        PlayerFilter::OpponentDealtDamage { source, .. } => {
+            if let Some(f) = source {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        // CR 608.2h: the exclusion anchor is itself a `PlayerFilter`.
+        PlayerFilter::AllExcept { exclude } => walk_player_filter(exclude, category, cursor),
+        // CR 109.5: "each player who controls [comparator] [filter]" — the filter
+        // and the comparison count both carry word-bearing sub-structure.
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            walk_target_filter(filter, category, cursor);
+            walk_quantity_expr(count, category, cursor);
+        }
+        // CR 119.1 / CR 402.1: the scalar attribute ref and its threshold value
+        // are quantities that may embed a typed `ObjectCount`.
+        PlayerFilter::PlayerAttribute { attr, value, .. } => {
+            walk_quantity_ref(attr, category, cursor);
+            walk_quantity_expr(value, category, cursor);
+        }
+        // No color / land / creature WORD used as such: controller / opponent /
+        // defending designations, attack / trigger / vote / chosen-player anchors.
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner => {}
+    }
+}
+
+/// CR 612.1 + CR 603.4: Walk the word-bearing children of a trigger's
+/// intervening-if `TriggerCondition`. A creature type / land type / color word
+/// can live in a control / event-subject / cast-history filter
+/// ("if you control a Goblin", "if it targets a Goblin", "if white mana was
+/// spent"), a nested `PlayerFilter` ("during that player's turn"), a quantity
+/// comparison, or a composite And/Or/Not. Every filter recurses via
+/// [`walk_target_filter`]; `ManaColorSpent` is a color-word carrier; player and
+/// quantity references delegate to their walkers. No `_` wildcard — a future
+/// word-bearing `TriggerCondition` variant fails to compile until classified.
+fn walk_trigger_condition(
+    cond: &mut TriggerCondition,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    match cond {
+        // CR 603.4: control / defending-player presence gates naming a type.
+        TriggerCondition::ControlsType { filter }
+        | TriggerCondition::ControlCount { filter, .. }
+        | TriggerCondition::ControlsNone { filter }
+        | TriggerCondition::DefendingPlayerControlsNone { filter } => {
+            walk_target_filter(filter, category, cursor)
+        }
+        // CR 120.1: damage-source / event-subject / cast-spell gates naming a type.
+        TriggerCondition::DealtDamageThisTurnBySource { source } => {
+            walk_target_filter(source, category, cursor)
+        }
+        TriggerCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+        | TriggerCondition::SourceMatchesFilter { filter }
+        | TriggerCondition::EventDamageSourceMatchesFilter { filter }
+        | TriggerCondition::EventObjectMatchesFilter { filter }
+        | TriggerCondition::TriggeringSpellTargetsFilter { filter }
+        | TriggerCondition::TriggeringSpellMatchesFilter { filter } => {
+            walk_target_filter(filter, category, cursor)
+        }
+        // CR 506.5 / CR 603.4: optional co-attacker and cast-spell filters.
+        TriggerCondition::MinCoAttackers { filter, .. }
+        | TriggerCondition::CastSpellThisTurn { filter } => {
+            if let Some(f) = filter {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        // CR 102.1: "if it's [player]'s turn" nests a `PlayerFilter`.
+        TriggerCondition::DuringPlayersTurn { player } => {
+            walk_player_filter(player, category, cursor)
+        }
+        // CR 207.2c: "if [N] mana of [color] was spent" spells a color WORD.
+        TriggerCondition::ManaColorSpent { color, .. } => cursor.color(category, color),
+        // CR 508.1: the attackers-declared count subject carries an optional
+        // condition-level type filter naming a creature type used as such — "if
+        // two or more Pirates attacked this combat" counts only Pirate attackers.
+        // Both subject axes (`Controller` / `AttackTarget`) hold the same
+        // `Option<TargetFilter>`, so both are recursion points.
+        TriggerCondition::AttackersDeclaredCount { subject, .. } => match subject {
+            AttackersDeclaredCountSubject::Controller { filter, .. }
+            | AttackersDeclaredCountSubject::AttackTarget { filter, .. } => {
+                if let Some(f) = filter {
+                    walk_target_filter(f, category, cursor);
+                }
+            }
+        },
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+            walk_quantity_expr(lhs, category, cursor);
+            walk_quantity_expr(rhs, category, cursor);
+        }
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            for c in conditions.iter_mut() {
+                walk_trigger_condition(c, category, cursor);
+            }
+        }
+        TriggerCondition::Not { condition } => walk_trigger_condition(condition, category, cursor),
+        // CR 400.7 / CR 111.1: `WasType`/`HadCounters` name a CORE type / counter
+        // kind, not a color/land/creature WORD (CR 612.2). Every remaining variant
+        // is a phase / timing / designation / event-shape / ordinal predicate with
+        // no printed color/land/creature word used as such.
+        TriggerCondition::GainedLife { .. }
+        | TriggerCondition::LostLife
+        | TriggerCondition::Descended
+        | TriggerCondition::NoSpellsCastLastTurn
+        | TriggerCondition::TwoOrMoreSpellsCastLastTurn
+        | TriggerCondition::SourceEnteredThisTurn
+        | TriggerCondition::EchoDue
+        | TriggerCondition::SolveConditionMet
+        | TriggerCondition::ClassLevelGE { .. }
+        | TriggerCondition::SourceIsHarnessed
+        | TriggerCondition::AttractionVisitRoll { .. }
+        | TriggerCondition::WasCast { .. }
+        | TriggerCondition::WasPlayed
+        | TriggerCondition::AdditionalCostPaid { .. }
+        | TriggerCondition::SourceIsAttacking
+        | TriggerCondition::CastVariantPaid { .. }
+        | TriggerCondition::CastVariantPaidPersistent { .. }
+        | TriggerCondition::ActivatedAbilityIsNonMana
+        | TriggerCondition::DealtDamageBySourceThisTurn
+        | TriggerCondition::FirstTimeObjectTappedThisTurn
+        | TriggerCondition::FirstTimeObjectCountersAddedThisTurn
+        | TriggerCondition::WasType { .. }
+        | TriggerCondition::LifeTotalGE { .. }
+        | TriggerCondition::AttackedThisTurn
+        | TriggerCondition::FirstCombatPhaseOfTurn
+        | TriggerCondition::HasMaxSpeed
+        | TriggerCondition::IsMonarch
+        | TriggerCondition::IsInitiative
+        | TriggerCondition::NoMonarch
+        | TriggerCondition::WasStartingPlayer { .. }
+        | TriggerCondition::SpellCastWithVariantThisTurn { .. }
+        | TriggerCondition::HasCityBlessing
+        | TriggerCondition::CompletedDungeon { .. }
+        | TriggerCondition::SourceIsTapped
+        | TriggerCondition::SourceIsTransformed
+        | TriggerCondition::SourceIsFaceUp
+        | TriggerCondition::SourceIsFaceDown
+        | TriggerCondition::SourceInZone { .. }
+        | TriggerCondition::CounterAddedThisTurn
+        | TriggerCondition::LostLifeLastTurn
+        | TriggerCondition::TributeNotPaid
+        | TriggerCondition::CastDuringPhase { .. }
+        | TriggerCondition::CastTimingPermission { .. }
+        | TriggerCondition::ManaSpentCondition { .. }
+        | TriggerCondition::HadCounters { .. }
+        | TriggerCondition::ControlsCommander { .. }
+        | TriggerCondition::IsRenowned { .. }
+        | TriggerCondition::HasCounters { .. }
+        | TriggerCondition::ZoneChangeObjectIsTapped
+        | TriggerCondition::DamagedPlayerIsEventSourceOwner
+        | TriggerCondition::ChosenLabelIs { .. }
+        | TriggerCondition::ExceptFirstDrawInDrawStep
+        | TriggerCondition::PlacedByAbilitySource => {}
+    }
+}
+
+/// CR 612.1 + CR 603.4: Walk the word-bearing children of a `TriggerConstraint`
+/// rate-limiter. Only `NthSpellThisTurn` carries an optional spell `TargetFilter`
+/// ("your Nth noncreature spell"); every other constraint is a pure count /
+/// timing / controller gate. No `_` wildcard.
+fn walk_trigger_constraint(
+    c: &mut TriggerConstraint,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    match c {
+        TriggerConstraint::NthSpellThisTurn { filter, .. } => {
+            if let Some(f) = filter {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        TriggerConstraint::OncePerTurn
+        | TriggerConstraint::OncePerGame
+        | TriggerConstraint::OnlyDuringYourTurn
+        | TriggerConstraint::NthDrawThisTurn { .. }
+        | TriggerConstraint::OnlyDuringOpponentsTurn
+        | TriggerConstraint::OnlyDuringYourMainPhase
+        | TriggerConstraint::AtClassLevel { .. }
+        | TriggerConstraint::MaxTimesPerTurn { .. }
+        | TriggerConstraint::OncePerOpponentPerTurn
+        | TriggerConstraint::EventSourceControlledBy { .. } => {}
+    }
+}
+
+/// CR 612.1 + CR 601.3 / CR 602.5: Walk the word-bearing children of a parsed
+/// cast/activation restriction condition (`StaticDefinition.per_player_condition`,
+/// `CostReduction.condition`, `ActivationRestriction::RequiresCondition`). A
+/// creature type / land type / color word can live in a subtype/color/keyword
+/// leaf ("you control a Forest", "an artifact creature", "a creature with
+/// flying"), a `TargetFilter`, a nested `PlayerFilter`, a quantity comparison, or
+/// a composite And/Or/Not. No `_` wildcard — a future word-bearing
+/// `ParsedCondition` variant fails to compile until classified.
+fn walk_parsed_condition(
+    condition: &mut ParsedCondition,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    match condition {
+        // CR 205.3: land / creature subtype leaves naming a type WORD.
+        ParsedCondition::ZoneSubtypeCardCountAtLeast { subtype, .. }
+        | ParsedCondition::YouControlSubtypeCountAtLeast { subtype, .. }
+        | ParsedCondition::YouControlSubtypeOrGraveyardCardSubtype { subtype } => {
+            cursor.subtype(category, subtype)
+        }
+        ParsedCondition::YouControlLandSubtypeAny { subtypes } => {
+            for s in subtypes.iter_mut() {
+                cursor.subtype(category, s);
+            }
+        }
+        // CR 105: color-word leaves.
+        ParsedCondition::SourceIsColor { color }
+        | ParsedCondition::YouControlColorPermanentCountAtLeast { color, .. } => {
+            cursor.color(category, color)
+        }
+        // CR 702.x: keyword params can name a land type (landwalk) / color (protection).
+        ParsedCondition::SourceLacksKeyword { keyword }
+        | ParsedCondition::ControlsCreatureWithKeyword { keyword, .. } => {
+            walk_keyword(keyword, category, cursor)
+        }
+        // Required / optional object filters.
+        ParsedCondition::BattlefieldEntriesThisTurn { filter, .. }
+        | ParsedCondition::SpellTargetsFilter { filter } => {
+            walk_target_filter(filter, category, cursor)
+        }
+        ParsedCondition::YouAttackedWithAtLeast { filter, .. }
+        | ParsedCondition::YouCastSpellThisTurn { filter } => {
+            if let Some(f) = filter {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        // CR 602.5b: a nested player filter can name a controlled type.
+        ParsedCondition::PlayerCountAtLeast { filter, .. } => {
+            walk_player_filter(filter, category, cursor)
+        }
+        // Quantity comparisons — `QuantityVsEachOpponent` compares two refs.
+        ParsedCondition::QuantityVsEachOpponent { lhs, rhs, .. } => {
+            walk_quantity_ref(lhs, category, cursor);
+            walk_quantity_ref(rhs, category, cursor);
+        }
+        ParsedCondition::QuantityComparison { lhs, rhs, .. } => {
+            walk_quantity_expr(lhs, category, cursor);
+            walk_quantity_expr(rhs, category, cursor);
+        }
+        ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => {
+            for c in conditions.iter_mut() {
+                walk_parsed_condition(c, category, cursor);
+            }
+        }
+        ParsedCondition::Not { condition } => walk_parsed_condition(condition, category, cursor),
+        // CR 612.2: core-type / zone / count / timing / power / life / named
+        // predicates carry no color/land/creature WORD used as such. (`ZoneCore*`,
+        // `YouControl*CoreType*`, `*NamedPlaneswalker`, `*NamedCreature` name a
+        // CORE type or a card NAME, not a subtype word — CR 205.2/CR 201.)
+        ParsedCondition::SourceInZone { .. }
+        | ParsedCondition::SourceIsAttacking
+        | ParsedCondition::SourceIsAttackingOrBlocking
+        | ParsedCondition::SourceIsBlocked
+        | ParsedCondition::SourcePowerAtLeast { .. }
+        | ParsedCondition::SourceHasCounterAtLeast { .. }
+        | ParsedCondition::SourceHasNoCounter { .. }
+        | ParsedCondition::SourceEnteredThisTurn
+        | ParsedCondition::SourceAttackedThisTurn
+        | ParsedCondition::SourceIsCreature
+        | ParsedCondition::SourceAttachedTo { .. }
+        | ParsedCondition::SourceUntappedAttachedTo { .. }
+        | ParsedCondition::FirstSpellThisGame
+        | ParsedCondition::OpponentSearchedLibraryThisTurn
+        | ParsedCondition::BeenAttackedThisStep
+        | ParsedCondition::ZoneCardCountAtLeast { .. }
+        | ParsedCondition::ZoneCardTypeCountAtLeast { .. }
+        | ParsedCondition::ZoneCoreTypeCardCountAtLeast { .. }
+        | ParsedCondition::OpponentPoisonAtLeast { .. }
+        | ParsedCondition::HandSizeExact { .. }
+        | ParsedCondition::HandSizeOneOf { .. }
+        | ParsedCondition::CreaturesYouControlTotalPowerAtLeast { .. }
+        | ParsedCondition::YouControlCoreTypeCountAtLeast { .. }
+        | ParsedCondition::YouControlLegendaryCreature
+        | ParsedCondition::YouControlNamedPlaneswalker { .. }
+        | ParsedCondition::YouControlCreatureWithPowerAtLeast { .. }
+        | ParsedCondition::YouControlCreatureWithPt { .. }
+        | ParsedCondition::YouControlAnotherColorlessCreature
+        | ParsedCondition::YouControlSnowPermanentCountAtLeast { .. }
+        | ParsedCondition::YouControlDifferentPowerCreatureCountAtLeast { .. }
+        | ParsedCondition::YouControlLandsWithSameNameAtLeast { .. }
+        | ParsedCondition::YouControlNoCreatures
+        | ParsedCondition::YouAttackedThisTurn
+        | ParsedCondition::YouAttackedSourceControllerThisTurn
+        | ParsedCondition::YouPlayedLandThisTurn
+        | ParsedCondition::YouCastNoncreatureSpellThisTurn
+        | ParsedCondition::YouCastSpellCountAtLeast { .. }
+        | ParsedCondition::YouGainedLifeThisTurn
+        | ParsedCondition::YouCreatedTokenThisTurn
+        | ParsedCondition::YouDiscardedCardThisTurn
+        | ParsedCondition::YouSacrificedArtifactThisTurn
+        | ParsedCondition::CreatureDiedThisTurn
+        | ParsedCondition::YouHadCreatureEnterThisTurn
+        | ParsedCondition::YouHadAngelOrBerserkerEnterThisTurn
+        | ParsedCondition::YouHadArtifactEnterThisTurn
+        | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { .. }
+        | ParsedCondition::HasCityBlessing
+        | ParsedCondition::IsYourTurn => {}
+    }
+}
+
+/// CR 601.2f + CR 602.2b: Walk a `CostReduction`'s word-bearing children — the
+/// counted quantity (a typed `ObjectCount` filter) and the optional conditional
+/// gate (`ParsedCondition`).
+fn walk_cost_reduction(
+    reduction: &mut CostReduction,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    walk_quantity_expr(&mut reduction.count, category, cursor);
+    if let Some(condition) = &mut reduction.condition {
+        walk_parsed_condition(condition, category, cursor);
+    }
+}
+
+/// CR 602.5 + CR 612.1: Walk an activation restriction's word-bearing children.
+/// Only `RequiresCondition` carries a `ParsedCondition`; every other restriction
+/// is a count / timing / designation gate. No `_` wildcard.
+fn walk_activation_restriction(
+    restriction: &mut ActivationRestriction,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    match restriction {
+        ActivationRestriction::RequiresCondition { condition } => {
+            if let Some(cond) = condition {
+                walk_parsed_condition(cond, category, cursor);
+            }
+        }
+        ActivationRestriction::AsSorcery
+        | ActivationRestriction::AsInstant
+        | ActivationRestriction::DuringYourTurn
+        | ActivationRestriction::DuringYourUpkeep
+        | ActivationRestriction::DuringCombat
+        | ActivationRestriction::BeforeAttackersDeclared
+        | ActivationRestriction::BeforeCombatDamage
+        | ActivationRestriction::OnlyOnceEachTurn
+        | ActivationRestriction::OnlyOnce
+        | ActivationRestriction::MaxTimesEachTurn { .. }
+        | ActivationRestriction::IsSolved
+        | ActivationRestriction::SourceIsHarnessed
+        | ActivationRestriction::ClassLevelIs { .. }
+        | ActivationRestriction::LevelCounterRange { .. }
+        | ActivationRestriction::CounterThreshold { .. }
+        | ActivationRestriction::MatchesCardCastTiming => {}
+    }
+}
+
+/// CR 611.2b + CR 612.1: Walk the word-bearing children of an effect/ability
+/// `Duration`. Only the `ForAsLongAs` shape carries a rules-text condition
+/// (`StaticCondition`) that can name a creature type / land type / color word
+/// used as such ("for as long as you control a Goblin", "as long as you control
+/// a Forest"); every other duration is a pure turn / phase / permanence marker
+/// with no printed word. No `_` wildcard — a future word-bearing `Duration`
+/// variant fails to compile until classified.
+fn walk_duration(dur: &mut Duration, category: TextWordCategory, cursor: &mut WordCursor) {
+    match dur {
+        Duration::ForAsLongAs { condition } => walk_static_condition(condition, category, cursor),
+        Duration::UntilEndOfTurn
+        | Duration::UntilEndOfCombat
+        | Duration::UntilNextTurnOf { .. }
+        | Duration::UntilEndOfNextTurnOf { .. }
+        | Duration::UntilHostLeavesPlay
+        | Duration::UntilNextStepOf { .. }
+        | Duration::UntilSourceExilesAnotherCard
+        | Duration::Permanent => {}
+    }
+}
+
 fn walk_ability_definition(
     ability: &mut AbilityDefinition,
     category: TextWordCategory,
     cursor: &mut WordCursor,
 ) {
     walk_effect(&mut ability.effect, category, cursor);
+    // CR 612.1 + CR 118.12: an ability's activation/additional cost, its
+    // resolution condition, and its unless-pay modifier are rules-text carriers —
+    // "Sacrifice a Goblin" / "if you control a Goblin" / "unless you sacrifice a
+    // Goblin" all name a creature type used as a creature type (CR 612.2).
+    if let Some(cost) = &mut ability.cost {
+        walk_ability_cost(cost, category, cursor);
+    }
+    if let Some(condition) = &mut ability.condition {
+        walk_ability_condition(condition, category, cursor);
+    }
+    if let Some(unless) = &mut ability.unless_pay {
+        walk_unless_pay(unless, category, cursor);
+    }
     if let Some(sub) = &mut ability.sub_ability {
         walk_ability_definition(sub, category, cursor);
     }
@@ -910,6 +1783,44 @@ fn walk_ability_definition(
     if let Some(repeat) = &mut ability.repeat_for {
         walk_quantity_expr(repeat, category, cursor);
     }
+    // CR 608.2c: a "repeat this process while <condition>" predicate may gate on a
+    // typed filter ("if the exiled card is a land card, repeat this process").
+    if let Some(repeat_until) = &mut ability.repeat_until {
+        walk_repeat_continuation(repeat_until, category, cursor);
+    }
+    // CR 601.2f + CR 602.2b: a self-referential cost reduction ("costs {N} less
+    // for each [filter]" / "... if [condition]") carries a typed count and a
+    // `ParsedCondition` gate.
+    if let Some(reduction) = &mut ability.cost_reduction {
+        walk_cost_reduction(reduction, category, cursor);
+    }
+    // CR 602.5: an "activate only if [condition]" restriction carries a
+    // `ParsedCondition` naming a type/color/keyword.
+    for restriction in ability.activation_restrictions.iter_mut() {
+        walk_activation_restriction(restriction, category, cursor);
+    }
+    // CR 602.2a + CR 109.5: the activator and per-player scope roots are
+    // `PlayerFilter`s whose control-count / attribute sub-filters can name a type.
+    if let Some(activator) = &mut ability.activator_filter {
+        walk_player_filter(activator, category, cursor);
+    }
+    if let Some(scope) = &mut ability.player_scope {
+        walk_player_filter(scope, category, cursor);
+    }
+    // CR 601.2c + CR 601.2b: the target-chooser filter and the announced-X
+    // quantity are word-bearing roots (a "target chooser" or measured-X
+    // expression can embed a typed filter).
+    if let Some(chooser) = &mut ability.target_chooser {
+        walk_target_filter(chooser, category, cursor);
+    }
+    if let Some(announced_x) = &mut ability.announced_x {
+        walk_quantity_expr(announced_x, category, cursor);
+    }
+    // CR 611.2b: a "for as long as [condition]" duration gates the ability's
+    // continuous effect on a word-bearing `StaticCondition`.
+    if let Some(duration) = &mut ability.duration {
+        walk_duration(duration, category, cursor);
+    }
 }
 
 fn walk_trigger_definition(
@@ -920,8 +1831,285 @@ fn walk_trigger_definition(
     if let Some(execute) = &mut trigger.execute {
         walk_ability_definition(execute, category, cursor);
     }
+    // CR 603.2: the trigger's event-shape filters name the object classes that fire
+    // it — a creature type / land type / color word ("whenever a Goblin you control
+    // dies", "whenever a red creature attacks") lives in `valid_card` and its
+    // sibling target/source/subject filters.
     if let Some(valid_card) = &mut trigger.valid_card {
         walk_target_filter(valid_card, category, cursor);
+    }
+    if let Some(valid_target) = &mut trigger.valid_target {
+        walk_target_filter(valid_target, category, cursor);
+    }
+    if let Some(valid_source) = &mut trigger.valid_source {
+        walk_target_filter(valid_source, category, cursor);
+    }
+    if let Some(valid_subject_player) = &mut trigger.valid_subject_player {
+        walk_target_filter(valid_subject_player, category, cursor);
+    }
+    // CR 603.2: a disjunctive zone-change trigger ("whenever a Goblin dies or a
+    // Goblin card is put into a graveyard from anywhere") names its object class
+    // in each clause's `valid_card`, not only the top-level filter.
+    for clause in trigger.zone_change_clauses.iter_mut() {
+        if let Some(valid_card) = &mut clause.valid_card {
+            walk_target_filter(valid_card, category, cursor);
+        }
+    }
+    // CR 118.12: a tax trigger's unless-pay bundles a cost + payer filter.
+    if let Some(unless) = &mut trigger.unless_pay {
+        walk_unless_pay(unless, category, cursor);
+    }
+    // CR 603.4: the intervening-if `TriggerCondition` ("... if you control a
+    // Goblin, ...") carries word-bearing control / event-subject / color filters.
+    if let Some(condition) = &mut trigger.condition {
+        walk_trigger_condition(condition, category, cursor);
+    }
+    // CR 603.4: a rate-limit `TriggerConstraint` ("... your Nth [type] spell ...")
+    // can carry a spell filter naming a type.
+    if let Some(constraint) = &mut trigger.constraint {
+        walk_trigger_constraint(constraint, category, cursor);
+    }
+}
+
+/// CR 612.1 + CR 612.2: Walk the word-bearing children of a `StaticMode`. A
+/// creature type / land type / color word can live in an evasion / block /
+/// attachment filter ("can't be blocked by Goblins", "can be attached only to a
+/// legendary creature"), a protection quality ("protection from the chosen
+/// color"), a keyword parameter ("can't have flying"/landwalk), a cost-scope
+/// spell filter ("black permanent spells cost less", "creature spells you cast
+/// have convoke"), a spelled-out color word ("green permanent spells", "unspent
+/// green mana"), a landwalk qualifier, or a nested quantity / player filter.
+/// Filters recurse via [`walk_target_filter`]; keywords via [`walk_keyword`];
+/// colors via [`WordCursor::color`]; the landwalk qualifier via
+/// [`WordCursor::subtype`]. No `_` wildcard — a future word-bearing `StaticMode`
+/// variant fails to compile until classified.
+///
+/// Intentionally NOT walked (coverage stays red, consistent with the keyword /
+/// secondary-cost exclusion on [`walk_object_words`]): a static's alternative /
+/// additional CAST-cost riders (`CastWithAlternativeCost.cost`,
+/// `ImposeAdditionalCost.cost`, `AlternativeKeywordCost.cost`, the permission
+/// `alt_cost` / `extra_cost` fields) — a mana-symbol / keyword casting cost that
+/// no covered card text-changes into a creature/land/color word. `PayLifeAsColoredMana`
+/// names a mana SYMBOL ({B}), not a color word (CR 612.2 + CR 107.4).
+fn walk_static_mode(mode: &mut StaticMode, category: TextWordCategory, cursor: &mut WordCursor) {
+    match mode {
+        // -- Evasion / block / attachment filters (CR 509.1b / 301.5 / 303.4) --
+        StaticMode::CantBeActivated { source_filter, .. }
+        | StaticMode::AttachmentRestriction {
+            filter: source_filter,
+        }
+        | StaticMode::CantBeBlockedBy {
+            filter: source_filter,
+        }
+        | StaticMode::BlockRestriction {
+            filter: source_filter,
+        }
+        | StaticMode::SuppressTriggers { source_filter, .. }
+        | StaticMode::MaxUntapPerType {
+            filter: source_filter,
+            ..
+        } => walk_target_filter(source_filter, category, cursor),
+        // CR 509.1b: "can't be blocked except by [quality]" nests a `TargetFilter`.
+        StaticMode::CantBeBlockedExceptBy { kind } => match kind {
+            BlockExceptionKind::Quality(filter) => walk_target_filter(filter, category, cursor),
+            BlockExceptionKind::MinBlockers { .. } => {}
+        },
+        // CR 509.1c: positive block requirements carry an optional blocker filter.
+        StaticMode::MustBeBlocked { by: filter }
+        | StaticMode::MustBeBlockedByAll { blockers: filter }
+        | StaticMode::PerTurnCastLimit {
+            spell_filter: filter,
+            ..
+        } => {
+            if let Some(f) = filter {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        // CR 601.2f: cost-scope spell filter + dynamic multiplier.
+        StaticMode::ModifyCost {
+            spell_filter,
+            dynamic_count,
+            ..
+        } => {
+            if let Some(f) = spell_filter {
+                walk_target_filter(f, category, cursor);
+            }
+            if let Some(q) = dynamic_count {
+                walk_quantity_ref(q, category, cursor);
+            }
+        }
+        // CR 601.2f + CR 118.8: additional-cost tax carries a spell filter (the
+        // AbilityCost rider is a secondary cost left red, see the doc note above).
+        StaticMode::ImposeAdditionalCost { spell_filter, .. } => {
+            if let Some(f) = spell_filter {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        // CR 601.2f + CR 602.2: ability-cost reduction carries a dynamic multiplier
+        // and an optional activator `PlayerFilter`.
+        StaticMode::ReduceAbilityCost {
+            dynamic_count,
+            activator,
+            ..
+        } => {
+            if let Some(q) = dynamic_count {
+                walk_quantity_ref(q, category, cursor);
+            }
+            if let Some(p) = activator {
+                walk_player_filter(p, category, cursor);
+            }
+        }
+        // CR 118.3 + CR 601.2h: "can't sacrifice [filter] to pay costs" nests a filter.
+        StaticMode::CantPayCost { cost, .. } => match cost {
+            CostPaymentProhibition::Sacrifice { filter } => {
+                walk_target_filter(filter, category, cursor)
+            }
+            CostPaymentProhibition::PayLife => {}
+        },
+        // CR 609.4b: any-color spend permission carries two scope filters.
+        StaticMode::SpendManaAsAnyColor {
+            spell_filter,
+            activation_source_filter,
+        } => {
+            if let Some(f) = spell_filter {
+                walk_target_filter(f, category, cursor);
+            }
+            if let Some(f) = activation_source_filter {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        // CR 702.51a / CR 702.x: keyword parameters (landwalk land type, protection
+        // color, "can't have [keyword]").
+        StaticMode::CastWithKeyword { keyword } | StaticMode::CantHaveKeyword { keyword } => {
+            walk_keyword(keyword, category, cursor)
+        }
+        // CR 702.16: player protection quality can name a color.
+        StaticMode::PlayerProtection(target) => walk_protection_target(target, category, cursor),
+        // CR 118.12a: "[color] permanent spells cost less" spells a color WORD.
+        StaticMode::DefilerCostReduction { color, .. } => cursor.color(category, color),
+        // CR 612.2: "unspent [color] mana" (Omnath) spells a color WORD used as
+        // such (contrast the {B} mana-symbol no-op below); `None` is the any-color
+        // form.
+        StaticMode::StepEndUnspentMana { filter, .. } => {
+            if let Some(c) = filter {
+                cursor.color(category, c);
+            }
+        }
+        // CR 702.14d: landwalk-cancel qualifier is a basic-land-type name ("Swamp").
+        StaticMode::IgnoreLandwalkForBlocking { qualifier } => {
+            if let Some(q) = qualifier {
+                cursor.subtype(category, q);
+            }
+        }
+        // CR 508 + CR 612.1: "your maximum hand size is equal to [quantity]" — the
+        // dynamic `EqualTo` quantity can embed a typed `ObjectCount` filter naming a
+        // type/color word. The `SetTo`/`AdjustedBy` forms are constant scalars.
+        StaticMode::MaximumHandSize { modification } => {
+            if let HandSizeModification::EqualTo(qty) = modification {
+                walk_quantity_expr(qty, category, cursor);
+            }
+        }
+        // No color / land / creature WORD used as such: nullary keyword/evasion
+        // markers, count / timing / designation gates, cast-permission scaffolding
+        // (its cost riders are red — see doc), core-type / counter-type / name /
+        // mana-symbol carriers, and player-scope prohibitions.
+        StaticMode::Continuous
+        | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::CantAttack
+        | StaticMode::CantBlock
+        | StaticMode::CantAttackOrBlock
+        | StaticMode::AttackOnlyNeighbor
+        | StaticMode::CantBecomeSuspected
+        | StaticMode::MaxAttackersEachCombat { .. }
+        | StaticMode::MaxBlockersEachCombat { .. }
+        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeCast { .. }
+        | StaticMode::CantSearchLibrary { .. }
+        | StaticMode::RestrictLibrarySearchToTop { .. }
+        | StaticMode::CantCauseSacrificeOrExile { .. }
+        | StaticMode::CastWithFlash
+        | StaticMode::GrantsExtraVote
+        | StaticMode::GrantsExtraVillainousChoice
+        | StaticMode::CastWithAlternativeCost { .. }
+        | StaticMode::AlternativeKeywordCost { .. }
+        | StaticMode::ReduceActionCost { .. }
+        | StaticMode::ModifyActivationLimit { .. }
+        | StaticMode::ActivateAsInstant { .. }
+        | StaticMode::CantGainLife
+        | StaticMode::CantLoseLife
+        | StaticMode::MustAttack
+        | StaticMode::MustAttackPlayer { .. }
+        | StaticMode::MustBlock
+        | StaticMode::MustBlockAttacker { .. }
+        | StaticMode::CantDraw { .. }
+        | StaticMode::DrawFromBottom { .. }
+        | StaticMode::DoubleTriggers { .. }
+        | StaticMode::IgnoreHexproof
+        | StaticMode::ExtraBlockers { .. }
+        | StaticMode::RevealTopOfLibrary { .. }
+        | StaticMode::RevealHand { .. }
+        | StaticMode::GraveyardCastPermission { .. }
+        | StaticMode::TopOfLibraryCastPermission { .. }
+        | StaticMode::TopOfLibraryHasPlot
+        | StaticMode::TopOfLibraryPlotPermission
+        | StaticMode::CastFromHandFree { .. }
+        | StaticMode::ExileCastPermission { .. }
+        | StaticMode::LinkedCollectionCounterPlayPermission
+        | StaticMode::CountersPersistAcrossZones { .. }
+        | StaticMode::CantBeCountered
+        | StaticMode::CantBeCopied
+        | StaticMode::CantEnterBattlefieldFrom
+        | StaticMode::CantCastFrom { .. }
+        | StaticMode::CantCastDuring { .. }
+        | StaticMode::CantActivateDuring { .. }
+        | StaticMode::PerTurnDrawLimit { .. }
+        | StaticMode::CantBeBlocked
+        | StaticMode::CantBeBlockedByMoreThan { .. }
+        | StaticMode::CantBeBlockedUnlessAllBlock
+        | StaticMode::Protection
+        | StaticMode::Indestructible
+        | StaticMode::CantBeDestroyed
+        | StaticMode::CantBeRegenerated
+        | StaticMode::FlashBack
+        | StaticMode::Shroud
+        | StaticMode::Hexproof
+        | StaticMode::Vigilance
+        | StaticMode::Menace
+        | StaticMode::Reach
+        | StaticMode::Flying
+        | StaticMode::Trample
+        | StaticMode::Deathtouch
+        | StaticMode::Lifelink
+        | StaticMode::CantTap
+        | StaticMode::CantUntap
+        | StaticMode::Goaded
+        | StaticMode::CombatAlone { .. }
+        | StaticMode::CantCrew
+        | StaticMode::CantPhaseIn
+        | StaticMode::CrewContribution { .. }
+        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtFaceDown
+        | StaticMode::CantBeTurnedFaceUp
+        | StaticMode::MayChooseNotToUntap
+        | StaticMode::AdditionalLandDrop { .. }
+        | StaticMode::EmblemStatic
+        | StaticMode::NoMaximumHandSize
+        | StaticMode::MayPlayAdditionalLand
+        | StaticMode::CantWinTheGame
+        | StaticMode::CantLoseTheGame
+        | StaticMode::LegendRuleDoesntApply
+        | StaticMode::SpeedCanIncreaseBeyondFour
+        | StaticMode::SkipStep { .. }
+        | StaticMode::PayLifeAsColoredMana { .. }
+        | StaticMode::CanAttackWithDefender
+        | StaticMode::CanActivateAbilitiesAsThoughHaste
+        | StaticMode::CanBlockShadow
+        | StaticMode::AssignNoCombatDamage
+        | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+        | StaticMode::EntersWithAdditionalCounters { .. }
+        | StaticMode::CountersCantBeRemoved { .. }
+        | StaticMode::CountsAsNamed { .. }
+        | StaticMode::Other(..) => {}
     }
 }
 
@@ -930,14 +2118,171 @@ fn walk_static_definition(
     category: TextWordCategory,
     cursor: &mut WordCursor,
 ) {
+    // CR 612.1: the static's `mode` carries word-bearing evasion / protection /
+    // cost-filter / color parameters ("can't be blocked by Goblins", "protection
+    // from the chosen color", "black permanent spells cost less").
+    walk_static_mode(&mut static_def.mode, category, cursor);
     if let Some(affected) = &mut static_def.affected {
         walk_target_filter(affected, category, cursor);
     }
     if let Some(condition) = &mut static_def.condition {
         walk_static_condition(condition, category, cursor);
     }
+    // CR 101.2 + CR 109.5: the per-affected-player gate is a `ParsedCondition`
+    // ("each opponent who controls a Goblin can't ...") naming a type/color/keyword.
+    if let Some(per_player) = &mut static_def.per_player_condition {
+        walk_parsed_condition(per_player, category, cursor);
+    }
     for modification in static_def.modifications.iter_mut() {
         walk_continuous_modification(modification, category, cursor);
+    }
+}
+
+/// CR 614.1 + CR 612.1: Walk the word-bearing children of a replacement effect.
+/// A creature type / land type / color word can live in the event-shape filter
+/// (`valid_card` — "whenever a Goblin would enter"), the applicability
+/// `condition` (`ReplacementCondition` — "unless you control a Plains"), the
+/// resulting `execute` ability (its effects/filters), the damage source /
+/// redirect filters, or the additional-token replacement's own subtypes.
+///
+/// Intentionally NOT walked (coverage stays red rather than silently
+/// mis-substituting): `runtime_execute` (a resolution-time `ResolvedAbility`
+/// continuation snapshot, not printed rules text); the token-spec creation
+/// fields (`additional_token_spec` / `ensure_token_specs` — token subtypes,
+/// consistent with the `Effect::Token` subtype exclusion in [`walk_effect`]);
+/// `mana_modification` (a mana SYMBOL, CR 612.2 + CR 107.4); `counter_match`
+/// (a counter kind, CR 122.1, not a color/land/creature word); and the scalar
+/// scope / expiry / player-axis fields.
+fn walk_replacement_definition(
+    replacement: &mut ReplacementDefinition,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    // CR 603.2 / CR 614.1: the event-shape filter names the object class the
+    // replacement watches.
+    if let Some(valid_card) = &mut replacement.valid_card {
+        walk_target_filter(valid_card, category, cursor);
+    }
+    // CR 614.1c/d: the applicability condition.
+    if let Some(condition) = &mut replacement.condition {
+        walk_replacement_condition(condition, category, cursor);
+    }
+    // CR 614.1: the resulting effect (an ability with its own effects/filters).
+    if let Some(execute) = &mut replacement.execute {
+        walk_ability_definition(execute, category, cursor);
+    }
+    // CR 120.1 + CR 614.1a: damage source / redirect filters can name a type/color.
+    if let Some(source) = &mut replacement.damage_source_filter {
+        walk_target_filter(source, category, cursor);
+    }
+    if let Some(redirect) = &mut replacement.redirect_target {
+        walk_target_filter(redirect, category, cursor);
+    }
+    // CR 614.10 + CR 118.12a: an optional / pay-cost replacement carries a
+    // `decline` continuation ability (and a `MayCost` payment) that are word-
+    // bearing children — walked via [`walk_replacement_mode`].
+    walk_replacement_mode(&mut replacement.mode, category, cursor);
+}
+
+/// CR 614.10 + CR 612.1: Walk the word-bearing children of a `ReplacementMode`.
+/// The `Optional` / `MayCost` decline continuation is a full `AbilityDefinition`
+/// (its effects/filters can name a type/color); `MayCost` additionally bundles an
+/// `AbilityCost` whose object filter can name a type. `Mandatory` carries none.
+/// No `_` wildcard — a future word-bearing `ReplacementMode` variant fails to
+/// compile until classified.
+fn walk_replacement_mode(
+    mode: &mut ReplacementMode,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    match mode {
+        ReplacementMode::Optional { decline } => {
+            if let Some(d) = decline {
+                walk_ability_definition(d, category, cursor);
+            }
+        }
+        ReplacementMode::MayCost { cost, decline } => {
+            walk_ability_cost(cost, category, cursor);
+            if let Some(d) = decline {
+                walk_ability_definition(d, category, cursor);
+            }
+        }
+        ReplacementMode::Mandatory => {}
+    }
+}
+
+/// CR 614.1c/d + CR 612.1: Walk the word-bearing children of a
+/// `ReplacementCondition`. A creature type / land type can live in a control /
+/// token / damage-source subtype leaf ("unless you control a Plains", "if you
+/// control a Goblin", "if you would create a Treasure token"); a color word in a
+/// filter's color predicate. Subtype string sets route through the
+/// category-disambiguating [`WordCursor::subtype`]; filters recurse via
+/// [`walk_target_filter`] / [`walk_typed_filter`]; quantity gates via
+/// [`walk_quantity_expr`]. No `_` wildcard — a future word-bearing
+/// `ReplacementCondition` variant fails to compile until classified.
+fn walk_replacement_condition(
+    condition: &mut ReplacementCondition,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    match condition {
+        ReplacementCondition::And { conditions } => {
+            for c in conditions.iter_mut() {
+                walk_replacement_condition(c, category, cursor);
+            }
+        }
+        // CR 205.3: subtype-string leaves naming a land / creature type WORD.
+        ReplacementCondition::UnlessControlsSubtype { subtypes }
+        | ReplacementCondition::TokenSubtypeMatches { subtypes } => {
+            for s in subtypes.iter_mut() {
+                cursor.subtype(category, s);
+            }
+        }
+        // CR 614.1d: control-count / control-presence gates carry a `TargetFilter`.
+        ReplacementCondition::UnlessControlsMatching { filter }
+        | ReplacementCondition::UnlessControlsCountMatching { filter, .. }
+        | ReplacementCondition::IfControlsMatching { filter, .. }
+        // CR 120.1 + CR 614.1a: damage-source gate naming a type/color.
+        | ReplacementCondition::DealtDamageThisTurnBySource { source: filter } => {
+            walk_target_filter(filter, category, cursor)
+        }
+        // CR 614.1c: fast-land control gate carries a `TypedFilter`.
+        ReplacementCondition::UnlessControlsOtherLeq { filter, .. } => {
+            walk_typed_filter(filter, category, cursor)
+        }
+        ReplacementCondition::UnlessQuantity { lhs, rhs, .. }
+        | ReplacementCondition::OnlyIfQuantity { lhs, rhs, .. } => {
+            walk_quantity_expr(lhs, category, cursor);
+            walk_quantity_expr(rhs, category, cursor);
+        }
+        // CR 612.2: no color/land/creature WORD used as such — life / turn /
+        // player-count / speed / cast-variant / zone-origin / kicker / counter-type
+        // / core-type / draw-step / class-level / control-of-source / free-text
+        // gates. (`TokenCoreTypeMatches` names a CORE type per CR 111.1, not a
+        // subtype word; `Unrecognized` is opaque deferred text.)
+        ReplacementCondition::UnlessPlayerLifeAtMost { .. }
+        | ReplacementCondition::UnlessMultipleOpponents
+        | ReplacementCondition::UnlessYourTurn
+        | ReplacementCondition::HasMaxSpeed
+        | ReplacementCondition::CastViaEscape
+        | ReplacementCondition::CastVariantPaid { .. }
+        | ReplacementCondition::CastFromZone { .. }
+        | ReplacementCondition::EnteredFromZone { .. }
+        | ReplacementCondition::YouAttackedThisTurn
+        | ReplacementCondition::OpponentDamagedThisTurn
+        | ReplacementCondition::CastViaKicker { .. }
+        | ReplacementCondition::SourceTappedState { .. }
+        | ReplacementCondition::EventSourceControlledBy { .. }
+        | ReplacementCondition::EffectCausedDiscard
+        | ReplacementCondition::OnlyExtraTurn
+        | ReplacementCondition::TokenCoreTypeMatches { .. }
+        | ReplacementCondition::FirstTokenCreationEachTurn { .. }
+        | ReplacementCondition::ExceptFirstDrawInDrawStep
+        | ReplacementCondition::ClassLevelGE { .. }
+        | ReplacementCondition::DuringUntapStep
+        | ReplacementCondition::DuringDrawStep { .. }
+        | ReplacementCondition::ControllerControlsSource { .. }
+        | ReplacementCondition::Unrecognized { .. } => {}
     }
 }
 
@@ -968,6 +2313,12 @@ fn walk_continuous_modification(
         ContinuousModification::GrantStaticAbility { definition } => {
             walk_static_definition(definition, category, cursor)
         }
+        // CR 613.1f + CR 612.1: a granted rule-modification static `mode` carries
+        // the same word-bearing evasion / protection / cost-filter / color params as
+        // any static's mode (e.g. a granted "can't be blocked by Goblins").
+        ContinuousModification::AddStaticMode { mode } => {
+            walk_static_mode(mode, category, cursor)
+        }
         ContinuousModification::GrantTrigger { trigger } => {
             walk_trigger_definition(trigger, category, cursor)
         }
@@ -983,6 +2334,12 @@ fn walk_continuous_modification(
         | ContinuousModification::AddDynamicToughness { value }
         | ContinuousModification::AddDynamicKeyword { value, .. } => {
             walk_quantity_expr(value, category, cursor)
+        }
+        // CR 707.9f + CR 612.1: the enters-with counter `count` is a `QuantityExpr`
+        // whose typed `ObjectCount` filter can name a type/color word (usually a
+        // `Fixed` scalar).
+        ContinuousModification::AddCounterOnEnter { count, .. } => {
+            walk_quantity_expr(count, category, cursor)
         }
         ContinuousModification::CopyValues { .. }
         | ContinuousModification::SetName { .. }
@@ -1003,7 +2360,6 @@ fn walk_continuous_modification(
         | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::AddChosenKeyword
-        | ContinuousModification::AddStaticMode { .. }
         | ContinuousModification::SwitchPowerToughness
         | ContinuousModification::AssignDamageFromToughness
         | ContinuousModification::AssignDamageAsThoughUnblocked
@@ -1018,9 +2374,62 @@ fn walk_continuous_modification(
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::AddCounterOnEnter { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
         | ContinuousModification::RemoveManaCost => {}
+    }
+}
+
+/// CR 603.7 + CR 612.1: Walk the word-bearing children of a
+/// `DelayedTriggerCondition`. A creature type / land type / color word can live in
+/// a filtered firing gate ("when a Goblin dies", "when a Forest enters") or an
+/// embedded event trigger (`WheneverEvent` / `WhenNextEvent`). Filters recurse via
+/// [`walk_target_filter`]; embedded triggers via [`walk_trigger_definition`]. The
+/// phase / object-id / player timing markers carry no printed word. No `_`
+/// wildcard — a future word-bearing variant fails to compile until classified.
+fn walk_delayed_trigger_condition(
+    condition: &mut DelayedTriggerCondition,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    match condition {
+        DelayedTriggerCondition::WhenDies { filter }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
+        | DelayedTriggerCondition::WhenEntersBattlefield { filter }
+        | DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
+            walk_target_filter(filter, category, cursor)
+        }
+        DelayedTriggerCondition::WheneverEvent { trigger } => {
+            walk_trigger_definition(trigger, category, cursor)
+        }
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+            ..
+        } => {
+            walk_trigger_definition(trigger, category, cursor);
+            if let Some(or_t) = or_trigger {
+                walk_trigger_definition(or_t, category, cursor);
+            }
+        }
+        DelayedTriggerCondition::AtNextPhase { .. }
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        | DelayedTriggerCondition::WhenLeavesPlay { .. } => {}
+    }
+}
+
+/// CR 603.7a + CR 612.1: Walk the word-bearing children of an `ExiledSpellRider`.
+/// Only the `ReturnTo` timing (a `DelayedTriggerCondition`) can carry a filtered
+/// firing gate; `BecomePlotted` carries none. No `_` wildcard.
+fn walk_exiled_spell_rider(
+    rider: &mut ExiledSpellRider,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    match rider {
+        ExiledSpellRider::ReturnTo { timing, .. } => {
+            walk_delayed_trigger_condition(timing, category, cursor)
+        }
+        ExiledSpellRider::BecomePlotted => {}
     }
 }
 
@@ -1051,18 +2460,59 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
         | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             walk_effect(replacement_effect, category, cursor)
         }
-        Effect::CreateDelayedTrigger { effect, .. } => {
-            walk_ability_definition(effect, category, cursor)
+        // CR 603.7: a delayed trigger carries both its firing `condition`
+        // (`DelayedTriggerCondition` — its object filter / embedded trigger can
+        // name a type) and its resulting `effect` ability.
+        Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } => {
+            walk_delayed_trigger_condition(condition, category, cursor);
+            walk_ability_definition(effect, category, cursor);
         }
+        // CR 603.7a + CR 608.2n: a Feather-style exile-instead-of-graveyard rider
+        // can arm a filtered delayed return trigger whose timing carries a filter.
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile, .. } => {
+            if let Some(rider) = on_exile {
+                walk_exiled_spell_rider(rider, category, cursor);
+            }
+        }
+        // CR 701.6a + CR 611.2: a counter effect's `source_rider` can install a
+        // static ability on the countered source ("that permanent loses all
+        // abilities for as long as ~"), a full `StaticDefinition` + `Duration`.
+        Effect::Counter {
+            source_rider: Some(rider),
+            ..
+        } => match rider {
+            CounterSourceRider::LosesAbilities {
+                static_def,
+                duration,
+            } => {
+                walk_static_definition(static_def, category, cursor);
+                walk_duration(duration, category, cursor);
+            }
+            CounterSourceRider::Destroy => {}
+        },
+        // CR 614.1 + CR 612.1: "the next [filter] you cast this turn gains
+        // [replacement]" installs a full `ReplacementDefinition` on a chosen target
+        // — both the installed replacement (its event filter / condition / effect)
+        // and the `target` filter naming the recipient class are word-bearing
+        // carriers. Not surfaced by `target_filter_mut` (returns `None`), so both
+        // are walked here.
+        Effect::AddTargetReplacement {
+            replacement,
+            target,
+        } => {
+            walk_replacement_definition(replacement, category, cursor);
+            walk_target_filter(target, category, cursor);
+        }
+        // CR 705.2: `flipper` (who flips) is a `TargetFilter` player ref not
+        // surfaced by `target_filter_mut` (returns `None`); walking it keeps the
+        // per-carrier sweep total (player refs are wordless leaves, but a future
+        // typed variant is reached). `FlipCoins` additionally carries a `count`.
         Effect::FlipCoin {
             win_effect,
             lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
-            win_effect,
-            lose_effect,
-            ..
+            flipper,
         } => {
             if let Some(w) = win_effect {
                 walk_ability_definition(w, category, cursor);
@@ -1070,51 +2520,183 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
             if let Some(l) = lose_effect {
                 walk_ability_definition(l, category, cursor);
             }
+            walk_target_filter(flipper, category, cursor);
+        }
+        Effect::FlipCoins {
+            count,
+            win_effect,
+            lose_effect,
+            flipper,
+        } => {
+            walk_quantity_expr(count, category, cursor);
+            if let Some(w) = win_effect {
+                walk_ability_definition(w, category, cursor);
+            }
+            if let Some(l) = lose_effect {
+                walk_ability_definition(l, category, cursor);
+            }
+            walk_target_filter(flipper, category, cursor);
         }
         Effect::FlipCoinUntilLose { win_effect } => {
             walk_ability_definition(win_effect, category, cursor)
         }
-        Effect::RollDie { results, .. } => {
+        // CR 706.1: `count` ("roll X dice") is a `QuantityExpr` carrier alongside
+        // each result branch's effect ability.
+        Effect::RollDie { count, results, .. } => {
+            walk_quantity_expr(count, category, cursor);
             for branch in results.iter_mut() {
                 walk_ability_definition(&mut branch.effect, category, cursor);
             }
         }
-        Effect::ChooseOneOf { branches, .. } => {
+        // CR 701.55: `chooser` is a `PlayerFilter` whose control-count sub-filter
+        // can name a type; each branch is a full sub-ability.
+        Effect::ChooseOneOf { chooser, branches } => {
+            walk_player_filter(chooser, category, cursor);
             for branch in branches.iter_mut() {
                 walk_ability_definition(branch, category, cursor);
             }
         }
+        // CR 701.38b: a `Named` vote resolves `per_choice_effect` per ballot; an
+        // `Objects` vote enumerates candidates via `candidate_filter` and resolves
+        // `outcome_template` per winner (Council's Judgment). Both the candidate
+        // filter and the outcome template are word-bearing carriers naming the
+        // voted-on object class / its resulting effect.
         Effect::Vote {
-            per_choice_effect, ..
+            per_choice_effect,
+            subject,
+            ..
         } => {
             for sub in per_choice_effect.iter_mut() {
                 walk_ability_definition(sub, category, cursor);
             }
+            match subject {
+                VoteSubject::Objects {
+                    candidate_filter,
+                    outcome_template,
+                } => {
+                    walk_target_filter(candidate_filter, category, cursor);
+                    walk_ability_definition(outcome_template, category, cursor);
+                }
+                VoteSubject::Named => {}
+            }
         }
+        // CR 700.3: `object_filter` constrains each subject's eligible set (a typed
+        // "creatures" / "Goblins" filter) — a word-bearing carrier not surfaced by
+        // `target_filter_mut` (`SeparateIntoPiles` has no targeting slot).
         Effect::SeparateIntoPiles {
+            object_filter,
             chosen_pile_effect,
             unchosen_pile_effect,
             ..
         } => {
+            walk_target_filter(object_filter, category, cursor);
             walk_ability_definition(chosen_pile_effect, category, cursor);
             if let Some(unchosen) = unchosen_pile_effect {
                 walk_ability_definition(unchosen, category, cursor);
             }
         }
-        Effect::RevealFromHand { on_decline, .. } => {
+        // CR 701.20a: `filter` restricts the self-reveal ("reveal a [type] card from
+        // your hand") — a word-bearing carrier not surfaced by `target_filter_mut`.
+        Effect::RevealFromHand { filter, on_decline } => {
+            walk_target_filter(filter, category, cursor);
             if let Some(sub) = on_decline {
                 walk_ability_definition(sub, category, cursor);
             }
         }
+        // CR 611.2b: `GenericEffect` additionally carries a "for as long as"
+        // `duration` whose `StaticCondition` can name a type/color word.
         Effect::GenericEffect {
-            static_abilities, ..
+            static_abilities,
+            duration,
+            ..
+        } => {
+            for static_def in static_abilities.iter_mut() {
+                walk_static_definition(static_def, category, cursor);
+            }
+            if let Some(dur) = duration {
+                walk_duration(dur, category, cursor);
+            }
         }
-        | Effect::Token {
+        Effect::Token {
             static_abilities, ..
         } => {
             for static_def in static_abilities.iter_mut() {
                 walk_static_definition(static_def, category, cursor);
             }
+        }
+        // CR 611.2b: effects that install a continuous modification carry a
+        // `duration` (`Option<Duration>`/`Duration`) whose `ForAsLongAs` shape
+        // gates on a word-bearing `StaticCondition`. Their primary target filter
+        // is already reached above via `target_filter_mut`; here the duration is
+        // the additional word-bearing child. (`PreventDamage.damage_source_filter`
+        // and `CastFromZone.alt_ability_cost` are secondary effect filters left
+        // intentionally red, consistent with the mass-filter exclusion documented
+        // below.)
+        // `ChangeTextWords.excluded_to` holds concrete `TextWord` operands (not
+        // words used as words on this object — sibling to `ReplaceTextWord`);
+        // `CastFromZone.alt_ability_cost` is the intentionally-red secondary cast
+        // cost (see [`walk_object_words`]). Only the `duration` is walked.
+        Effect::ChangeTextWords { duration, .. } | Effect::CastFromZone { duration, .. } => {
+            if let Some(dur) = duration {
+                walk_duration(dur, category, cursor);
+            }
+        }
+        // CR 707.2 + CR 611.2c: `recipient` (the object(s) that become the copy —
+        // "Shards you control") and the `additional_modifications` "except …"
+        // exceptions are word-bearing carriers alongside the `duration`; the copy
+        // *source* `target` is reached via `target_filter_mut`.
+        Effect::BecomeCopy {
+            recipient,
+            duration,
+            additional_modifications,
+            ..
+        } => {
+            walk_target_filter(recipient, category, cursor);
+            for modification in additional_modifications.iter_mut() {
+                walk_continuous_modification(modification, category, cursor);
+            }
+            if let Some(dur) = duration {
+                walk_duration(dur, category, cursor);
+            }
+        }
+        // CR 611.2c: `recipient` (who receives the abilities — a typed group filter
+        // "each Horror you control") is a word-bearing carrier alongside `duration`;
+        // the donor `target` is reached via `target_filter_mut`.
+        Effect::GainActivatedAbilitiesOfTarget {
+            recipient,
+            duration,
+            ..
+        } => {
+            walk_target_filter(recipient, category, cursor);
+            if let Some(dur) = duration {
+                walk_duration(dur, category, cursor);
+            }
+        }
+        // CR 615.11: `amount_dynamic` ("prevent X … where X is <quantity>") is a
+        // word-bearing `QuantityExpr` carrier alongside the shield `duration`. The
+        // `damage_source_filter` stays intentionally red (see [`walk_object_words`]).
+        Effect::PreventDamage {
+            amount_dynamic,
+            prevention_duration,
+            ..
+        } => {
+            if let Some(amount) = amount_dynamic {
+                walk_quantity_expr(amount, category, cursor);
+            }
+            if let Some(dur) = prevention_duration {
+                walk_duration(dur, category, cursor);
+            }
+        }
+        // CR 508.1d: `required_player` (whom the creature must attack) is a
+        // `TargetFilter` carrier alongside the `duration`; the attacker `target`
+        // is reached via `target_filter_mut`.
+        Effect::ForceAttack {
+            required_player,
+            duration,
+            ..
+        } => {
+            walk_target_filter(required_player, category, cursor);
+            walk_duration(duration, category, cursor);
         }
         Effect::CreateEmblem { statics, triggers } => {
             for static_def in statics.iter_mut() {
@@ -1124,45 +2706,477 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
                 walk_trigger_definition(trigger, category, cursor);
             }
         }
-        Effect::ChangeTextWords { .. }
-        | Effect::StartYourEngines { .. }
-        | Effect::ChangeSpeed { .. }
-        | Effect::DealDamage { .. }
-        | Effect::ApplyPostReplacementDamage { .. }
-        | Effect::EachDealsDamageEqualToPower { .. }
-        | Effect::EachSourceDealsDamage { .. }
-        | Effect::Draw { .. }
-        | Effect::Pump { .. }
+        // ================= CR 612.1: secondary word-bearing carriers =================
+        // Every arm below walks the carrier fields NOT already reached through the
+        // `target_filter_mut()` primary-target walk above. Effects whose only
+        // carrier is that primary target (or which are genuinely wordless / hold an
+        // intentionally-red mass or creation-spec field) fall through to the final
+        // no-op group.
+
+        // ---- PlayerFilter roots (CR 109.5 — control-count / attribute sub-filters) ----
+        Effect::StartYourEngines { player_scope } => {
+            walk_player_filter(player_scope, category, cursor)
+        }
+        Effect::ChangeSpeed {
+            player_scope,
+            amount,
+            ..
+        } => {
+            walk_player_filter(player_scope, category, cursor);
+            walk_quantity_expr(amount, category, cursor);
+        }
+        Effect::DamageEachPlayer {
+            amount,
+            player_filter,
+        } => {
+            walk_quantity_expr(amount, category, cursor);
+            walk_player_filter(player_filter, category, cursor);
+        }
+        // CR 120.3: DamageAll's `target` is a mass object-population filter (left
+        // red like DestroyAll), but its `amount` and `player_filter` are ordinary
+        // carriers ("N damage where N is the number of Goblins", "each opponent").
+        Effect::DamageAll {
+            amount,
+            player_filter,
+            ..
+        } => {
+            walk_quantity_expr(amount, category, cursor);
+            if let Some(pf) = player_filter {
+                walk_player_filter(pf, category, cursor);
+            }
+        }
+        // CR 101.2: Conjure's `library_players` scopes which players' libraries
+        // receive the conjured cards (an "each player" `PlayerFilter`).
+        Effect::Conjure {
+            library_players, ..
+        } => {
+            if let Some(pf) = library_players {
+                walk_player_filter(pf, category, cursor);
+            }
+        }
+
+        // ---- Single-`amount` QuantityExpr carriers (CR 107.3 + CR 608.2c) ----
+        Effect::DealDamage { amount, .. }
+        | Effect::GainLife { amount, .. }
+        | Effect::GainEnergy { amount }
+        | Effect::SetLifeTotal { amount, .. }
+        | Effect::GrantExtraLoyaltyActivations { amount, .. }
+        | Effect::Intensify { amount, .. } => walk_quantity_expr(amount, category, cursor),
+        Effect::LoseLife { amount, .. } => walk_quantity_expr(amount, category, cursor),
+        Effect::Discover {
+            mana_value_limit, ..
+        } => walk_quantity_expr(mana_value_limit, category, cursor),
+
+        // ---- Single-`count` QuantityExpr carriers (CR 107.3 + CR 608.2c) ----
+        // The `target` (or `player`) each carries is reached via `target_filter_mut`
+        // (or is a mass filter left red); here the count is the added carrier.
+        Effect::Draw { count, .. }
+        | Effect::RemoveCounter { count, .. }
+        | Effect::Sacrifice { count, .. }
+        | Effect::Mill { count, .. }
+        | Effect::Scry { count, .. }
+        | Effect::Surveil { count, .. }
+        | Effect::Connive { count, .. }
+        | Effect::PutCounter { count, .. }
+        | Effect::PutChosenCounter { count, .. }
+        | Effect::PutCounterAll { count, .. }
+        | Effect::ChooseCounterAdjustment { count, .. }
+        | Effect::ExileTop { count, .. }
+        | Effect::GivePlayerCounter { count, .. }
+        | Effect::AddPendingETBCounters { count, .. }
+        | Effect::SkipNextTurn { count, .. }
+        | Effect::SkipNextStep { count, .. }
+        | Effect::PutAtLibraryPosition { count, .. }
+        | Effect::AssembleContraptions { count }
+        | Effect::Incubate { count, .. }
+        | Effect::Monstrosity { count }
+        | Effect::Renown { count }
+        | Effect::Bolster { count, .. }
+        | Effect::Adapt { count, .. } => walk_quantity_expr(count, category, cursor),
+
+        // ---- PtValue quantities (CR 613.4) ----
+        Effect::Pump {
+            power, toughness, ..
+        }
+        | Effect::PumpAll {
+            power, toughness, ..
+        } => {
+            walk_pt_value(power, category, cursor);
+            walk_pt_value(toughness, category, cursor);
+        }
+        // CR 613.4 / CR 205.1a: Animate grants base P/T (`Option<PtValue>`), a
+        // typed-subtype `types`/`remove_types` set, and granted `keywords`.
+        Effect::Animate {
+            power,
+            toughness,
+            types,
+            remove_types,
+            keywords,
+            ..
+        } => {
+            if let Some(p) = power {
+                walk_pt_value(p, category, cursor);
+            }
+            if let Some(t) = toughness {
+                walk_pt_value(t, category, cursor);
+            }
+            for subtype in types.iter_mut().chain(remove_types.iter_mut()) {
+                cursor.subtype(category, subtype);
+            }
+            for keyword in keywords.iter_mut() {
+                walk_keyword(keyword, category, cursor);
+            }
+        }
+
+        // ---- Multi-carrier damage effects ----
+        // CR 120.1: both source groups and the shared recipient are word-bearing
+        // filters (none surfaced by `target_filter_mut`).
+        Effect::EachDealsDamageEqualToPower {
+            sources,
+            recipient,
+            extra_source,
+        } => {
+            walk_target_filter(sources, category, cursor);
+            walk_target_filter(recipient, category, cursor);
+            if let Some(extra) = extra_source {
+                walk_target_filter(extra, category, cursor);
+            }
+        }
+        // CR 120.1 + CR 608.2: the source class and per-batch amount; the `Shared`
+        // recipient is reached via `target_filter_mut`, `EachController` is wordless.
+        Effect::EachSourceDealsDamage {
+            sources, amount, ..
+        } => {
+            walk_target_filter(sources, category, cursor);
+            walk_quantity_expr(amount, category, cursor);
+        }
+
+        // ---- Secondary TargetFilter carriers (CR 612.2) ----
+        Effect::Attach { attachment, .. } | Effect::UnattachAll { attachment, .. } => {
+            walk_target_filter(attachment, category, cursor)
+        }
+        Effect::Fight { subject, .. } => walk_target_filter(subject, category, cursor),
+        // CR 701.63a: the enduring permanent (`subject`) plus the N/N counter count.
+        Effect::Endure { amount, subject } => {
+            walk_quantity_expr(amount, category, cursor);
+            walk_target_filter(subject, category, cursor);
+        }
+        Effect::Behold { filter } | Effect::FreeCastFromZones { filter, .. } => {
+            walk_target_filter(filter, category, cursor)
+        }
+        // `ChooseAugmentAndCombineWithHost.filter` is a `Box<TargetFilter>`; the
+        // `host` is reached via `target_filter_mut`.
+        Effect::ChooseAugmentAndCombineWithHost { filter, .. } => {
+            walk_target_filter(filter, category, cursor)
+        }
+        Effect::ChooseDamageSource { source_filter } => {
+            walk_target_filter(source_filter, category, cursor)
+        }
+        Effect::GiveControl { recipient, .. } => walk_target_filter(recipient, category, cursor),
+        Effect::TurnFaceUp { target } => walk_target_filter(target, category, cursor),
+        Effect::ExchangeControl { target_a, target_b }
+        | Effect::ExchangeLifeTotals {
+            player_a: target_a,
+            player_b: target_b,
+        } => {
+            walk_target_filter(target_a, category, cursor);
+            walk_target_filter(target_b, category, cursor);
+        }
+        Effect::Meld {
+            source_filter,
+            partner_filter,
+            ..
+        } => {
+            walk_target_filter(source_filter, category, cursor);
+            walk_target_filter(partner_filter, category, cursor);
+        }
+        Effect::CopyTokenBlockingAttacker {
+            source_filter,
+            owner,
+        } => {
+            walk_target_filter(source_filter, category, cursor);
+            walk_target_filter(owner, category, cursor);
+        }
+        // CR 701.9a: the format-pool copy source's owner + type filter and its
+        // mana-value bound / token count (inventory carriers, not a token
+        // creation-spec exclusion).
+        Effect::CreateTokenCopyFromPool {
+            owner,
+            type_filter,
+            mv_bound,
+            count,
+            ..
+        } => {
+            walk_target_filter(owner, category, cursor);
+            walk_target_filter(type_filter, category, cursor);
+            walk_quantity_expr(mv_bound, category, cursor);
+            walk_quantity_expr(count, category, cursor);
+        }
+        Effect::ChangeTargets { forced_to, .. } => {
+            if let Some(f) = forced_to {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        Effect::ReduceNextSpellCost { spell_filter, .. }
+        | Effect::GrantNextSpellAbility { spell_filter, .. } => {
+            if let Some(f) = spell_filter {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        Effect::ChooseFromZone { filter, .. } => {
+            if let Some(f) = filter {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        Effect::ChooseObjectsIntoTrackedSet {
+            chooser, filter, ..
+        } => {
+            walk_target_filter(chooser, category, cursor);
+            walk_target_filter(filter, category, cursor);
+        }
+        Effect::ChooseAndSacrificeRest {
+            choose_filter,
+            sacrifice_filter,
+            total_power_cap,
+            ..
+        } => {
+            walk_target_filter(choose_filter, category, cursor);
+            walk_target_filter(sacrifice_filter, category, cursor);
+            if let Some(cap) = total_power_cap {
+                walk_quantity_expr(cap, category, cursor);
+            }
+        }
+        // CR 614.9 + CR 615: ordinary source/recipient object filters are walked;
+        // the specialized `DamageTargetFilter` / `DamageRedirectTarget` axes are
+        // not among the listed carrier types (left red).
+        Effect::CreateDamageReplacement {
+            source_filter,
+            redirect_object_filter,
+            recipient_object_filter,
+            ..
+        } => {
+            for f in [
+                source_filter,
+                redirect_object_filter,
+                recipient_object_filter,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        Effect::AssembleContraptionOnSprocket { target, .. } => {
+            walk_target_filter(target, category, cursor)
+        }
+
+        // ---- Effects with a `target`/`player` primary NOT surfaced by
+        // `target_filter_mut` (in its `None` group) plus a count / filter ----
+        Effect::Manifest { target, count, .. } => {
+            walk_target_filter(target, category, cursor);
+            walk_quantity_expr(count, category, cursor);
+        }
+        Effect::Cloak {
+            target,
+            count,
+            object_source,
+        } => {
+            walk_target_filter(target, category, cursor);
+            walk_quantity_expr(count, category, cursor);
+            if let Some(f) = object_source {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        Effect::ExileFromTopUntil { until, .. } => walk_until_condition(until, category, cursor),
+        Effect::RevealUntil { filter, count, .. } | Effect::Seek { filter, count, .. } => {
+            walk_target_filter(filter, category, cursor);
+            walk_quantity_expr(count, category, cursor);
+        }
+        Effect::SearchLibrary { filter, count, .. }
+        | Effect::SearchOutsideGame { filter, count, .. } => {
+            walk_target_filter(filter, category, cursor);
+            walk_quantity_expr(count, category, cursor);
+        }
+        Effect::Dig {
+            count,
+            keep_count_expr,
+            filter,
+            ..
+        } => {
+            walk_quantity_expr(count, category, cursor);
+            if let Some(k) = keep_count_expr {
+                walk_quantity_expr(k, category, cursor);
+            }
+            walk_target_filter(filter, category, cursor);
+        }
+        Effect::RevealHand {
+            card_filter, count, ..
+        } => {
+            walk_target_filter(card_filter, category, cursor);
+            if let Some(c) = count {
+                walk_quantity_expr(c, category, cursor);
+            }
+        }
+        Effect::Discard {
+            count,
+            unless_filter,
+            filter,
+            ..
+        } => {
+            walk_quantity_expr(count, category, cursor);
+            if let Some(f) = unless_filter {
+                walk_target_filter(f, category, cursor);
+            }
+            if let Some(f) = filter {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        Effect::MoveCounters { source, count, .. } => {
+            walk_target_filter(source, category, cursor);
+            if let Some(c) = count {
+                walk_quantity_expr(c, category, cursor);
+            }
+        }
+        Effect::CastCopyOfCard { count, .. } | Effect::BounceAll { count, .. } => {
+            if let Some(c) = count {
+                walk_quantity_expr(c, category, cursor);
+            }
+        }
+        Effect::PutSticker {
+            count,
+            max_ticket_cost,
+            ..
+        } => {
+            walk_quantity_expr(count, category, cursor);
+            if let Some(m) = max_ticket_cost {
+                walk_quantity_expr(m, category, cursor);
+            }
+        }
+        Effect::ChooseDrawnThisTurnPayOrTopdeck {
+            count,
+            life_payment,
+            ..
+        } => {
+            walk_quantity_expr(count, category, cursor);
+            walk_quantity_expr(life_payment, category, cursor);
+        }
+        // CR 508.1c: the additional combat's `attacker_restriction` filter plus the
+        // count of scheduled phases.
+        Effect::AdditionalPhase {
+            count,
+            attacker_restriction,
+            ..
+        } => {
+            walk_quantity_expr(count, category, cursor);
+            if let Some(f) = attacker_restriction {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        // CR 400.7 + CR 614.1c: enters-with counter quantities and the conditional
+        // enters-with gate filter (the mass `ChangeZoneAll` counterpart walks only
+        // the counter quantities; its object `target` is a mass filter left red).
+        Effect::ChangeZone {
+            enter_with_counters,
+            conditional_enter_with_counters,
+            enters_modified_if,
+            ..
+        } => {
+            for (_, count) in enter_with_counters.iter_mut() {
+                walk_quantity_expr(count, category, cursor);
+            }
+            for (gate, _, count) in conditional_enter_with_counters.iter_mut() {
+                walk_target_filter(gate, category, cursor);
+                walk_quantity_expr(count, category, cursor);
+            }
+            if let Some(f) = enters_modified_if {
+                walk_target_filter(f, category, cursor);
+            }
+        }
+        Effect::ChangeZoneAll {
+            enter_with_counters,
+            ..
+        } => {
+            for (_, count) in enter_with_counters.iter_mut() {
+                walk_quantity_expr(count, category, cursor);
+            }
+        }
+
+        // ---- Vec<ContinuousModification> secondary carriers (CR 707.9) ----
+        Effect::CopySpell {
+            additional_modifications,
+            ..
+        }
+        | Effect::AddPendingEntersModifications {
+            modifications: additional_modifications,
+        } => {
+            for modification in additional_modifications.iter_mut() {
+                walk_continuous_modification(modification, category, cursor);
+            }
+        }
+        // CR 707.2 + CR 707.9: the eligible object class plus the "except …"
+        // modifications applied to each created copy.
+        Effect::EachPlayerCopyChosen {
+            choose_filter,
+            copy_modifications,
+            ..
+        } => {
+            walk_target_filter(choose_filter, category, cursor);
+            for modification in copy_modifications.iter_mut() {
+                walk_continuous_modification(modification, category, cursor);
+            }
+        }
+        // CR 702.5a + CR 604.1: the Aura enchant filter and the granted body's
+        // continuous modifications.
+        Effect::ReturnAsAura {
+            enchant_filter,
+            grants,
+        } => {
+            walk_target_filter(enchant_filter, category, cursor);
+            for modification in grants.iter_mut() {
+                walk_continuous_modification(modification, category, cursor);
+            }
+        }
+
+        // ---- AbilityCost / subtype carriers ----
+        // CR 118.1: a resolution-time `PayCost` bundles a full `AbilityCost` (whose
+        // object filter can name a type — "Sacrifice a Goblin"), an optional scale
+        // quantity, and the payer filter.
+        Effect::PayCost { cost, scale, payer } => {
+            walk_ability_cost(cost, category, cursor);
+            if let Some(s) = scale {
+                walk_quantity_expr(s, category, cursor);
+            }
+            walk_target_filter(payer, category, cursor);
+        }
+        // CR 701.47a: Amass names a creature subtype used as such, plus a count.
+        Effect::Amass { subtype, count } => {
+            cursor.subtype(category, subtype);
+            walk_quantity_expr(count, category, cursor);
+        }
+
+        // ================= Genuinely wordless / primary-only / red =================
+        // Every effect below either (a) exposes its only word carrier through the
+        // `target_filter_mut()` walk above, (b) carries no color/land/creature WORD
+        // (fixed counts, markers, ids, name/label strings, mana pips), or (c) holds
+        // a deliberately-red carrier: a mass-population `*All` object filter, a
+        // token / CopyTokenOf / face-down / perpetual creation-spec, a resolved-spell
+        // snapshot (`EpicCopy`), a secondary cast cost, or a specialized non-listed
+        // sub-enum (`FaceDownProfile`, `GuessSubject`, `PerpetualModification`,
+        // `IntensityScope`, `ForEachCategoryAction`, `DamageTargetFilter`, etc.).
+        Effect::ApplyPostReplacementDamage { .. }
         | Effect::PairWith { .. }
         | Effect::Destroy { .. }
         | Effect::Regenerate { .. }
         | Effect::RemoveAllDamage { .. }
         | Effect::Counter { .. }
         | Effect::CounterAll { .. }
-        | Effect::GainLife { .. }
-        | Effect::LoseLife { .. }
         | Effect::SetTapState { .. }
-        | Effect::RemoveCounter { .. }
-        | Effect::Sacrifice { .. }
         | Effect::DiscardCard { .. }
-        | Effect::Mill { .. }
-        | Effect::Scry { .. }
-        | Effect::PumpAll { .. }
-        | Effect::DamageAll { .. }
-        | Effect::DamageEachPlayer { .. }
         | Effect::DestroyAll { .. }
-        | Effect::ChangeZone { .. }
-        | Effect::ChangeZoneAll { .. }
-        | Effect::Dig { .. }
         | Effect::GainControl { .. }
         | Effect::GainControlAll { .. }
         | Effect::ControlNextTurn { .. }
-        | Effect::Attach { .. }
-        | Effect::UnattachAll { .. }
-        | Effect::Surveil { .. }
-        | Effect::Fight { .. }
         | Effect::Bounce { .. }
-        | Effect::BounceAll { .. }
         | Effect::Explore
         | Effect::ExploreAll { .. }
         | Effect::Investigate
@@ -1174,78 +3188,43 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
         | Effect::ProliferateTarget { .. }
         | Effect::Populate
         | Effect::Clash
-        | Effect::Behold { .. }
         | Effect::EndTheTurn
         | Effect::EndCombatPhase
         | Effect::SwitchPT { .. }
-        | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
-        | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
-        | Effect::CreateTokenCopyFromPool { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::CombineHost { .. }
-        | Effect::ChooseAugmentAndCombineWithHost { .. }
-        | Effect::Meld { .. }
         | Effect::ExileHaunting { .. }
         | Effect::HideawayConceal { .. }
-        | Effect::CopyTokenBlockingAttacker { .. }
-        | Effect::BecomeCopy { .. }
-        | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
-        | Effect::PutCounter { .. }
         | Effect::ChooseCounterKind { .. }
-        | Effect::PutChosenCounter { .. }
-        | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
-        | Effect::ChooseCounterAdjustment { .. }
         | Effect::DoublePT { .. }
         | Effect::DoublePTAll { .. }
-        | Effect::MoveCounters { .. }
-        | Effect::Animate { .. }
-        | Effect::ReturnAsAura { .. }
         | Effect::RegisterBending { .. }
         | Effect::Cleanup { .. }
         | Effect::Mana { .. }
-        | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
-        | Effect::SearchLibrary { .. }
-        | Effect::SearchOutsideGame { .. }
-        | Effect::RevealHand { .. }
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
-        | Effect::ExileTop { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
-        | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
-        | Effect::Connive { .. }
         | Effect::PhaseOut { .. }
         | Effect::PhaseIn { .. }
         | Effect::ForceBlock { .. }
-        | Effect::ForceAttack { .. }
         | Effect::SolveCase
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }
         | Effect::BecomeSaddled { .. }
         | Effect::SetClassLevel { .. }
-        | Effect::AddTargetReplacement { .. }
         | Effect::AddRestriction { .. }
-        | Effect::ReduceNextSpellCost { .. }
-        | Effect::GrantNextSpellAbility { .. }
-        | Effect::AddPendingETBCounters { .. }
-        | Effect::AddPendingEntersModifications { .. }
-        | Effect::PayCost { .. }
-        | Effect::CastFromZone { .. }
-        | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
-        | Effect::PreventDamage { .. }
-        | Effect::CreateDamageReplacement { .. }
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RingTemptsYou
@@ -1258,81 +3237,45 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
         | Effect::RedistributeLifeTotals
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
-        | Effect::AssembleContraptions { .. }
         | Effect::AssembleContraptionsFromRollDifference
         | Effect::CrankContraptions { .. }
         | Effect::ReassembleContraption { .. }
-        | Effect::AssembleContraptionOnSprocket { .. }
         | Effect::ReassembleContraptionOnSprocket { .. }
-        | Effect::PutSticker { .. }
         | Effect::ApplySticker { .. }
         | Effect::ProcessRadCounters
         | Effect::GrantCastingPermission { .. }
-        | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
         | Effect::ForEachCategory { .. }
-        | Effect::ChooseObjectsIntoTrackedSet { .. }
-        | Effect::ChooseAndSacrificeRest { .. }
-        | Effect::EachPlayerCopyChosen { .. }
-        | Effect::Exploit { .. }
-        | Effect::GainEnergy { .. }
-        | Effect::GivePlayerCounter { .. }
         | Effect::LoseAllPlayerCounters { .. }
-        | Effect::ExileFromTopUntil { .. }
-        | Effect::RevealUntil { .. }
-        | Effect::Discover { .. }
+        | Effect::Exploit { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
         | Effect::Ripple { .. }
         | Effect::MiracleCast { .. }
         | Effect::MadnessCast { .. }
-        | Effect::PutAtLibraryPosition { .. }
-        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
         | Effect::PutOnTopOrBottom { .. }
         | Effect::GiftDelivery { .. }
         | Effect::Goad { .. }
         | Effect::GoadAll { .. }
         | Effect::Detain { .. }
         | Effect::SetRoomDoorLock { .. }
-        | Effect::ExchangeControl { .. }
-        | Effect::ChangeTargets { .. }
-        | Effect::Manifest { .. }
         | Effect::ManifestDread
-        | Effect::Cloak { .. }
-        | Effect::TurnFaceUp { .. }
         | Effect::TurnFaceDown { .. }
         | Effect::ExtraTurn { .. }
-        | Effect::GrantExtraLoyaltyActivations { .. }
-        | Effect::SkipNextTurn { .. }
-        | Effect::SkipNextStep { .. }
-        | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
         | Effect::RuntimeHandled { .. }
-        | Effect::Incubate { .. }
-        | Effect::Amass { .. }
-        | Effect::Monstrosity { .. }
         | Effect::Specialize
-        | Effect::Renown { .. }
-        | Effect::Bolster { .. }
-        | Effect::Adapt { .. }
         | Effect::Learn
         | Effect::Forage
         | Effect::Harness
         | Effect::CollectEvidence { .. }
-        | Effect::Endure { .. }
         | Effect::BlightEffect { .. }
-        | Effect::Seek { .. }
-        | Effect::SetLifeTotal { .. }
         | Effect::ExchangeLifeWithStat { .. }
-        | Effect::ExchangeLifeTotals { .. }
         | Effect::SetDayNight { .. }
-        | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
-        | Effect::Conjure { .. }
         | Effect::ApplyPerpetual { .. }
-        | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::Unimplemented { .. } => {}
     }
