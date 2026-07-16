@@ -3828,6 +3828,18 @@ pub enum FilterProp {
     /// CR 510.1: Object was dealt damage during this turn.
     /// Checks `damage_marked > 0` (damage persists until cleanup step).
     WasDealtDamageThisTurn,
+    /// CR 120.1: This object *dealt* damage during this turn — i.e. it was the
+    /// SOURCE of a damage event ("target creature ... that dealt damage this
+    /// turn", Red Guardian, Super-Soldier). The active-voice counterpart of
+    /// `WasDealtDamageThisTurn` (which reads the damage recipient). Evaluated by
+    /// scanning `state.damage_dealt_this_turn` for a record whose `source_id`
+    /// is this object.
+    ///
+    /// Parameterization note: these two form a damage-role pair. If a third
+    /// damage-role filter appears (e.g. "dealt combat damage this turn"), fold
+    /// the pair into `DamageThisTurn { role: {Dealt, Received}, combat_only }`
+    /// per the /add-engine-variant sibling-cluster threshold.
+    DealtDamageThisTurn,
     /// CR 400.7: Object entered the battlefield during this turn.
     /// Checks `entered_battlefield_turn == Some(current_turn)`.
     EnteredThisTurn,
@@ -15663,8 +15675,8 @@ pub enum ActivationRestriction {
 }
 
 /// Structured spell-casting restrictions parsed from Oracle text.
-/// These describe when a spell may be cast. Runtime enforcement can
-/// be added independently of parsing/export support.
+/// These describe when — and, for `CantSpendMana`, how — a spell may be cast.
+/// Runtime enforcement can be added independently of parsing/export support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum CastingRestriction {
@@ -15692,6 +15704,14 @@ pub enum CastingRestriction {
     RequiresCondition {
         condition: Option<ParsedCondition>,
     },
+    /// CR 601.2g / CR 118.3: "You can't spend mana to cast this spell."
+    /// Unlike the timing variants above, this restricts HOW the cost is paid,
+    /// not WHEN: no mana may leave the pool, so the entire mana cost must be
+    /// covered by alternative payments such as convoke and delve (Hogaak,
+    /// Arisen Necropolis). It never gates casting on the game timing, so
+    /// `restrictions.rs` treats it as always-satisfied for the timing check and
+    /// the mana-payment path excludes real pool mana when it is present.
+    CantSpendMana,
 }
 
 /// CR 602.2b + CR 601.2f: Self-referential cost reduction on an activated ability.
@@ -19937,6 +19957,42 @@ impl CopyCountStatus {
     }
 }
 
+/// CR 608.2c: Distinguishes WHY an immediately-chained `ParentTarget` child
+/// ability was handed off with nothing to act on. The three sources are
+/// mutually exclusive per hand-off (only one effect can be the immediate
+/// parent of a given child), and each is consulted by exactly one downstream
+/// site, so they used to be three parallel boolean fields on `ResolvedAbility`
+/// / `GameState` before being consolidated here (see the PR #5834/#5836
+/// review that requested this).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParentTargetMissingReason {
+    /// CR 401.5 (issue #1365): A `Dig` looked at an empty library. Consulted
+    /// solely by the `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`)
+    /// to resolve a `target: ParentTarget` with no selection to NO target
+    /// instead of the generic self-fallback, which would otherwise move the
+    /// Dig's own source (e.g. a reanimated Thassa's Oracle) into the library
+    /// it just found empty.
+    Dig,
+    /// CR 609.3: A `ChooseFromZone` had no cards to choose from. Consumers
+    /// that name the missing choice through `ParentTarget` (e.g. a chained
+    /// perpetual rider, `perpetual.rs`) must no-op instead of using the
+    /// shared source fallback.
+    ChooseFromZone,
+    /// CR 608.2c (issue #4950, Thoughtseize): A `RevealHand` reveal-choice
+    /// ("choose a nonland card from it") came up with an empty eligible set —
+    /// there was nothing to choose, so no object was ever bound as
+    /// `ParentTarget`. Distinct from a `Discard`/`DiscardCard` whose OWN
+    /// target is player-scoped (Tinybones' "target player discards a card",
+    /// Sonic Shrieker's "they discard a card" forwarding a damaged PLAYER,
+    /// not a chosen card): those never produce this reason, since no
+    /// reveal-choice ran, and must still fall back to the generic
+    /// hand-choice/random discard path. Consulted by `effects::discard::
+    /// resolve` to resolve a `ParentTarget`-bound discard with zero forwarded
+    /// objects to a hard no-op (CR 608.2c: nothing to choose) instead of the
+    /// whole-hand fallback.
+    RevealHandChoice,
+}
+
 /// Runtime ability data passed to effect handlers at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedAbility {
@@ -20151,25 +20207,17 @@ pub struct ResolvedAbility {
     /// CR 700.2b: One AbilityDefinition per mode for the reflexive modal trigger.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_abilities: Vec<AbilityDefinition>,
-    /// CR 401.5 + CR 608.2c (issue #1365): Stamped ONLY by
-    /// `effects::apply_parent_chain_context` at the exact moment this ability
-    /// is handed off as the immediate sub_ability of a `Dig` that just looked
-    /// at an empty library — never set any other way, so it cannot be
-    /// confused with a stale value from an unrelated resolution. Consulted
-    /// solely by the `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`)
-    /// to resolve a `target: ParentTarget` with no selection to NO target
-    /// instead of the generic self-fallback, which would otherwise move the
-    /// Dig's own source (e.g. a reanimated Thassa's Oracle) into the library
-    /// it just found empty.
+    /// CR 401.5 + CR 608.2c (issue #1365) + CR 609.3 + issue #4950
+    /// (Thoughtseize): Stamped ONLY by `effects::apply_parent_chain_context`
+    /// at the exact moment this ability is handed off as the immediate
+    /// sub_ability of a `Dig`/`ChooseFromZone`/`RevealHand` reveal-choice that
+    /// came up with nothing (empty library, no eligible card to choose, or an
+    /// empty reveal-choice eligible set respectively) — never set any other
+    /// way, so it cannot be confused with a stale value from an unrelated
+    /// resolution. See [`ParentTargetMissingReason`] for what each variant
+    /// gates and who consults it.
     #[serde(skip)]
-    pub dig_found_nothing_for_parent_target: bool,
-    /// CR 609.3 + CR 608.2c: Stamped only by
-    /// `effects::apply_parent_chain_context` when this ability is the immediate
-    /// child of a `ChooseFromZone` that had no cards to choose. Consumers that
-    /// name the missing choice through `ParentTarget` must no-op instead of
-    /// using the shared source fallback.
-    #[serde(skip)]
-    pub choose_from_zone_found_nothing_for_parent_target: bool,
+    pub parent_target_missing_reason: Option<ParentTargetMissingReason>,
 }
 
 impl ResolvedAbility {
@@ -20227,8 +20275,7 @@ impl ResolvedAbility {
             source_card_id: None,
             modal: None,
             mode_abilities: Vec::new(),
-            dig_found_nothing_for_parent_target: false,
-            choose_from_zone_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         }
     }
 

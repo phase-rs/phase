@@ -16039,6 +16039,59 @@ fn blossombind_compound_splits_into_untap_and_counter_replacements() {
     );
 }
 
+/// CR 701.26b + CR 613.1f: Frozen in Ice — "Enchanted creature loses all
+/// abilities and can't become untapped." must decompose into BOTH the
+/// loses-all-abilities static AND an unconditional Untap-prevention
+/// replacement, sharing the layer/replacement split established by
+/// `blossombind_compound_splits_into_untap_and_counter_replacements`. Before
+/// `try_split_and_cant_become_untapped`, the leading "loses all abilities"
+/// clause made `is_static_pattern` claim the whole line, and the generic
+/// continuous-modification scanner silently dropped the trailing "can't
+/// become untapped" clause — the enchanted creature lost its abilities but
+/// untapped normally next turn (issue #5801).
+#[test]
+fn frozen_in_ice_compound_splits_into_grant_and_untap_replacement() {
+    let r = parse(
+        "Enchant creature\nWhen this Aura enters, tap enchanted creature.\nEnchanted creature loses all abilities and can't become untapped.",
+        "Frozen in Ice",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    assert!(
+        r.statics
+            .iter()
+            .any(|def| matches!(def.mode, StaticMode::Continuous)),
+        "the loses-all-abilities grant must be preserved, got {:?}",
+        r.statics
+    );
+    // The broad untap prohibition must NOT lower to a CantUntap static (that
+    // class is untap-step-only per CR 502.3 and would not stop a spell/
+    // ability untap).
+    assert!(
+        !r.statics
+            .iter()
+            .any(|def| def.mode == StaticMode::CantUntap),
+        "broad 'can't become untapped' must not be a CantUntap static, got {:?}",
+        r.statics
+    );
+    let untap = r
+        .replacements
+        .iter()
+        .find(|def| def.event == ReplacementEvent::Untap)
+        .expect("compound must emit an Untap-prevention replacement");
+    assert!(
+        untap.condition.is_none(),
+        "the untap prevention must be unconditional (apply to every untap), got {:?}",
+        untap.condition
+    );
+    assert!(
+        untap.execute.is_none(),
+        "a bare 'can't become untapped' has no alternative effect, got {:?}",
+        untap.execute
+    );
+}
+
 /// CR 207.2c + CR 702.185c: Temporal Intervention — the "Void —" ability-word
 /// prefix has no rules meaning, so the body "This spell costs {2} less to cast
 /// if [a nonland permanent left the battlefield this turn or a spell was warped

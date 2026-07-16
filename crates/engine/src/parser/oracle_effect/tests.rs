@@ -20435,6 +20435,142 @@ fn become_basic_land_type_of_choice() {
     );
 }
 
+// CR 205.1b: Navigator's Compass — "{T}: Until end of turn, target land you
+// control becomes the basic land type of your choice in addition to its
+// other types." (Oracle text verified against Scryfall.) Previously
+// `try_parse_become_choice` anchored on the choice phrase literally ending in
+// "of your choice"; the trailing "in addition to its other types" marker made
+// the whole predicate fall through unparsed (the animation fallback can't
+// tokenize "of your choice" as a type either), so the ability did nothing.
+#[test]
+fn become_basic_land_type_of_choice_in_addition_to_other_types() {
+    let clause = parse_effect_clause(
+        "target land you control becomes the basic land type of your choice \
+         in addition to its other types until end of turn",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::BasicLandType,
+                ..
+            }
+        ),
+        "Expected Choose {{ BasicLandType }}, got {:?}",
+        clause.effect
+    );
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*apply.effect
+    else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert_eq!(
+        static_abilities[0].modifications,
+        vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::BasicLandType,
+        }],
+        "the retention marker must not introduce RemoveAllSubtypes or change \
+         the additive AddChosenSubtype modification: {:?}",
+        static_abilities[0].modifications
+    );
+}
+
+// Sibling coverage on the creature-type choice axis, proving the fix
+// generalizes across `try_parse_become_choice`'s three choice kinds rather
+// than special-casing the land branch alone.
+#[test]
+fn become_creature_type_of_choice_in_addition_to_other_types() {
+    let clause = parse_effect_clause(
+        "target creature becomes the creature type of your choice in addition \
+         to its other types until end of turn",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::CreatureType { .. },
+                ..
+            }
+        ),
+        "Expected Choose {{ CreatureType }}, got {:?}",
+        clause.effect
+    );
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*apply.effect
+    else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert_eq!(
+        static_abilities[0].modifications,
+        vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }]
+    );
+}
+
+// No-regression guard: the pre-existing "and <keyword grant>" trailing form
+// (Mondo Gecko) must still parse — the new marker-strip must not interfere
+// when no "in addition to its other types" marker is present.
+#[test]
+fn become_color_of_choice_still_chains_trailing_keyword_grant() {
+    use crate::types::ability::ColorChangeMode;
+    use crate::types::keywords::{HexproofFilter, Keyword};
+
+    let clause = parse_effect_clause(
+        "Target creature becomes the color of your choice and gains hexproof \
+         from that color until end of turn",
+        &mut ParseContext::default(),
+    );
+    assert!(matches!(
+        clause.effect,
+        Effect::Choose {
+            choice_type: ChoiceType::Color { .. },
+            ..
+        }
+    ));
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*apply.effect
+    else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert!(
+        static_abilities[0]
+            .modifications
+            .contains(&ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Set,
+            }),
+        "{:?}",
+        static_abilities[0].modifications
+    );
+    assert!(
+        static_abilities[0].modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::HexproofFrom(HexproofFilter::ChosenColor)
+            }
+        )),
+        "trailing keyword grant must still chain: {:?}",
+        static_abilities[0].modifications
+    );
+}
+
 #[test]
 fn parse_play_from_exile_this_turn() {
     // CR 400.7i + CR 608.2c: A standalone "you may play that card this turn"

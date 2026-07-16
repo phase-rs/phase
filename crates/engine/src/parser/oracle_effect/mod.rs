@@ -20212,9 +20212,59 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             mana_spend_permission: None,
         });
     }
+    // CR 400.1/400.2 + CR 608.2c: The bare "them"/"those cards" anaphor is
+    // ambiguous — it usually refers to an exile the chain produced
+    // (ExiledBySource), but when no exile ever occurred and the SAME chain's
+    // most recent producer merely looked at/revealed a PLAYER'S HAND
+    // (Silent-Blade Oni: "look at that player's hand. You may cast a spell
+    // from among those cards without paying its mana cost."), the cards
+    // never left that hand. Binding to `ExiledBySource` there resolves
+    // against an empty tracked-exile set and silently swallows the cast
+    // permission (issue #5240) — no prompt is ever offered. Bind to that
+    // player's hand instead, mirroring Branch 2's own "cast a spell from
+    // your hand" shape (`TypedFilter::new(Card).controller(..)` + `InZone{Hand}`)
+    // with the revealed player's `ControllerRef` swapped in for `You`.
+    // "...exiled cards" phrasings are unambiguous (the antecedent noun is
+    // explicitly "exiled") and always keep the `ExiledBySource` binding.
     if scan_contains_phrase(rest, "from among them")
         || scan_contains_phrase(rest, "from among those cards")
-        || scan_contains_phrase(rest, "from among those exiled cards")
+    {
+        if !ctx.chain_has_prior_exile_producer {
+            if let Some(controller) = ctx
+                .chain_prior_hand_reveal_target
+                .as_ref()
+                .and_then(hand_reveal_target_to_controller_ref)
+            {
+                let mut hand_filter = TypedFilter::new(TypeFilter::Card).controller(controller);
+                hand_filter
+                    .properties
+                    .push(FilterProp::InZone { zone: Zone::Hand });
+                return Some(Effect::CastFromZone {
+                    target: TargetFilter::Typed(hand_filter),
+                    without_paying_mana_cost: without_paying,
+                    mode,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint,
+                    duration: None,
+                    driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                    mana_spend_permission: None,
+                });
+            }
+        }
+        return Some(Effect::CastFromZone {
+            target: TargetFilter::ExiledBySource,
+            without_paying_mana_cost: without_paying,
+            mode,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint,
+            duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
+        });
+    }
+    if scan_contains_phrase(rest, "from among those exiled cards")
         || scan_contains_phrase(rest, "from among the exiled cards")
     {
         return Some(Effect::CastFromZone {
@@ -22222,6 +22272,36 @@ fn clause_ir_is_exile_producer(clause: &ClauseIr) -> bool {
     chain_clause_is_exile_producer(&clause.parsed.effect)
         || continuation_is_exile_producer(clause.disposition.followup())
         || continuation_is_exile_producer(clause.disposition.intrinsic())
+}
+
+/// CR 400.1/400.2 + CR 608.2c: If this clause is an `Effect::RevealHand`
+/// ("look at"/"reveal" a possessive hand), return the player it looked at.
+/// Feeds `ParseContext::chain_prior_hand_reveal_target` so a later same-chain
+/// "cast a spell from among those cards" anaphor (Silent-Blade Oni) can bind
+/// to that player's hand instead of the exile-only `ExiledBySource` default.
+fn clause_ir_hand_reveal_target(clause: &ClauseIr) -> Option<TargetFilter> {
+    match &clause.parsed.effect {
+        Effect::RevealHand { target, .. } => Some(target.clone()),
+        _ => None,
+    }
+}
+
+/// CR 400.1/400.2 + CR 601.2a: Map a possessive-hand player reference (as
+/// produced by `parse_hand_possessive_target`) to the `ControllerRef` axis
+/// used to scope a card filter to that same player's hand. Exhaustive over
+/// the closed set of forms `parse_hand_possessive_target` can produce — a
+/// bounded translation table, not per-card special-casing.
+fn hand_reveal_target_to_controller_ref(target: &TargetFilter) -> Option<ControllerRef> {
+    match target {
+        TargetFilter::Controller => Some(ControllerRef::You),
+        TargetFilter::Player => Some(ControllerRef::TargetPlayer),
+        TargetFilter::TriggeringPlayer => Some(ControllerRef::TriggeringPlayer),
+        TargetFilter::DefendingPlayer => Some(ControllerRef::DefendingPlayer),
+        TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::Opponent) => {
+            Some(ControllerRef::Opponent)
+        }
+        _ => None,
+    }
 }
 
 fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
@@ -27061,6 +27141,15 @@ pub(crate) fn parse_effect_chain_ir(
                 .clauses()
                 .iter()
                 .any(clause_ir_is_exile_producer),
+            // CR 400.1/400.2 + CR 608.2c: most-recent earlier same-chain
+            // `RevealHand` target, so a later "cast a spell from among those
+            // cards" anaphor (Silent-Blade Oni) binds to that player's hand
+            // instead of the exile-only `ExiledBySource` default.
+            chain_prior_hand_reveal_target: builder
+                .clauses()
+                .iter()
+                .rev()
+                .find_map(clause_ir_hand_reveal_target),
             // CR 608.2c: bind a bare "it" in this chunk's counter/anaphor to the
             // token created by an earlier clause when that token is the chain's
             // most-recent object referent (Esper Terra's "put up to three lore

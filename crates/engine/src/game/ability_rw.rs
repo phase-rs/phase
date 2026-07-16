@@ -2359,6 +2359,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -2617,6 +2618,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -3628,8 +3630,7 @@ fn walk_ability(
         chosen_players: _,
         sub_link: _,
         replacement_applied: _,
-        dig_found_nothing_for_parent_target: _,
-        choose_from_zone_found_nothing_for_parent_target: _,
+        parent_target_missing_reason: _,
     } = a;
 
     // §4.3.2: a definition's own `player_scope` overrides the inherited scope for

@@ -9,6 +9,23 @@ use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
 
+/// CR 400.1/400.2: Recursively extract a filter's own `controller` axis,
+/// looking through the composed forms (`Not`/`And`/`Or`) a real card's target
+/// filter may be built from rather than only matching a bare `Typed`. `And`/
+/// `Or` return the first branch that carries a controller axis — composed
+/// filters in this codebase don't mix two different explicit player axes on
+/// the same object filter, so first-found is unambiguous.
+fn extract_controller_ref(filter: &TargetFilter) -> Option<&crate::types::ability::ControllerRef> {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller.as_ref(),
+        TargetFilter::Not { filter } => extract_controller_ref(filter),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().find_map(extract_controller_ref)
+        }
+        _ => None,
+    }
+}
+
 /// CR 115.1 + CR 601.2c: "You may cast a spell ... from your hand without paying
 /// its mana cost" (Electrodominance, Baral's Expertise) has no "target" word —
 /// the spell is chosen at resolution from the granting player's hand via
@@ -21,7 +38,30 @@ fn open_private_zone_cast_selection(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    let Some(player) = state.players.iter().find(|p| p.id == ability.controller) else {
+    // CR 400.1/400.2 + CR 109.4: A hand-scoped cast filter's own `controller`
+    // axis names WHOSE hand is the candidate pool. Buster-Sword-class filters
+    // ("cast a spell from your hand") carry no controller (or `You`) and keep
+    // scanning the caster's own hand. Silent-Blade Oni's "cast a spell from
+    // among those cards" (bound to the damaged player's hand via
+    // `ControllerRef::TriggeringPlayer`, issue #5240) needs a DIFFERENT
+    // player's hand as the pool — `ability.controller` alone can't express
+    // that, so resolve the filter's own controller axis through the single
+    // `ControllerRef` authority instead of hardcoding the caster. Recurses
+    // through `Not`/`And`/`Or` (extract_controller_ref) so a composed filter
+    // (e.g. a future card combining a type restriction with a player axis via
+    // `And`) isn't silently treated as caster-scoped.
+    let hand_owner = extract_controller_ref(target_filter)
+        .and_then(|cref| {
+            crate::game::filter::controller_ref_player(
+                state,
+                ability.source_id,
+                Some(ability.controller),
+                Some(ability),
+                cref,
+            )
+        })
+        .unwrap_or(ability.controller);
+    let Some(player) = state.players.iter().find(|p| p.id == hand_owner) else {
         return Err(EffectError::PlayerNotFound);
     };
     let cards_iter = match source_zone {
