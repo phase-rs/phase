@@ -261,7 +261,7 @@ fn finish_search_found_batch(
                 };
                 return Ok(state.waiting_for.clone());
             }
-            let _ = apply_search_partition(
+            match apply_search_partition(
                 state,
                 &batch.survivors,
                 &[],
@@ -269,7 +269,12 @@ fn finish_search_found_batch(
                 source_id,
                 player,
                 events,
-            );
+            )? {
+                crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                    return Ok(state.waiting_for.clone());
+                }
+            }
             set_priority(state, player);
             // CR 605.3b + CR 616.1: resume-aware — a parked mana-cost cursor
             // settles before (and instead of stranding) the ordinary rider.
@@ -482,51 +487,25 @@ pub(crate) fn route_rest_partition(
     state: &mut GameState,
     rest_ids: &[ObjectId],
     rest_zone: Zone,
+    source_id: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
-) {
-    match rest_zone {
-        Zone::Library => {
-            for &obj_id in rest_ids {
-                zones::move_to_library_position(state, obj_id, false, events);
+) -> crate::game::zone_pipeline::BatchMoveResult {
+    let requests = rest_ids
+        .iter()
+        .map(|&obj_id| {
+            let request = crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                obj_id,
+                rest_zone,
+                source_id.unwrap_or(obj_id),
+            );
+            if rest_zone == Zone::Library {
+                request.at_library_position(LibraryPosition::Bottom)
+            } else {
+                request
             }
-        }
-        zone => {
-            // ZONE-PIPELINE GAP (documented deferral): the dig/search "rest into
-            // your graveyard" partition (65 Dig cards + the `null`→Graveyard
-            // default) is delivered raw here, so a `Moved` graveyard→exile redirect
-            // (Rest in Peace / Leyline of the Void) does NOT yet fire on these
-            // rest cards. The sibling dig unkept-loop (handle_resolution_choice
-            // DigChoice) and the reveal-until rest pile (effects::reveal_until::
-            // move_rest_then) ARE migrated; this shared partition helper is not,
-            // because it has three callers — two synchronous (search-split at
-            // `apply_search_partition`, dig at the kept block) and ONE inside
-            // `run_batch_completion`'s RevealRestPile arm.
-            //
-            // RE-PAUSE CONTRACT STATUS (updated): the "pause from inside a
-            // completion" blocker named here previously is RESOLVED — the
-            // re-pause contract documented on
-            // `zone_pipeline::drain_pending_batch_deliveries` now covers a fresh
-            // park raised FROM a completion (the drain `.take()`s the old record
-            // BEFORE invoking the completion, so a completion that re-enters the
-            // batch machinery installs a clean record; see the
-            // `AttractionOpenRemainder` arm, which already pauses + re-defers
-            // through this exact path). The ONLY remaining work to migrate this
-            // helper onto `move_objects_simultaneously` is threading the
-            // `BatchMoveResult::NeedsChoice` return through the two SYNCHRONOUS
-            // callers (`apply_search_partition` and the dig kept-block), each of
-            // which currently returns `Result<(), _>` / `()` and would need to
-            // surface a parked prompt the same way the migrated DigChoice
-            // unkept-loop does (`defer_completion_on_pause` + early return). That
-            // is a cross-cutting signature change across both callers; tracked for
-            // a follow-up so it lands as one reviewable unit rather than a partial
-            // migration here. (Practical exposure: a graveyard-redirect on a dig
-            // REST pile — the non-kept cards — with RIP/Leyline on the
-            // battlefield.)
-            for &obj_id in rest_ids {
-                zones::move_to_zone(state, obj_id, zone, events);
-            }
-        }
-    }
+        })
+        .collect();
+    crate::game::zone_pipeline::move_objects_simultaneously(state, requests, events)
 }
 
 /// CR 701.22a / CR 701.25a: Scry and surveil put the kept cards on top of the
@@ -690,7 +669,7 @@ fn apply_search_partition(
     source_id: ObjectId,
     controller: crate::types::player::PlayerId,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
+) -> Result<crate::game::zone_pipeline::BatchMoveResult, EngineError> {
     if !primary_ids.is_empty() {
         // CR 614.1 / CR 110.5b: Synthesize a ChangeZone over the explicit primary
         // targets and route through the ETB pipeline so the permanent enters
@@ -722,10 +701,16 @@ fn apply_search_partition(
         crate::game::effects::resolve_ability_chain(state, &change_zone, events, 0)
             .map_err(|e| EngineError::InvalidAction(format!("search-split primary move: {e:?}")))?;
     }
-    // Rest is never Battlefield across the A/B/C cluster; the standard rest mover
-    // (Library => bottom per CR 401.4, else move_to_zone) is correct.
-    route_rest_partition(state, rest_ids, split.rest_destination, events);
-    Ok(())
+    // CR 701.23a + CR 401.4 + CR 616.1: Rest is never Battlefield across the
+    // A/B/C cluster. Surface a replacement-ordering pause so callers do not
+    // drain their shuffle continuation past the still-parked rest-pile batch.
+    Ok(route_rest_partition(
+        state,
+        rest_ids,
+        split.rest_destination,
+        Some(source_id),
+        events,
+    ))
 }
 
 /// CR 701.38: The mutable round state of a `WaitingFor::VoteChoice`. Bundles
@@ -1077,6 +1062,7 @@ pub(super) fn handle_resolution_choice(
                         state,
                         crate::types::game_state::BatchCompletion::RevealRestPile {
                             player,
+                            source_id: Some(source_id),
                             rest_cards: graveyard_cards,
                             rest_destination: Zone::Graveyard,
                             clear_markers: cards.clone(),
@@ -1304,6 +1290,7 @@ pub(super) fn handle_resolution_choice(
                                 state,
                                 crate::types::game_state::BatchCompletion::RevealRestPile {
                                     player,
+                                    source_id: Some(source_id),
                                     rest_cards: misses,
                                     rest_destination,
                                     clear_markers,
@@ -1379,6 +1366,7 @@ pub(super) fn handle_resolution_choice(
                 rest_destination,
                 Some(crate::types::game_state::BatchCompletion::RevealRestPile {
                     player,
+                    source_id: Some(source_id),
                     rest_cards: Vec::new(),
                     rest_destination,
                     clear_markers,
@@ -2364,6 +2352,7 @@ pub(super) fn handle_resolution_choice(
                                 state,
                                 crate::types::game_state::BatchCompletion::RevealRestPile {
                                     player,
+                                    source_id: dig_source_id,
                                     rest_cards: Vec::new(),
                                     rest_destination: zone,
                                     clear_markers: Vec::new(),
@@ -2436,6 +2425,7 @@ pub(super) fn handle_resolution_choice(
                                     state,
                                     crate::types::game_state::BatchCompletion::RevealRestPile {
                                         player,
+                                        source_id: dig_source_id,
                                         rest_cards: unkept.clone(),
                                         rest_destination: rest_destination
                                             .unwrap_or(Zone::Graveyard),
@@ -2471,23 +2461,50 @@ pub(super) fn handle_resolution_choice(
                 } else {
                     kept.clone()
                 };
-            effects::publish_fresh_tracked_set(state, publish_set);
             // None => Graveyard; map to a concrete zone so the rest mover
             // (shared with the search-split partition) has a single Zone.
             // When a continuation owns the unkept pile (Expressive Iteration
-            // bottom/exile tail), do not pre-route here.
+            // bottom/exile tail), do not pre-route here. A `Moved` replacement
+            // can pause this batch, so the tracked-set publication and
+            // continuation wiring stay below the result match: neither may see
+            // a pre-redirect rest pile.
             let defer_rest_routing = state
                 .pending_continuation
                 .as_ref()
                 .is_some_and(|cont| dig_continuation_needs_full_looked_at_tracked_set(&cont.chain));
             if !defer_rest_routing {
-                route_rest_partition(
+                match route_rest_partition(
                     state,
                     &unkept,
                     rest_destination.unwrap_or(Zone::Graveyard),
+                    dig_source_id,
                     events,
-                );
+                ) {
+                    crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                        // CR 701.20e + CR 616.1: `route_rest_partition` has
+                        // parked the undelivered suffix. Its cleanup tail owns
+                        // the publication and continuation work, so the drain
+                        // performs it exactly once only after the true batch end.
+                        crate::game::zone_pipeline::defer_completion_on_pause(
+                            state,
+                            crate::types::game_state::BatchCompletion::RevealRestPile {
+                                player,
+                                source_id: dig_source_id,
+                                rest_cards: Vec::new(),
+                                rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                                clear_markers: Vec::new(),
+                                publish_tracked_set: Some(publish_set),
+                                emit_reveal_until_resolved: None,
+                            },
+                        );
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                }
             }
+            effects::publish_fresh_tracked_set(state, publish_set);
             if let Some(cont) = state.pending_continuation.as_mut() {
                 // CR 608.2c: ParentTarget continuations (Hideaway conceal, dig
                 // conditionals on the kept card) bind to the kept selection.
@@ -2744,7 +2761,22 @@ pub(super) fn handle_resolution_choice(
                 // CR 609.3 fast-path: found <= primary_count, so ALL chosen go to
                 // the primary destination and the rest is empty. No second prompt.
                 let events_before_drain = events.len();
-                apply_search_partition(state, &chosen, &[], &split, source_id, player, events)?;
+                match apply_search_partition(
+                    state,
+                    &chosen,
+                    &[],
+                    &split,
+                    source_id,
+                    player,
+                    events,
+                )? {
+                    crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                }
                 set_priority(state, player);
                 super::engine::resume_pending_continuation_if_priority(state, events)
                     .expect("a settled search choice must resume its continuation");
@@ -2800,7 +2832,7 @@ pub(super) fn handle_resolution_choice(
                 rest_destination,
             };
             let events_before_partition = events.len();
-            apply_search_partition(
+            match apply_search_partition(
                 state,
                 &primary_chosen,
                 &rest_ids,
@@ -2808,7 +2840,14 @@ pub(super) fn handle_resolution_choice(
                 source_id,
                 player,
                 events,
-            )?;
+            )? {
+                crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
+            }
             set_priority(state, player);
             super::engine::resume_pending_continuation_if_priority(state, events)
                 .expect("a settled search choice must resume its continuation");
@@ -5318,6 +5357,7 @@ fn route_kept_card_or_defer(
                 state,
                 crate::types::game_state::BatchCompletion::RevealRestPile {
                     player,
+                    source_id: Some(source_id),
                     rest_cards: misses.to_vec(),
                     rest_destination,
                     clear_markers,
@@ -5478,6 +5518,7 @@ pub(crate) fn run_batch_completion(
         // tail the synchronous path runs inline.
         BatchCompletion::RevealRestPile {
             player,
+            source_id,
             rest_cards,
             rest_destination,
             clear_markers,
@@ -5490,7 +5531,25 @@ pub(crate) fn run_batch_completion(
             // Library-bottom placement and any CR 616.1 pause. Dispatch on the
             // dig-only payload so each site keeps its synchronous semantics.
             if publish_tracked_set.is_some() {
-                route_rest_partition(state, &rest_cards, rest_destination, events);
+                match route_rest_partition(state, &rest_cards, rest_destination, source_id, events)
+                {
+                    crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                        crate::game::zone_pipeline::defer_completion_on_pause(
+                            state,
+                            BatchCompletion::RevealRestPile {
+                                player,
+                                source_id,
+                                rest_cards: Vec::new(),
+                                rest_destination,
+                                clear_markers,
+                                publish_tracked_set,
+                                emit_reveal_until_resolved,
+                            },
+                        );
+                        return;
+                    }
+                }
             } else if !rest_cards.is_empty() {
                 // CR 701.20a + CR 616.1: Reveal-until rest piles are fully
                 // pipeline-owned, including Library-bottom placement. If a
@@ -5499,6 +5558,7 @@ pub(crate) fn run_batch_completion(
                 // continuation drain run after the pile actually lands.
                 let cleanup = BatchCompletion::RevealRestPile {
                     player,
+                    source_id,
                     rest_cards: Vec::new(),
                     rest_destination,
                     clear_markers,
@@ -5533,6 +5593,63 @@ pub(crate) fn run_batch_completion(
                     subject: None,
                 });
             }
+            finish_with_continuation(state, player, events);
+        }
+        BatchCompletion::DigMassPutAllRestComplete {
+            player,
+            source_id,
+            selected,
+            destination,
+            enter_tapped,
+        } => {
+            crate::game::effects::dig::move_mass_put_all_selected(
+                state,
+                player,
+                source_id,
+                selected,
+                destination,
+                enter_tapped,
+                events,
+            );
+        }
+        BatchCompletion::DigMassPutAllComplete {
+            player: _,
+            source_id,
+            selected,
+            destination,
+        } => {
+            // CR 608.2c + CR 614.1: A replacement can redirect an individual
+            // selected card, so "those" refers only to cards that actually
+            // reached the requested destination after the full batch settles.
+            let delivered = selected
+                .into_iter()
+                .filter(|id| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|obj| obj.zone == destination)
+                })
+                .collect();
+            effects::publish_fresh_tracked_set(state, delivered);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Dig,
+                source_id,
+                subject: None,
+            });
+            // The synchronous resolver still owns its own sub-ability traversal;
+            // on a paused path `engine_replacement` drains the already-stashed
+            // continuation after this batch completion returns. Do not drain it
+            // here, or a synchronous mass Dig could run an outer continuation
+            // ahead of its own child instruction.
+        }
+        BatchCompletion::DigPriorLookRestComplete { player, source_id } => {
+            state.private_look_ids.clear();
+            state.private_look_player = None;
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Dig,
+                source_id,
+                subject: None,
+            });
             finish_with_continuation(state, player, events);
         }
         // CR 610.3: the exile-until-leaves return pile has fully landed (after a

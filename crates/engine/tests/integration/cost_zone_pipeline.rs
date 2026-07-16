@@ -6,9 +6,10 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle_cost::parse_oracle_cost;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, CastingPermission, ChoiceType,
-    DiscardSelfScope, Effect, ManaContribution, ManaProduction, ModalChoice, QuantityExpr,
-    ReplacementDefinition, ReplacementMode, ResolvedAbility, SacrificeCost, SpellCastingOption,
-    TargetFilter, TargetRef, TargetSelectionMode, TriggerDefinition, TypeFilter, TypedFilter,
+    DigSource, DiscardSelfScope, Effect, ManaContribution, ManaProduction, ModalChoice,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
+    SacrificeCost, SpellCastingOption, TargetFilter, TargetRef, TargetSelectionMode,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -16,9 +17,9 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, CollectEvidenceResume, GameState, ManaAbilityCostParentLifecycle,
-    ManaAbilityCostResolutionMode, ManaAbilityResume, PayCostKind, PendingCast,
-    PendingCostMoveResume, PendingReplacement, StackEntryKind, WaitingFor,
+    BatchCompletion, CastPaymentMode, CollectEvidenceResume, GameState,
+    ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, PayCostKind,
+    PendingCast, PendingCostMoveResume, PendingReplacement, StackEntryKind, WaitingFor,
 };
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -50,6 +51,570 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
                 enters_modified_if: None,
             },
         ))
+}
+
+/// W-R1 (red first): a Dig rest pile sent to the library bottom is an
+/// effect-owned batch. Competing Library-destination `Moved` replacements must
+/// pause before the kept tracked set is published, then re-pause safely while
+/// the rest pile drains.
+#[test]
+fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Dig Rest-Pile Redirect Source", 1, 1)
+        .id();
+    let kept = scenario
+        .add_spell_to_library_top(P0, "Dig Kept Card", true)
+        .id();
+    let rest_a = scenario
+        .add_spell_to_library_top(P0, "Dig Rest Card A", true)
+        .id();
+    let rest_b = scenario
+        .add_spell_to_library_top(P0, "Dig Rest Card B", true)
+        .id();
+    let redirect_sources = [
+        scenario
+            .add_creature(P0, "Dig Library To Graveyard", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .id(),
+        scenario
+            .add_creature(P0, "Dig Library To Exile", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .id(),
+    ];
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![kept, rest_a, rest_b];
+    let ability = ResolvedAbility::new(
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 3 },
+            destination: None,
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: Some(Zone::Library),
+            reveal: true,
+            enter_tapped: false,
+            source: DigSource::Library,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("Dig reaches its selection");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DigChoice { .. }
+    ));
+
+    let paused = runner
+        .act(GameAction::SelectCards { cards: vec![kept] })
+        .expect("Dig submits the kept card and reaches the first bottom placement");
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    let parked_order = runner
+        .state()
+        .pending_batch_deliveries
+        .as_ref()
+        .expect("the second rest card is parked behind the first replacement choice")
+        .remaining
+        .clone();
+    assert_eq!(parked_order.len(), 1);
+    assert!(
+        runner.state().chain_tracked_set_id.is_none(),
+        "the kept set cannot publish while a rest placement remains undecided"
+    );
+    for card_id in [kept, rest_a, rest_b] {
+        assert!(
+            runner.state().revealed_cards.contains(&card_id),
+            "reveal bookkeeping must remain intact while the rest-pile batch is parked"
+        );
+    }
+
+    let first_redirect = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("first rest-card redirect resolves");
+    assert!(matches!(
+        first_redirect.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(
+        runner.state().chain_tracked_set_id.is_none(),
+        "a re-paused rest batch still cannot publish its tracked set"
+    );
+    for redirect_source in redirect_sources {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&redirect_source)
+            .expect("synthetic redirect source remains on the battlefield")
+            .replacement_definitions
+            .clear();
+    }
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("unredirected rest-pile suffix drains");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    let tracked = runner
+        .state()
+        .tracked_object_sets
+        .get(
+            &runner
+                .state()
+                .chain_tracked_set_id
+                .expect("Dig publishes a tracked set once its rest pile settles"),
+        )
+        .expect("the freshly-published Dig tracked set exists");
+    assert_eq!(tracked, &vec![kept]);
+    let redirected_id = [rest_a, rest_b]
+        .into_iter()
+        .find(|id| !parked_order.contains(id))
+        .expect("first attempted rest card is outside the parked suffix");
+    assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&parked_order[0]].zone, Zone::Library);
+}
+
+/// W-R3 (red first): deterministic Dig's nonbattlefield kept batch must defer
+/// its tracked-set publication and downstream tracked-set consumer until every
+/// selected card has either reached the requested destination or been
+/// redirected elsewhere.
+#[test]
+fn dig_mass_put_all_nonbattlefield_redirect_publishes_only_delivered_set() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Mass Dig Redirect Source", 1, 1)
+        .id();
+    let selected_a = scenario
+        .add_spell_to_library_top(P0, "Mass Dig Selected A", true)
+        .id();
+    let selected_b = scenario
+        .add_spell_to_library_top(P0, "Mass Dig Selected B", true)
+        .id();
+    let drawn = scenario
+        .add_spell_to_library_top(P0, "Mass Dig Tracked-Set Draw", true)
+        .id();
+    let redirect_sources = [
+        scenario
+            .add_creature(P0, "Mass Dig Hand To Exile", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile))
+            .id(),
+        scenario
+            .add_creature(P0, "Mass Dig Hand To Graveyard", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard))
+            .id(),
+    ];
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![selected_a, selected_b, drawn];
+    let mut ability = ResolvedAbility::new(
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 2 },
+            destination: Some(Zone::Hand),
+            keep_count: Some(u32::MAX),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: Some(Zone::Library),
+            reveal: true,
+            enter_tapped: false,
+            source: DigSource::Library,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::Draw {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+            target: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    )));
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("mass Dig reaches its first kept-card delivery");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    let parked_order = runner
+        .state()
+        .pending_batch_deliveries
+        .as_ref()
+        .expect("the second selected card is batch-owned behind the first redirect")
+        .remaining
+        .clone();
+    assert_eq!(parked_order.len(), 1);
+    assert!(
+        runner
+            .state()
+            .tracked_object_sets
+            .values()
+            .all(|set| !set.contains(&selected_a) && !set.contains(&selected_b)),
+        "a nested replacement may allocate an unrelated empty tracked set, but the mass Dig's selected cards cannot publish before their batch settles"
+    );
+    assert_eq!(
+        runner.state().objects[&drawn].zone,
+        Zone::Library,
+        "the chained tracked-set consumer cannot run while the selected batch is parked"
+    );
+    assert!(
+        !initial_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: engine::types::ability::EffectKind::Dig,
+                source_id,
+                ..
+            } if *source_id == source
+        )),
+        "the parent Dig result must wait for the selected batch"
+    );
+
+    let first_redirect = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("first selected-card redirect resolves");
+    assert!(matches!(
+        first_redirect.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(runner
+        .state()
+        .tracked_object_sets
+        .values()
+        .all(|set| !set.contains(&selected_a) && !set.contains(&selected_b)));
+    for redirect_source in redirect_sources {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&redirect_source)
+            .expect("synthetic redirect source remains on the battlefield")
+            .replacement_definitions
+            .clear();
+    }
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the remaining selected card reaches hand and the mass Dig completes");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+
+    let redirected_id = [selected_a, selected_b]
+        .into_iter()
+        .find(|id| !parked_order.contains(id))
+        .expect("first selected card is outside the parked suffix");
+    let delivered_id = parked_order[0];
+    assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&delivered_id].zone, Zone::Hand);
+    let tracked = runner
+        .state()
+        .tracked_object_sets
+        .get(
+            &runner
+                .state()
+                .chain_tracked_set_id
+                .expect("mass Dig publishes only after the kept batch settles"),
+        )
+        .expect("the mass Dig tracked set exists");
+    assert_eq!(tracked, &vec![delivered_id]);
+    assert_eq!(
+        runner.state().objects[&drawn].zone,
+        Zone::Hand,
+        "the chained tracked-set draw sees exactly the delivered selected-card count"
+    );
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(first_redirect.events.iter())
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: engine::types::ability::EffectKind::Dig,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the parent Dig completion fires exactly once after the kept batch settles"
+    );
+}
+
+/// W-REG: The migration keeps the no-replacement fast paths synchronous for
+/// both interactive and deterministic Dig; the search split fast path remains
+/// covered by `cultivate_split_destination`.
+#[test]
+fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
+    let mut dig_scenario = GameScenario::new();
+    dig_scenario.at_phase(Phase::PreCombatMain);
+    let dig_source = dig_scenario
+        .add_creature(P0, "Synchronous Dig Source", 1, 1)
+        .id();
+    let kept = dig_scenario
+        .add_spell_to_library_top(P0, "Synchronous Dig Kept", true)
+        .id();
+    let rest_a = dig_scenario
+        .add_spell_to_library_top(P0, "Synchronous Dig Rest A", true)
+        .id();
+    let rest_b = dig_scenario
+        .add_spell_to_library_top(P0, "Synchronous Dig Rest B", true)
+        .id();
+    let mut dig_runner = dig_scenario.build();
+    dig_runner.state_mut().players[P0.0 as usize].library = im::vector![kept, rest_a, rest_b];
+    let dig = ResolvedAbility::new(
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 3 },
+            destination: None,
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: Some(Zone::Library),
+            reveal: false,
+            enter_tapped: false,
+            source: DigSource::Library,
+        },
+        vec![],
+        dig_source,
+        P0,
+    );
+    let mut dig_events = Vec::new();
+    resolve_ability_chain(dig_runner.state_mut(), &dig, &mut dig_events, 0)
+        .expect("uninterrupted Dig reaches its selection");
+    let dig_completed = dig_runner
+        .act(GameAction::SelectCards { cards: vec![kept] })
+        .expect("uninterrupted Dig rest batch completes inline");
+    assert!(matches!(
+        dig_completed.waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(dig_runner.state().pending_batch_deliveries.is_none());
+    assert_eq!(dig_runner.state().objects[&rest_a].zone, Zone::Library);
+    assert_eq!(dig_runner.state().objects[&rest_b].zone, Zone::Library);
+    let dig_tracked = dig_runner
+        .state()
+        .tracked_object_sets
+        .get(
+            &dig_runner
+                .state()
+                .chain_tracked_set_id
+                .expect("synchronous Dig publishes its kept set"),
+        )
+        .expect("synchronous Dig tracked set exists");
+    assert_eq!(dig_tracked, &vec![kept]);
+
+    let mut mass_scenario = GameScenario::new();
+    mass_scenario.at_phase(Phase::PreCombatMain);
+    let mass_source = mass_scenario
+        .add_creature(P0, "Synchronous Mass Dig Source", 1, 1)
+        .id();
+    let selected_a = mass_scenario
+        .add_spell_to_library_top(P0, "Synchronous Mass Dig A", true)
+        .id();
+    let selected_b = mass_scenario
+        .add_spell_to_library_top(P0, "Synchronous Mass Dig B", true)
+        .id();
+    let mut mass_runner = mass_scenario.build();
+    mass_runner.state_mut().players[P0.0 as usize].library = im::vector![selected_a, selected_b];
+    let mass_dig = ResolvedAbility::new(
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 2 },
+            destination: Some(Zone::Hand),
+            keep_count: Some(u32::MAX),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: Some(Zone::Library),
+            reveal: false,
+            enter_tapped: false,
+            source: DigSource::Library,
+        },
+        vec![],
+        mass_source,
+        P0,
+    );
+    let mut mass_events = Vec::new();
+    resolve_ability_chain(mass_runner.state_mut(), &mass_dig, &mut mass_events, 0)
+        .expect("uninterrupted deterministic Dig resolves inline");
+    assert!(matches!(
+        mass_runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(mass_runner.state().pending_batch_deliveries.is_none());
+    assert_eq!(mass_runner.state().objects[&selected_a].zone, Zone::Hand);
+    assert_eq!(mass_runner.state().objects[&selected_b].zone, Zone::Hand);
+    let mass_tracked = mass_runner
+        .state()
+        .tracked_object_sets
+        .get(
+            &mass_runner
+                .state()
+                .chain_tracked_set_id
+                .expect("synchronous mass Dig publishes after its batch"),
+        )
+        .expect("synchronous mass Dig tracked set exists");
+    assert_eq!(mass_tracked, &vec![selected_a, selected_b]);
+}
+
+/// W-R2: A `RevealRestPile` already deferred behind a kept-card replacement can
+/// itself start a Library-bottom batch that re-pauses while draining. Its cleanup
+/// must survive both pause boundaries and publish exactly once at the true end.
+#[test]
+fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Deferred Dig Rest-Pile Source", 1, 1)
+        .id();
+    let kept = scenario
+        .add_spell_to_library_top(P0, "Deferred Dig Kept", true)
+        .id();
+    let rest_a = scenario
+        .add_spell_to_library_top(P0, "Deferred Dig Rest A", true)
+        .id();
+    let rest_b = scenario
+        .add_spell_to_library_top(P0, "Deferred Dig Rest B", true)
+        .id();
+    for (name, destination) in [
+        ("Deferred Dig Battlefield Redirect A", Zone::Graveyard),
+        ("Deferred Dig Battlefield Redirect B", Zone::Exile),
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Battlefield, destination));
+    }
+    let library_redirect_sources = [
+        scenario
+            .add_creature(P0, "Deferred Dig Library Redirect A", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .id(),
+        scenario
+            .add_creature(P0, "Deferred Dig Library Redirect B", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .id(),
+    ];
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![kept, rest_a, rest_b];
+    let ability = ResolvedAbility::new(
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 3 },
+            destination: Some(Zone::Battlefield),
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: Some(Zone::Library),
+            reveal: true,
+            enter_tapped: false,
+            source: DigSource::Library,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("Dig reaches its kept-card selection");
+
+    let kept_pause = runner
+        .act(GameAction::SelectCards { cards: vec![kept] })
+        .expect("kept battlefield entry reaches a replacement choice");
+    assert!(matches!(
+        kept_pause.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(matches!(
+        runner
+            .state()
+            .pending_batch_deliveries
+            .as_ref()
+            .and_then(|pending| pending.completion.as_ref()),
+        Some(BatchCompletion::RevealRestPile { .. })
+    ));
+
+    let rest_pause = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("kept-card resolution enters the deferred rest-pile route");
+    assert!(matches!(
+        rest_pause.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    let first_rest_park = runner
+        .state()
+        .pending_batch_deliveries
+        .as_ref()
+        .expect("the second rest placement is parked behind the first redirect");
+    assert_eq!(first_rest_park.remaining.len(), 1);
+    assert!(matches!(
+        first_rest_park.completion.as_ref(),
+        Some(BatchCompletion::RevealRestPile { .. })
+    ));
+    assert!(runner.state().chain_tracked_set_id.is_none());
+
+    let reparking = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the rest batch re-parks on its remaining library placement");
+    assert!(matches!(
+        reparking.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(matches!(
+        runner
+            .state()
+            .pending_batch_deliveries
+            .as_ref()
+            .and_then(|pending| pending.completion.as_ref()),
+        Some(BatchCompletion::RevealRestPile { .. })
+    ));
+    assert!(runner.state().chain_tracked_set_id.is_none());
+
+    for redirect_source in library_redirect_sources {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&redirect_source)
+            .expect("synthetic redirect source remains on the battlefield")
+            .replacement_definitions
+            .clear();
+    }
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the final rest placement drains the deferred completion");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    let tracked = runner
+        .state()
+        .tracked_object_sets
+        .get(
+            &runner
+                .state()
+                .chain_tracked_set_id
+                .expect("the Dig completion publishes after the true batch end"),
+        )
+        .expect("the tracked set exists");
+    assert_eq!(tracked, &vec![kept]);
 }
 
 fn redirect_self_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefinition {
