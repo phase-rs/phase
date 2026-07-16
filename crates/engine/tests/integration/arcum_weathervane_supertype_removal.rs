@@ -69,7 +69,7 @@ fn add_snow_land(runner: &mut GameRunner, player: PlayerId) -> ObjectId {
 /// Cast a one-shot supertype-removal spell at an opponent's snow land and assert
 /// the Snow supertype is stripped end-to-end. On `main` the clause lowers to
 /// `Effect::Unimplemented`, so the land is unchanged and this fails.
-fn snow_removal_case(oracle: &str) {
+fn snow_removal_case(oracle: &str, persists_until_next_turn: bool) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
@@ -104,16 +104,29 @@ fn snow_removal_case(oracle: &str) {
         outcome.state().objects[&land].card_types.supertypes,
         outcome.state().waiting_for,
     );
+
+    drop(outcome);
+    runner.advance_to_phase(Phase::Upkeep);
+    assert_eq!(
+        runner.state().objects[&land]
+            .card_types
+            .supertypes
+            .contains(&Supertype::Snow),
+        !persists_until_next_turn,
+        "the \"{oracle}\" duration must determine whether Snow returns after \
+         end-of-turn cleanup; supertypes={:?}",
+        runner.state().objects[&land].card_types.supertypes,
+    );
 }
 
 /// Arcum's Weathervane: "Target snow land is no longer snow." (permanent).
 #[test]
 fn arcum_weathervane_is_no_longer_snow_strips_snow_supertype() {
-    snow_removal_case(IS_NO_LONGER_SNOW);
+    snow_removal_case(IS_NO_LONGER_SNOW, true);
 }
 
 /// Thermal Flux: "Target snow permanent isn't snow until end of turn."
 #[test]
 fn thermal_flux_isnt_snow_strips_snow_supertype_until_end_of_turn() {
-    snow_removal_case(ISNT_SNOW_EOT);
+    snow_removal_case(ISNT_SNOW_EOT, false);
 }

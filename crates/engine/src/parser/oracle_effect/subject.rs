@@ -198,7 +198,7 @@ pub(super) fn try_parse_subject_predicate_ast(
         ));
     }
 
-    // CR 205.4b + CR 611.2b: one-shot supertype removal — "target <filter> isn't
+    // CR 205.4b + CR 611.2a: one-shot supertype removal — "target <filter> isn't
     // / is not / is no longer <supertype>", the RemoveSupertype sibling of the
     // "becomes <supertype>" AddSupertype one-shot above (Arcum's Weathervane,
     // Thermal Flux). Runs after the become arm because its subject is always
@@ -736,7 +736,7 @@ fn try_parse_subject_become_clause(
     build_become_clause(application, &predicate, ctx)
 }
 
-/// CR 205.4b + CR 611.2b: One-shot supertype REMOVAL on a targeted permanent —
+/// CR 205.4b + CR 611.2a: One-shot supertype REMOVAL on a targeted permanent —
 /// "target <filter> isn't / is not / is no longer <supertype> [until end of
 /// turn]". This is the inverse of the "target <filter> becomes <supertype>"
 /// one-shot that [`build_become_clause`] already lowers (it emits
@@ -763,21 +763,33 @@ fn try_parse_subject_supertype_removal_clause(
     ctx: &mut ParseContext,
 ) -> Option<ClauseAst> {
     let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
-    // The copula-negation seam. `split_around` matches on the lowercased mirror
-    // and returns original-case slices; none of the three markers is a substring
-    // of another, so probe order is irrelevant.
-    let (subject_tp, predicate_tp) = tp
-        .split_around(" isn't ")
-        .or_else(|| tp.split_around(" is no longer "))
-        .or_else(|| tp.split_around(" is not "))?;
-    let subject = subject_tp.original.trim();
+    // The copula-negation seam. Keep recognition in the nom grammar and map the
+    // remainder back to original case through `nom_on_lower`; the three copulas
+    // are independent alternatives, not a full-string permutation list.
+    let (subject_lower, predicate) = nom_on_lower(text, &lower, |input| {
+        alt((
+            terminated(
+                take_until::<_, _, OracleError<'_>>(" isn't "),
+                tag(" isn't "),
+            ),
+            terminated(
+                take_until::<_, _, OracleError<'_>>(" is no longer "),
+                tag(" is no longer "),
+            ),
+            terminated(
+                take_until::<_, _, OracleError<'_>>(" is not "),
+                tag(" is not "),
+            ),
+        ))
+        .parse(input)
+    })?;
+    let subject = text[..subject_lower.len()].trim();
     if subject.is_empty() {
         return None;
     }
-    // Peel a trailing duration ("until end of turn"); CR 611.2b: a one-shot type
+    // Peel a trailing duration ("until end of turn"); CR 611.2a: a one-shot type
     // change with no explicit duration is permanent.
-    let (supertype_text, duration) = super::strip_trailing_duration(predicate_tp.original.trim());
+    let (supertype_text, duration) = super::strip_trailing_duration(predicate.trim());
     let supertype_lower = supertype_text
         .trim()
         .trim_end_matches('.')
