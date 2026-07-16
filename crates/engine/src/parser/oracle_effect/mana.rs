@@ -132,16 +132,27 @@ fn try_parse_for_each_color_mana(text: &str, lower: &str) -> Option<Effect> {
 /// the Phase triggers that carry these clauses (Belbe, Corrupted Observer) the
 /// active player is the trigger's scoped player, so the recipient resolves via
 /// `TargetFilter::ScopedPlayer`. "that player" is the same anaphor.
+///
+/// CR 115.1 + CR 106.4: "target player" is a genuine chosen target (Jetfire,
+/// Ingenious Scientist: "Target player adds that much {C}"), recorded as
+/// `TargetFilter::Player`. Unlike the anaphors it is not a context ref, so it
+/// also surfaces a player target slot at activation and its mana is deposited
+/// into the chosen player (see `mana_effect_recipient`).
 fn strip_mana_subject_prefix(text: &str) -> Option<(TargetFilter, &str)> {
     let lower = text.to_lowercase();
     nom_on_lower(text, &lower, |i| {
-        value(
-            TargetFilter::ScopedPlayer,
-            (
-                alt((tag("the active player "), tag("that player "))),
-                tag("adds "),
+        alt((
+            // CR 505.1 + CR 106.4: anaphoric subject — active/that player.
+            value(
+                TargetFilter::ScopedPlayer,
+                (
+                    alt((tag("the active player "), tag("that player "))),
+                    tag("adds "),
+                ),
             ),
-        )
+            // CR 115.1 + CR 106.4: a chosen target player is the recipient.
+            value(TargetFilter::Player, (tag("target player "), tag("adds "))),
+        ))
         .parse(i)
     })
 }
@@ -586,6 +597,25 @@ pub(super) fn try_parse_add_mana_effect_with_context(
                 expiry: None,
                 target: mana_target.or(where_x_target),
             });
+        }
+
+        // CR 106.1b: "[count] {C}[{C}…]" -> count-prefixed COLORLESS mana
+        // ("adds that much {C}", Jetfire, Ingenious Scientist). The literal {C}
+        // symbol count is a per-unit multiplier applied to the prefix count
+        // (mirrors the symbol-first "{C}{C} for each X" scaling).
+        if let Some((symbol_count, after)) = parse_colorless_mana_production(rest) {
+            let after = after.trim().trim_end_matches(['.', '"']).trim();
+            if after.is_empty() {
+                return Some(Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: scale_for_each_count(symbol_count, count.clone()),
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: where_x_target,
+                });
+            }
         }
 
         // CR 106.1: "[count] {color}" -> single color repeated (e.g., "six {G}" -> 6 Green)
@@ -3899,6 +3929,46 @@ mod tests {
                         }
                     ),
                     "count must be ObjectCount, got {count:?}"
+                );
+            }
+            other => panic!("expected Effect::Mana, got {other:?}"),
+        }
+    }
+
+    /// CR 115.1 + CR 106.4: "Target player adds that much {C}" (Jetfire,
+    /// Ingenious Scientist) — a chosen TARGET player is the recipient
+    /// (`TargetFilter::Player`, not the `ScopedPlayer` anaphor), and "that much"
+    /// is the counters-removed cost amount (`EventContextAmount`, resolved from
+    /// `chosen_x`). Revert-probe: without the "target player adds" arm in
+    /// `strip_mana_subject_prefix` this clause returns `None` (whole clause
+    /// unparsed).
+    #[test]
+    fn parse_add_mana_target_player_that_much_colorless() {
+        let effect = try_parse_add_mana_effect("target player adds that much {C}")
+            .expect("'target player adds' subject-led mana clause must parse");
+        match effect {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                target,
+                restrictions,
+                ..
+            } => {
+                assert_eq!(
+                    target,
+                    Some(TargetFilter::Player),
+                    "recipient must be the chosen TARGET player, not an anaphor"
+                );
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    },
+                    "'that much' must be EventContextAmount, got {count:?}"
+                );
+                assert!(
+                    restrictions.is_empty(),
+                    "the bare add clause carries no restriction; the following \
+                     sentence attaches it"
                 );
             }
             other => panic!("expected Effect::Mana, got {other:?}"),

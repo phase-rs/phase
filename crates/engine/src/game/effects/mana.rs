@@ -24,12 +24,123 @@ fn mana_effect_recipient(
     state: &GameState,
     ability: &ResolvedAbility,
     recipient_filter: &Option<TargetFilter>,
+    produced: &ManaProduction,
 ) -> PlayerId {
     match recipient_filter {
+        // CR 106.4: context-ref recipients (ScopedPlayer, chosen player) resolve
+        // via the context, not `ability.targets`.
         Some(filter) if filter.is_context_ref() => {
             super::resolve_player_for_context_ref(state, ability, filter)
         }
+        // CR 115.1 + CR 106.4: "target player adds …" (Jetfire, Ingenious
+        // Scientist) — the targeted player was chosen at announcement and lives
+        // in `ability.targets`. Gate on the production count NOT being
+        // target-derived: the identical `TargetFilter::Player` is also emitted as
+        // a COUNT SOURCE ("Add {U} for each card in target player's hand"), where
+        // the target feeds the count and the recipient stays the controller.
+        Some(filter @ TargetFilter::Player) if !mana_count_reads_targets(produced) => {
+            super::resolve_player_for_context_ref(state, ability, filter)
+        }
         _ => ability.controller,
+    }
+}
+
+/// CR 106.4 + CR 115.1: True when a mana production's count is derived from the
+/// ability's chosen target (e.g. "for each card in target player's hand" →
+/// `TargetZoneCardCount`), as opposed to a target-independent count ("that much"
+/// → `EventContextAmount`; "for each artifact you control" → `ObjectCount`).
+///
+/// `Effect::Mana.target` is overloaded: it names the mana RECIPIENT for a
+/// subject-led "target player adds …" clause, but a COUNT SOURCE for a
+/// "… for each card in target player's …" clause. This predicate distinguishes
+/// the two so `mana_effect_recipient` only redirects the pool when the target is
+/// genuinely the recipient.
+fn mana_count_reads_targets(produced: &ManaProduction) -> bool {
+    mana_production_count(produced).is_some_and(quantity_expr_reads_targets)
+}
+
+/// The player-chosen/dynamic count of a mana production, if it carries one.
+/// Exhaustive over `ManaProduction` so a new variant forces a decision here.
+fn mana_production_count(
+    produced: &ManaProduction,
+) -> Option<&crate::types::ability::QuantityExpr> {
+    match produced {
+        ManaProduction::Colorless { count }
+        | ManaProduction::AnyOneColor { count, .. }
+        | ManaProduction::AnyCombination { count, .. }
+        | ManaProduction::ChosenColor { count, .. }
+        | ManaProduction::OpponentLandColors { count }
+        | ManaProduction::AnyCombinationOfObjectColors { count, .. }
+        | ManaProduction::AnyTypeProduceableBy { count, .. }
+        | ManaProduction::AnyInCommandersColorIdentity { count, .. }
+        | ManaProduction::AnyOneColorAmongPermanents { count, .. } => Some(count),
+        // No dynamic count (fixed symbol lists, choice-among-colors productions).
+        ManaProduction::Fixed { .. }
+        | ManaProduction::Mixed { .. }
+        | ManaProduction::ChoiceAmongExiledColors { .. }
+        | ManaProduction::ChoiceAmongCombinations { .. }
+        | ManaProduction::DistinctColorsAmongPermanents { .. }
+        | ManaProduction::TriggerEventManaType => None,
+    }
+}
+
+fn quantity_expr_reads_targets(expr: &crate::types::ability::QuantityExpr) -> bool {
+    use crate::types::ability::QuantityExpr;
+    match expr {
+        QuantityExpr::Ref { qty } => quantity_ref_reads_targets(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_reads_targets(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_reads_targets)
+        }
+        // Conservative default: a literal or any unrecognized wrapper is not
+        // target-derived. Mirrors `quantity_expr_is_board_state_relative`.
+        _ => false,
+    }
+}
+
+/// CR 115.1: True when a `QuantityRef` reads the resolving ability's chosen
+/// target (an owned target slot, a target-scoped object/player axis, or a filter
+/// that references the target player). Conservative default (`false`) mirrors
+/// `quantity_ref_is_board_state_relative` in `game/casting.rs`: any ref not
+/// positively known to read a target is treated as target-independent.
+fn quantity_ref_reads_targets(qty: &crate::types::ability::QuantityRef) -> bool {
+    use crate::types::ability::{ObjectScope, PlayerScope, QuantityRef};
+    match qty {
+        // Refs that own or read the first target slot directly.
+        QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::TargetControllerCounter { .. } => true,
+        // Player-axis refs read a target only when scoped to the target player.
+        QuantityRef::HandSize { player }
+        | QuantityRef::LifeTotal { player }
+        | QuantityRef::GraveyardSize { player }
+        | QuantityRef::LifeLostThisTurn { player }
+        | QuantityRef::PartySize { player }
+        | QuantityRef::Speed { player } => matches!(player, PlayerScope::Target),
+        // Object-axis refs read a target only when scoped to the target object.
+        QuantityRef::CountersOn { scope, .. }
+        | QuantityRef::Power { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::Intensity { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
+            matches!(scope, ObjectScope::Target)
+        }
+        // Filter-carrying counts read a target when the filter references it.
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::Aggregate { filter, .. } => {
+            crate::game::ability_utils::filter_references_target_player(filter)
+        }
+        _ => false,
     }
 }
 
@@ -74,7 +185,7 @@ pub fn resolve(
         // (Spectral Searchlight, Stadium Vendors) that is the chosen player, not
         // the controller. Resolve it here so the prompt is directed correctly;
         // `handle_choose_mana_effect` re-derives the same recipient for deposit.
-        let prompt_player = mana_effect_recipient(state, ability, &mana_recipient_filter);
+        let prompt_player = mana_effect_recipient(state, ability, &mana_recipient_filter, produced);
         state.waiting_for = WaitingFor::ChooseManaColor {
             player: prompt_player,
             choice,
@@ -137,7 +248,7 @@ pub fn resolve(
         // CR 106.4: A subject-led mana clause routes the mana to the named
         // player ("the active player adds {C}{C} …" on a Phase trigger, "that
         // player adds one mana of any color" on Spectral Searchlight).
-        _ => mana_effect_recipient(state, ability, &mana_recipient_filter),
+        _ => mana_effect_recipient(state, ability, &mana_recipient_filter, produced),
     };
 
     // CR 106.4: When an effect instructs a player to add mana, that mana goes
@@ -203,7 +314,7 @@ pub fn handle_choose_mana_effect(
     // same player the color prompt was directed to in `resolve`), not the
     // controller. Priority still returns to the controller below — only the mana
     // is redirected.
-    let recipient = mana_effect_recipient(state, ability, target);
+    let recipient = mana_effect_recipient(state, ability, target, produced);
     let produced_mana = !mana_types.is_empty();
     for mana_type in mana_types {
         mana_payment::produce_mana_with_attributes_from_source_quality(
@@ -999,6 +1110,184 @@ mod tests {
             state.players[0].mana_pool.total(),
             0,
             "controller (P0) must NOT receive the chosen player's mana"
+        );
+    }
+
+    /// CR 115.1 + CR 106.4: "Target player adds that much {C}" (Jetfire) — a
+    /// genuine `TargetFilter::Player` recipient whose count is NOT target-derived
+    /// deposits into the chosen target player (`ability.targets`), not the
+    /// controller. Revert-probe: before the `TargetFilter::Player` arm in
+    /// `mana_effect_recipient`, the mana lands in P0's pool.
+    #[test]
+    fn target_player_recipient_deposits_into_the_target_not_controller() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jetfire".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 3 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: Some(TargetFilter::Player),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[1].mana_pool.count_color(ManaType::Colorless),
+            3,
+            "the targeted player (P1) must receive the mana"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "controller (P0) must NOT receive a targeted recipient's mana"
+        );
+    }
+
+    /// CR 115.1 + CR 106.4: multi-authority provenance fixture for the recipient
+    /// gate. The identical `TargetFilter::Player` is emitted both as a RECIPIENT
+    /// (subject-led "target player adds", count target-independent) and as a
+    /// COUNT SOURCE ("Add {U} for each card in target player's hand", count =
+    /// `TargetZoneCardCount`). `mana_count_reads_targets` must separate them so
+    /// only the recipient case redirects the pool; the count-source case (and
+    /// Jeska's Will's `Typed(Opponent)`) stays on the controller. Tested at the
+    /// `mana_effect_recipient` seam to avoid coupling to count resolution.
+    #[test]
+    fn mana_recipient_gate_separates_recipient_from_count_source() {
+        use crate::types::ability::{ControllerRef, TypedFilter, ZoneRef};
+
+        let state = GameState::new_two_player(42);
+        let src = ObjectId(100);
+        let targets = vec![TargetRef::Player(PlayerId(1))];
+
+        // Count-source: the count reads the target (TargetZoneCardCount).
+        let count_source = ManaProduction::AnyOneColor {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    zone: ZoneRef::Hand,
+                },
+            },
+            color_options: vec![ManaColor::Blue],
+            contribution: ManaContribution::Base,
+        };
+        assert!(
+            mana_count_reads_targets(&count_source),
+            "TargetZoneCardCount count must be classified target-derived"
+        );
+
+        // Recipient: a target-independent count ("that much" → EventContextAmount).
+        let recipient_prod = ManaProduction::Colorless {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+        };
+        assert!(
+            !mana_count_reads_targets(&recipient_prod),
+            "EventContextAmount count must be classified target-independent"
+        );
+
+        let mk = |produced: ManaProduction, target: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::Mana {
+                    produced,
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: Some(target.clone()),
+                },
+                targets.clone(),
+                src,
+                PlayerId(0),
+            )
+        };
+
+        // (a) Subject-led recipient, target-independent count → the target (P1).
+        let recip = mk(recipient_prod.clone(), TargetFilter::Player);
+        assert_eq!(
+            mana_effect_recipient(&state, &recip, &Some(TargetFilter::Player), &recipient_prod),
+            PlayerId(1),
+            "a Player recipient with a target-independent count → the target"
+        );
+
+        // (b) Count-source Player target → controller (P0).
+        let cs = mk(count_source.clone(), TargetFilter::Player);
+        assert_eq!(
+            mana_effect_recipient(&state, &cs, &Some(TargetFilter::Player), &count_source),
+            PlayerId(0),
+            "a Player COUNT SOURCE must keep the recipient on the controller"
+        );
+
+        // (c) Jeska's Will `Typed(Opponent)` count-source → controller (P0).
+        let opp = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+        let jeska = mk(count_source.clone(), opp.clone());
+        assert_eq!(
+            mana_effect_recipient(&state, &jeska, &Some(opp), &count_source),
+            PlayerId(0),
+            "Jeska's Will Typed(Opponent) target → controller (unchanged)"
+        );
+    }
+
+    /// CR 106.6 + CR 115.1: Jetfire's produced {C} carries the negative spend
+    /// restriction "this mana can't be spent to cast nonartifact spells"
+    /// (`SpellTypeOrAbilityActivation{ Artifact, Any }`), and it is deposited on
+    /// the targeted player's mana units.
+    #[test]
+    fn target_player_recipient_mana_carries_spend_restriction() {
+        use crate::types::mana::{AbilityActivationScope, ManaRestriction};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jetfire".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 2 },
+                },
+                restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Artifact".to_string(),
+                    ability: AbilityActivationScope::Any,
+                }],
+                grants: vec![],
+                expiry: None,
+                target: Some(TargetFilter::Player),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[1].mana_pool.total(), 2);
+        assert!(
+            state.players[1].mana_pool.mana.iter().all(|unit| {
+                unit.restrictions
+                    .contains(&ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                        spell_type: "Artifact".to_string(),
+                        ability: AbilityActivationScope::Any,
+                    })
+            }),
+            "each produced {{C}} must carry the artifact-spell spend restriction"
         );
     }
 

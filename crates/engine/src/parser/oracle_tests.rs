@@ -7590,6 +7590,155 @@ fn forest_reminder_text_only() {
     assert_eq!(r.abilities.len(), 0);
 }
 
+/// CR 106.4 + CR 106.6 + CR 115.1 + CR 701.28: Jetfire, Ingenious Scientist
+/// front-face activated ability composes end-to-end: a chosen-X counter-removal
+/// cost from among artifacts you control, a mana clause that adds that-much {C}
+/// to a TARGET player (the new "target player adds" recipient arm), the negative
+/// spend restriction folded onto the produced mana, and a trailing "Convert
+/// Jetfire" self-transform as the chained sub-ability.
+#[test]
+fn jetfire_front_face_activated_ability() {
+    use crate::types::ability::{
+        AbilityCost, Effect, ManaProduction, ManaSpendRestriction, QuantityExpr, QuantityRef,
+        TargetFilter, REMOVE_COUNTER_COST_X,
+    };
+    use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::mana::AbilityActivationScope;
+
+    let r = parse(
+        "Remove one or more +1/+1 counters from among artifacts you control: \
+         Target player adds that much {C}. This mana can't be spent to cast \
+         nonartifact spells. Convert Jetfire.",
+        "Jetfire, Ingenious Scientist",
+        &[],
+        &["Artifact", "Creature"],
+        &["Robot"],
+    );
+    assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
+    let ability = &r.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+
+    // Cost: remove the chosen-X count of +1/+1 counters from among a group.
+    match ability
+        .cost
+        .as_ref()
+        .expect("activated ability must have a cost")
+    {
+        AbilityCost::RemoveCounter {
+            count,
+            counter_type,
+            target,
+            ..
+        } => {
+            assert_eq!(
+                *count, REMOVE_COUNTER_COST_X,
+                "'one or more' → chosen-X sentinel"
+            );
+            assert_eq!(*counter_type, CounterMatch::OfType(CounterType::Plus1Plus1));
+            assert!(
+                target.is_some(),
+                "counters come from among artifacts you control (a group filter)"
+            );
+        }
+        other => panic!("expected RemoveCounter cost, got {other:?}"),
+    }
+
+    // Head effect: add "that much" {C} to a TARGET player, with the negative
+    // spend restriction folded in from the following sentence.
+    let Effect::Mana {
+        produced,
+        target,
+        restrictions,
+        ..
+    } = &*ability.effect
+    else {
+        panic!("head effect must be Effect::Mana, got {:?}", ability.effect);
+    };
+    assert!(
+        matches!(
+            produced,
+            ManaProduction::Colorless {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                }
+            }
+        ),
+        "must add 'that much' ({{C}} = counters removed), got {produced:?}"
+    );
+    assert_eq!(
+        *target,
+        Some(TargetFilter::Player),
+        "recipient must be the chosen target player"
+    );
+    assert_eq!(
+        restrictions,
+        &vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+            spell_type: "Artifact".to_string(),
+            ability: AbilityActivationScope::Any,
+        }],
+        "the following sentence must fold in the 'nonartifact' spend restriction"
+    );
+
+    // Sub-ability: "Convert Jetfire" → self-transform.
+    let sub = ability
+        .sub_ability
+        .as_ref()
+        .expect("'Convert Jetfire' must chain as a sub-ability");
+    assert!(
+        matches!(
+            &*sub.effect,
+            Effect::Transform {
+                target: TargetFilter::SelfRef
+            }
+        ),
+        "sub-ability must be a self-transform, got {:?}",
+        sub.effect
+    );
+}
+
+/// CR 701.28 + CR 701.46a: Jetfire, Air Guardian back-face activated ability
+/// "{U}{U}{U}: Convert Jetfire, then adapt 3." composes a self-transform head
+/// with a chained `adapt 3` sub-ability (ordered).
+#[test]
+fn jetfire_back_face_convert_then_adapt() {
+    use crate::types::ability::{Effect, QuantityExpr, TargetFilter};
+
+    let r = parse(
+        "{U}{U}{U}: Convert Jetfire, then adapt 3.",
+        "Jetfire, Air Guardian",
+        &[],
+        &["Artifact"],
+        &["Vehicle"],
+    );
+    assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
+    let ability = &r.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::Transform {
+                target: TargetFilter::SelfRef
+            }
+        ),
+        "head effect must be a self-transform, got {:?}",
+        ability.effect
+    );
+    let sub = ability
+        .sub_ability
+        .as_ref()
+        .expect("'then adapt 3' must chain as a sub-ability");
+    assert!(
+        matches!(
+            &*sub.effect,
+            Effect::Adapt {
+                count: QuantityExpr::Fixed { value: 3 }
+            }
+        ),
+        "sub-ability must be adapt 3, got {:?}",
+        sub.effect
+    );
+}
+
 /// CR 106.6 + CR 603.3: Lapis Orb of Dragonkind — the trailing "When you
 /// spend this mana to cast a Dragon creature spell, scry 2" clause folds into
 /// the mana effect's `grants` as a `TriggerOnSpend`, consuming the sub-ability
