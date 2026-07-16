@@ -1301,8 +1301,8 @@ pub fn resolve_effect_player_ref(
             TargetRef::Player(player) => Some(*player),
             _ => None,
         }),
-        // CR 102.2 + CR 102.3 + CR 601.2c: "of an opponent's choice" / "of a
-        // player's choice" — the slot's announcing player is an opponent of the
+        // CR 102.2 + CR 102.3 + CR 601.2c: "of an opponent's choice" — the slot's
+        // announcing player is an opponent of the
         // controller. CR 601.2c normally makes the controller announce every
         // target; this card text overrides the announcer for this one slot.
         //
