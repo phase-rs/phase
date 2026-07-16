@@ -7748,12 +7748,75 @@ pub(crate) fn replace_combat_damage_batch(
     (survivors, tally)
 }
 
+/// Resume a frozen SearchFound candidate set after one optional candidate was
+/// declined. The pending event carries the declined replacement in its applied
+/// set, while the remaining candidate snapshots preserve the original CR 616.1
+/// ordering choice without re-reading live replacement sources.
+fn continue_search_found_after_decline(
+    state: &mut GameState,
+    mut pending: PendingReplacement,
+    declined: ReplacementId,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    pending.proposed.mark_applied(declined);
+    let ProposedEvent::SearchFound { disposition, .. } = &mut pending.proposed else {
+        unreachable!("SearchFound decline continuation requires a SearchFound event");
+    };
+    *disposition = SearchFoundDisposition::Original;
+    dirty_replacement_index(state);
+
+    pending
+        .search_found_candidates
+        .retain(|candidate| candidate.replacement_id != declined);
+    pending.candidates = pending
+        .search_found_candidates
+        .iter()
+        .map(|candidate| candidate.replacement_id)
+        .collect();
+    pending.depth += 1;
+
+    match pending.search_found_candidates.as_slice() {
+        [] => pipeline_loop(
+            state,
+            pending.proposed,
+            pending.depth,
+            replacement_registry(),
+            events,
+        ),
+        [candidate] if !candidate.is_optional => {
+            let candidate = candidate.clone();
+            let proposed =
+                apply_bound_search_found_candidate(state, pending.proposed, &candidate, events);
+            pipeline_loop(
+                state,
+                proposed,
+                pending.depth + 1,
+                replacement_registry(),
+                events,
+            )
+        }
+        [candidate] => {
+            debug_assert!(candidate.is_optional);
+            let affected = pending.proposed.affected_player(state);
+            pending.is_optional = true;
+            state.pending_replacement = Some(pending);
+            ReplacementResult::NeedsChoice(affected)
+        }
+        [_, _, ..] => {
+            let affected = pending.proposed.affected_player(state);
+            pending.is_optional = false;
+            state.pending_replacement = Some(pending);
+            ReplacementResult::NeedsChoice(affected)
+        }
+    }
+}
+
 fn continue_replacement_impl(
     state: &mut GameState,
     chosen_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
-    let pending = match state.pending_replacement.take() {
+    let mut pending = match state.pending_replacement.take() {
         Some(p) => p,
         None => {
             return ReplacementResult::Execute(ProposedEvent::Draw {
@@ -7778,33 +7841,28 @@ fn continue_replacement_impl(
     if pending.is_optional {
         let rid = pending.candidates[0];
         if matches!(pending.proposed, ProposedEvent::SearchFound { .. }) {
-            let mut proposed = pending.proposed;
             // CR 614.5: this replacement gets one opportunity to affect this
             // event. Accept uses the candidate frozen when the prompt was
             // created; the definition's `may` makes decline legal, and decline
             // retains the applied key so the same effect is not offered again.
+            let Some(bound) = pending
+                .search_found_candidates
+                .iter()
+                .find(|candidate| candidate.replacement_id == rid)
+                .cloned()
+            else {
+                debug_assert!(
+                    false,
+                    "optional SearchFound choice resumed without a bound candidate"
+                );
+                return ReplacementResult::Prevented;
+            };
             if chosen_index == 0 {
-                let Some(bound) = pending
-                    .search_found_candidates
-                    .iter()
-                    .find(|candidate| candidate.replacement_id == rid)
-                else {
-                    debug_assert!(
-                        false,
-                        "optional SearchFound choice resumed without a bound candidate"
-                    );
-                    return ReplacementResult::Prevented;
-                };
-                proposed = apply_bound_search_found_candidate(state, proposed, bound, events);
-            } else {
-                proposed.mark_applied(rid);
-                let ProposedEvent::SearchFound { disposition, .. } = &mut proposed else {
-                    unreachable!();
-                };
-                *disposition = SearchFoundDisposition::Original;
-                dirty_replacement_index(state);
+                let proposed =
+                    apply_bound_search_found_candidate(state, pending.proposed, &bound, events);
+                return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
             }
-            return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
+            return continue_search_found_after_decline(state, pending, rid, events);
         }
         let payer = pending.proposed.affected_player(state);
         // CR 614.12a: a `true` flag means this is the post-choice resume of an
@@ -8038,12 +8096,11 @@ fn continue_replacement_impl(
     }
 
     let rid = pending.candidates[chosen_index];
-    let mut proposed = pending.proposed;
-    if matches!(proposed, ProposedEvent::SearchFound { .. }) {
-        let Some(bound) = pending
+    if matches!(pending.proposed, ProposedEvent::SearchFound { .. }) {
+        let Some(bound_index) = pending
             .search_found_candidates
             .iter()
-            .find(|candidate| candidate.replacement_id == rid)
+            .position(|candidate| candidate.replacement_id == rid)
         else {
             debug_assert!(
                 false,
@@ -8051,9 +8108,25 @@ fn continue_replacement_impl(
             );
             return ReplacementResult::Prevented;
         };
-        proposed = apply_bound_search_found_candidate(state, proposed, bound, events);
+        let bound = pending.search_found_candidates[bound_index].clone();
+        if bound.is_optional {
+            // CR 616.1 + CR 614.5: choosing which effect gets the next
+            // opportunity does not accept that effect's optional action. Re-park
+            // the chosen frozen candidate as an accept/decline prompt, with the
+            // unchosen frozen candidates retained behind it for the CR 616.1f
+            // repeat if the player declines.
+            let affected = pending.proposed.affected_player(state);
+            let selected = pending.search_found_candidates.remove(bound_index);
+            pending.search_found_candidates.insert(0, selected);
+            pending.candidates = vec![rid];
+            pending.is_optional = true;
+            state.pending_replacement = Some(pending);
+            return ReplacementResult::NeedsChoice(affected);
+        }
+        let proposed = apply_bound_search_found_candidate(state, pending.proposed, &bound, events);
         return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
     }
+    let mut proposed = pending.proposed;
     proposed.mark_applied(rid);
     // CR 614.1a: per-player "first time each turn" window is consumed by
     // `record_token_created` on the created tokens; no per-source bookkeeping here.

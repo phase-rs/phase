@@ -5552,6 +5552,7 @@ mod tests {
     };
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
+    use crate::types::proposed_event::ReplacementId;
     use crate::types::replacements::ReplacementEvent;
 
     fn search_found_redirect(destination: Zone) -> ReplacementDefinition {
@@ -5762,6 +5763,156 @@ mod tests {
         .expect("decline resumes through the public action boundary");
 
         assert_eq!(state.objects[&found].zone, Zone::Library);
+        assert!(state.pending_search_found_batch.is_none());
+    }
+
+    #[test]
+    fn mixed_search_found_ordering_preserves_optional_decline() {
+        let mut state = GameState::new_two_player(42);
+        let optional_source =
+            install_search_found_redirect(&mut state, PlayerId(0), 90_012, Zone::Exile);
+        state
+            .objects
+            .get_mut(&optional_source)
+            .unwrap()
+            .replacement_definitions[0]
+            .mode = ReplacementMode::Optional { decline: None };
+        let mandatory_source =
+            install_search_found_redirect(&mut state, PlayerId(0), 90_013, Zone::Graveyard);
+        let found = create_object(
+            &mut state,
+            CardId(90_014),
+            PlayerId(1),
+            "Found card".to_string(),
+            Zone::Library,
+        );
+
+        apply_search_found_replacements(
+            &mut state,
+            PlayerId(1),
+            &[found],
+            crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
+            false,
+            &mut Vec::new(),
+        )
+        .expect_err("mixed redirects require CR 616 ordering");
+        let optional_index = state
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .search_found_candidates
+            .iter()
+            .position(|candidate| candidate.disposition.destination == Zone::Exile)
+            .expect("optional exile candidate exists");
+
+        super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement {
+                index: optional_index,
+            },
+        )
+        .expect("ordering an optional candidate opens its accept/decline prompt");
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .expect("optional candidate remains parked");
+        assert!(pending.is_optional);
+        assert_eq!(
+            pending.candidates,
+            vec![ReplacementId {
+                source: optional_source,
+                index: 0,
+            }]
+        );
+        assert_eq!(
+            pending.search_found_candidates.len(),
+            2,
+            "the mandatory frozen candidate must survive the nested optional prompt"
+        );
+        state.objects.remove(&mandatory_source);
+        state
+            .battlefield
+            .retain(|object_id| *object_id != mandatory_source);
+
+        super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("declining the optional redirect resumes the mandatory candidate");
+
+        assert_eq!(state.objects[&found].zone, Zone::Graveyard);
+        assert!(state.pending_search_found_batch.is_none());
+    }
+
+    #[test]
+    fn multiple_optional_search_found_ordering_declines_one_before_accepting_another() {
+        let mut state = GameState::new_two_player(42);
+        let exile_source =
+            install_search_found_redirect(&mut state, PlayerId(0), 90_015, Zone::Exile);
+        let graveyard_source =
+            install_search_found_redirect(&mut state, PlayerId(0), 90_016, Zone::Graveyard);
+        for source in [exile_source, graveyard_source] {
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .replacement_definitions[0]
+                .mode = ReplacementMode::Optional { decline: None };
+        }
+        let found = create_object(
+            &mut state,
+            CardId(90_017),
+            PlayerId(1),
+            "Found card".to_string(),
+            Zone::Library,
+        );
+
+        apply_search_found_replacements(
+            &mut state,
+            PlayerId(1),
+            &[found],
+            crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
+            false,
+            &mut Vec::new(),
+        )
+        .expect_err("multiple optional redirects require CR 616 ordering");
+        let exile_index = state
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .search_found_candidates
+            .iter()
+            .position(|candidate| candidate.disposition.destination == Zone::Exile)
+            .expect("optional exile candidate exists");
+
+        super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: exile_index },
+        )
+        .expect("ordering the first optional candidate opens accept/decline");
+        super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("declining the first candidate exposes the remaining optional candidate");
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .expect("remaining optional candidate is parked");
+        assert!(pending.is_optional);
+        assert_eq!(pending.search_found_candidates.len(), 1);
+        assert_eq!(
+            pending.search_found_candidates[0].disposition.destination,
+            Zone::Graveyard
+        );
+
+        super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("accepting the remaining candidate resumes the search");
+
+        assert_eq!(state.objects[&found].zone, Zone::Graveyard);
         assert!(state.pending_search_found_batch.is_none());
     }
 
