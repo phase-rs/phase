@@ -11626,6 +11626,125 @@ fn static_grant_blitz_simple_form() {
     );
 }
 
+// CR 702.85a + CR 702.85c + issue #6005: Zhulodok, Void Gorger — a spell-cast
+// keyword grant whose granted keyword is QUOTED and REPEATED ("have 'Cascade,
+// cascade.'"). Before this handler the quoted grant was `Unimplemented` (the
+// card did nothing). It must emit ONE `CastWithKeyword { Cascade }` static per
+// listed keyword — two here — because the runtime fires one Cascade trigger per
+// granted keyword instance (CR 702.85c). The colorless / from-hand / mana-value
+// 7+ qualifiers must all survive in each grant's affected filter.
+#[test]
+fn parse_zhulodok_quoted_doubled_cascade_grant() {
+    let defs = parse_static_line_multi(
+        "Colorless spells you cast from your hand with mana value 7 or greater have \"Cascade, cascade.\"",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "\"Cascade, cascade\" grants two independent Cascade instances: {defs:?}"
+    );
+    for def in &defs {
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Cascade,
+            }
+        );
+        let Some(TargetFilter::Typed(tf)) = &def.affected else {
+            panic!("expected a Typed spell filter, got {:?}", def.affected);
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Card));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties
+                .contains(&FilterProp::InZone { zone: Zone::Hand }),
+            "from-hand qualifier preserved: {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 7 },
+                }
+            )),
+            "mana value 7+ qualifier preserved: {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::ColorCount {
+                    comparator: Comparator::EQ,
+                    count: 0,
+                }
+            )),
+            "colorless qualifier preserved (grant is not over-broad): {:?}",
+            tf.properties
+        );
+    }
+}
+
+// Building block: the quoted keyword-list grant is compositional — a distinct
+// two-keyword list yields one static per keyword, in listed order.
+#[test]
+fn parse_spells_quoted_multi_keyword_grant_is_per_keyword() {
+    let defs = parse_static_line_multi("Spells you cast have \"Flash, haste.\"");
+    let keywords: Vec<_> = defs
+        .iter()
+        .map(|d| match &d.mode {
+            StaticMode::CastWithKeyword { keyword } => keyword.clone(),
+            other => panic!("expected CastWithKeyword, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(keywords, vec![Keyword::Flash, Keyword::Haste]);
+}
+
+// A quoted SINGLE keyword grant ("have 'Cascade.'") is the degenerate one-element
+// list — handled here too, since the unquoted single-keyword path cannot consume
+// the surrounding quotes.
+#[test]
+fn parse_spells_quoted_single_keyword_grant() {
+    let defs = parse_static_line_multi("Spells you cast have \"Cascade.\"");
+    assert_eq!(defs.len(), 1);
+    assert_eq!(
+        defs[0].mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        }
+    );
+}
+
+// Decline guard: a quoted grant whose content is a triggered ABILITY (not a
+// keyword list) must NOT be claimed here — every listed token must parse as a
+// keyword, so this falls through to the granted-ability path instead.
+#[test]
+fn parse_spells_quoted_ability_grant_declines() {
+    let defs =
+        parse_static_line_multi("Spells you cast have \"When you cast this spell, draw a card.\"");
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(d.mode, StaticMode::CastWithKeyword { .. })),
+        "a quoted ability grant must not be misread as a keyword grant: {defs:?}"
+    );
+}
+
+// Regression: the ordinary UNQUOTED single-keyword grant stays owned by
+// `parse_spells_have_keyword` and is unaffected by the quoted-list handler.
+#[test]
+fn parse_spells_unquoted_single_keyword_grant_unchanged() {
+    let defs = parse_static_line_multi("Spells you cast have cascade.");
+    assert_eq!(defs.len(), 1);
+    assert_eq!(
+        defs[0].mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        }
+    );
+}
+
 #[test]
 fn static_grant_replicate_hatchery_sliver() {
     // Issue #5323 — Hatchery Sliver: "Each Sliver spell you cast has replicate.

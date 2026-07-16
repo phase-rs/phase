@@ -1001,3 +1001,4 @@ mod winding_way_reveal_partition_2931;
 mod witchs_oven_food_tokens;
 mod xantid_swarm_defending_player_cant_cast;
 mod you_have_been_caught_stealing_any_damage;
+mod zhulodok_double_cascade;

@@ -1420,6 +1420,13 @@ fn requires_per_instance_keyword(keyword: &Keyword) -> bool {
         Keyword::Casualty(_)
             // CR 702.157b: each Squad instance is paid and triggers separately.
             | Keyword::Squad(_)
+            // CR 702.85c: if a spell has multiple instances of Cascade, each
+            // triggers separately. Granted duplicate Cascades (Zhulodok, Void
+            // Gorger's "Cascade, cascade") must therefore be preserved as distinct
+            // instances rather than folded together by kind, so each fires its own
+            // cascade trigger. Unlike Casualty/Squad, Cascade carries no per-
+            // instance cost — it is preserved purely for the separate triggers.
+            | Keyword::Cascade
     )
 }
 
