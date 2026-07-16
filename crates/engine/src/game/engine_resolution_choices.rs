@@ -271,7 +271,9 @@ fn finish_search_found_batch(
                 events,
             );
             set_priority(state, player);
-            effects::drain_pending_continuation(state, events);
+            // CR 605.3b + CR 616.1: resume-aware — a parked mana-cost cursor
+            // settles before (and instead of stranding) the ordinary rider.
+            super::engine::resume_pending_continuation_if_priority(state, events)?;
             return Ok(state.waiting_for.clone());
         }
     }
@@ -669,7 +671,10 @@ fn finalize_standard_search_selection(
         propagate_targets_through_search_shuffle(&mut continuation.chain, &targets);
         state.pending_continuation = Some(continuation);
     }
-    effects::drain_pending_continuation(state, events);
+    // CR 605.3b + CR 616.1: resume-aware — a parked mana-cost cursor settles
+    // before (and instead of stranding) the ordinary rider.
+    super::engine::resume_pending_continuation_if_priority(state, events)
+        .expect("a settled search choice must resume its continuation");
     park_search_observer_triggers(state, events, events_before_drain)
 }
 
@@ -1890,7 +1895,8 @@ pub(super) fn handle_resolution_choice(
             // sub_ability here and hand priority back to the clashing player.
             if !matches!(state.waiting_for, WaitingFor::ClashCardPlacement { .. }) {
                 set_priority(state, player);
-                effects::drain_pending_continuation(state, events);
+                super::engine::resume_pending_continuation_if_priority(state, events)
+                    .expect("a settled clash choice must resume its continuation");
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -2514,7 +2520,8 @@ pub(super) fn handle_resolution_choice(
                 state.private_look_player = None;
                 set_priority(state, player);
                 if decline_runs_continuation {
-                    effects::drain_pending_continuation(state, events);
+                    super::engine::resume_pending_continuation_if_priority(state, events)
+                        .expect("a settled reveal choice must resume its continuation");
                 } else {
                     state.pending_continuation = None;
                 }
@@ -2567,7 +2574,8 @@ pub(super) fn handle_resolution_choice(
                     cont.chain.context.optional_effect_performed = true;
                 }
             }
-            effects::drain_pending_continuation(state, events);
+            super::engine::resume_pending_continuation_if_priority(state, events)
+                .expect("a settled reveal choice must resume its continuation");
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -2688,7 +2696,8 @@ pub(super) fn handle_resolution_choice(
                 let events_before_drain = events.len();
                 apply_search_partition(state, &chosen, &[], &split, source_id, player, events)?;
                 set_priority(state, player);
-                effects::drain_pending_continuation(state, events);
+                super::engine::resume_pending_continuation_if_priority(state, events)
+                    .expect("a settled search choice must resume its continuation");
                 return Ok(park_search_observer_triggers(
                     state,
                     events,
@@ -2751,7 +2760,8 @@ pub(super) fn handle_resolution_choice(
                 events,
             )?;
             set_priority(state, player);
-            effects::drain_pending_continuation(state, events);
+            super::engine::resume_pending_continuation_if_priority(state, events)
+                .expect("a settled search choice must resume its continuation");
             park_search_observer_triggers(state, events, events_before_partition)
         }
         (
@@ -2968,7 +2978,8 @@ pub(super) fn handle_resolution_choice(
                 // Only after every player has been prompted (the drain leaves no
                 // pending iteration and is no longer waiting on a choice) does
                 // the parked continuation run.
-                effects::drain_pending_continuation(state, events);
+                super::engine::resume_pending_continuation_if_priority(state, events)
+                    .expect("a settled zone choice must resume its continuation");
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     state.waiting_for.clone(),
                 ));
@@ -2982,7 +2993,8 @@ pub(super) fn handle_resolution_choice(
                 effects::choose_from_zone::drain_pending_per_category_zone_choice(
                     state, &chosen, events,
                 );
-                effects::drain_pending_continuation(state, events);
+                super::engine::resume_pending_continuation_if_priority(state, events)
+                    .expect("a settled zone choice must resume its continuation");
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     state.waiting_for.clone(),
                 ));
@@ -3047,7 +3059,8 @@ pub(super) fn handle_resolution_choice(
                 state.current_trigger_match_count = ctx.match_count;
                 state.die_result_this_resolution = ctx.die_result;
             }
-            effects::drain_pending_continuation(state, events);
+            super::engine::resume_pending_continuation_if_priority(state, events)
+                .expect("a settled zone choice must resume its continuation");
             state.current_trigger_event = prev_trigger_event;
             state.current_trigger_match_count = prev_trigger_match_count;
             state.die_result_this_resolution = prev_die_result;
@@ -3118,7 +3131,8 @@ pub(super) fn handle_resolution_choice(
             // slots). Required so a `repeat_for: DistinctCounterKindsAmong` loop
             // paused on `ChooseOneOfBranch` advances past the first counter kind to
             // prompt for each remaining kind (Bribe Taker).
-            effects::drain_pending_continuation(state, events);
+            super::engine::resume_pending_continuation_if_priority(state, events)
+                .expect("a settled branch choice must resume its continuation");
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -4298,20 +4312,17 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
-            set_priority(state, player);
+            let waiting_for = finish_with_continuation(state, player, events);
+            if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+                state.last_named_choice = None;
+                return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
+            }
             if let Some(pending) = state.pending_cast.take() {
-                if let Some(ability_index) = pending.activation_ability_index {
-                    state.waiting_for = casting_costs::push_activated_ability_to_stack(
-                        state,
-                        player,
-                        pending.object_id,
-                        ability_index,
-                        pending.ability,
-                        pending.activation_cost.as_ref(),
-                        pending.activation_residual,
-                        pending.pending_loyalty_activation_player,
-                        events,
-                    )?;
+                if pending.activation_ability_index.is_some() {
+                    state.waiting_for =
+                        casting_costs::finish_activated_ability_at_payment_boundary(
+                            state, player, *pending, events,
+                        )?;
                 } else {
                     // CR 601.2c + CR 601.2f (mirrors the identical fix for
                     // GameAction::DistributeAmong in engine.rs): a NamedChoice
@@ -4377,8 +4388,6 @@ pub(super) fn handle_resolution_choice(
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     state.waiting_for.clone(),
                 ));
-            } else {
-                effects::drain_pending_continuation(state, events);
             }
             state.last_named_choice = None;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -4452,7 +4461,8 @@ pub(super) fn handle_resolution_choice(
                 .map(|o| o.controller)
                 .unwrap_or(state.active_player);
             set_priority(state, controller);
-            effects::drain_pending_continuation(state, events);
+            super::engine::resume_pending_continuation_if_priority(state, events)
+                .expect("a settled guess choice must resume its continuation");
             // Cleared ONLY after the synchronous drain (mirrors NamedChoice), so
             // the wrong/right branch's "number they guessed" read sees it.
             state.last_named_choice = None;
@@ -4502,7 +4512,8 @@ pub(super) fn handle_resolution_choice(
                 source_filter,
             });
             set_priority(state, player);
-            effects::drain_pending_continuation(state, events);
+            super::engine::resume_pending_continuation_if_priority(state, events)
+                .expect("a settled damage-source choice must resume its continuation");
             state.last_chosen_damage_source = None;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -5312,7 +5323,8 @@ fn finish_with_continuation(
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     set_priority(state, player);
-    effects::drain_pending_continuation(state, events);
+    super::engine::resume_pending_continuation_if_priority(state, events)
+        .expect("a settled resolution choice must resume its continuation");
     state.waiting_for.clone()
 }
 

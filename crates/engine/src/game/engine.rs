@@ -76,6 +76,24 @@ pub enum PublicFinalizeMode {
     DeferredDisplay,
 }
 
+/// CR 601.2h + CR 702.132a: Assist remains cancellable while it is only a
+/// selected contribution. Once helper payment has started or completed, its
+/// resources may have changed and cancellation cannot roll that prefix back.
+fn ensure_assist_cancellation_is_allowed(state: &GameState) -> Result<(), EngineError> {
+    if matches!(
+        state
+            .pending_cast
+            .as_deref()
+            .map(|pending| pending.assist_state),
+        Some(AssistState::PaymentStarted { .. } | AssistState::Paid { .. })
+    ) {
+        return Err(EngineError::ActionNotAllowed(
+            "Cannot cancel a cast after an Assist contribution is committed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn handle_unlock_room_door(
     state: &mut GameState,
     player: PlayerId,
@@ -2160,6 +2178,18 @@ pub(super) fn resume_pending_continuation_if_priority(
 ) -> Result<(), EngineError> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         effects::drain_pending_continuation(state, events);
+        // CR 605.3b + CR 616.1: Any interactive replacement post-effect may
+        // finish at this common prompt boundary. Once ordinary effect
+        // continuations have drained, resume a parked mana-cost cursor exactly
+        // once; do not depend on a particular choice handler or effect shape.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && matches!(
+                state.pending_cost_move_resume,
+                Some(crate::types::game_state::PendingCostMoveResume::ManaAbilityPayment { .. })
+            )
+        {
+            state.waiting_for = mana_abilities::resume_mana_ability_cost_move(state, events)?;
+        }
     }
     Ok(())
 }
@@ -2267,9 +2297,7 @@ fn pass_priority_once_with_pipeline(
     // this drain, a continuation queued after a no-choice effect would sit
     // until an unrelated action, by which point referenced stack objects may
     // have left the stack.
-    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        effects::drain_pending_continuation(state, events);
-    }
+    resume_pending_continuation_if_priority(state, events)?;
 
     let skip_triggers =
         stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage;
@@ -2717,7 +2745,7 @@ fn finalize_copy_retarget(
         }
         state.waiting_for = wf;
         state.priority_player = player;
-        effects::drain_pending_continuation(state, events);
+        resume_pending_continuation_if_priority(state, events)?;
         return Ok(());
     }
     state.waiting_for = if let Some(remaining) = paradigm_remaining_offers {
@@ -2726,7 +2754,7 @@ fn finalize_copy_retarget(
         WaitingFor::Priority { player }
     };
     state.priority_player = player;
-    effects::drain_pending_continuation(state, events);
+    resume_pending_continuation_if_priority(state, events)?;
     Ok(())
 }
 
@@ -4292,7 +4320,7 @@ fn apply_action(
             subject: None,});
             state.waiting_for = WaitingFor::Priority { player: *player };
             state.priority_player = *player;
-            effects::drain_pending_continuation(state, &mut events);
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()
         }
         (
@@ -4487,6 +4515,7 @@ fn apply_action(
             // CR 601.2i: Cancelling at mana payment rolls back the cast — pop
             // the stack entry placed at announcement and return the object to
             // its origin zone via `cancel_pending_cast`.
+            ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
@@ -4674,11 +4703,11 @@ fn apply_action(
                     .to_string(),
             ));
         }
-        // CR 702.132a: Assist — the chosen player commits how much generic mana to
-        // pay. The caster's owed generic is reduced now, and the commitment is
-        // recorded on the pending cast; the helper's sources are tapped only at
-        // `finalize_cast` (the non-cancellable commit), so a later CancelCast can
-        // never leak the helper's lands or spent mana.
+        // CR 702.132a + CR 601.2h: Assist records the selected generic
+        // contribution and reduces the caster's owed generic now, but helper
+        // resources stay untouched until final payment begins. The typed
+        // PaymentStarted boundary, not this deferred intent, makes cancellation
+        // unavailable once a helper source can have changed state.
         (
             WaitingFor::AssistPayment {
                 caster,
@@ -4709,11 +4738,12 @@ fn apply_action(
                 let mut sim = state.clone();
                 let mut sink = Vec::new();
                 casting_costs::auto_tap_mana_sources(&mut sim, chosen, &probe, &mut sink, None);
-                let feasible = sim
-                    .players
-                    .iter()
-                    .find(|p| p.id == chosen)
-                    .is_some_and(|p| mana_payment::can_pay(&p.mana_pool, &probe));
+                let feasible = casting::mana_ability_cost_payment_is_paused(&sim)
+                    || sim
+                        .players
+                        .iter()
+                        .find(|p| p.id == chosen)
+                        .is_some_and(|p| mana_payment::can_pay(&p.mana_pool, &probe));
                 if !feasible {
                     return Err(EngineError::InvalidAction(format!(
                         "Assisting player cannot produce {generic} generic mana"
@@ -4863,6 +4893,7 @@ fn apply_action(
         // CR 601.2i: CancelCast during Phyrexian payment rolls back the cast —
         // mirrors the ManaPayment CancelCast path.
         (WaitingFor::PhyrexianPayment { player, .. }, GameAction::CancelCast) => {
+            ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
@@ -4899,13 +4930,20 @@ fn apply_action(
                     &ability_def,
                     &mut events,
                     crate::types::game_state::ManaAbilityResume::ManaPayment {
+                        outer_player: Some(*player),
                         convoke_mode: *convoke_mode,
                     },
                     None,
                 )?;
                 // CR 605.1b: Process TapsForMana triggers inline during mana payment
                 // (same rationale as the TapLandForMana arm below).
-                if events.len() > events_before {
+                // CR 605.3b + CR 616.1 + CR 603.3b: A paused costed mana
+                // ability serializes its unscanned events in its typed cursor.
+                // The cursor is their single settlement authority, so do not
+                // scan them here and again when the replacement choice resumes.
+                if events.len() > events_before
+                    && !casting::mana_ability_cost_payment_is_paused(state)
+                {
                     let mana_events: Vec<_> = events[events_before..].to_vec();
                     super::triggers::process_triggers(state, &mana_events);
                 }
@@ -5502,7 +5540,7 @@ fn apply_action(
                     if state.pending_batch_deliveries.is_some() {
                         super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
                     }
-                    effects::drain_pending_continuation(state, &mut events);
+                    resume_pending_continuation_if_priority(state, &mut events)?;
                     return Ok(ActionResult {
                         events,
                         waiting_for: state.waiting_for.clone(),
@@ -5540,7 +5578,7 @@ fn apply_action(
             if state.pending_batch_deliveries.is_some() {
                 super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
             }
-            effects::drain_pending_continuation(state, &mut events);
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()
         }
         (
@@ -6365,7 +6403,7 @@ fn apply_action(
             subject: None,});
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
-            effects::drain_pending_continuation(state, &mut events);
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()
         }
         // CR 701.56a: Time travel — player selected objects for the current phase
@@ -6413,7 +6451,7 @@ fn apply_action(
                     subject: None,});
                     state.waiting_for = WaitingFor::Priority { player: p };
                     state.priority_player = p;
-                    effects::drain_pending_continuation(state, &mut events);
+                    resume_pending_continuation_if_priority(state, &mut events)?;
                     state.waiting_for.clone()
                 }
             } else {
@@ -6423,7 +6461,7 @@ fn apply_action(
                 subject: None,});
                 state.waiting_for = WaitingFor::Priority { player: p };
                 state.priority_player = p;
-                effects::drain_pending_continuation(state, &mut events);
+                resume_pending_continuation_if_priority(state, &mut events)?;
                 state.waiting_for.clone()
             }
         }
@@ -6482,7 +6520,7 @@ fn apply_action(
             let previous_trigger_match_count = state.current_trigger_match_count;
             state.current_trigger_event = pending_event;
             state.current_trigger_match_count = state.pending_optional_trigger_match_count.take();
-            effects::drain_pending_continuation(state, &mut events);
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_match_count = previous_trigger_match_count;
             state.waiting_for.clone()
@@ -6700,25 +6738,20 @@ fn apply_action(
             // CR 601.2d: Resume casting pipeline after distribution.
             if state.pending_cast.is_some() {
                 let pending = state.pending_cast.take().unwrap();
-                if let Some(ability_index) = pending.activation_ability_index {
+                if pending.activation_ability_index.is_some() {
                     // CR 602.2b + CR 601.2d: an activated ability that divides
                     // damage among targets goes on the stack as an ActivatedAbility
                     // after the division is announced — not as a spell (Captain
-                    // America's Throw). `push_activated_ability_to_stack` pays the
-                    // residual mana leg and no-ops the already-paid UnattachFrom.
+                    // America's Throw). The payment boundary retains the original
+                    // target-first root while it pays the residual mana leg.
                     // The spell-only cost-determination authority used in the `else`
                     // branch (`finish_pending_cast_cost_or_pay`) must NOT be reached
                     // here: it routes into `finalize_cast`, which would commit the
                     // source permanent to the stack as a spell.
-                    casting_costs::push_activated_ability_to_stack(
+                    casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
                         state,
                         p,
-                        pending.object_id,
-                        ability_index,
-                        pending.ability,
-                        pending.activation_cost.as_ref(),
-                        pending.activation_residual,
-                        pending.pending_loyalty_activation_player,
+                        *pending,
                         &mut events,
                     )?
                 } else {
@@ -6802,7 +6835,7 @@ fn apply_action(
                 // Resolution-time distribution continuation path.
                 state.waiting_for = WaitingFor::Priority { player: p };
                 state.priority_player = p;
-                effects::drain_pending_continuation(state, &mut events);
+                resume_pending_continuation_if_priority(state, &mut events)?;
                 state.waiting_for.clone()
             }
         }
@@ -6830,9 +6863,7 @@ fn apply_action(
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
             effects::counters::drain_pending_counter_moves(state, &mut events);
-            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                effects::drain_pending_continuation(state, &mut events);
-            }
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()
         }
         // CR 107.1c + CR 608.2d: Submit the "remove any number of counters"
@@ -6861,9 +6892,7 @@ fn apply_action(
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
             effects::counters::drain_pending_counter_removals(state, &mut events);
-            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                effects::drain_pending_continuation(state, &mut events);
-            }
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()
         }
         // CR 115.7: Retarget a spell or ability on the stack via the dialog
@@ -7071,7 +7100,7 @@ fn apply_retarget(
     });
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
-    effects::drain_pending_continuation(state, events);
+    resume_pending_continuation_if_priority(state, events)?;
     Ok(state.waiting_for.clone())
 }
 

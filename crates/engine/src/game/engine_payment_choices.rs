@@ -621,10 +621,13 @@ pub(super) fn handle_unless_payment(
                 )? {
                     PaymentOutcome::Paid => {}
                     PaymentOutcome::Failed { .. } => payment_failed = true,
-                    // CR 616.1: an atomic Mana cost cannot surface a
-                    // replacement pause; the authority never returns `Paused`
-                    // for it. Treat any pause defensively as not-paid.
-                    PaymentOutcome::Paused { .. } => payment_failed = true,
+                    // CR 118.12 + CR 605.3b + CR 616.1: An auto-tapped mana
+                    // ability can pause on a replacement-aware zone cost.
+                    // Its cursor owns the exact UnlessPayment continuation;
+                    // preserve that choice instead of resolving the effect.
+                    PaymentOutcome::Paused { .. } => {
+                        return Ok(action_result(events, state.waiting_for.clone()));
+                    }
                 }
             }
             // CR 118.4 + CR 107.3c: A dynamic generic cost should have been
@@ -938,8 +941,12 @@ pub(super) fn handle_unless_payment(
                     events,
                 )? {
                     PaymentOutcome::Paid => {}
-                    PaymentOutcome::Failed { .. } | PaymentOutcome::Paused { .. } => {
-                        payment_failed = true;
+                    PaymentOutcome::Failed { .. } => payment_failed = true,
+                    // CR 118.12 + CR 605.3b + CR 616.1: The paused mana
+                    // source owns the original `UnlessPayment` root. Do not
+                    // treat a live replacement choice as declining payment.
+                    PaymentOutcome::Paused { .. } => {
+                        return Ok(action_result(events, state.waiting_for.clone()));
                     }
                 }
             }
@@ -1453,6 +1460,7 @@ pub(super) fn handle_unless_payment_activate_ability(
         &ability_def,
         events,
         crate::types::game_state::ManaAbilityResume::UnlessPayment {
+            outer_player: Some(player),
             cost: Box::new(cost),
             pending_effect,
             trigger_event,

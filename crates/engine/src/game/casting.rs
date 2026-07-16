@@ -11,10 +11,11 @@ use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActivationResidual, CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption,
-    ConvokeMode, CostResume, GameState, NextSpellModifier, PayCostKind, PendingCast,
-    PendingCostMoveResume, SneakPlacement, SpellCastRecord, SpellCostSource, StackEntry,
-    StackEntryKind, TargetSelectionSlot, WaitingFor,
+    ActivationResidual, ActivationTargetSelection, CastOfferKind, CastPaymentMode, CastingVariant,
+    CastingVariantChoiceOption, ConvokeMode, CostResume, GameState, ManaAbilityCostParent,
+    ManaAbilityResume, NextSpellModifier, PayCostKind, PendingCast, PendingCostMoveResume,
+    SneakPlacement, SpellCastRecord, SpellCostSource, StackEntry, StackEntryKind,
+    TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -326,12 +327,14 @@ pub(crate) fn begin_variable_speed_payment(
     resolved: ResolvedAbility,
     cost: AbilityCost,
     ability_index: usize,
+    target_selection: ActivationTargetSelection,
 ) -> WaitingFor {
     let max_speed = effective_speed(state, player);
     let (min, max) = variable_speed_payment_range(&cost, max_speed).unwrap_or((0, max_speed));
     let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
     pending.activation_cost = Some(cost);
     pending.activation_ability_index = Some(ability_index);
+    pending.activation_target_selection = target_selection;
     state.pending_cast = Some(Box::new(pending));
     WaitingFor::NamedChoice {
         player,
@@ -12371,6 +12374,14 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
         options.source_cache,
     );
 
+    // CR 601.2g + CR 605.3b + CR 616.1: A costed mana source may stop the
+    // preview at a replacement choice. That is an in-progress, payable mana
+    // payment, not evidence that the source is unavailable. The live flow
+    // serializes the cursor and resumes it after the choice.
+    if mana_ability_cost_payment_is_paused(&simulated) {
+        return true;
+    }
+
     // CR 605.4a: A `TapsForMana` triggered mana ability (Leyline of Abundance /
     // Fertile Ground / Wild Growth / Utopia Sprawl class) resolves inline,
     // adding bonus mana to the pool, when a source is tapped for mana. The
@@ -12983,6 +12994,12 @@ pub(super) fn can_pay_effect_mana_cost_after_auto_tap(
         Some(source_id),
         Some(&effect_ctx),
     );
+    // CR 118.12 + CR 605.3b + CR 616.1: A replacement choice during an
+    // auto-tapped mana ability is an in-progress payment, not an affordability
+    // failure. The live payment will surface that exact choice before spending.
+    if mana_ability_cost_payment_is_paused(&simulated) {
+        return true;
+    }
     // CR 605.4a: Resolve coupled `TapsForMana` triggered mana abilities inline
     // so the bonus mana is in the simulated pool — same authority the real
     // payment path uses, keeping preview and execution in lockstep.
@@ -13038,13 +13055,9 @@ pub(super) fn ability_mana_payment_excluded_sources(
     }
 }
 
-/// Pay a mana cost by auto-tapping lands and deducting from the player's mana pool.
-///
-/// Used by spell casting (`pay_and_push`). Builds a `PaymentContext::Spell` from
-/// the cast object's types so CR 106.6 spell-side restrictions (`allows_spell`)
-/// gate which restricted mana is eligible. For ability activation, use
-/// `pay_ability_mana_cost` instead so restrictions are evaluated against the
-/// source permanent's types via `allows_activation`.
+/// Test-only shorthand for a spell payment with automatic Phyrexian choices.
+/// Production call sites retain the resume-aware entry point below.
+#[cfg(test)]
 pub(super) fn pay_mana_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -13066,6 +13079,29 @@ pub(super) fn pay_mana_cost_with_choices(
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    pay_mana_cost_with_choices_and_resume(
+        state,
+        player,
+        source_id,
+        cost,
+        phyrexian_choices,
+        None,
+        events,
+    )
+}
+
+/// CR 107.4f + CR 601.2f-h + CR 605.3b + CR 616.1: A submitted Phyrexian
+/// payment can be interrupted by a costed auto-tapped mana source. Preserve
+/// the finalization root rather than deriving a generic priority resume.
+pub(super) fn pay_mana_cost_with_choices_and_resume(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
+    resume: Option<&ManaAbilityResume>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
     super::layers::flush_layers(state);
 
     let spell_meta = build_spell_meta(state, player, source_id);
@@ -13079,6 +13115,7 @@ pub(super) fn pay_mana_cost_with_choices(
         spell_ctx.as_ref(),
         phyrexian_choices,
         events,
+        resume,
     )?;
 
     let spent_convoke_sources = spent_units
@@ -13368,7 +13405,34 @@ pub(super) fn pay_ability_mana_cost_excluding(
     // non-demanded mana. `None` for ordinary top-level ability activations.
     sub_cost_demand: Option<&mana_payment::ColorDemand>,
 ) -> Result<(), EngineError> {
-    pay_ability_mana_cost_with_choices_excluding(
+    pay_ability_mana_cost_excluding_with_parent(
+        state,
+        player,
+        source_id,
+        cost,
+        ability_tag,
+        events,
+        excluded_sources,
+        sub_cost_demand,
+        None,
+    )
+}
+
+/// CR 605.3b + CR 605.3c: The nested mana-source path carries the exact
+/// suspended parent cursor to any child source that pauses on a cost move.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn pay_ability_mana_cost_excluding_with_parent(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
+    events: &mut Vec<GameEvent>,
+    excluded_sources: &HashSet<ObjectId>,
+    sub_cost_demand: Option<&mana_payment::ColorDemand>,
+    parent: Option<&ManaAbilityCostParent>,
+) -> Result<(), EngineError> {
+    pay_ability_mana_cost_with_choices_excluding_and_parent(
         state,
         player,
         source_id,
@@ -13378,11 +13442,15 @@ pub(super) fn pay_ability_mana_cost_excluding(
         events,
         excluded_sources,
         sub_cost_demand,
+        None,
+        parent,
     )
 }
 
+/// CR 107.4f + CR 601.2f-h + CR 605.3b + CR 616.1: Preserve submitted
+/// Phyrexian choices while an activated ability's auto-tapped source pauses.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn pay_ability_mana_cost_with_choices_excluding(
+pub(super) fn pay_ability_mana_cost_with_choices_excluding_and_resume(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
@@ -13392,6 +13460,36 @@ pub(super) fn pay_ability_mana_cost_with_choices_excluding(
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
     sub_cost_demand: Option<&mana_payment::ColorDemand>,
+    resume: &ManaAbilityResume,
+) -> Result<(), EngineError> {
+    pay_ability_mana_cost_with_choices_excluding_and_parent(
+        state,
+        player,
+        source_id,
+        cost,
+        ability_tag,
+        phyrexian_choices,
+        events,
+        excluded_sources,
+        sub_cost_demand,
+        Some(resume),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pay_ability_mana_cost_with_choices_excluding_and_parent(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
+    phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
+    events: &mut Vec<GameEvent>,
+    excluded_sources: &HashSet<ObjectId>,
+    sub_cost_demand: Option<&mana_payment::ColorDemand>,
+    resume: Option<&ManaAbilityResume>,
+    parent: Option<&ManaAbilityCostParent>,
 ) -> Result<(), EngineError> {
     super::layers::flush_layers(state);
 
@@ -13412,6 +13510,8 @@ pub(super) fn pay_ability_mana_cost_with_choices_excluding(
         events,
         excluded_sources,
         sub_cost_demand,
+        resume,
+        parent,
     )?;
 
     Ok(())
@@ -13427,12 +13527,27 @@ pub(super) fn pay_effect_mana_cost(
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    pay_effect_mana_cost_with_resume(state, player, source_id, cost, None, events)
+}
+
+/// CR 118.12 + CR 605.3b + CR 616.1: Resolution-time cost payment may
+/// auto-activate a mana source whose own cost pauses. Carry the caller-owned
+/// typed payment root into that activation rather than falling back to priority.
+pub(super) fn pay_effect_mana_cost_with_resume(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    resume: Option<&ManaAbilityResume>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
     pay_non_cast_mana_cost(
         state,
         player,
         Some(source_id),
         cost,
         PaymentContext::Effect,
+        resume,
         events,
     )
 }
@@ -13456,6 +13571,7 @@ pub(crate) fn pay_special_action_mana_cost(
         source_id,
         cost,
         PaymentContext::SpecialAction(action),
+        None,
         events,
     )
 }
@@ -13488,19 +13604,29 @@ fn pay_non_cast_mana_cost(
     source_id: Option<ObjectId>,
     cost: &crate::types::mana::ManaCost,
     ctx: PaymentContext<'_>,
+    resume: Option<&ManaAbilityResume>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     super::layers::flush_layers(state);
 
     let events_before = events.len();
-    super::casting_costs::auto_tap_mana_sources_with_context(
+    super::casting_costs::auto_tap_mana_sources_with_context_and_resume(
         state,
         player,
         cost,
         events,
         source_id,
         Some(&ctx),
+        resume,
     );
+    // CR 118.12 + CR 605.3b + CR 616.1: Do not spend an outer effect-time
+    // payment while an auto-tapped mana ability's replacement-aware cost move
+    // is unresolved. Its cursor retains the exact enclosing continuation.
+    if mana_ability_cost_payment_is_paused(state) {
+        return Err(EngineError::InvalidAction(
+            "Mana payment is awaiting a replacement choice".to_string(),
+        ));
+    }
     // CR 605.4a: Resolve coupled `TapsForMana` triggered mana abilities inline
     // so their bonus mana is in the pool before the affordability check.
     super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
@@ -13563,6 +13689,7 @@ fn pay_non_cast_mana_cost(
 /// executes the spend with the given payment context, and processes any
 /// Phyrexian life payments. Returns the spent units so spell-specific callers
 /// can apply grants / bookkeeping. Single authority for restriction gating.
+#[allow(clippy::too_many_arguments)]
 fn auto_tap_and_pay_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -13571,6 +13698,7 @@ fn auto_tap_and_pay_cost(
     ctx: Option<&PaymentContext<'_>>,
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
+    resume: Option<&ManaAbilityResume>,
 ) -> Result<Vec<crate::types::mana::ManaUnit>, EngineError> {
     auto_tap_and_pay_cost_excluding(
         state,
@@ -13581,6 +13709,8 @@ fn auto_tap_and_pay_cost(
         phyrexian_choices,
         events,
         &HashSet::new(),
+        None,
+        resume,
         None,
     )
 }
@@ -13596,9 +13726,11 @@ fn auto_tap_and_pay_cost_excluding(
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
     sub_cost_demand: Option<&mana_payment::ColorDemand>,
+    resume: Option<&ManaAbilityResume>,
+    parent: Option<&ManaAbilityCostParent>,
 ) -> Result<Vec<crate::types::mana::ManaUnit>, EngineError> {
     let events_before = events.len();
-    super::casting_costs::auto_tap_mana_sources_with_context_excluding(
+    super::casting_costs::auto_tap_mana_sources_with_context_excluding_and_resume(
         state,
         player,
         cost,
@@ -13606,7 +13738,14 @@ fn auto_tap_and_pay_cost_excluding(
         Some(source_id),
         ctx,
         excluded_sources,
+        resume,
+        parent,
     );
+    if mana_ability_cost_payment_is_paused(state) {
+        return Err(EngineError::InvalidAction(
+            "Mana payment is awaiting a replacement choice".to_string(),
+        ));
+    }
     // CR 605.4a: Resolve coupled `TapsForMana` triggered mana abilities inline
     // so their bonus mana is in the pool before the affordability check (and
     // before the spend). The post-action trigger scan skips what is resolved
@@ -13698,6 +13837,17 @@ fn auto_tap_and_pay_cost_excluding(
     }
 
     Ok(spent_units)
+}
+
+/// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A mana ability's serialized
+/// cost cursor has paused for a replacement choice or that choice's
+/// post-effect. Callers must return that prompt, not treat it as a failed or
+/// completed outer payment.
+pub(super) fn mana_ability_cost_payment_is_paused(state: &GameState) -> bool {
+    matches!(
+        state.pending_cost_move_resume.as_ref(),
+        Some(crate::types::game_state::PendingCostMoveResume::ManaAbilityPayment { .. })
+    )
 }
 
 /// CR 106.6: Build (core-types, subtypes) slices for a `PaymentContext::Activation`
@@ -14048,6 +14198,91 @@ pub(super) fn find_non_self_exile(
     }
 }
 
+/// Removes the one non-self exile leg paid by the interactive activation-cost
+/// handler. Later exile legs remain in the residual for their own choice.
+pub(super) fn remove_selected_non_self_exile_cost(cost: AbilityCost) -> Option<AbilityCost> {
+    match cost {
+        AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            ..
+        } => Some(cost),
+        AbilityCost::Exile { .. } => None,
+        AbilityCost::Composite { costs } => {
+            let mut removed = false;
+            let remaining = costs
+                .into_iter()
+                .filter_map(|cost| {
+                    if !removed
+                        && (find_non_self_exile(&cost).is_some()
+                            || find_battlefield_exile_cost(&cost).is_some())
+                    {
+                        removed = true;
+                        remove_selected_non_self_exile_cost(cost)
+                    } else {
+                        Some(cost)
+                    }
+                })
+                .collect();
+            combine_cost_legs(remaining)
+        }
+        other => Some(other),
+    }
+}
+
+/// Removes the one discard leg paid by the interactive activation cost handler.
+/// This keeps a later mana-leg pause from replaying either a chosen hand discard
+/// or the source-card discard that already left its activation zone.
+pub(super) fn remove_selected_discard_cost(cost: AbilityCost) -> Option<AbilityCost> {
+    match cost {
+        AbilityCost::Discard { .. } => None,
+        AbilityCost::Composite { costs } => {
+            let mut removed = false;
+            let remaining = costs
+                .into_iter()
+                .filter_map(|cost| {
+                    if !removed && matches!(cost, AbilityCost::Discard { .. }) {
+                        removed = true;
+                        remove_selected_discard_cost(cost)
+                    } else {
+                        Some(cost)
+                    }
+                })
+                .collect();
+            combine_cost_legs(remaining)
+        }
+        other => Some(other),
+    }
+}
+
+/// Removes the one non-self sacrifice leg paid by the interactive activation
+/// cost handler. Later sacrifice legs stay in the residual for later choices.
+pub(super) fn remove_selected_non_self_sacrifice_cost(cost: AbilityCost) -> Option<AbilityCost> {
+    match cost {
+        AbilityCost::Sacrifice(sacrifice)
+            if !matches!(sacrifice.target, TargetFilter::SelfRef)
+                && sacrifice.requirement.fixed_count().is_some() =>
+        {
+            None
+        }
+        AbilityCost::Composite { costs } => {
+            let mut removed = false;
+            let remaining = costs
+                .into_iter()
+                .filter_map(|cost| {
+                    if !removed && find_non_self_sacrifice_cost(&cost).is_some() {
+                        removed = true;
+                        remove_selected_non_self_sacrifice_cost(cost)
+                    } else {
+                        Some(cost)
+                    }
+                })
+                .collect();
+            combine_cost_legs(remaining)
+        }
+        other => Some(other),
+    }
+}
+
 /// CR 701.3d + CR 608.2k: Detect a non-self `UnattachFrom` activation cost
 /// (Captain America's Throw) requiring an interactive "unattach a matching
 /// attachment from the source" selection. Returns `(count, filter)`. The
@@ -14059,6 +14294,31 @@ pub(super) fn find_unattach_from_cost(cost: &AbilityCost) -> Option<(u32, &Targe
         AbilityCost::UnattachFrom { filter, count } => Some((*count, filter)),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_unattach_from_cost),
         _ => None,
+    }
+}
+
+/// Removes the one `UnattachFrom` leg paid by its interactive cost handler.
+/// Later unattach legs stay in the residual so each one can acquire its own
+/// selection before the activation reaches the stack.
+pub(super) fn remove_selected_unattach_from_cost(cost: AbilityCost) -> Option<AbilityCost> {
+    match cost {
+        AbilityCost::UnattachFrom { .. } => None,
+        AbilityCost::Composite { costs } => {
+            let mut removed = false;
+            let remaining = costs
+                .into_iter()
+                .filter_map(|cost| {
+                    if !removed && find_unattach_from_cost(&cost).is_some() {
+                        removed = true;
+                        remove_selected_unattach_from_cost(cost)
+                    } else {
+                        Some(cost)
+                    }
+                })
+                .collect();
+            combine_cost_legs(remaining)
+        }
+        other => Some(other),
     }
 }
 
@@ -14443,19 +14703,6 @@ pub(super) fn split_return_to_hand_cost_legs(
     }
 }
 
-/// True only for a residual composed entirely of return-to-hand legs. A full
-/// activation cost may still contain a return leg after another chooser paid a
-/// different component; that legacy path continues through the cost authority.
-pub(super) fn has_only_return_to_hand_cost_legs(cost: &AbilityCost) -> bool {
-    match cost {
-        AbilityCost::ReturnToHand { .. } => true,
-        AbilityCost::Composite { costs } => {
-            !costs.is_empty() && costs.iter().all(has_only_return_to_hand_cost_legs)
-        }
-        _ => false,
-    }
-}
-
 fn combine_cost_legs(costs: Vec<AbilityCost>) -> Option<AbilityCost> {
     match costs.len() {
         0 => None,
@@ -14771,7 +15018,6 @@ pub(crate) fn can_pay_ability_cost_now(
         &super::costs::PaymentScope::Activation {
             excluded_sources: &excluded_sources,
             ability_tag,
-            cost_move_handling: super::costs::ActivationCostMoveHandling::OutcomeAware,
         },
     )
 }
@@ -15075,35 +15321,116 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
     }
 }
 
-/// CR 107.4f + GH #600: Pause for K'rrik/Phyrexian per-shard consent when an
-/// activated ability's mana leg would otherwise be paid inline (e.g. `{B},{T}: …`)
-/// without routing through `enter_payment_step`. Removal-first and `{X}` detours
-/// already hoist mana through `finalize_mana_payment`, which shares this pause
-/// helper — this path covers bare mana + non-removal residual tails only.
-pub(super) fn try_pause_activation_phyrexian_payment(
+/// CR 602.2b + CR 605.3b + CR 616.1: Start a bare activated ability's mana-leg
+/// payment from its exact serialized root. A source cost can pause before either
+/// ordinary spending or Phyrexian selection, so both paths must use the same
+/// automatic finalizer rather than the unrooted direct cost-payment helper.
+/// Removal-first and `{X}` detours already establish this root through
+/// `enter_payment_step`; this path covers bare mana + non-removal residual tails.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_finalize_activation_mana_payment(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
     resolved: &ResolvedAbility,
     cost: &AbilityCost,
+    target_selection: ActivationTargetSelection,
     events: &mut Vec<GameEvent>,
-) -> Option<WaitingFor> {
-    if find_non_self_battlefield_removal_cost(cost).is_some() {
-        return None;
+) -> Result<Option<WaitingFor>, EngineError> {
+    let mut pending = PendingCast::new(source_id, CardId(0), resolved.clone(), ManaCost::NoCost);
+    pending.activation_target_selection = target_selection;
+    try_finalize_activation_mana_payment_from_root(
+        state,
+        player,
+        pending,
+        ability_index,
+        resolved,
+        cost,
+        events,
+    )
+}
+
+/// CR 602.2b + CR 605.3b + CR 616.1: Establish a serialized activation root
+/// for one unpaid, nonzero mana leg. Callers supply the exact root at their
+/// payment boundary, so target-first activations retain chosen targets and only
+/// the non-mana suffix remains after the mana payment settles.
+pub(super) fn try_finalize_pending_activation_mana_leg(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    ability_index: usize,
+    cost: &AbilityCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let Some((mana_cost, remaining)) = casting_costs::extract_mana_leg(cost) else {
+        return Ok(None);
+    };
+    if mana_cost.is_without_paying_mana() {
+        return Ok(None);
     }
-    let (mana_cost, remaining) = casting_costs::extract_mana_leg(cost)?;
     let excluded_sources = remaining
         .as_ref()
-        .map(|tail| ability_mana_payment_excluded_sources(tail, source_id))
+        .map(|tail| ability_mana_payment_excluded_sources(tail, pending.object_id))
         .unwrap_or_default();
-    let (source_types, source_subtypes) = activation_source_types(state, source_id);
+    let (source_types, source_subtypes) = activation_source_types(state, pending.object_id);
     let activation_ctx = PaymentContext::Activation {
         source_types: &source_types,
         source_subtypes: &source_subtypes,
-        ability_tag: activation_ability_tag(state, source_id, ability_index),
+        ability_tag: activation_ability_tag(state, pending.object_id, ability_index),
     };
+    pending.cost = mana_cost.clone();
+    pending.activation_cost = remaining;
+    pending.activation_ability_index = Some(ability_index);
+    pending.activation_residual = ActivationResidual::ManaLeg;
+    let pending_source_id = pending.object_id;
+    state.pending_cast = Some(Box::new(pending));
     let waiting = casting_costs::maybe_pause_for_phyrexian_choice(
+        state,
+        player,
+        pending_source_id,
+        &mana_cost,
+        events,
+        Some(&activation_ctx),
+        &excluded_sources,
+        Some(&ManaAbilityResume::FinalizePendingManaPayment { player }),
+    );
+    if let Some(waiting) = waiting {
+        return Ok(Some(waiting));
+    }
+    casting_costs::finalize_automatic_mana_payment(state, player, events).map(Some)
+}
+
+/// CR 602.2b + CR 605.3b + CR 616.1: Finalize an activation mana cost that
+/// was already locked on its serialized root (notably chosen-X before target
+/// selection). The root's residual marker belongs to the caller and must not
+/// be replaced while an automatic mana source can pause on a cost move.
+pub(super) fn finalize_pending_activation_mana_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    ability_index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let mana_cost = pending.cost.clone();
+    debug_assert!(
+        !mana_cost.is_without_paying_mana(),
+        "only a genuine locked mana cost reaches automatic activation finalization"
+    );
+    let excluded_sources = pending
+        .activation_cost
+        .as_ref()
+        .map(|tail| ability_mana_payment_excluded_sources(tail, pending.object_id))
+        .unwrap_or_default();
+    let (source_types, source_subtypes) = activation_source_types(state, pending.object_id);
+    let activation_ctx = PaymentContext::Activation {
+        source_types: &source_types,
+        source_subtypes: &source_subtypes,
+        ability_tag: activation_ability_tag(state, pending.object_id, ability_index),
+    };
+    let source_id = pending.object_id;
+    state.pending_cast = Some(Box::new(pending));
+    if let Some(waiting) = casting_costs::maybe_pause_for_phyrexian_choice(
         state,
         player,
         source_id,
@@ -15111,15 +15438,31 @@ pub(super) fn try_pause_activation_phyrexian_payment(
         events,
         Some(&activation_ctx),
         &excluded_sources,
-    )?;
-    let mut pending = PendingCast::new(source_id, CardId(0), resolved.clone(), mana_cost);
-    pending.activation_cost = remaining;
-    pending.activation_ability_index = Some(ability_index);
-    if pending.activation_cost.is_some() {
-        pending.activation_residual = ActivationResidual::ManaLeg;
+        Some(&ManaAbilityResume::FinalizePendingManaPayment { player }),
+    ) {
+        return Ok(waiting);
     }
-    state.pending_cast = Some(Box::new(pending));
-    Some(waiting)
+    casting_costs::finalize_automatic_mana_payment(state, player, events)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_finalize_activation_mana_payment_from_root(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    ability_index: usize,
+    resolved: &ResolvedAbility,
+    cost: &AbilityCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    // Preserve the established left-to-right self-discard path: the source-card
+    // discard can pause before the later mana leg, whose continuation then
+    // establishes this same serialized root.
+    if find_non_self_battlefield_removal_cost(cost).is_some() || has_self_ref_discard_cost(cost) {
+        return Ok(None);
+    }
+    pending.ability = resolved.clone();
+    try_finalize_pending_activation_mana_leg(state, player, pending, ability_index, cost, events)
 }
 
 /// CR 602.2: To activate an ability is to put it onto the stack and pay its costs.
@@ -15841,6 +16184,27 @@ pub fn handle_activate_ability(
             });
         }
 
+        // CR 601.2c + CR 601.2h + CR 602.2b: For no-target activations, use
+        // the serialized residual dispatcher for interactive cost kinds not
+        // covered by the earlier specialized detours. Its selected-cost
+        // handlers remove exactly one leg before re-entering the payment
+        // boundary, including repeated and chosen-OneOf costs.
+        if build_target_slots(state, &resolved)?.is_empty() {
+            let mut pending_interactive =
+                PendingCast::new(source_id, CardId(0), resolved.clone(), ManaCost::NoCost);
+            pending_interactive.activation_cost = Some(cost.clone());
+            pending_interactive.activation_ability_index = Some(ability_index);
+            if let Some(waiting_for) =
+                casting_costs::surface_next_unpaid_interactive_activation_cost(
+                    state,
+                    player,
+                    &pending_interactive,
+                )?
+            {
+                return Ok(waiting_for);
+            }
+        }
+
         // Waterbend cost: detour to ManaPayment with Waterbend mode.
         if let Some(wb_cost) = find_waterbend_cost(cost) {
             let mut pending_wb = PendingCast::new(source_id, CardId(0), resolved, wb_cost.clone());
@@ -15874,18 +16238,20 @@ pub fn handle_activate_ability(
                         resolved,
                         cost.clone(),
                         ability_index,
+                        ActivationTargetSelection::Settled,
                     ));
                 }
                 stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
-                if let Some(waiting) = try_pause_activation_phyrexian_payment(
+                if let Some(waiting) = try_finalize_activation_mana_payment(
                     state,
                     player,
                     source_id,
                     ability_index,
                     &resolved,
                     cost,
+                    ActivationTargetSelection::Settled,
                     events,
-                ) {
+                )? {
                     return Ok(waiting);
                 }
                 if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
@@ -16001,18 +16367,20 @@ pub fn handle_activate_ability(
                 resolved,
                 cost.clone(),
                 ability_index,
+                ActivationTargetSelection::Pending,
             ));
         }
         stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
-        if let Some(waiting) = try_pause_activation_phyrexian_payment(
+        if let Some(waiting) = try_finalize_activation_mana_payment(
             state,
             player,
             source_id,
             ability_index,
             &resolved,
             cost,
+            ActivationTargetSelection::Pending,
             events,
-        ) {
+        )? {
             return Ok(waiting);
         }
         if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(

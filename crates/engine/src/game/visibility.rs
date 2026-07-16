@@ -17,6 +17,9 @@ const HIDDEN_CARD_NAME: &str = "Hidden Card";
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
+    // The replacement-resume cursor is server authority and can retain private
+    // object IDs and last-known snapshots from a cost payment.
+    filtered.pending_cost_move_resume = None;
     let replacement_candidate_source_ids = match &state.waiting_for {
         WaitingFor::ReplacementChoice { candidates, .. } => Some(
             candidates
@@ -1448,17 +1451,19 @@ mod tests {
     };
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, BeholdCostAction, Effect, ReplacementDefinition,
-        ResolvedAbility, TargetFilter,
+        AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot, Effect,
+        ReplacementDefinition, ResolvedAbility, TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AutoMayChoice, CastPaymentMode, CastingVariant, CostResume, ManaAbilityResume,
-        MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingBeginGameAbility, PendingCast,
-        PendingManaAbility, PendingScopedLibrarySearch, PendingSearchFoundBatch,
+        AutoMayChoice, CastPaymentMode, CastingVariant, CostResume, ManaAbilityCostCursor,
+        ManaAbilityCostResolutionMode, ManaAbilityResume, MayTriggerAutoChoiceKey,
+        MayTriggerOrigin, PendingBeginGameAbility, PendingCast, PendingCostMoveCompletion,
+        PendingCostMoveResume, PendingManaAbility, PendingScopedLibrarySearch,
+        PendingSearchFoundBatch,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -1513,6 +1518,8 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: crate::types::game_state::AssistState::NotOffered,
             activation_residual: crate::types::game_state::ActivationResidual::None,
+            activation_target_selection:
+                crate::types::game_state::ActivationTargetSelection::Pending,
             alt_cost_grant_source: None,
         })
     }
@@ -1528,6 +1535,7 @@ mod tests {
             ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
+            cost_move_resume: None,
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -4182,5 +4190,96 @@ mod tests {
         let controller_attrs = &controller_view.objects[&source].chosen_attributes;
         assert!(controller_attrs.contains(&ChosenAttribute::Number(3)));
         assert!(controller_attrs.contains(&ChosenAttribute::Number(5)));
+    }
+
+    #[test]
+    fn paused_cost_move_resume_is_server_authoritative_for_unauthorized_viewers() {
+        let mut state = GameState::new_two_player(42);
+        state.next_object_id = 70_001;
+        let hidden = create_object(
+            &mut state,
+            CardId(70_001),
+            PlayerId(0),
+            "Paused Cost Secret".to_string(),
+            Zone::Hand,
+        );
+        let mut pending = *dummy_pending_mana_ability(PlayerId(0), ObjectId(70_002));
+        pending.chosen_discards = vec![hidden];
+        pending.chosen_exiled = vec![hidden];
+        pending.cost_paid_object = Some(CostPaidObjectSnapshot {
+            object_id: hidden,
+            lki: state.objects[&hidden].snapshot_for_mana_spent(),
+        });
+        let mana_resume = PendingCostMoveResume::ManaAbilityPayment {
+            pending: Box::new(pending),
+            cursor: ManaAbilityCostCursor {
+                remaining: Vec::new(),
+                resolution_mode: ManaAbilityCostResolutionMode::Interactive,
+                excluded_sources: Vec::new(),
+                sub_cost_demand: None,
+                next_tapper: 0,
+                next_discard: 0,
+                next_exiled: 0,
+                next_sacrificed: 0,
+                selected_exile_remaining: Some(vec![hidden]),
+                deferred_cost_events: Vec::new(),
+                current_action_deferred_start: 0,
+                parent: None,
+            },
+        };
+        let resumes = vec![
+            PendingCostMoveResume::Cast {
+                player: PlayerId(0),
+                pending: Some(dummy_pending_cast(hidden, CardId(70_001), PlayerId(0))),
+                chosen: vec![hidden],
+                paused_at_index: 0,
+                destination: Zone::Exile,
+                completion: PendingCostMoveCompletion::FinishPending,
+            },
+            PendingCostMoveResume::Foretell {
+                player: PlayerId(0),
+                object_id: hidden,
+                cost: ManaCost::generic(1),
+                turn_foretold: 7,
+            },
+            mana_resume,
+        ];
+
+        for resume in resumes {
+            state.pending_cost_move_resume = Some(resume);
+            let authoritative_resume = serde_json::to_string(&state.pending_cost_move_resume)
+                .expect("the authoritative cost continuation serializes");
+            assert!(
+                authoritative_resume.contains("70001"),
+                "the authoritative continuation contains the private object ID"
+            );
+            if matches!(
+                &state.pending_cost_move_resume,
+                Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+            ) {
+                assert!(
+                    authoritative_resume.contains("Paused Cost Secret"),
+                    "the mana continuation contains the private cost-payment LKI"
+                );
+            }
+
+            let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
+            assert!(
+                opponent_view.pending_cost_move_resume.is_none(),
+                "a non-acting opponent must not receive a paused cost continuation"
+            );
+            let wire = serde_json::to_string(&opponent_view)
+                .expect("the filtered multiplayer snapshot serializes");
+            assert!(
+                !wire.contains("\"pendingCostMoveResume\":{\"type\"")
+                    && !wire.contains("\"pending_cost_move_resume\":{\"type\""),
+                "the viewer snapshot must not serialize a paused continuation's IDs or LKI"
+            );
+        }
+
+        assert!(
+            state.pending_cost_move_resume.is_some(),
+            "filtering must not alter the authoritative server continuation"
+        );
     }
 }

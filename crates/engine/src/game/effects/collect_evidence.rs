@@ -219,17 +219,9 @@ pub(crate) fn handle_choice(
             // there — and pushes the ability. Detected by the activation index
             // carried on the pending; spell casts (bestow Detective's Phoenix)
             // have `None` and fall through to `pay_and_push`.
-            if let Some(ability_index) = pending.activation_ability_index {
-                return super::super::casting_costs::push_activated_ability_to_stack(
-                    state,
-                    player,
-                    pending.object_id,
-                    ability_index,
-                    pending.ability,
-                    pending.activation_cost.as_ref(),
-                    pending.activation_residual,
-                    pending.pending_loyalty_activation_player,
-                    events,
+            if pending.activation_ability_index.is_some() {
+                return super::super::casting_costs::finish_activated_ability_at_payment_boundary(
+                    state, player, pending, events,
                 );
             }
             let base_cost = pending.base_cost.clone();
@@ -549,6 +541,7 @@ mod tests {
             ability_snapshot: None,
             color_override: None,
             resume: crate::types::game_state::ManaAbilityResume::Priority,
+            cost_move_resume: None,
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,

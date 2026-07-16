@@ -6785,6 +6785,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         assist_state: AssistState::NotOffered,
         activation_residual: crate::types::game_state::ActivationResidual::None,
+        activation_target_selection: crate::types::game_state::ActivationTargetSelection::Pending,
         alt_cost_grant_source: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
@@ -7177,6 +7178,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         assist_state: AssistState::NotOffered,
         activation_residual: crate::types::game_state::ActivationResidual::None,
+        activation_target_selection: crate::types::game_state::ActivationTargetSelection::Pending,
         alt_cost_grant_source: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
