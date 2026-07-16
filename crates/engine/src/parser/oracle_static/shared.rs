@@ -3477,6 +3477,24 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
         return Some(filter);
     }
 
+    // NOTE: deliberately NOT wiring `parse_owned_off_battlefield_subject_filter`
+    // in here as a general fallback. It's safe under
+    // `parse_spells_have_keyword`'s `CastWithKeyword` mode (casting is checked
+    // directly against the zone a card sits in, so an off-battlefield filter is
+    // meaningful there), but every OTHER caller of this function feeds a
+    // `Continuous` static whose modifications apply through the Layer system —
+    // which only iterates battlefield objects. `game/off_zone_characteristics.rs`
+    // is the sole off-battlefield continuous-effect path, and its
+    // `supports_off_zone_keyword_query` allowlist is keyword-only (`AddKeyword`
+    // and its siblings) — it has no notion of `AddSubtype`/`AddType`/etc. Folding
+    // an off-battlefield conjunct into a general filter here would let a
+    // type-changing static (e.g. Dune Chanter's "land cards you own that aren't
+    // on the battlefield are Deserts...") claim an `affected` scope the engine
+    // cannot actually realize, which is worse than leaving the line
+    // `Unimplemented` — it would silently under-deliver while looking parsed.
+    // Revisit once an off-zone characteristics path exists for non-keyword
+    // modifications.
+
     let (filter, rest) = parse_type_phrase(trimmed);
     if rest.trim().is_empty() {
         // CR 109.2: a bare "spell(s)" head noun in a static-ability subject
@@ -3491,6 +3509,66 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
     }
 
     parse_rule_static_subject_filter(trimmed)
+}
+
+/// CR 109.4 + CR 109.5: "`<type>` cards you own that aren't on the battlefield"
+/// — an off-battlefield-scoped subject naming cards by ownership rather than
+/// control, since CR 109.4 objects that are neither on the stack nor the
+/// battlefield have no controller, so CR 109.5 falls back to reading "you"/
+/// "your" as the object's owner instead. Resolves the leading type phrase and
+/// attaches `ControllerRef::You` (read as "owned by you" off the battlefield)
+/// plus `FilterProp::InAnyZone` over every non-battlefield, non-stack zone this
+/// class of card names (hand/graveyard/exile/command — no printed card in this
+/// shape also reaches into the hidden library zone).
+///
+/// Extracted from [`super::keyword_grant::parse_spells_have_keyword`]'s Pattern
+/// 2 (Leyline of Anticipation: "Creature cards you own that aren't on the
+/// battlefield have flash.") as a standalone, fully-anchored subject parser —
+/// still used only by that caller today. `CastWithKeyword` statics are checked
+/// directly against a card's actual zone (casting inherently happens from
+/// off-battlefield zones), so this filter's off-battlefield scope is realized
+/// there; `Continuous`-mode statics are not (see the caller-side note in
+/// [`parse_continuous_subject_filter`]), so do NOT wire this into that
+/// function's general dispatch chain until an off-zone characteristics path
+/// exists for non-keyword modifications.
+///
+/// All-consuming: the ENTIRE (trimmed, period-stripped) subject must be exactly
+/// `<type phrase>` + `"cards you own that aren't on the battlefield"`, with
+/// nothing before the type phrase and nothing after the fixed suffix. A
+/// partial/substring match (trailing qualifier, leading noise) declines rather
+/// than silently truncating.
+pub(crate) fn parse_owned_off_battlefield_subject_filter(subject: &str) -> Option<TargetFilter> {
+    let trimmed = subject.trim().trim_end_matches('.');
+    let lower = trimmed.to_lowercase();
+    let (prefix, remainder) = nom_primitives::scan_split_at_phrase(&lower, |i| {
+        tag::<_, _, OracleError<'_>>("cards you own that aren't on the battlefield").parse(i)
+    })?;
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "cards you own that aren't on the battlefield",
+    ))
+    .parse(remainder)
+    .ok()?;
+    let type_part = &trimmed[..prefix.len()];
+    let (base_filter, rest) = parse_type_phrase(type_part);
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    // A bare, untyped "cards you own that aren't on the battlefield" (empty
+    // type_part) doesn't resolve to a `Typed` filter — pass it through unscoped
+    // rather than force a controller/zone property onto a non-Typed variant.
+    // No printed card in this class omits the type qualifier, so this arm is
+    // unreached in practice; kept to preserve the pre-extraction behavior of
+    // `parse_spells_have_keyword`'s Pattern 2 exactly.
+    match base_filter {
+        TargetFilter::Typed(mut typed) => {
+            typed = typed.controller(ControllerRef::You);
+            typed.properties.push(FilterProp::InAnyZone {
+                zones: vec![Zone::Hand, Zone::Graveyard, Zone::Exile, Zone::Command],
+            });
+            Some(TargetFilter::Typed(typed))
+        }
+        other => Some(other),
+    }
 }
 
 /// CR 109.5: Keep the subject descriptor paired with its "you control" suffix

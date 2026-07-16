@@ -1545,7 +1545,31 @@ pub fn resolve_all(
 
     // Collect matching object IDs.
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-    let ctx = filter::FilterContext::from_ability(ability);
+    //
+    // CR 120.1 + CR 601.2c: When `damage_source` is `Some(Target)`, "other"/
+    // "another"-relative recipient filters (`FilterProp::Another` — "each
+    // OTHER creature") must be evaluated relative to the resolved damage
+    // SOURCE creature, not the ability's nominal source (the spell/permanent
+    // that generated this `DamageAll` effect). Left as `ability.source_id`,
+    // `FilterProp::Another` compares each battlefield candidate against the
+    // spell's own object id — which is never itself a battlefield creature —
+    // so the exclusion never actually fires and the chosen source creature
+    // wrongly deals damage to itself (Chandra's Ignition class: "target
+    // creature you control deals damage ... to each other creature").
+    // Mirrors the damage-source resolution below (used for keyword/
+    // protection purposes); rebinding it here too keeps recipient-set
+    // membership consistent with which object CR 120.1 says the damage is
+    // actually FROM.
+    let mut ctx = filter::FilterContext::from_ability(ability);
+    if matches!(damage_source, Some(DamageSource::Target)) {
+        if let Some(resolved_source_id) = ability.targets.iter().find_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            _ => None,
+        }) {
+            ctx.source_id = resolved_source_id;
+            ctx.source_controller = state.objects.get(&resolved_source_id).map(|o| o.controller);
+        }
+    }
     let matching_objects: Vec<_> = state
         .battlefield
         .iter()
