@@ -34,7 +34,7 @@ mod meld_tests;
 mod unearth_tests;
 
 pub use bracket_lists::{BracketLists, BracketSignals};
-pub use card_db::{validate_card_face_for_export, CardDatabase};
+pub use card_db::CardDatabase;
 pub use search::{CardSearchQuery, CardSearchResult, CardSearchResults};
 
 /// Single authority for "is this card runnable by the engine right now?"

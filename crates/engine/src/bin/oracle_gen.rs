@@ -14,9 +14,7 @@ use engine::database::set_catalog::load_set_catalog;
 use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
 };
-use engine::database::{
-    set_gating, validate_card_face_for_export, BracketLists, BracketSignals, CardDatabase,
-};
+use engine::database::{set_gating, BracketLists, BracketSignals, CardDatabase};
 use engine::game::coverage::{
     audit_semantic, card_face_has_unimplemented_parts, format_semantic_audit_markdown,
 };
@@ -55,26 +53,6 @@ struct CardExportEntry {
 
 fn is_clean_signals(sig: &BracketSignals) -> bool {
     sig.is_clean()
-}
-
-fn validated_card_export_json(
-    entries: &BTreeMap<String, CardExportEntry>,
-) -> Result<String, String> {
-    for (name, entry) in entries {
-        validate_card_face_for_export(&entry.face)
-            .map_err(|problem| format!("{name}: {problem}"))?;
-    }
-    serde_json::to_string(entries)
-        .map_err(|error| format!("Failed to serialize card data: {error}"))
-}
-
-fn write_validated_card_export(
-    path: &Path,
-    entries: &BTreeMap<String, CardExportEntry>,
-) -> Result<(), String> {
-    let json = validated_card_export_json(entries)?;
-    std::fs::write(path, json)
-        .map_err(|error| format!("Failed to write {}: {error}", path.display()))
 }
 
 /// A localized card face for the per-language content-i18n sidecars. Only display
@@ -1249,12 +1227,11 @@ fn main() {
         );
     }
 
+    let json = serde_json::to_string(&face_index).expect("Failed to serialize card data");
     if let Some(ref out_path) = output {
-        write_validated_card_export(out_path, &face_index)
-            .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(out_path, &json)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", out_path.display()));
     } else {
-        let json =
-            validated_card_export_json(&face_index).unwrap_or_else(|error| panic!("{error}"));
         println!("{json}");
     }
 
@@ -1828,12 +1805,9 @@ mod tests {
         load_atomic_cards, AtomicCard, AtomicCardsFile, AtomicIdentifiers, SetIdentifiers,
         SetRelatedCards,
     };
-    use engine::types::ability::{
-        AbilityCost, CardPlayMode, Effect, ManaSpendPermission, SearchFoundModifier, TargetFilter,
-    };
-    use engine::types::card::{AdditionalCost, CardFace};
+    use engine::types::ability::TargetFilter;
+    use engine::types::card::CardFace;
     use engine::types::keywords::Keyword;
-    use engine::types::zones::Zone;
 
     use super::*;
 
@@ -1862,37 +1836,6 @@ mod tests {
             rarities: BTreeSet::new(),
             bracket_signals: BracketSignals::default(),
         }
-    }
-
-    #[test]
-    fn invalid_nested_search_found_effect_is_rejected_before_export_file_creation() {
-        let mut entry = make_entry("invalid-nested-search-found", &[], None);
-        entry.face.name = "Invalid Nested SearchFound".to_string();
-        entry.face.additional_cost = Some(AdditionalCost::Required(AbilityCost::EffectCost {
-            effect: Box::new(Effect::ApplySearchFoundReplacement {
-                modifier: SearchFoundModifier {
-                    destination: Zone::Exile,
-                    play_mode: CardPlayMode::Play,
-                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
-                },
-            }),
-        }));
-        let entries = BTreeMap::from([("invalid".to_string(), entry)]);
-        let path = std::env::temp_dir().join(format!(
-            "phase-oracle-gen-invalid-export-{}.json",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-
-        let error = write_validated_card_export(&path, &entries)
-            .expect_err("nested SearchFound runtime effect must fail closed");
-
-        assert!(error.contains("additional_cost.effect"), "{error}");
-        assert!(error.contains("forbidden outside"), "{error}");
-        assert!(
-            !path.exists(),
-            "validation failure must not create an export file"
-        );
     }
 
     fn atomic_single(name: &str, oracle_id: Option<&str>) -> AtomicCard {

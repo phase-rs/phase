@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::database::bracket_lists::BracketSignals;
 use crate::database::card_db::{
-    build_name_alias_index, collect_creature_type_vocabulary,
-    validate_card_face_replacement_invariants, CardDatabase,
+    build_name_alias_index, collect_creature_type_vocabulary, CardDatabase,
 };
 use crate::database::legality::normalize_legalities;
 use crate::database::mtgjson::load_atomic_cards;
@@ -110,15 +109,6 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         }
     }
 
-    for (name, face) in &face_index {
-        validate_card_face_replacement_invariants(face).map_err(|problem| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("{name}: {problem}"),
-            )
-        })?;
-    }
-
     let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.values());
     Ok(CardDatabase {
         cards,
@@ -139,7 +129,6 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::replacements::ReplacementEvent;
     use std::path::Path;
 
     #[test]
@@ -156,48 +145,5 @@ mod tests {
         let bolt = db.get_face_by_name("Lightning Bolt").unwrap();
         assert_eq!(bolt.name, "Lightning Bolt");
         assert!(bolt.oracle_text.is_some());
-    }
-
-    #[test]
-    fn mtgjson_opposition_agent_face_passes_shared_recursive_validation() {
-        let fixture = serde_json::json!({
-            "data": {
-                "Opposition Agent": [{
-                    "name": "Opposition Agent",
-                    "manaCost": "{2}{B}",
-                    "manaValue": 3.0,
-                    "colors": ["B"],
-                    "colorIdentity": ["B"],
-                    "power": "3",
-                    "toughness": "2",
-                    "types": ["Creature"],
-                    "subtypes": ["Human", "Rogue"],
-                    "supertypes": [],
-                    "text": "Flash\nYou control your opponents while they're searching their libraries.\nWhile an opponent is searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
-                    "layout": "normal",
-                    "type": "Creature — Human Rogue",
-                    "keywords": ["Flash"],
-                    "identifiers": {
-                        "scryfallOracleId": "1f438b8f-fe23-4f3b-ab2e-f6c33676c462"
-                    }
-                }]
-            }
-        });
-        let path = std::env::temp_dir().join(format!(
-            "phase-opposition-agent-{}-{}.json",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("oracle-loader")
-        ));
-        std::fs::write(&path, serde_json::to_vec(&fixture).unwrap()).unwrap();
-        let loaded = load_from_mtgjson(&path);
-        let _ = std::fs::remove_file(&path);
-
-        let db = loaded.expect("MTGJSON loader accepts the validated typed SearchFound face");
-        let face = db
-            .get_face_by_name("Opposition Agent")
-            .expect("Opposition Agent is indexed from MTGJSON");
-        assert!(face.replacements.iter().any(|definition| definition.event
-            == ReplacementEvent::SearchFound
-            && definition.validate_search_found_modifier().is_ok()));
     }
 }
