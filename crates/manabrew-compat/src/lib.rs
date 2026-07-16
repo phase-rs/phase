@@ -3090,6 +3090,7 @@ mod tests {
                         TargetRef::Player(PlayerId(1)),
                     ],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),

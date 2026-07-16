@@ -2319,6 +2319,7 @@ fn collect_target_slots_inner(
                 acc.push(TargetSelectionSlot {
                     legal_targets: extra_legal,
                     optional: true,
+                    chooser: None,
                 });
             }
 
@@ -3090,12 +3091,14 @@ fn collect_attach_attachment_target_slots(
             acc.push(TargetSelectionSlot {
                 legal_targets: legal_targets.clone(),
                 optional: slot_index >= bounds.min,
+                chooser: None,
             });
         }
     } else {
         acc.push(TargetSelectionSlot {
             legal_targets,
             optional: ability.targeting_is_optional(),
+            chooser: None,
         });
     }
     Ok(())

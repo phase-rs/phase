@@ -3429,6 +3429,7 @@ mod tests {
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(opp_creature)],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),

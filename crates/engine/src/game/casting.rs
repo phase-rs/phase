@@ -11578,6 +11578,7 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
                             prepared.object_id,
                         ),
                         optional: false,
+                        chooser: None,
                     })
                 } else {
                     None
@@ -11603,6 +11604,7 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
             vec![TargetSelectionSlot {
                 legal_targets: legal,
                 optional: false,
+                chooser: None,
             }]
         });
     }
