@@ -15571,6 +15571,19 @@ fn try_parse_multi_target_damage_chain(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
+    // This recognizer speculatively parses the whole clause. A failed attempt
+    // must leave every parser-context field (especially the target chooser)
+    // untouched for the fallback compound parser.
+    let mut tentative_ctx = ctx.clone();
+    let clause = try_parse_multi_target_damage_chain_inner(text, &mut tentative_ctx)?;
+    *ctx = tentative_ctx;
+    Some(clause)
+}
+
+fn try_parse_multi_target_damage_chain_inner(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     // CR 601.2c + CR 115.1: A bare-damage chain is a fresh instruction even
     // when reached through a compound continuation. Do not let the preceding
     // target phrase's announcing-player override leak into its first recipient.
