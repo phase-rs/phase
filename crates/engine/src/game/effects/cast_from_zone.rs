@@ -1770,7 +1770,26 @@ mod tests {
         apply_as_current(&mut state, GameAction::SelectCards { cards: vec![cheap] }).unwrap();
 
         assert_eq!(state.objects[&cheap].zone, Zone::Stack);
-        assert!(state.objects[&cheap].casting_permissions.is_empty());
+        assert!(
+            matches!(
+                state.objects[&cheap].casting_permissions.as_slice(),
+                [CastingPermission::ExileWithAltCost {
+                    resolution_cleanup: None,
+                    mana_spend_permission: None,
+                    graveyard_replacement: None,
+                    enters_with_counter: None,
+                    enters_with_modifications,
+                    ..
+                }] if enters_with_modifications.is_empty()
+            ),
+            "the consumed hand-cast permission must remain only as a neutral stable slot"
+        );
+
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        assert!(
+            state.objects[&cheap].casting_permissions.is_empty(),
+            "normal Stack exit cleanup must remove the neutral consumed slot"
+        );
     }
 
     /// CR 118.9 + CR 702.62a + CR 608.2g: The Face of Boe RUNTIME proof. Picking a
