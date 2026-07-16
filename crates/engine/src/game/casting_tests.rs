@@ -17089,6 +17089,7 @@ fn exact_permission_does_not_inherit_sibling_etb_counter() {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: (index == 1).then(|| {
                         crate::types::ability::ResolutionCastCleanup {
+                            source_id: creature,
                             exiled_misses: Vec::new(),
                             reject_action:
                                 crate::types::ability::ResolutionMvRejectAction::RemainExiled,
@@ -17172,6 +17173,7 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: (index == 1).then(|| {
                         crate::types::ability::ResolutionCastCleanup {
+                            source_id: creature,
                             exiled_misses: Vec::new(),
                             reject_action:
                                 crate::types::ability::ResolutionMvRejectAction::RemainExiled,
@@ -45040,6 +45042,7 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
             constraint: None,
             granted_to: Some(PlayerId(0)),
             resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
+                source_id: spell,
                 exiled_misses: vec![hostile_miss],
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
@@ -45243,6 +45246,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
             });
     }
     let cleanup = crate::types::ability::ResolutionCastCleanup {
+        source_id: spell,
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
@@ -45304,6 +45308,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
             });
     }
     let cleanup = crate::types::ability::ResolutionCastCleanup {
+        source_id: spell,
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
@@ -45365,6 +45370,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                 constraint: None,
                 granted_to: Some(PlayerId(0)),
                 resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
+                    source_id: spell,
                     exiled_misses: Vec::new(),
                     reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                     success_action:
