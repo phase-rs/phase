@@ -2161,8 +2161,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         sub_link,
         modal,
         mode_abilities,
-        dig_found_nothing_for_parent_target,
-        choose_from_zone_found_nothing_for_parent_target,
+        parent_target_missing_reason,
     } = ability;
 
     let self_counter = matches!(
@@ -2219,8 +2218,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && *sub_link == SubAbilityLink::ContinuationStep
         && modal.is_none()
         && mode_abilities.is_empty()
-        && !*dig_found_nothing_for_parent_target
-        && !*choose_from_zone_found_nothing_for_parent_target
+        && parent_target_missing_reason.is_none()
 }
 
 /// CR 608.2: Apply a proven-safe batch. The per-resolution handler body runs
@@ -8338,7 +8336,7 @@ mod tests {
             let mut normal = setup_board();
             flush_layers(&mut normal);
             add_entry(&mut normal);
-            let entered_ids: std::collections::HashSet<ObjectId> = match &normal.layers_dirty {
+            let entered_ids: std::collections::BTreeSet<ObjectId> = match &normal.layers_dirty {
                 crate::types::game_state::LayersDirty::EnteredObjects(ids) => ids.clone(),
                 other => panic!("expected EnteredObjects dirty state, got {other:?}"),
             };
@@ -9111,7 +9109,7 @@ mod tests {
             flush_layers(&mut state);
             // A green entry perturbs the < 7 gate (would flip 6 → 7).
             add_green_devotion_entry(&mut state, 322);
-            let entered_ids: std::collections::HashSet<ObjectId> = match &state.layers_dirty {
+            let entered_ids: std::collections::BTreeSet<ObjectId> = match &state.layers_dirty {
                 crate::types::game_state::LayersDirty::EnteredObjects(ids) => ids.clone(),
                 other => panic!("expected EnteredObjects, got {other:?}"),
             };

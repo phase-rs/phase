@@ -56,7 +56,13 @@ pub fn validated_candidate_actions_with_probe(
     probe: Option<&crate::game::casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let pipeline = FilterPipeline::default_pipeline();
-    pipeline.apply_with_probe(state, candidate_actions_with_probe(state, probe), probe)
+    let mut actions =
+        pipeline.apply_with_probe(state, candidate_actions_with_probe(state, probe), probe);
+    // Issue #4878: candidate enumeration must not depend on HashSet/HashMap
+    // iteration order leaking into AI tie-breaking downstream. Ordered via the
+    // allocation-free `GameAction::cmp_stable` total order (not `Debug` strings).
+    actions.sort_by(|a, b| a.action.cmp_stable(&b.action));
+    actions
 }
 
 /// CR 702.51a / 702.66a / 702.126a: During `ManaPayment`, every structurally
@@ -4833,6 +4839,7 @@ mod tests {
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![target.clone()],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -4883,6 +4890,7 @@ mod tests {
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: targets.clone(),
                 optional: true,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -4985,6 +4993,7 @@ mod tests {
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![target],
                 optional: true,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -5094,6 +5103,66 @@ mod tests {
             clones < 5,
             "delve validation should not clone state per graveyard card (got {clones} clones)"
         );
+    }
+
+    /// Issue #4878: `validated_candidate_actions` must return candidates in the
+    /// canonical `GameAction::cmp_stable` order, independent of the upstream
+    /// enumeration order (which walks `state.objects`, an `im::HashMap`, in
+    /// hash order — not sorted for this id set). Reverting the
+    /// `sort_by(cmp_stable)` guard returns the candidates in that hash order,
+    /// which differs from the canonical order below, flipping this assertion.
+    #[test]
+    fn validated_candidates_are_cmp_stable_sorted() {
+        let mut state = setup_priority();
+        // CR 305.2 + CR 505: land drop available in the precombat main phase so
+        // each land in hand survives the simulation filter as a `PlayLand`.
+        state.phase = Phase::PreCombatMain;
+        state.lands_played_this_turn = 0;
+        for _ in 0..10 {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+
+        let actions: Vec<GameAction> = validated_candidate_actions(&state)
+            .iter()
+            .map(|c| c.action.clone())
+            .collect();
+
+        // Reach guard: the scenario must actually offer several distinct actions
+        // (multiple `PlayLand` + `PassPriority`), otherwise a single-element list
+        // would be trivially "sorted" and the assertion vacuous.
+        assert!(
+            actions.len() >= 3,
+            "expected several candidate actions to canonicalize, got {}",
+            actions.len()
+        );
+
+        // Canonical order: identical to an independent `cmp_stable` sort.
+        let mut expected = actions.clone();
+        expected.sort_by(|a, b| a.cmp_stable(b));
+        assert_eq!(
+            actions, expected,
+            "validated_candidate_actions must emit cmp_stable-canonical order"
+        );
+
+        // Determinism: a second call over the same state yields the same order.
+        let again: Vec<GameAction> = validated_candidate_actions(&state)
+            .iter()
+            .map(|c| c.action.clone())
+            .collect();
+        assert_eq!(actions, again, "candidate order must be deterministic");
     }
 
     /// CR 117.3d: a matching priority yield for the top-of-stack trigger makes

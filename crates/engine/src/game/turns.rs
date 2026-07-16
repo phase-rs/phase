@@ -4436,6 +4436,86 @@ mod tests {
         );
     }
 
+    /// CR 502.3 + CR 701.26b: Frozen in Ice (issue #5801) — "Enchanted
+    /// creature loses all abilities and can't become untapped." must drive
+    /// the production untap step exactly like Blossombind's bare untap
+    /// prohibition: the loses-all-abilities clause is a same-turn drawback,
+    /// not an exception to the untap lock, since the aura's own text (not a
+    /// granted ability) is what installs the replacement. Parses the real
+    /// compound line, pulls the Untap-prevention replacement out of the
+    /// cross-layer split, and installs it on the attached Aura — mirroring
+    /// `execute_untap_honors_blossombind_cant_become_untapped`. Reverting
+    /// `try_split_and_cant_become_untapped` (or its dispatch wiring) makes the
+    /// untap-step `replace_event` return `Execute`, the creature untaps, and
+    /// this assertion fails.
+    #[test]
+    fn execute_untap_honors_frozen_in_ice_cant_become_untapped() {
+        use crate::game::effects::attach::attach_to;
+        use crate::types::card_type::CoreType;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Locked Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.tapped = true;
+        }
+
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Frozen in Ice".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let parsed = crate::parser::parse_oracle_text(
+                "Enchant creature\nWhen this Aura enters, tap enchanted creature.\nEnchanted creature loses all abilities and can't become untapped.",
+                "Frozen in Ice",
+                &[],
+                &["Enchantment".to_string()],
+                &["Aura".to_string()],
+            );
+            assert!(
+                parsed
+                    .replacements
+                    .iter()
+                    .any(|def| def.event == ReplacementEvent::Untap),
+                "Frozen in Ice's untap prohibition must parse to an Untap-prevention replacement"
+            );
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.replacement_definitions = parsed.replacements.into();
+        }
+        attach_to(&mut state, aura, host);
+
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+
+        assert!(
+            state.objects[&host].tapped,
+            "Frozen in Ice's enchanted creature must stay tapped at the untap step"
+        );
+        assert!(
+            !events.iter().any(|event| {
+                matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == host)
+            }),
+            "skipped untap must not emit PermanentUntapped"
+        );
+    }
+
     #[test]
     fn execute_untap_honors_attached_subject_cant_untap_from_parser() {
         use crate::game::effects::attach::attach_to;

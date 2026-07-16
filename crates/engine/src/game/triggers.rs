@@ -3519,6 +3519,21 @@ enum TriggerOrderingDisposition {
     NoChoiceNeeded(Vec<PendingTriggerContext>),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DelayedTriggerEventScope {
+    Any,
+    PhaseChangedOnly,
+}
+
+impl DelayedTriggerEventScope {
+    fn accepts(self, event: &GameEvent) -> bool {
+        match self {
+            Self::Any => true,
+            Self::PhaseChangedOnly => matches!(event, GameEvent::PhaseChanged { .. }),
+        }
+    }
+}
+
 /// CR 603.3b: Strip per-instance object identity so two triggers produced by
 /// distinct sources can be compared for genuine indistinguishability. Mirrors
 /// `ResolvedAbility::set_may_trigger_origin_recursive`'s traversal — `sub_ability`
@@ -5884,109 +5899,13 @@ pub fn check_state_triggers(state: &mut GameState) {
 /// One-shot triggers are removed after firing; multi-fire (WheneverEvent) triggers
 /// persist until end-of-turn cleanup (CR 603.7c).
 pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Vec<GameEvent> {
-    if state.delayed_triggers.is_empty() && state.epic_effects.is_empty() {
-        return vec![];
-    }
-
-    // Separate "abilities to fire" from "indices to remove".
-    // One-shot triggers are removed; multi-fire triggers are cloned and left in place.
-    let mut to_fire: Vec<(DelayedTrigger, Option<GameEvent>)> = Vec::new();
-    let mut to_remove: Vec<(usize, GameEvent)> = Vec::new();
-
-    // CR 603.12: A reflexive delayed trigger ("when you [do X] this way, …",
-    // including "when you win/lose the flip") is checked immediately after
-    // creation and triggers only on the event(s) that occurred earlier during the
-    // creating resolution. It gets exactly one shot on that creation batch: if it
-    // did not match on this — its first — `check_delayed_triggers` pass, it must
-    // be discarded rather than left to fire on a later same-turn matching event
-    // (which a bare CR 603.7b `WhenNextEvent` would do).
-    let mut to_discard: Vec<usize> = Vec::new();
-
-    for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
-        if let Some((_, trigger_event)) = delayed_trigger_event_with_index(
-            &delayed.condition,
-            events,
-            state,
-            delayed.source_id,
-            delayed.controller,
-        ) {
-            if delayed.one_shot {
-                to_remove.push((idx, trigger_event));
-            } else {
-                to_fire.push((delayed.clone(), Some(trigger_event)));
-            }
-        } else if is_reflexive_lifetime(&delayed.condition) {
-            // CR 603.12: an unmatched reflexive trigger, checked on its creation
-            // batch, never gets a "next" event — discard it rather than let it
-            // linger to a later same-turn event.
-            to_discard.push(idx);
-        }
-    }
-
-    // CR 702.50a: Epic effects are a persistent rest-of-game generator (never
-    // stored as a `DelayedTrigger`, so cleanup never purges them). At the
-    // beginning of each controller's upkeep, synthesize a fresh `EpicCopy`
-    // trigger from each stored effect and fire it through the same path.
-    for effect in &state.epic_effects {
-        let synth = super::effects::epic::epic_upkeep_trigger(effect);
-        if let Some((_, trigger_event)) = delayed_trigger_event_with_index(
-            &synth.condition,
-            events,
-            state,
-            synth.source_id,
-            synth.controller,
-        ) {
-            to_fire.push((synth, Some(trigger_event)));
-        }
-    }
-
-    // Remove fired one-shot triggers AND discarded non-matching reflexive
-    // coin-flip triggers from `delayed_triggers` in a single descending-index
-    // pass so every index stays valid (a `to_remove`-then-`to_discard` two-pass
-    // removal would invalidate the discard indices once the vec shrinks). Fired
-    // one-shots are collected into `to_fire`; discarded reflexives (CR 603.12)
-    // are dropped without firing. The two index sets are disjoint — a trigger
-    // either matched (fire) or resolved-without-match (discard), never both.
-    let mut fired_events: std::collections::HashMap<usize, GameEvent> =
-        to_remove.iter().cloned().collect();
-    let mut combined: Vec<usize> = to_remove
-        .iter()
-        .map(|(idx, _)| *idx)
-        .chain(to_discard.iter().copied())
-        .collect();
-    combined.sort_unstable();
-    for idx in combined.into_iter().rev() {
-        let trigger = state.delayed_triggers.remove(idx);
-        if let Some(trigger_event) = fired_events.remove(&idx) {
-            to_fire.push((trigger, Some(trigger_event)));
-        }
-    }
-
-    if to_fire.is_empty() {
+    let (pending, _) =
+        collect_matching_delayed_triggers(state, events, DelayedTriggerEventScope::Any);
+    if pending.is_empty() {
         return vec![];
     }
 
     let mut new_events = Vec::new();
-
-    // CR 603.3b + CR 101.4: APNAP stack-placement order for the firing batch.
-    // Stable sort; the per-batch timestamp (state.turn_number) is constant, so it
-    // preserves the prior same-controller order the ordering pass then consumes.
-    let mut pending: Vec<PendingTriggerContext> = to_fire
-        .into_iter()
-        .map(|(trigger, trigger_event)| {
-            delayed_trigger_to_context(
-                state,
-                trigger,
-                trigger_event.expect("every to_fire entry carries its trigger event"),
-            )
-        })
-        .collect();
-    pending.sort_by_key(|ctx| {
-        (
-            trigger_apnap_rank(state, ctx.pending.controller),
-            ctx.pending.timestamp,
-        )
-    });
 
     // CR 603.3b + CR 603.7: Route the firing batch through the ordering authority
     // (mirrors the phase-delayed path process_collected_triggers_with_delayed_phase_events)
@@ -6071,9 +5990,10 @@ fn delayed_trigger_to_context(
     })
 }
 
-pub(crate) fn collect_matching_delayed_phase_triggers(
+fn collect_matching_delayed_triggers(
     state: &mut GameState,
-    delayed_events: &[GameEvent],
+    events: &[GameEvent],
+    scope: DelayedTriggerEventScope,
 ) -> (
     Vec<PendingTriggerContext>,
     Vec<ConsumedTriggerEventOccurrence>,
@@ -6082,76 +6002,92 @@ pub(crate) fn collect_matching_delayed_phase_triggers(
         return (Vec::new(), Vec::new());
     }
 
+    // Separate "abilities to fire" from "indices to remove".
+    // One-shot triggers are removed; multi-fire triggers are cloned and left in place.
     let mut to_fire: Vec<(DelayedTrigger, usize, GameEvent)> = Vec::new();
-    let mut to_remove: Vec<usize> = Vec::new();
+    let mut to_remove: Vec<(usize, usize, GameEvent)> = Vec::new();
+
+    // CR 603.12: A reflexive delayed trigger ("when you [do X] this way, ...",
+    // including "when you win/lose the flip") is checked immediately after
+    // creation and triggers only on the event(s) that occurred earlier during the
+    // creating resolution. It gets exactly one shot on that creation batch: if it
+    // did not match on this first check, it must be discarded rather than left to
+    // fire on a later same-turn matching event (which a bare CR 603.7b
+    // `WhenNextEvent` would do). The phase-only path keeps the historical
+    // narrower coin-flip discard gate because it filters non-phase matches out of
+    // the candidate batch.
     let mut to_discard: Vec<usize> = Vec::new();
 
     for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
         if let Some((event_index, trigger_event)) = delayed_trigger_event_with_index(
             &delayed.condition,
-            delayed_events,
+            events,
             state,
             delayed.source_id,
             delayed.controller,
         ) {
-            if !matches!(trigger_event, GameEvent::PhaseChanged { .. }) {
+            if !scope.accepts(&trigger_event) {
                 continue;
             }
             if delayed.one_shot {
-                to_remove.push(idx);
+                to_remove.push((idx, event_index, trigger_event));
             } else {
                 to_fire.push((delayed.clone(), event_index, trigger_event));
             }
-        } else if reflexive_coin_flip_resolved_without_match(
-            &delayed.condition,
-            delayed_events,
-            state,
-            delayed.source_id,
-        ) {
+        } else if match scope {
+            DelayedTriggerEventScope::Any => is_reflexive_lifetime(&delayed.condition),
+            DelayedTriggerEventScope::PhaseChangedOnly => {
+                reflexive_coin_flip_resolved_without_match(
+                    &delayed.condition,
+                    events,
+                    state,
+                    delayed.source_id,
+                )
+            }
+        } {
             to_discard.push(idx);
         }
     }
 
-    let mut fired_by_index: std::collections::HashMap<usize, (usize, GameEvent)> = to_remove
+    // CR 702.50a: Epic effects are a persistent rest-of-game generator (never
+    // stored as a `DelayedTrigger`, so cleanup never purges them). At the
+    // beginning of each controller's upkeep, synthesize a fresh `EpicCopy`
+    // trigger from each stored effect and fire it through the same path.
+    for effect in &state.epic_effects {
+        let synth = super::effects::epic::epic_upkeep_trigger(effect);
+        if let Some((event_index, trigger_event)) = delayed_trigger_event_with_index(
+            &synth.condition,
+            events,
+            state,
+            synth.source_id,
+            synth.controller,
+        ) {
+            if scope.accepts(&trigger_event) {
+                to_fire.push((synth, event_index, trigger_event));
+            }
+        }
+    }
+
+    // Remove fired one-shot triggers AND discarded non-matching reflexive triggers
+    // from `delayed_triggers` in a single descending-index pass so every index
+    // stays valid. Fired one-shots are collected into `to_fire`; discarded
+    // reflexives (CR 603.12) are dropped without firing. The two index sets are
+    // disjoint — a trigger either matched (fire) or resolved-without-match
+    // (discard), never both.
+    let mut fired_events: std::collections::HashMap<usize, (usize, GameEvent)> = to_remove
         .iter()
-        .filter_map(|idx| {
-            let delayed = &state.delayed_triggers[*idx];
-            delayed_trigger_event_with_index(
-                &delayed.condition,
-                delayed_events,
-                state,
-                delayed.source_id,
-                delayed.controller,
-            )
-            .filter(|(_, event)| matches!(event, GameEvent::PhaseChanged { .. }))
-            .map(|matched| (*idx, matched))
-        })
+        .map(|(idx, event_index, event)| (*idx, (*event_index, event.clone())))
         .collect();
     let mut combined: Vec<usize> = to_remove
         .iter()
-        .copied()
+        .map(|(idx, _, _)| *idx)
         .chain(to_discard.iter().copied())
         .collect();
     combined.sort_unstable();
     for idx in combined.into_iter().rev() {
         let trigger = state.delayed_triggers.remove(idx);
-        if let Some((event_index, trigger_event)) = fired_by_index.remove(&idx) {
+        if let Some((event_index, trigger_event)) = fired_events.remove(&idx) {
             to_fire.push((trigger, event_index, trigger_event));
-        }
-    }
-
-    for effect in &state.epic_effects {
-        let synth = super::effects::epic::epic_upkeep_trigger(effect);
-        if let Some((event_index, trigger_event)) = delayed_trigger_event_with_index(
-            &synth.condition,
-            delayed_events,
-            state,
-            synth.source_id,
-            synth.controller,
-        ) {
-            if matches!(trigger_event, GameEvent::PhaseChanged { .. }) {
-                to_fire.push((synth, event_index, trigger_event));
-            }
         }
     }
 
@@ -6160,13 +6096,16 @@ pub(crate) fn collect_matching_delayed_phase_triggers(
         .into_iter()
         .map(|(trigger, event_index, trigger_event)| {
             consumed_events.push(ConsumedTriggerEventOccurrence {
-                occurrence: trigger_event_occurrence(delayed_events, event_index),
+                occurrence: trigger_event_occurrence(events, event_index),
                 event: trigger_event.clone(),
             });
             delayed_trigger_to_context(state, trigger, trigger_event)
         })
         .collect();
 
+    // CR 603.3b + CR 101.4: APNAP stack-placement order for the firing batch.
+    // Stable sort; the per-batch timestamp (state.turn_number) is constant, so it
+    // preserves the prior same-controller order the ordering pass then consumes.
     pending.sort_by_key(|ctx| {
         (
             trigger_apnap_rank(state, ctx.pending.controller),
@@ -6207,11 +6146,27 @@ pub(crate) fn process_collected_triggers_with_delayed_phase_events(
     delayed_events: &[GameEvent],
     events_out: &mut Vec<GameEvent>,
 ) -> TriggerBatchOutcome {
+    process_collected_triggers_with_delayed_events(
+        state,
+        normal_pending,
+        delayed_events,
+        DelayedTriggerEventScope::PhaseChangedOnly,
+        events_out,
+    )
+}
+
+fn process_collected_triggers_with_delayed_events(
+    state: &mut GameState,
+    normal_pending: Vec<PendingTriggerContext>,
+    delayed_events: &[GameEvent],
+    delayed_scope: DelayedTriggerEventScope,
+    events_out: &mut Vec<GameEvent>,
+) -> TriggerBatchOutcome {
     let stack_before = state.stack.len();
     let waiting_before = state.waiting_for.clone();
     let normal_was_non_empty = !normal_pending.is_empty();
     let (delayed_pending, consumed_events) =
-        collect_matching_delayed_phase_triggers(state, delayed_events);
+        collect_matching_delayed_triggers(state, delayed_events, delayed_scope);
     let mut pending = normal_pending;
     pending.extend(delayed_pending);
 
@@ -6286,6 +6241,22 @@ pub(crate) fn process_triggers_with_delayed_phase_events(
         state,
         normal_pending,
         delayed_events,
+        events_out,
+    )
+}
+
+pub(crate) fn process_triggers_with_delayed_events(
+    state: &mut GameState,
+    normal_events: &[GameEvent],
+    delayed_events: &[GameEvent],
+    events_out: &mut Vec<GameEvent>,
+) -> TriggerBatchOutcome {
+    let normal_pending = collect_triggers_for_batch(state, normal_events);
+    process_collected_triggers_with_delayed_events(
+        state,
+        normal_pending,
+        delayed_events,
+        DelayedTriggerEventScope::Any,
         events_out,
     )
 }

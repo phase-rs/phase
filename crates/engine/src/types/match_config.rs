@@ -44,7 +44,7 @@ pub struct MatchScore {
     pub draws: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DeckCardCount {
     pub name: String,
     pub count: u32,

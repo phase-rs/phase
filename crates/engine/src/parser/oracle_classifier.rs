@@ -9,7 +9,9 @@ use nom::Parser;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::scan_contains;
 use super::oracle_util::parse_mana_symbols;
-use crate::parser::oracle_effect::{split_leading_conditional, try_parse_named_choice};
+use crate::parser::oracle_effect::{
+    split_leading_conditional, try_parse_named_choice, try_parse_named_choice_conjunction,
+};
 
 pub(crate) fn is_cant_win_lose_compound(lower: &str) -> bool {
     scan_contains(lower, "can't win the game") && scan_contains(lower, "can't lose the game")
@@ -771,6 +773,11 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     if is_as_enters_choose_pattern(lower) {
         return true;
     }
+    // CR 701.3a + CR 614.1: "As ~ becomes attached [to X], choose …" — the
+    // attach-time analogue of `is_as_enters_choose_pattern` (Psychic Paper).
+    if is_as_becomes_attached_choose_pattern(lower) {
+        return true;
+    }
     // CR 614.1c + CR 614.12: "As a [filter] enters, it becomes a [P/T] [type]
     // creature in addition to its other types" — a replacement from another
     // source affecting a subset of entrants (Displaced Dinosaurs). Routes to
@@ -959,6 +966,29 @@ fn is_as_enters_choose_pattern(lower: &str) -> bool {
     })
     .is_some();
     has_as && has_enters && has_choose
+}
+
+/// CR 701.3a + CR 614.1: the attach-time analogue of `is_as_enters_choose_pattern`
+/// (Psychic Paper: "As this Equipment becomes attached to a creature, choose a
+/// creature card name and a creature type."). Accepts both a single choice and
+/// a conjunction ("choose X and Y") sharing one "choose".
+fn is_as_becomes_attached_choose_pattern(lower: &str) -> bool {
+    let has_as = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("as ").parse(i)
+    })
+    .is_some();
+    let has_becomes_attached = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("becomes attached").parse(i)
+    })
+    .is_some();
+    let has_choose = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        verify(tag::<_, _, OracleError<'_>>("choose "), |_: &&str| {
+            try_parse_named_choice(i).is_some() || try_parse_named_choice_conjunction(i).is_some()
+        })
+        .parse(i)
+    })
+    .is_some();
+    has_as && has_becomes_attached && has_choose
 }
 
 /// CR 603.2 vs CR 614.1c: "Whenever <subject> enters with a counter on it, <consequence>"

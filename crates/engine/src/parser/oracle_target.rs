@@ -3255,6 +3255,35 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
+    // CR 601.2c: the controller normally announces every target; this card text
+    // overrides the announcer for THIS slot — "of an opponent's choice" (Volcanic
+    // Offering). The announcing player is an opponent of the controller (CR 102.3);
+    // the slot is still a target of the controller's spell (CR 115.1). In 3+ player
+    // games the controller picks which opponent announces before target selection
+    // (see `ChooseAnnouncingOpponent`).
+    let remaining_opp_choice = lower[pos..].trim_start();
+    let opp_choice_offset = lower[pos..].len() - remaining_opp_choice.len();
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("of an opponent's choice").parse(remaining_opp_choice)
+    {
+        pos += opp_choice_offset + (remaining_opp_choice.len() - rest.len());
+        ctx.target_chooser = Some(TargetFilter::Opponent);
+    }
+
+    // CR 601.2c + CR 109.4: A target's announcing-player qualifier can precede
+    // its controller restriction ("target creature of an opponent's choice you
+    // don't control", Volcanic Offering). The primary controller-suffix pass
+    // runs before choice qualifiers, so re-run it here to consume that trailing
+    // restriction without letting it leak into a following effect clause.
+    if controller.is_none() {
+        pos += parse_ownership_or_controller_suffix(
+            &lower[pos..],
+            &mut properties,
+            &mut controller,
+            ctx,
+        );
+    }
+
     // CR 201.2: "named [card name]" suffix — filter by exact card name.
     // Handles "creature named X", "cards named X", "named X" patterns.
     let remaining_named = lower[pos..].trim_start();
@@ -6485,6 +6514,9 @@ pub(crate) fn parse_that_clause_suffix<'a>(
             "was dealt damage this turn",
             FilterProp::WasDealtDamageThisTurn,
         ),
+        // CR 120.1: active voice — the creature dealt damage (was the source),
+        // distinct from the passive "was dealt damage" above (Red Guardian).
+        ("dealt damage this turn", FilterProp::DealtDamageThisTurn),
         (
             "entered the battlefield this turn",
             FilterProp::EnteredThisTurn,
@@ -8342,6 +8374,25 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
         );
+    }
+
+    /// CR 601.2c + CR 109.4: The announcing-player qualifier and controller
+    /// restriction both bind to one target phrase, even when the qualifier comes
+    /// first (Volcanic Offering's printed template).
+    #[test]
+    fn opponent_choice_target_consumes_trailing_controller_restriction() {
+        let mut ctx = ParseContext::default();
+        let (filter, rest) = parse_target_with_ctx(
+            "target creature of an opponent's choice you don't control",
+            &mut ctx,
+        );
+
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent))
+        );
+        assert_eq!(rest, "");
+        assert_eq!(ctx.target_chooser, Some(TargetFilter::Opponent));
     }
 
     #[test]
@@ -13981,6 +14032,37 @@ mod tests {
             rest.trim().is_empty(),
             "expected empty remainder, got: {rest:?}"
         );
+    }
+
+    // CR 120.1: active-voice "that dealt damage this turn" (creature is the damage
+    // source) must parse to `DealtDamageThisTurn`, NOT the passive
+    // `WasDealtDamageThisTurn` (creature is the damage recipient). Red Guardian,
+    // Super-Soldier: "destroy target creature an opponent controls that dealt
+    // damage this turn."
+    #[test]
+    fn that_dealt_damage_this_turn_is_active_voice() {
+        let (filter, rest) =
+            parse_target("target creature an opponent controls that dealt damage this turn");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::DealtDamageThisTurn)),
+            "Expected DealtDamageThisTurn (active), got: {:?}",
+            tf.properties
+        );
+        assert!(
+            !tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::WasDealtDamageThisTurn)),
+            "must NOT collapse to the passive WasDealtDamageThisTurn: {:?}",
+            tf.properties
+        );
+        assert!(rest.trim().is_empty(), "expected empty remainder: {rest:?}");
     }
 
     #[test]

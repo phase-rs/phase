@@ -66,7 +66,7 @@ use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{anychar, multispace0, multispace1, space1};
-use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value};
 use nom::multi::{many1, many_till, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -14777,6 +14777,12 @@ fn try_parse_reanimate_self_and_target(
 /// the sub_ability's target is set to `TargetFilter::ParentTarget` so it inherits the
 /// parent's resolved targets at resolution time.
 fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+    // CR 601.2c + CR 115.1: A chooser override belongs to the target phrase in
+    // the current compound instruction. This parser can recurse after a prior
+    // "of an opponent's choice" conjunct, so begin each new instruction with
+    // the controller default; its own target parser will stamp an override when
+    // the current phrase supplies one.
+    ctx.target_chooser = None;
     let lower = text.to_lowercase();
 
     // Quick bail: no "and" means no compound connector possible
@@ -14824,6 +14830,10 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     } else {
         ctx.clone()
     };
+    // CR 601.2c + CR 115.1: The continuation starts a new target instruction.
+    // Keep the primary phrase's announcer on `ctx`; only a chooser printed in
+    // the continuation itself may be attached to the chained sub-ability.
+    continuation_ctx.target_chooser = None;
 
     // Parse the sub-effect
     let mut sub_clause = parse_imperative_effect(sub_text, &mut continuation_ctx);
@@ -15090,6 +15100,9 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
 
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_ability.sub_ability = sub_clause.sub_ability;
+    // CR 601.2c + CR 115.1: the continuation's opponent-choice announcer belongs
+    // to this chained link rather than the primary target.
+    sub_ability.target_chooser = continuation_ctx.target_chooser.clone();
     // CR 115.6: Propagate "up to N" cardinality so the sub-clause target
     // remains optional (e.g. "up to one other target artifact or enchantment").
     sub_ability.multi_target = sub_clause.multi_target;
@@ -15558,8 +15571,28 @@ fn try_parse_multi_target_damage_chain(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
+    // This recognizer speculatively parses the whole clause. A failed attempt
+    // must leave every parser-context field (especially the target chooser)
+    // untouched for the fallback compound parser.
+    let mut tentative_ctx = ctx.clone();
+    let clause = try_parse_multi_target_damage_chain_inner(text, &mut tentative_ctx)?;
+    *ctx = tentative_ctx;
+    Some(clause)
+}
+
+fn try_parse_multi_target_damage_chain_inner(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    // CR 601.2c + CR 115.1: A bare-damage chain is a fresh instruction even
+    // when reached through a compound continuation. Do not let the preceding
+    // target phrase's announcing-player override leak into its first recipient.
+    ctx.target_chooser = None;
     let lower = text.to_lowercase();
     let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
+    // Each segment parses through the shared context, so retain the primary
+    // segment's announcer before a continuation can overwrite it.
+    let primary_target_chooser = ctx.target_chooser.clone();
     let trimmed = remainder.trim_start();
     let trimmed_lower = trimmed.to_lowercase();
     // A comma-delimited list ("..., M damage to T2, and K ...") or a bare
@@ -15578,8 +15611,9 @@ fn try_parse_multi_target_damage_chain(
 
     // Walk the comma-delimited continuation list. Each iteration either
     // consumes one bare-damage segment (returning the next AbilityDefinition)
-    // or aborts the entire chain — partial parses are not committed.
-    let mut segments: Vec<Effect> = Vec::new();
+    // or aborts the entire chain — partial parses are not committed. Each
+    // continuation retains its own target announcer.
+    let mut segments: Vec<(Effect, Option<TargetFilter>)> = Vec::new();
     let mut cursor = remainder.trim_start();
     while !cursor.is_empty() {
         let cursor_lower = cursor.to_lowercase();
@@ -15606,8 +15640,12 @@ fn try_parse_multi_target_damage_chain(
             return None;
         };
 
+        // CR 601.2c + CR 115.1: Every comma- or and-delimited damage recipient
+        // is a distinct target phrase. Do not inherit the preceding recipient's
+        // announcing-player override.
+        ctx.target_chooser = None;
         let (segment_effect, leftover) = parse_bare_damage_continuation(after_separator, ctx)?;
-        segments.push(segment_effect);
+        segments.push((segment_effect, ctx.target_chooser.clone()));
         cursor = leftover.trim_start();
     }
 
@@ -15615,14 +15653,17 @@ fn try_parse_multi_target_damage_chain(
         return None;
     }
 
+    ctx.target_chooser = primary_target_chooser;
+
     // Build the chain bottom-up so each segment becomes the `sub_ability` of
     // the previous one. Effects beyond the primary share the primary's
     // damage-source semantics by construction (each is a `DealDamage` with
     // `damage_source: None`).
     let mut chain_tail: Option<Box<AbilityDefinition>> = None;
-    for effect in segments.into_iter().rev() {
+    for (effect, target_chooser) in segments.into_iter().rev() {
         let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
         def.sub_ability = chain_tail.take();
+        def.target_chooser = target_chooser;
         chain_tail = Some(Box::new(def));
     }
 
@@ -16092,6 +16133,8 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
     }
 
     let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
+    // Preserve the primary target's announcer while parsing the continuation.
+    let primary_target_chooser = ctx.target_chooser.clone();
 
     if remainder.is_empty() {
         return None;
@@ -16107,9 +16150,16 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
         return None;
     }
 
+    // CR 601.2c + CR 115.1: This compound continuation has its own target
+    // phrase, so it starts with the controller as chooser unless it explicitly
+    // provides an override.
+    ctx.target_chooser = None;
+
     // Parse the sub-effect through the full clause pipeline (not just imperative),
     // because the sub-text may have a subject prefix like "you gain 3 life".
     let mut sub_clause = parse_effect_clause(sub_text, ctx);
+    let sub_target_chooser = ctx.target_chooser.clone();
+    ctx.target_chooser = primary_target_chooser;
 
     // Guard: if the sub-text parsed to Unimplemented, it's likely a target phrase
     // continuation ("each creature and planeswalker they control") rather than an
@@ -16129,6 +16179,7 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
 
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_ability.sub_ability = sub_clause.sub_ability;
+    sub_ability.target_chooser = sub_target_chooser;
 
     Some(ParsedEffectClause {
         effect: primary_effect,
@@ -17222,41 +17273,50 @@ fn rebind_anaphoric_generic_effect_subject_to_parent(lower: &str, def: &mut Abil
 }
 
 /// CR 115.10a + CR 601.2c: A damage clause whose recipient is a FRESH typed
-/// "creature an opponent controls" / "creature you don't control" target (both
-/// canonicalize to `ControllerRef::Opponent`) declares its own target — it is
-/// not the anaphoric "It" subject that an earlier clause established. Per CR
-/// 601.2c each instance of the word "target" is a separate target, and per CR
-/// 115.10a being affected (the source's power feeding the amount) does not make
-/// that recipient the same object as the boosted creature. Recurses through
+/// target structurally distinct from the anaphoric "It" subject an earlier
+/// clause established — it declares its own recipient, not the boosted/
+/// counter'd object. Two shapes both witness this: (1) "creature an opponent
+/// controls" / "creature you don't control" (canonicalize to
+/// `ControllerRef::Opponent`) — a different player's permanent can never be
+/// the subject's own controller's chosen object; (2) "each other creature" /
+/// "all other creatures" (`FilterProp::Another`) — CR 115.10a: an "other"/
+/// "another" exclusion excludes the referenced object *by definition*, so a
+/// board-sweep recipient (Chandra's Ignition class: "target creature you
+/// control deals damage equal to its power to each other creature") can never
+/// be the same object as "It" either. Per CR 601.2c each instance of the word
+/// "target" is a separate target, and per CR 115.10a being affected (the
+/// source's power feeding the amount) does not make either recipient shape the
+/// same object as the boosted/counter'd creature. Recurses through
 /// `Or`/`And`/`Not` wrappers, mirroring `attach_controller_if_absent` /
-/// `rewrite_filter_controller`. Returns true only for the tight
-/// `Typed { controller: Some(Opponent), .. }` shape; `ParentTarget`/`SelfRef`/
-/// `Any`/`ParentTargetController` etc. are excluded (they are never
-/// Typed-with-Opponent anyway).
-fn target_filter_is_fresh_opponent_typed(filter: &TargetFilter) -> bool {
+/// `rewrite_filter_controller`. `ParentTarget`/`SelfRef`/`Any`/
+/// `ParentTargetController` etc. are excluded (they are never `Typed` anyway).
+fn target_filter_is_distinct_recipient(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(TypedFilter {
-            controller: Some(ControllerRef::Opponent),
-            ..
-        }) => true,
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(target_filter_is_fresh_opponent_typed)
+        TargetFilter::Typed(tf) => {
+            tf.controller == Some(ControllerRef::Opponent)
+                || tf.properties.contains(&FilterProp::Another)
         }
-        TargetFilter::Not { filter } => target_filter_is_fresh_opponent_typed(filter),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_is_distinct_recipient)
+        }
+        TargetFilter::Not { filter } => target_filter_is_distinct_recipient(filter),
         _ => false,
     }
 }
 
 /// Returns true iff `effect` is a `DealDamage`/`DamageAll` whose recipient is a
-/// fresh opponent-controlled typed target (see
-/// `target_filter_is_fresh_opponent_typed`). Used to DECLINE the blanket
-/// anaphoric parent-rewrite for the "one-sided fight" class (Ambuscade, Clear
-/// Shot, Rabid Gnaw, ...): the recipient is parsed correctly upstream and must
-/// be preserved, not clobbered to `ParentTarget`.
-fn damage_clause_has_fresh_opponent_recipient(effect: &Effect) -> bool {
+/// structurally distinct typed target (see `target_filter_is_distinct_recipient`
+/// — either opponent-controlled or an "other"/"another"-excluded board sweep).
+/// Used to DECLINE the blanket anaphoric parent-rewrite for the "one-sided
+/// fight" class (Ambuscade, Clear Shot, Rabid Gnaw, ...) and the "counter-then-
+/// sweep" class (Nova Flame: "Put X +1/+1 counters on target creature you
+/// control. It deals damage equal to its power to each other creature."): the
+/// recipient is parsed correctly upstream and must be preserved, not clobbered
+/// to `ParentTarget`.
+fn damage_clause_has_distinct_recipient(effect: &Effect) -> bool {
     match effect {
         Effect::DealDamage { target, .. } | Effect::DamageAll { target, .. } => {
-            target_filter_is_fresh_opponent_typed(target)
+            target_filter_is_distinct_recipient(target)
         }
         _ => false,
     }
@@ -17393,11 +17453,19 @@ fn restore_this_way_trigger_anaphor(effect: &mut Effect) {
 /// to `Anaphoric` routes it back through the same runtime fallback. Returns true
 /// (= decline the blanket `replace_target_with_parent`) when handled.
 ///
-/// Covers two recipient shapes: (1) the fresh-opponent recipient — attribute
+/// Covers three recipient shapes: (1) the fresh-opponent recipient — attribute
 /// the damage source to the parent target while preserving the recipient and
 /// the anaphoric amount; (2) the self-reference recipient ("to this
 /// creature"/"to ~", `TargetFilter::SelfRef`, the Karplusan Yeti fight-back
-/// class) — preserve the recipient verbatim with NO source/amount rebind.
+/// class) — preserve the recipient verbatim with NO source/amount rebind;
+/// (3) the "other"/"another"-excluded board-sweep recipient ("to each other
+/// creature", `FilterProp::Another` — the Chandra's Ignition / Nova Flame
+/// class, issue #4960) — same handling as (1): attribute the damage source to
+/// the parent target while preserving the sweep recipient and the anaphoric
+/// amount. Without this, `damage_source` stays `None` (the spell itself), so
+/// the runtime one-sided-fight fallback in `game/quantity.rs` (gated on
+/// `damage_source == Some(Target)`) never fires and `Power{Anaphoric}`
+/// resolves to 0 — Nova Flame with any X dealt no damage.
 fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     // CR 201.5 + CR 608.2c: a self-reference recipient ("to this creature"/"to ~")
     // is the source itself and must be preserved verbatim (fight-back class). No
@@ -17406,13 +17474,14 @@ fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     if damage_clause_has_self_ref_recipient(effect) {
         return true;
     }
-    if !damage_clause_has_fresh_opponent_recipient(effect) {
+    if !damage_clause_has_distinct_recipient(effect) {
         return false;
     }
-    // CR 115.10a + CR 601.2c + CR 608.2c + CR 120.1: preserve the fresh-opponent
-    // recipient and attribute damage source to targets[0] (the boosted "It");
-    // leave "its power" as Power{Anaphoric} — the runtime resolves it to that
-    // same source object. Do NOT rebind to Target (that desyncs the export from
+    // CR 115.10a + CR 601.2c + CR 608.2c + CR 120.1: preserve the distinct
+    // recipient (fresh-opponent target OR "other"-excluded board sweep) and
+    // attribute damage source to targets[0] (the boosted/counter'd "It"); leave
+    // "its power" as Power{Anaphoric} — the runtime resolves it to that same
+    // source object. Do NOT rebind to Target (that desyncs the export from
     // the Oracle "its" and reintroduces #699).
     set_damage_clause_source_only(effect, DamageSource::Target);
     // Source → Anaphoric only (the SelfRef-subject "Then it deals..." variant);
@@ -20212,9 +20281,59 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             mana_spend_permission: None,
         });
     }
+    // CR 400.1/400.2 + CR 608.2c: The bare "them"/"those cards" anaphor is
+    // ambiguous — it usually refers to an exile the chain produced
+    // (ExiledBySource), but when no exile ever occurred and the SAME chain's
+    // most recent producer merely looked at/revealed a PLAYER'S HAND
+    // (Silent-Blade Oni: "look at that player's hand. You may cast a spell
+    // from among those cards without paying its mana cost."), the cards
+    // never left that hand. Binding to `ExiledBySource` there resolves
+    // against an empty tracked-exile set and silently swallows the cast
+    // permission (issue #5240) — no prompt is ever offered. Bind to that
+    // player's hand instead, mirroring Branch 2's own "cast a spell from
+    // your hand" shape (`TypedFilter::new(Card).controller(..)` + `InZone{Hand}`)
+    // with the revealed player's `ControllerRef` swapped in for `You`.
+    // "...exiled cards" phrasings are unambiguous (the antecedent noun is
+    // explicitly "exiled") and always keep the `ExiledBySource` binding.
     if scan_contains_phrase(rest, "from among them")
         || scan_contains_phrase(rest, "from among those cards")
-        || scan_contains_phrase(rest, "from among those exiled cards")
+    {
+        if !ctx.chain_has_prior_exile_producer {
+            if let Some(controller) = ctx
+                .chain_prior_hand_reveal_target
+                .as_ref()
+                .and_then(hand_reveal_target_to_controller_ref)
+            {
+                let mut hand_filter = TypedFilter::new(TypeFilter::Card).controller(controller);
+                hand_filter
+                    .properties
+                    .push(FilterProp::InZone { zone: Zone::Hand });
+                return Some(Effect::CastFromZone {
+                    target: TargetFilter::Typed(hand_filter),
+                    without_paying_mana_cost: without_paying,
+                    mode,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint,
+                    duration: None,
+                    driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                    mana_spend_permission: None,
+                });
+            }
+        }
+        return Some(Effect::CastFromZone {
+            target: TargetFilter::ExiledBySource,
+            without_paying_mana_cost: without_paying,
+            mode,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint,
+            duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
+        });
+    }
+    if scan_contains_phrase(rest, "from among those exiled cards")
         || scan_contains_phrase(rest, "from among the exiled cards")
     {
         return Some(Effect::CastFromZone {
@@ -21436,6 +21555,16 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     ))
     .parse(lower)
     .ok()?;
+    parse_named_choice_object(rest)
+}
+
+/// The object phrase of a named choice, with any leading "choose "/"secretly
+/// choose " already stripped (e.g. "a creature type", "a creature card name").
+/// Factored out of `try_parse_named_choice` so a conjunction of choices sharing
+/// one "choose" ("choose a creature card name and a creature type" — Psychic
+/// Paper) can re-dispatch each conjunct through this same phrase table instead
+/// of duplicating it or reconstructing a "choose "-prefixed string.
+pub(crate) fn parse_named_choice_object(rest: &str) -> Option<ChoiceType> {
     type E<'a> = OracleError<'a>;
     if tag::<_, _, E>("a creature type").parse(rest).is_ok() {
         Some(ChoiceType::creature_type())
@@ -21571,6 +21700,38 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         // semantics.
         try_parse_labeled_choice(rest).map(|options| ChoiceType::Labeled { options })
     }
+}
+
+/// CR 608.2d + CR 614.1c: A conjunction of named-choice phrases sharing one
+/// "choose" ("choose a creature card name and a creature type" — Psychic
+/// Paper). Strips the same "choose "/"secretly choose " prefix
+/// `try_parse_named_choice` strips, then splits on top-level " and " and
+/// re-dispatches each conjunct through `parse_named_choice_object` (the same
+/// phrase table `try_parse_named_choice` itself delegates to), so this stays
+/// additive rather than duplicating tags. `separated_list1` naturally extends
+/// to a future 3+-way conjunction. Returns `None` for a bare (non-conjunction)
+/// choice — callers fall back to `try_parse_named_choice` for that case.
+pub(crate) fn try_parse_named_choice_conjunction(choose_text: &str) -> Option<Vec<ChoiceType>> {
+    let (after_choose, _) = alt((
+        tag::<_, _, OracleError<'_>>("choose "),
+        nom::sequence::preceded(tag("secretly "), tag("choose ")),
+    ))
+    .parse(choose_text)
+    .ok()?;
+    let trimmed = after_choose.trim_end_matches('.').trim();
+
+    fn conjunct(input: &str) -> nom::IResult<&str, ChoiceType, OracleError<'_>> {
+        map_opt(
+            alt((take_until::<_, _, OracleError<'_>>(" and "), rest)),
+            parse_named_choice_object,
+        )
+        .parse(input)
+    }
+
+    let (_, choices) = all_consuming(separated_list1(tag(" and "), conjunct))
+        .parse(trimmed)
+        .ok()?;
+    (choices.len() >= 2).then_some(choices)
 }
 
 /// CR 608.2d + CR 113.3: Parse a typed keyword enumeration following "choose "
@@ -22222,6 +22383,36 @@ fn clause_ir_is_exile_producer(clause: &ClauseIr) -> bool {
     chain_clause_is_exile_producer(&clause.parsed.effect)
         || continuation_is_exile_producer(clause.disposition.followup())
         || continuation_is_exile_producer(clause.disposition.intrinsic())
+}
+
+/// CR 400.1/400.2 + CR 608.2c: If this clause is an `Effect::RevealHand`
+/// ("look at"/"reveal" a possessive hand), return the player it looked at.
+/// Feeds `ParseContext::chain_prior_hand_reveal_target` so a later same-chain
+/// "cast a spell from among those cards" anaphor (Silent-Blade Oni) can bind
+/// to that player's hand instead of the exile-only `ExiledBySource` default.
+fn clause_ir_hand_reveal_target(clause: &ClauseIr) -> Option<TargetFilter> {
+    match &clause.parsed.effect {
+        Effect::RevealHand { target, .. } => Some(target.clone()),
+        _ => None,
+    }
+}
+
+/// CR 400.1/400.2 + CR 601.2a: Map a possessive-hand player reference (as
+/// produced by `parse_hand_possessive_target`) to the `ControllerRef` axis
+/// used to scope a card filter to that same player's hand. Exhaustive over
+/// the closed set of forms `parse_hand_possessive_target` can produce — a
+/// bounded translation table, not per-card special-casing.
+fn hand_reveal_target_to_controller_ref(target: &TargetFilter) -> Option<ControllerRef> {
+    match target {
+        TargetFilter::Controller => Some(ControllerRef::You),
+        TargetFilter::Player => Some(ControllerRef::TargetPlayer),
+        TargetFilter::TriggeringPlayer => Some(ControllerRef::TriggeringPlayer),
+        TargetFilter::DefendingPlayer => Some(ControllerRef::DefendingPlayer),
+        TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::Opponent) => {
+            Some(ControllerRef::Opponent)
+        }
+        _ => None,
+    }
 }
 
 fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
@@ -27061,6 +27252,15 @@ pub(crate) fn parse_effect_chain_ir(
                 .clauses()
                 .iter()
                 .any(clause_ir_is_exile_producer),
+            // CR 400.1/400.2 + CR 608.2c: most-recent earlier same-chain
+            // `RevealHand` target, so a later "cast a spell from among those
+            // cards" anaphor (Silent-Blade Oni) binds to that player's hand
+            // instead of the exile-only `ExiledBySource` default.
+            chain_prior_hand_reveal_target: builder
+                .clauses()
+                .iter()
+                .rev()
+                .find_map(clause_ir_hand_reveal_target),
             // CR 608.2c: bind a bare "it" in this chunk's counter/anaphor to the
             // token created by an earlier clause when that token is the chain's
             // most-recent object referent (Esper Terra's "put up to three lore

@@ -117,7 +117,23 @@ pub(super) fn handle_replacement_choice(
     index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return Err(EngineError::InvalidAction(
+            "replacement choice has no pending replacement".to_string(),
+        ));
+    };
+    let option_count = super::replacement::pending_replacement_option_count(state, pending);
+    if index >= option_count {
+        return Err(EngineError::InvalidAction(format!(
+            "replacement choice index {index} is outside 0..{option_count}"
+        )));
+    }
     let replacement_action_event_start = events.len();
+    let parked_search_found_replacement = state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| matches!(pending.proposed, ProposedEvent::SearchFound { .. }))
+        .cloned();
     let pending_was_counter_move = state
         .pending_replacement
         .as_ref()
@@ -411,6 +427,34 @@ pub(super) fn handle_replacement_choice(
                 // does not prevent the turn-up), so there is nothing to apply on
                 // the post-replacement Execute path here.
                 ProposedEvent::TurnFaceUp { .. } => {}
+                // CR 701.3a + CR 616.1: Attach accepted after a replacement
+                // ordering choice (2+ "as it becomes attached, choose …"
+                // definitions on the same attachment). Unreachable today — the
+                // parser pool has exactly one `ReplacementEvent::Attached`
+                // producer (Psychic Paper) — but wired for correctness if a
+                // future card shares the class. `source_id` for the
+                // `EffectResolved` push is approximated as `attachment_id`:
+                // `ProposedEvent::Attach` doesn't carry the original ability's
+                // source, which only differs from the attachment for a
+                // non-Equip "attach ~ to" effect (e.g. a triggered ability on
+                // another permanent) — no such card has BOTH that shape AND a
+                // second Attached-event replacement to order against today.
+                ProposedEvent::Attach {
+                    attachment_id,
+                    target_id,
+                    ..
+                } => {
+                    if let Some(waiting_for) = crate::game::effects::attach::deliver_attach(
+                        state,
+                        attachment_id,
+                        target_id,
+                        attachment_id,
+                        events,
+                    ) {
+                        state.waiting_for = waiting_for;
+                        return Ok(state.waiting_for.clone());
+                    }
+                }
                 // CR 121.1 + CR 614.6 + CR 614.11: Draw accepted after
                 // replacement choice — delegate to the shared post-replacement
                 // helper so library-zone move + per-turn accounting match the
@@ -666,6 +710,21 @@ pub(super) fn handle_replacement_choice(
                         "CoinFlip replacement reached the optional-choice resume path"
                     );
                 }
+                // CR 701.23a + CR 614.6: modified SearchFound events are delivered by
+                // the search-resolution continuation. This arm is reached only
+                // when CR 616 ordering required a replacement choice; the bound
+                // modified event remains authoritative and is not rescanned.
+                event @ ProposedEvent::SearchFound { .. } => {
+                    return match super::engine_resolution_choices::resume_search_found_after_replacement(
+                        state, event, events,
+                    ) {
+                        Ok(waiting) => Ok(waiting),
+                        Err(error) => {
+                            state.pending_replacement = parked_search_found_replacement;
+                            Err(error)
+                        }
+                    };
+                }
             }
 
             let mut waiting_for = WaitingFor::Priority {
@@ -874,6 +933,13 @@ pub(super) fn handle_replacement_choice(
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.pending_continuation.is_some()
                     || state.pending_change_zone_iteration.is_some())
+                // CR 118.12 + CR 605.3b + CR 616.1: A mana-source cost pause
+                // owns the unpaid cost suffix.  Do not drain the ordinary
+                // effect rider before that typed root has settled it.
+                && !matches!(
+                    state.pending_cost_move_resume,
+                    Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+                )
             {
                 // CR 614.12b + CR 614.1c + CR 614.13: drain BOTH the chained
                 // continuation and the multi-target ChangeZone iteration that
@@ -973,6 +1039,32 @@ pub(super) fn handle_replacement_choice(
                 )
             {
                 waiting_for = super::casting::resume_foretell_cost_move(state, events);
+            }
+
+            // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: The selected
+            // replacement has delivered the interrupted mana-ability cost move.
+            // Resume only its unpaid cursor suffix; it owns production and the
+            // inline subchain after every cost component has settled.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && matches!(
+                    state.pending_cost_move_resume,
+                    Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+                )
+            {
+                waiting_for = super::mana_abilities::resume_mana_ability_cost_move(state, events)?;
+            }
+
+            // CR 118.12 + CR 605.3b + CR 616.1: The ordinary effect rider may
+            // resume only after the whole typed mana-cost root has either paid
+            // or failed its suffix.  This mirrors the prevention path below.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && (state.pending_continuation.is_some()
+                    || state.pending_change_zone_iteration.is_some())
+            {
+                effects::drain_pending_continuation(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
             }
 
             // CR 601.2h + CR 602.2b + CR 616.1: Resume a non-move cast or
@@ -1174,6 +1266,27 @@ pub(super) fn handle_replacement_choice(
                 Some(PendingCostMoveResume::Foretell { .. })
             ) {
                 return Ok(super::casting::resume_foretell_cost_move(state, events));
+            }
+            // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A fully
+            // prevented or substituted mana-ability cost move still pays that
+            // component, so drain the exact unpaid cursor suffix.
+            if matches!(
+                state.pending_cost_move_resume,
+                Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+            ) {
+                let waiting_for =
+                    super::mana_abilities::resume_mana_ability_cost_move(state, events)?;
+                state.waiting_for = waiting_for.clone();
+                // CR 118.12 + CR 605.3b + CR 616.1: A prevented or substituted
+                // cost move has the same sequencing as a delivered move: settle
+                // the typed cost root first, then exactly once drain its rider.
+                if matches!(waiting_for, WaitingFor::Priority { .. })
+                    && (state.pending_continuation.is_some()
+                        || state.pending_change_zone_iteration.is_some())
+                {
+                    effects::drain_pending_continuation(state, events);
+                }
+                return Ok(state.waiting_for.clone());
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,
             // the permanent goes to the graveyard instead.
@@ -2947,6 +3060,7 @@ mod tests {
                 source: bear,
                 index: 0,
             }],
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,

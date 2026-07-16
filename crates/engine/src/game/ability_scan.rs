@@ -203,8 +203,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         chosen_players: _,        // concrete chosen player ids
         replacement_applied: _,   // replacement provenance set, no dynamic read
         sub_link: _,              // SubAbilityLink kind tag
-        dig_found_nothing_for_parent_target: _, // bool seam flag
-        choose_from_zone_found_nothing_for_parent_target: _, // bool seam flag
+        parent_target_missing_reason: _, // seam flag
     } = a;
 
     let mut acc = scan_effect(effect);
@@ -2413,6 +2412,7 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
         TargetFilter::Any => Axes::NONE,
         TargetFilter::Player => Axes::NONE,
         TargetFilter::Controller => Axes::NONE,
+        TargetFilter::Opponent => Axes::NONE,
         TargetFilter::SelfRef => Axes::NONE,
         // CR 201.5a: a source-relative object ref (the granting object), like
         // SelfRef — no event/sibling/projected resource axis.
@@ -3246,6 +3246,11 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         // has `damage_marked == 0` yet a persistent journal record, so gate (1) cannot
         // backstop this read — PROVEN projected, fail closed.
         FilterProp::WasDealtDamageThisTurn => Axes::CONSERVATIVE,
+        // CR 120.1: reads `state.damage_dealt_this_turn`, the same append-only
+        // per-turn journal a loop pumps and `project_out_resources` clears — a
+        // projected-resource read, PROVEN projected, fail closed (mirrors the
+        // passive `WasDealtDamageThisTurn` arm above).
+        FilterProp::DealtDamageThisTurn => Axes::CONSERVATIVE,
         // CR 400 / CR 603.6a: runtime eval reads `state.zone_changes_this_turn`, an
         // append-only event journal a loop pumps, cleared by `project_out_resources`
         // and strict-compared by nothing in gate (1). A flicker/blink loop keeps the
@@ -4733,8 +4738,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         chosen_players: _, // concrete chosen player ids (already selected)
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _,  // SubAbilityLink kind tag
-        dig_found_nothing_for_parent_target: _, // bool seam flag
-        choose_from_zone_found_nothing_for_parent_target: _, // bool seam flag
+        parent_target_missing_reason: _, // seam flag
     } = a;
 
     // CR 608.2d: an optional effect / optional targeting / opponent-may

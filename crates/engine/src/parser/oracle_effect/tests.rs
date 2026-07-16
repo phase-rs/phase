@@ -20435,6 +20435,142 @@ fn become_basic_land_type_of_choice() {
     );
 }
 
+// CR 205.1b: Navigator's Compass — "{T}: Until end of turn, target land you
+// control becomes the basic land type of your choice in addition to its
+// other types." (Oracle text verified against Scryfall.) Previously
+// `try_parse_become_choice` anchored on the choice phrase literally ending in
+// "of your choice"; the trailing "in addition to its other types" marker made
+// the whole predicate fall through unparsed (the animation fallback can't
+// tokenize "of your choice" as a type either), so the ability did nothing.
+#[test]
+fn become_basic_land_type_of_choice_in_addition_to_other_types() {
+    let clause = parse_effect_clause(
+        "target land you control becomes the basic land type of your choice \
+         in addition to its other types until end of turn",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::BasicLandType,
+                ..
+            }
+        ),
+        "Expected Choose {{ BasicLandType }}, got {:?}",
+        clause.effect
+    );
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*apply.effect
+    else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert_eq!(
+        static_abilities[0].modifications,
+        vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::BasicLandType,
+        }],
+        "the retention marker must not introduce RemoveAllSubtypes or change \
+         the additive AddChosenSubtype modification: {:?}",
+        static_abilities[0].modifications
+    );
+}
+
+// Sibling coverage on the creature-type choice axis, proving the fix
+// generalizes across `try_parse_become_choice`'s three choice kinds rather
+// than special-casing the land branch alone.
+#[test]
+fn become_creature_type_of_choice_in_addition_to_other_types() {
+    let clause = parse_effect_clause(
+        "target creature becomes the creature type of your choice in addition \
+         to its other types until end of turn",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::CreatureType { .. },
+                ..
+            }
+        ),
+        "Expected Choose {{ CreatureType }}, got {:?}",
+        clause.effect
+    );
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*apply.effect
+    else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert_eq!(
+        static_abilities[0].modifications,
+        vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }]
+    );
+}
+
+// No-regression guard: the pre-existing "and <keyword grant>" trailing form
+// (Mondo Gecko) must still parse — the new marker-strip must not interfere
+// when no "in addition to its other types" marker is present.
+#[test]
+fn become_color_of_choice_still_chains_trailing_keyword_grant() {
+    use crate::types::ability::ColorChangeMode;
+    use crate::types::keywords::{HexproofFilter, Keyword};
+
+    let clause = parse_effect_clause(
+        "Target creature becomes the color of your choice and gains hexproof \
+         from that color until end of turn",
+        &mut ParseContext::default(),
+    );
+    assert!(matches!(
+        clause.effect,
+        Effect::Choose {
+            choice_type: ChoiceType::Color { .. },
+            ..
+        }
+    ));
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*apply.effect
+    else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert!(
+        static_abilities[0]
+            .modifications
+            .contains(&ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Set,
+            }),
+        "{:?}",
+        static_abilities[0].modifications
+    );
+    assert!(
+        static_abilities[0].modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::HexproofFrom(HexproofFilter::ChosenColor)
+            }
+        )),
+        "trailing keyword grant must still chain: {:?}",
+        static_abilities[0].modifications
+    );
+}
+
 #[test]
 fn parse_play_from_exile_this_turn() {
     // CR 400.7i + CR 608.2c: A standalone "you may play that card this turn"
@@ -46279,4 +46415,163 @@ fn attachable_token_creator_still_rewrites_target_side_anaphor() {
     };
     assert_eq!(attachment, TargetFilter::SelfRef);
     assert_eq!(target, TargetFilter::LastCreated);
+}
+
+/// CR 402.1 + CR 121.1 (issue #5637) — production-path regression for Bandit's
+/// Talent. The level-3 trigger "At the beginning of your draw step, draw an
+/// additional card for each opponent who has one or fewer cards in hand" must
+/// lower to a Draw whose count is a `PlayerCount` over opponents with hand size
+/// `<= 1` — not a flat `Fixed(1)`. Before the fix the "for each opponent who has
+/// one or fewer cards in hand" clause was swallowed (a `DynamicQty`
+/// `SwallowedClause` warning fired) and the draw collapsed to one card regardless
+/// of how many opponents were hellbent.
+#[test]
+fn bandits_talent_level3_draw_counts_hellbent_opponents() {
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::types::ability::{
+        AbilityDefinition, Effect, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr,
+        QuantityRef,
+    };
+
+    fn find_draw_count(def: &AbilityDefinition) -> Option<QuantityExpr> {
+        if let Effect::Draw { count, .. } = &*def.effect {
+            return Some(count.clone());
+        }
+        def.sub_ability.as_deref().and_then(find_draw_count)
+    }
+
+    let parsed = parse_oracle_text(
+        "When this Class enters, each opponent discards two cards unless they discard a nonland card.\n{B}: Level 2\nAt the beginning of each opponent's upkeep, if that player has one or fewer cards in hand, they lose 2 life.\n{3}{B}: Level 3\nAt the beginning of your draw step, draw an additional card for each opponent who has one or fewer cards in hand.",
+        "Bandit's Talent",
+        &[],
+        &["Enchantment".to_string()],
+        &["Class".to_string()],
+    );
+
+    let count = parsed
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .find_map(find_draw_count)
+        .expect("Bandit's Talent must lower a draw-step Draw effect");
+
+    assert_eq!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: crate::types::ability::Comparator::LE,
+                    value: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+            },
+        },
+        "the draw count must be the number of opponents with <= 1 card in hand, not Fixed(1)"
+    );
+
+    // The DynamicQty swallow warning for the draw-step line must be gone.
+    assert!(
+        !parsed.parse_warnings.iter().any(|w| matches!(
+            w,
+            OracleDiagnostic::SwallowedClause { detector, description, .. }
+                if detector == "DynamicQty" && description.contains("draw an additional card for each opponent")
+        )),
+        "the DynamicQty swallow warning must be cleared: {:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// CR 111.3 + CR 122.1 + CR 608.2c (issue #5844) — production-path regression for
+/// Alien Invasion. The token's quoted granted ability ends the first sentence
+/// (`able."`); the following imperative sentence pumps the created token. Before
+/// the sentence-splitter fix, the whole remainder was swallowed into the token
+/// clause: the token COUNT became `CountersOn(invasion)` (creating one token per
+/// invasion counter) and the "+1/+1 counter on it for each invasion counter"
+/// pump was dropped entirely. The corrected parse creates exactly ONE token and
+/// keeps the pump as a sibling `PutCounter` on the last-created token.
+#[test]
+fn alien_invasion_creates_one_token_and_pumps_it_per_counter() {
+    use crate::types::ability::{
+        AbilityDefinition, Effect, ObjectScope, QuantityExpr, QuantityRef,
+    };
+    use crate::types::counter::CounterType;
+
+    // Flatten the trigger's execute chain (def -> sub_ability -> ...).
+    fn collect_effects(def: &AbilityDefinition, out: &mut Vec<Effect>) {
+        out.push((*def.effect).clone());
+        if let Some(sub) = def.sub_ability.as_deref() {
+            collect_effects(sub, out);
+        }
+    }
+
+    let parsed = parse_oracle_text(
+        "At the beginning of combat on your turn, create a 1/1 red Alien creature token with haste and \"This token attacks each combat if able.\" Put a +1/+1 counter on it for each invasion counter on this enchantment, then put an invasion counter on this enchantment.",
+        "Alien Invasion",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("Alien Invasion must lower to a combat trigger with an execute chain");
+    let mut effects = Vec::new();
+    collect_effects(trigger, &mut effects);
+
+    // 1) Exactly one token is created (count is a literal 1, NOT CountersOn).
+    let token_count = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::Token { count, .. } => Some(count.clone()),
+            _ => None,
+        })
+        .expect("must emit a Token effect");
+    assert_eq!(
+        token_count,
+        QuantityExpr::Fixed { value: 1 },
+        "the token count must be a literal 1, not scaled by invasion counters: {token_count:?}"
+    );
+
+    // 2) The "+1/+1 counter on it for each invasion counter" pump survives as a
+    //    PutCounter on the last-created token, counted by the enchantment's
+    //    invasion counters.
+    let has_pump = effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::PutCounter {
+                target: TargetFilter::LastCreated,
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(inner),
+                    },
+                },
+            } if *inner == CounterType::Generic("invasion".to_string())
+        )
+    });
+    assert!(
+        has_pump,
+        "the '+1/+1 counter on it for each invasion counter' pump must survive: {effects:#?}"
+    );
+
+    // 3) The enchantment still accrues one invasion counter.
+    let has_self_counter = effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                counter_type: ct,
+                count: QuantityExpr::Fixed { value: 1 },
+            } if *ct == CounterType::Generic("invasion".to_string())
+        )
+    });
+    assert!(
+        has_self_counter,
+        "the enchantment must still gain one invasion counter: {effects:#?}"
+    );
 }

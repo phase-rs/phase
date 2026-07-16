@@ -498,7 +498,29 @@ fn do_eliminate(
     // remaining players (not field-nulling), tracked as a separate follow-up. This
     // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
     // `pending_replacement` guard.
-    if state.pending_replacement.is_some() && state.waiting_for.acting_player() == Some(player) {
+    let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
+    // CR 800.4a + CR 616.1: SearchFound owns an outer per-card batch, and a
+    // replacement-selected zone move may own a nested batch completion. The
+    // inner pause can be either replacement ordering or another zone-delivery
+    // choice, so this teardown is keyed to the batch plus its latched chooser,
+    // independently of `pending_replacement`.
+    if state.pending_search_found_batch.is_some() && leaving_is_latched_chooser {
+        state.pending_search_found_batch = None;
+        if state
+            .pending_batch_deliveries
+            .as_ref()
+            .and_then(|pending| pending.completion.as_ref())
+            .is_some_and(|completion| {
+                matches!(
+                    completion,
+                    crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery { .. }
+                )
+            })
+        {
+            state.pending_batch_deliveries = None;
+        }
+    }
+    if state.pending_replacement.is_some() && leaving_is_latched_chooser {
         state.pending_replacement = None;
         state.replacement_may_cost_paused = false;
         super::replacement::abandon_post_replacement_continuation(state);
@@ -738,6 +760,38 @@ mod tests {
         let mut state = GameState::new(FormatConfig::archenemy(), 4, 42);
         state.turn_number = 1;
         state
+    }
+
+    fn pending_search_found_batch(
+        searcher: PlayerId,
+        object_id: ObjectId,
+    ) -> crate::types::game_state::PendingSearchFoundBatch {
+        crate::types::game_state::PendingSearchFoundBatch {
+            searcher,
+            remaining: vec![object_id],
+            survivors: Vec::new(),
+            continuation: crate::types::game_state::PendingSearchFoundContinuation::Standard {
+                split: None,
+            },
+            visibility: crate::types::game_state::SearchFoundVisibility::Private,
+        }
+    }
+
+    fn pending_search_found_zone_delivery(
+        object_id: ObjectId,
+    ) -> crate::types::game_state::PendingBatchDeliveries {
+        crate::types::game_state::PendingBatchDeliveries {
+            remaining: Vec::new(),
+            destination: Zone::Exile,
+            source_id: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: Some(
+                crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery { object_id },
+            ),
+            replacement_applied: HashSet::new(),
+        }
     }
 
     // --- 2-player elimination (immediate GameOver) ---
@@ -1071,6 +1125,7 @@ mod tests {
             },
             sacrifice_provenance: None,
             candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,
@@ -1125,6 +1180,8 @@ mod tests {
             count: 1,
             applied: HashSet::new(),
         });
+        state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(2), o));
+        state.pending_batch_deliveries = Some(pending_search_found_zone_delivery(o));
         // CR 121.2: a paused draw instruction owned by the LEAVING chooser (P2) —
         // single-player-scoped, must clear alongside its siblings via
         // `abandon_post_replacement_continuation` (replacement.rs).
@@ -1171,6 +1228,14 @@ mod tests {
         );
         assert!(state.pending_connive_reentry.is_none());
         assert!(
+            state.pending_search_found_batch.is_none(),
+            "the eliminated chooser's outer found-card batch must be abandoned"
+        );
+        assert!(
+            state.pending_batch_deliveries.is_none(),
+            "the eliminated chooser's nested found-card zone completion must be abandoned"
+        );
+        assert!(
             state.draw_sequences.is_empty(),
             "CR 121.2: the leaving chooser's paused draw instruction must be \
              cleared via abandon_post_replacement_continuation, not stranded"
@@ -1179,6 +1244,50 @@ mod tests {
             state.pending_spell_resolution.is_none(),
             "the leaving chooser's coupled spell-resolution ctx must be torn down"
         );
+    }
+
+    #[test]
+    fn elimination_clears_outer_search_found_batch_without_nested_zone_completion() {
+        let mut state = setup_three_player();
+        let found = create_object(
+            &mut state,
+            CardId(8),
+            PlayerId(0),
+            "Found card".into(),
+            Zone::Library,
+        );
+        state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(0), found));
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::SearchFound {
+                searcher: PlayerId(0),
+                library_owner: Some(PlayerId(0)),
+                object_id: found,
+                disposition: crate::types::proposed_event::SearchFoundDisposition::Original,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 1,
+            candidates: Vec::new(),
+        };
+        assert!(state.pending_batch_deliveries.is_none());
+
+        eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
+
+        assert!(state.pending_replacement.is_none());
+        assert!(state.pending_search_found_batch.is_none());
+        assert!(state.pending_batch_deliveries.is_none());
     }
 
     #[test]
@@ -1196,6 +1305,7 @@ mod tests {
             },
             sacrifice_provenance: None,
             candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,
@@ -1209,6 +1319,10 @@ mod tests {
             candidate_count: 1,
             candidates: vec![],
         };
+        let parked_found = ObjectId(77);
+        state.pending_search_found_batch =
+            Some(pending_search_found_batch(PlayerId(0), parked_found));
+        state.pending_batch_deliveries = Some(pending_search_found_zone_delivery(parked_found));
         // A coupled spell-resolution ctx owned by the LIVING chooser (P0).
         state.pending_spell_resolution = Some(PendingSpellResolution {
             object_id: create_object(&mut state, CardId(7), PlayerId(0), "S".into(), Zone::Stack),
@@ -1241,6 +1355,26 @@ mod tests {
         assert!(
             state.pending_replacement.is_some(),
             "an opponent leaving must not clear the living chooser's parked replacement"
+        );
+        assert!(
+            state.pending_search_found_batch.is_some(),
+            "an opponent leaving must not clear the living chooser's outer found-card batch"
+        );
+        assert!(
+            state
+                .pending_batch_deliveries
+                .as_ref()
+                .is_some_and(|pending| {
+                    matches!(
+                        pending.completion,
+                        Some(
+                            crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
+                                object_id
+                            }
+                        ) if object_id == parked_found
+                    )
+                }),
+            "an opponent leaving must preserve the living chooser's nested found-card completion"
         );
         assert!(
             state.pending_spell_resolution.is_some(),

@@ -713,6 +713,7 @@
     "confirmTap": "Conferma TAP ({{selected}}/{{count}})",
     "keepCurrentTargets": "Mantieni i bersagli attuali",
     "skip": "Salta",
+    "opponentChoice": "(a scelta dell'avversario)",
     "chooseNewTarget": "Scegli il nuovo bersaglio della magia",
     "chooseNewTargetForSpell": "Scegli un nuovo bersaglio per {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1666,6 +1667,13 @@
     "title": "Scegli un protettore",
     "battleFallback": "Battaglia",
     "subtitle": "{{name}} necessita di un nuovo protettore. Scegli quale avversario la difenderà."
+  },
+  "announcingOpponent": {
+    "title": "Scegli l'avversario che annuncia ({{current}} di {{total}})",
+    "subtitle": "Scegli quale avversario annuncia {{target}} ({{current}} di {{total}}).",
+    "targetLand": "il bersaglio terra",
+    "targetCreature": "il bersaglio creatura",
+    "targetChoice": "questa scelta del bersaglio"
   },
   "clashOpponent": {
     "title": "Scegli l'avversario per lo scontro",

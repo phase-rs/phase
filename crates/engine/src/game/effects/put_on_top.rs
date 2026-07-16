@@ -3,7 +3,8 @@ use rand::seq::SliceRandom;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, LibraryPosition, QuantityExpr, ResolvedAbility, TargetFilter,
+    Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
+    ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -46,17 +47,17 @@ pub fn resolve(
     // into the library it just found empty, corrupting devotion and
     // library-count reads for any trailing win condition.
     //
-    // `ability.dig_found_nothing_for_parent_target` is a typed, per-ability
-    // signal stamped ONLY by `effects::apply_parent_chain_context` at the
-    // exact moment THIS ability is handed off as a Dig's immediate
-    // sub_ability — never copied to grandchildren and never read from raw
-    // global state here. That means every OTHER `ParentTarget` consumer
-    // (Avenging Angel's LTB self-return, etc.) keeps its ordinary
-    // self-fallback regardless of an unrelated Dig anywhere else in the same
-    // resolution, including a second, later `PutAtLibraryPosition` call.
+    // `ability.parent_target_missing_reason` is a typed, per-ability signal
+    // stamped ONLY by `effects::apply_parent_chain_context` at the exact
+    // moment THIS ability is handed off as a Dig's immediate sub_ability —
+    // never copied to grandchildren and never read from raw global state
+    // here. That means every OTHER `ParentTarget` consumer (Avenging Angel's
+    // LTB self-return, etc.) keeps its ordinary self-fallback regardless of
+    // an unrelated Dig anywhere else in the same resolution, including a
+    // second, later `PutAtLibraryPosition` call.
     let dig_found_nothing_for_parent_target = matches!(target_filter, TargetFilter::ParentTarget)
         && ability.targets.is_empty()
-        && ability.dig_found_nothing_for_parent_target;
+        && ability.parent_target_missing_reason == Some(ParentTargetMissingReason::Dig);
 
     // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch
     // (`resolved_targets`). `SelfRef` always resolves to the source object;
@@ -727,11 +728,11 @@ mod tests {
     }
 
     /// Issue #1365 follow-up: this resolver must consult
-    /// `ability.dig_found_nothing_for_parent_target` (a typed field stamped
-    /// ONLY by `effects::apply_parent_chain_context` at a real Dig->child
-    /// hand-off), never `state.last_dig_found_nothing` directly. A freshly
+    /// `ability.parent_target_missing_reason` (a typed field stamped ONLY by
+    /// `effects::apply_parent_chain_context` at a real Dig->child hand-off),
+    /// never `state.last_parent_target_missing_reason` directly. A freshly
     /// built `ResolvedAbility` (as in any ordinary LTB self-return trigger)
-    /// never goes through that hand-off, so its field stays `false` no matter
+    /// never goes through that hand-off, so its field stays `None` no matter
     /// what stray global state an unrelated, earlier empty-library Dig left
     /// behind in the same resolution.
     #[test]
@@ -746,7 +747,7 @@ mod tests {
         );
         // Simulate a stale flag left behind by an unrelated empty-library Dig
         // earlier in the same top-level resolution.
-        state.last_dig_found_nothing = true;
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
 
         let ability = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {

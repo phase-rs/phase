@@ -415,6 +415,9 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     let trimmed = text.trim().trim_end_matches('.');
     // Try direct match first, then fall back to stripping ability word prefix
     let trimmed_lower = trimmed.to_lowercase();
+    if parse_cant_spend_mana_restriction(&trimmed_lower) {
+        return Some(vec![CastingRestriction::CantSpendMana]);
+    }
     if let Some(restriction) = parse_negative_self_casting_restriction(&trimmed_lower) {
         return Some(vec![restriction]);
     }
@@ -468,6 +471,28 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     }
 
     (!restrictions.is_empty()).then_some(restrictions)
+}
+
+/// CR 601.2g / CR 118.3: "You can't spend mana to cast this spell." A payment
+/// restriction (Hogaak, Arisen Necropolis) — no mana may leave the pool, so the
+/// whole mana cost must be met by alternative payments (convoke/delve).
+/// Recognized here so the line is not left to the effect-parser fallback as an
+/// `Effect::Unimplemented`. `~` covers the self-name rewrite of the card form.
+fn parse_cant_spend_mana_restriction(lower: &str) -> bool {
+    fn parser(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+        all_consuming(value(
+            (),
+            (
+                alt((
+                    tag("you can't spend mana to cast "),
+                    tag("you can\u{2019}t spend mana to cast "),
+                )),
+                alt((tag("this spell"), tag("~"))),
+            ),
+        ))
+        .parse(input)
+    }
+    parser(lower).is_ok()
 }
 
 fn parse_negative_self_casting_restriction(text: &str) -> Option<CastingRestriction> {
@@ -774,6 +799,68 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::zones::Zone;
+
+    #[test]
+    fn cant_spend_mana_to_cast_this_spell_parses() {
+        // Hogaak, Arisen Necropolis (issue #1095).
+        let restrictions =
+            parse_casting_restriction_line("You can't spend mana to cast this spell.")
+                .expect("restriction should parse");
+        assert_eq!(restrictions, vec![CastingRestriction::CantSpendMana]);
+    }
+
+    #[test]
+    fn cant_spend_mana_accepts_curly_apostrophe_and_self_name_form() {
+        assert_eq!(
+            parse_casting_restriction_line("You can\u{2019}t spend mana to cast this spell."),
+            Some(vec![CastingRestriction::CantSpendMana]),
+        );
+        // `~` is the self-name rewrite of the card form.
+        assert_eq!(
+            parse_casting_restriction_line("You can't spend mana to cast ~."),
+            Some(vec![CastingRestriction::CantSpendMana]),
+        );
+    }
+
+    #[test]
+    fn cant_spend_mana_does_not_overmatch_other_mana_lines() {
+        // A superficially similar but distinct line must not be swallowed.
+        assert_eq!(
+            parse_casting_restriction_line("You can't spend mana to activate abilities."),
+            None,
+        );
+    }
+
+    #[test]
+    fn hogaak_full_card_records_restriction_and_drops_no_unimplemented_line() {
+        // Issue #1095: the "can't spend mana" line previously fell through to the
+        // effect parser as an `Effect::Unimplemented` ("effect_structure"). It must
+        // now be captured as a structured casting restriction instead.
+        let hogaak = "You can't spend mana to cast this spell.\n\
+Convoke, delve (Each creature you tap while casting this spell pays for {1} or one mana of that creature's color. Each card you exile from your graveyard pays for {1}.)\n\
+You may cast this card from your graveyard.\n\
+Trample";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            hogaak,
+            "Hogaak, Arisen Necropolis",
+            &[],
+            &[],
+            &[],
+        );
+        assert!(
+            parsed
+                .casting_restrictions
+                .contains(&CastingRestriction::CantSpendMana),
+            "Hogaak must record CastingRestriction::CantSpendMana, got {:?}",
+            parsed.casting_restrictions
+        );
+        let dump = format!("{:#?}", parsed);
+        assert!(
+            // allow-noncombinator: test assertion scanning a Debug dump, not parse dispatch
+            !dump.to_lowercase().contains("spend mana to cast"),
+            "the 'can't spend mana to cast' line must not remain as an Unimplemented effect"
+        );
+    }
 
     #[test]
     fn spell_cast_restriction_condition_is_preserved() {

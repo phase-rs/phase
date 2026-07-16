@@ -713,6 +713,7 @@
     "confirmTap": "Confirmar Virar ({{selected}}/{{count}})",
     "keepCurrentTargets": "Manter Alvos Atuais",
     "skip": "Pular",
+    "opponentChoice": "(à escolha do oponente)",
     "chooseNewTarget": "Escolha o novo alvo da mágica",
     "chooseNewTargetForSpell": "Escolha um novo alvo para {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1666,6 +1667,13 @@
     "title": "Escolher um Protetor",
     "battleFallback": "Batalha",
     "subtitle": "{{name}} precisa de um novo protetor. Escolha qual oponente a defenderá."
+  },
+  "announcingOpponent": {
+    "title": "Escolher oponente que anuncia ({{current}} de {{total}})",
+    "subtitle": "Escolha qual oponente anuncia {{target}} ({{current}} de {{total}}).",
+    "targetLand": "o alvo de terreno",
+    "targetCreature": "o alvo de criatura",
+    "targetChoice": "esta escolha de alvo"
   },
   "clashOpponent": {
     "title": "Escolher oponente para confronto",
