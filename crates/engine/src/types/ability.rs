@@ -3828,6 +3828,18 @@ pub enum FilterProp {
     /// CR 510.1: Object was dealt damage during this turn.
     /// Checks `damage_marked > 0` (damage persists until cleanup step).
     WasDealtDamageThisTurn,
+    /// CR 120.1: This object *dealt* damage during this turn — i.e. it was the
+    /// SOURCE of a damage event ("target creature ... that dealt damage this
+    /// turn", Red Guardian, Super-Soldier). The active-voice counterpart of
+    /// `WasDealtDamageThisTurn` (which reads the damage recipient). Evaluated by
+    /// scanning `state.damage_dealt_this_turn` for a record whose `source_id`
+    /// is this object.
+    ///
+    /// Parameterization note: these two form a damage-role pair. If a third
+    /// damage-role filter appears (e.g. "dealt combat damage this turn"), fold
+    /// the pair into `DamageThisTurn { role: {Dealt, Received}, combat_only }`
+    /// per the /add-engine-variant sibling-cluster threshold.
+    DealtDamageThisTurn,
     /// CR 400.7: Object entered the battlefield during this turn.
     /// Checks `entered_battlefield_turn == Some(current_turn)`.
     EnteredThisTurn,
@@ -4377,6 +4389,15 @@ pub enum TargetFilter {
     Any,
     Player,
     Controller,
+    /// CR 102.2 + CR 102.3 + CR 601.2c: A player reference to an opponent of the
+    /// ability's controller, used as the announcing player (`target_chooser`) for
+    /// a slot whose Oracle text reads "of an opponent's choice". The casting
+    /// controller chooses and records that opponent before target selection in
+    /// multiplayer; the sole opponent is used in two-player games. This is a
+    /// *player-reference* role only — it is never used as an object-population
+    /// filter (an opponent-controlled object is expressed as
+    /// `Typed(.., controller: Some(ControllerRef::Opponent))`).
+    Opponent,
     SelfRef,
     /// CR 201.5a: The specific object that GRANTED the ability this filter lives
     /// inside — used when a granted (activated/triggered) body refers to the
@@ -4768,7 +4789,7 @@ pub enum TapStateChange {
 /// inexpressible boolean combination. Parameterizes the lock/unlock axis — both
 /// live within CR rule section 709.5 — into one effect variant instead of two
 /// sibling effects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DoorLockOp {
     /// CR 709.5f: choose a locked half and give it the unlocked designation.
@@ -15663,8 +15684,8 @@ pub enum ActivationRestriction {
 }
 
 /// Structured spell-casting restrictions parsed from Oracle text.
-/// These describe when a spell may be cast. Runtime enforcement can
-/// be added independently of parsing/export support.
+/// These describe when — and, for `CantSpendMana`, how — a spell may be cast.
+/// Runtime enforcement can be added independently of parsing/export support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum CastingRestriction {
@@ -15692,6 +15713,14 @@ pub enum CastingRestriction {
     RequiresCondition {
         condition: Option<ParsedCondition>,
     },
+    /// CR 601.2g / CR 118.3: "You can't spend mana to cast this spell."
+    /// Unlike the timing variants above, this restricts HOW the cost is paid,
+    /// not WHEN: no mana may leave the pool, so the entire mana cost must be
+    /// covered by alternative payments such as convoke and delve (Hogaak,
+    /// Arisen Necropolis). It never gates casting on the game timing, so
+    /// `restrictions.rs` treats it as always-satisfied for the timing check and
+    /// the mana-payment path excludes real pool mana when it is present.
+    CantSpendMana,
 }
 
 /// CR 602.2b + CR 601.2f: Self-referential cost reduction on an activated ability.
@@ -17166,6 +17195,12 @@ pub enum KickerVariant {
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// CR 601.2c + CR 115.1: For a target slot announced by "an opponent's
+    /// choice", the opponent the spell's controller chose to make that choice.
+    /// In a multiplayer game the controller picks which opponent announces;
+    /// `None` until that choice is made (and for the single-opponent default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announcing_opponent: Option<PlayerId>,
     /// Whether the spell's optional additional cost was paid during casting.
     #[serde(default)]
     pub additional_cost_paid: bool,
@@ -19858,7 +19893,7 @@ pub enum ContinuousModification {
 // ---------------------------------------------------------------------------
 
 /// Unified target reference for creatures and players.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum TargetRef {
     Object(ObjectId),
     Player(PlayerId),

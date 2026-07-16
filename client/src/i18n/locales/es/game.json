@@ -713,6 +713,7 @@
     "confirmTap": "Confirmar giro ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conservar objetivos actuales",
     "skip": "Omitir",
+    "opponentChoice": "(elección del oponente)",
     "chooseNewTarget": "Elige el nuevo objetivo del hechizo",
     "chooseNewTargetForSpell": "Elige un nuevo objetivo para {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1666,6 +1667,13 @@
     "title": "Elegir un protector",
     "battleFallback": "Batalla",
     "subtitle": "{{name}} necesita un nuevo protector. Elige qué oponente la defenderá."
+  },
+  "announcingOpponent": {
+    "title": "Elegir oponente que anuncia ({{current}} de {{total}})",
+    "subtitle": "Elige qué oponente anuncia {{target}} ({{current}} de {{total}}).",
+    "targetLand": "el objetivo de tierra",
+    "targetCreature": "el objetivo de criatura",
+    "targetChoice": "esta elección de objetivo"
   },
   "clashOpponent": {
     "title": "Elegir oponente para chocar",

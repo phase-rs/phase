@@ -117,7 +117,23 @@ pub(super) fn handle_replacement_choice(
     index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return Err(EngineError::InvalidAction(
+            "replacement choice has no pending replacement".to_string(),
+        ));
+    };
+    let option_count = super::replacement::pending_replacement_option_count(state, pending);
+    if index >= option_count {
+        return Err(EngineError::InvalidAction(format!(
+            "replacement choice index {index} is outside 0..{option_count}"
+        )));
+    }
     let replacement_action_event_start = events.len();
+    let parked_search_found_replacement = state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| matches!(pending.proposed, ProposedEvent::SearchFound { .. }))
+        .cloned();
     let pending_was_counter_move = state
         .pending_replacement
         .as_ref()
@@ -411,6 +427,34 @@ pub(super) fn handle_replacement_choice(
                 // does not prevent the turn-up), so there is nothing to apply on
                 // the post-replacement Execute path here.
                 ProposedEvent::TurnFaceUp { .. } => {}
+                // CR 701.3a + CR 616.1: Attach accepted after a replacement
+                // ordering choice (2+ "as it becomes attached, choose …"
+                // definitions on the same attachment). Unreachable today — the
+                // parser pool has exactly one `ReplacementEvent::Attached`
+                // producer (Psychic Paper) — but wired for correctness if a
+                // future card shares the class. `source_id` for the
+                // `EffectResolved` push is approximated as `attachment_id`:
+                // `ProposedEvent::Attach` doesn't carry the original ability's
+                // source, which only differs from the attachment for a
+                // non-Equip "attach ~ to" effect (e.g. a triggered ability on
+                // another permanent) — no such card has BOTH that shape AND a
+                // second Attached-event replacement to order against today.
+                ProposedEvent::Attach {
+                    attachment_id,
+                    target_id,
+                    ..
+                } => {
+                    if let Some(waiting_for) = crate::game::effects::attach::deliver_attach(
+                        state,
+                        attachment_id,
+                        target_id,
+                        attachment_id,
+                        events,
+                    ) {
+                        state.waiting_for = waiting_for;
+                        return Ok(state.waiting_for.clone());
+                    }
+                }
                 // CR 121.1 + CR 614.6 + CR 614.11: Draw accepted after
                 // replacement choice — delegate to the shared post-replacement
                 // helper so library-zone move + per-turn accounting match the
@@ -665,6 +709,21 @@ pub(super) fn handle_replacement_choice(
                         false,
                         "CoinFlip replacement reached the optional-choice resume path"
                     );
+                }
+                // CR 701.23a + CR 614.6: modified SearchFound events are delivered by
+                // the search-resolution continuation. This arm is reached only
+                // when CR 616 ordering required a replacement choice; the bound
+                // modified event remains authoritative and is not rescanned.
+                event @ ProposedEvent::SearchFound { .. } => {
+                    return match super::engine_resolution_choices::resume_search_found_after_replacement(
+                        state, event, events,
+                    ) {
+                        Ok(waiting) => Ok(waiting),
+                        Err(error) => {
+                            state.pending_replacement = parked_search_found_replacement;
+                            Err(error)
+                        }
+                    };
                 }
             }
 
@@ -2947,6 +3006,7 @@ mod tests {
                 source: bear,
                 index: 0,
             }],
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,

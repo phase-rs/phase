@@ -715,6 +715,7 @@
     "confirmTap": "Potwierdź obrócenie ({{selected}}/{{count}})",
     "keepCurrentTargets": "Zachowaj bieżące cele",
     "skip": "Pomiń",
+    "opponentChoice": "(wybór przeciwnika)",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
     "sacrificeExact_other": "Sacrifice {{count}} permanents",
     "sacrificeUpTo_one": "Sacrifice up to {{count}} permanent",
@@ -1666,6 +1667,13 @@
     "title": "Wybierz obrońcę",
     "battleFallback": "Bitwa",
     "subtitle": "{{name}} potrzebuje nowego obrońcy. Wybierz, który przeciwnik będzie jej bronił."
+  },
+  "announcingOpponent": {
+    "title": "Wybierz ogłaszającego przeciwnika ({{current}} z {{total}})",
+    "subtitle": "Wybierz, który przeciwnik ogłasza {{target}} ({{current}} z {{total}}).",
+    "targetLand": "cel lądu",
+    "targetCreature": "cel stwora",
+    "targetChoice": "ten wybór celu"
   },
   "clashOpponent": {
     "title": "Wybierz przeciwnika do starcia",

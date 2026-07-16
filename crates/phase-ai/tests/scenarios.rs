@@ -35,6 +35,7 @@ fn scenario_prefers_opponent_target_over_self() {
         target_slots: vec![TargetSelectionSlot {
             legal_targets: vec![TargetRef::Player(P0), TargetRef::Player(P1)],
             optional: false,
+            chooser: None,
         }],
         mode_labels: Vec::new(),
         target_constraints: Vec::new(),
@@ -70,6 +71,7 @@ fn scenario_skips_optional_target_with_no_legal_choices() {
         target_slots: vec![TargetSelectionSlot {
             legal_targets: Vec::new(),
             optional: true,
+            chooser: None,
         }],
         mode_labels: Vec::new(),
         target_constraints: Vec::new(),

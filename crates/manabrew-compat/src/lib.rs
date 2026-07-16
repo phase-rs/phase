@@ -1693,6 +1693,9 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::ChooseClashOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.clash-unsupported")
         }
+        GameAction::ChooseAnnouncingOpponent { .. } => {
+            AvailableActionConversion::Unsupported("local.announcing-opponent-unsupported")
+        }
         GameAction::ChoosePileOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.pile-opponent-unsupported")
         }
@@ -3090,6 +3093,7 @@ mod tests {
                         TargetRef::Player(PlayerId(1)),
                     ],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
@@ -3575,6 +3579,20 @@ mod tests {
 
         assert!(available_actions(&[GameAction::ChooseKeptCreatures {
             kept: vec![ObjectId(1)]
+        }])
+        .is_empty());
+
+        assert!(matches!(
+            convert_available_action(
+                &GameAction::ChooseAnnouncingOpponent {
+                    opponent: PlayerId(1),
+                },
+                "action-1".to_string(),
+            ),
+            AvailableActionConversion::Unsupported("local.announcing-opponent-unsupported")
+        ));
+        assert!(available_actions(&[GameAction::ChooseAnnouncingOpponent {
+            opponent: PlayerId(1),
         }])
         .is_empty());
     }

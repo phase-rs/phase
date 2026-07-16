@@ -227,9 +227,9 @@ pub fn choose_action_with_session(
         // so the game never deadlocks waiting for the AI.
         return fallback_action(state);
     }
-    if config.execution_mode.is_measurement() {
-        scored.sort_by_cached_key(|(action, _)| action_order_key(action));
-    }
+    // Issue #4878: total order before softmax so equal scores never depend on
+    // HashSet/HashMap allocation order.
+    scored.sort_by(|a, b| a.0.cmp_stable(&b.0));
     let chosen = if scored.len() == 1 {
         Some(scored[0].0.clone())
     } else {
@@ -1185,6 +1185,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             .first()
             .map(|&opponent| GameAction::ChooseClashOpponent { opponent }),
 
+        // CR 601.2c + CR 115.1: "of an opponent's choice" announcer — the
+        // controller picks which opponent announces; fall back to the first.
+        WaitingFor::ChooseAnnouncingOpponent { candidates, .. } => candidates
+            .first()
+            .map(|&opponent| GameAction::ChooseAnnouncingOpponent { opponent }),
+
         // Adventure/MDFC/alt-cost choice: default to the "normal" face/cost.
         WaitingFor::CastOffer {
             kind: CastOfferKind::Adventure { .. },
@@ -1794,9 +1800,8 @@ pub fn score_candidates_with_session(
         merge_into(&mut acc, &mut positions, &mut counts, scored);
     }
     let mut out = finalize_mean(acc, counts, k as usize);
-    if config.execution_mode.is_measurement() {
-        out.sort_by_cached_key(|(action, _)| action_order_key(action));
-    }
+    // Issue #4878: canonical order after K-sample merge (measurement + play).
+    out.sort_by(|a, b| a.0.cmp_stable(&b.0));
     out
 }
 
@@ -1922,9 +1927,8 @@ fn score_candidates_core(
             _ => true,
         })
         .collect();
-    if config.execution_mode.is_measurement() {
-        gated.sort_by_cached_key(|g| action_order_key(&g.candidate.action));
-    }
+    // Issue #4878: deterministic candidate order before scoring / search.
+    gated.sort_by(|a, b| a.candidate.action.cmp_stable(&b.candidate.action));
 
     let actions: Vec<GameAction> = gated
         .iter()
@@ -2002,10 +2006,7 @@ fn score_candidates_core(
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(Ordering::Equal)
-                .then_with(|| {
-                    action_order_key(&a.candidate.action)
-                        .cmp(&action_order_key(&b.candidate.action))
-                })
+                .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
         });
         ranked.truncate(branching);
 
@@ -2082,9 +2083,7 @@ fn score_candidates_core(
         }
 
         let mut out = best_scored;
-        if config.execution_mode.is_measurement() {
-            out.sort_by_cached_key(|(action, _)| action_order_key(action));
-        }
+        out.sort_by(|a, b| a.0.cmp_stable(&b.0));
         out
     } else {
         // Heuristic-only scoring
@@ -2101,15 +2100,9 @@ fn score_candidates_core(
                 (candidate.candidate.action, score)
             })
             .collect();
-        if config.execution_mode.is_measurement() {
-            out.sort_by_cached_key(|(action, _)| action_order_key(action));
-        }
+        out.sort_by(|a, b| a.0.cmp_stable(&b.0));
         out
     }
-}
-
-fn action_order_key(action: &GameAction) -> String {
-    format!("{action:?}")
 }
 
 /// Build AI context from the player's deck pool, or a neutral default if unavailable.
@@ -2955,10 +2948,15 @@ pub fn softmax_select_pairs(
 
     let total: f64 = weights.iter().sum();
     if total <= 0.0 || !total.is_finite() {
-        // Fallback: pick the highest-scored action
+        // Fallback: pick the highest-scored action (tie-break by action key —
+        // issue #4878).
         return scored
             .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp_stable(&b.0))
+            })
             .map(|s| s.0.clone());
     }
 
@@ -3162,6 +3160,79 @@ mod tests {
                 source_id: real_source,
                 partner_id: real_partner,
             })
+        );
+    }
+
+    /// Issue #4878: the degenerate-weight fallback in `softmax_select_pairs`
+    /// must break score ties with `GameAction::cmp_stable`, not fall back to the
+    /// input-list order. Here every score is `-inf` (weights become `NaN`, so
+    /// the fallback branch runs). `PassPriority` (discriminant 0) sorts before
+    /// `PlayLand` (discriminant 1), so the `cmp_stable`-maximum is the `PlayLand`
+    /// listed FIRST. Removing the `then_with(cmp_stable)` tie-break makes
+    /// `max_by` return the last equally-maximal element (`PassPriority`) instead,
+    /// flipping this assertion.
+    #[test]
+    fn softmax_fallback_tiebreak_is_cmp_stable_deterministic() {
+        let scored = vec![
+            (
+                GameAction::PlayLand {
+                    object_id: ObjectId(5),
+                    card_id: CardId(1),
+                },
+                f64::NEG_INFINITY,
+            ),
+            (GameAction::PassPriority, f64::NEG_INFINITY),
+        ];
+        // Reach guard: `PlayLand` must outrank `PassPriority` under cmp_stable so
+        // the expected pick is the first (non-last) element, distinguishing the
+        // tie-break from `max_by`'s last-on-ties behavior.
+        assert_eq!(
+            scored[0].0.cmp_stable(&scored[1].0),
+            std::cmp::Ordering::Greater,
+            "precondition: PlayLand > PassPriority under cmp_stable"
+        );
+
+        let mut rng = SmallRng::seed_from_u64(0);
+        let chosen = softmax_select_pairs(&scored, 1.0, &mut rng)
+            .expect("non-empty scored list must select an action");
+        assert_eq!(
+            chosen, scored[0].0,
+            "degenerate-weight fallback must pick the cmp_stable-max action"
+        );
+    }
+
+    /// Issue #4878: the candidate sort was previously gated behind measurement
+    /// mode. A *normal* (non-measurement) config must still emit candidates in
+    /// the canonical `cmp_stable` order. Reverting the always-on
+    /// `out.sort_by(cmp_stable)` returns candidates in score / enumeration order,
+    /// which is not `cmp_stable`-sorted for this set, flipping the assertion.
+    #[test]
+    fn score_candidates_non_measurement_order_is_cmp_stable_canonical() {
+        let mut state = make_state();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 6);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellA", 1);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellB", 2);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellC", 3);
+        // Normal config: NOT measurement mode (the guard this test protects only
+        // ever sorted under measurement before #4878).
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let session = AiSession::arc_from_game(&state);
+
+        let scored = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+        let actions: Vec<GameAction> = scored.iter().map(|(a, _)| a.clone()).collect();
+        // Reach guard: several distinct candidates (3 castable spells + Pass)
+        // so the order is non-trivial.
+        assert!(
+            actions.len() >= 3,
+            "expected several scored candidates, got {}",
+            actions.len()
+        );
+
+        let mut expected = actions.clone();
+        expected.sort_by(|a, b| a.cmp_stable(b));
+        assert_eq!(
+            actions, expected,
+            "non-measurement scoring must emit cmp_stable-canonical order"
         );
     }
 
@@ -3423,6 +3494,7 @@ mod tests {
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(opp_creature)],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -4538,6 +4610,7 @@ mod tests {
                     TargetRef::Player(PlayerId(1)),
                 ],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -4576,6 +4649,7 @@ mod tests {
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: Vec::new(),
                 optional: true,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -5604,7 +5678,7 @@ mod tests {
     }
 
     fn sorted_by_action(mut scored: Vec<(GameAction, f64)>) -> Vec<(GameAction, f64)> {
-        scored.sort_by_cached_key(|(action, _)| action_order_key(action));
+        scored.sort_by(|a, b| a.0.cmp_stable(&b.0));
         scored
     }
 

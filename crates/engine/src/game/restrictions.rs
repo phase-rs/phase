@@ -1115,6 +1115,9 @@ fn casting_restriction_applies(
         CastingRestriction::RequiresCondition { condition } => condition
             .as_ref()
             .is_none_or(|cond| evaluate_condition(state, player, source_id, cond)),
+        // Not a timing gate: "can't spend mana" restricts how the cost is paid,
+        // never when. Always satisfied here; enforced in the mana-payment path.
+        CastingRestriction::CantSpendMana => true,
     }
 }
 

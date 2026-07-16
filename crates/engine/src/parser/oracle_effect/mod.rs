@@ -66,7 +66,7 @@ use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{anychar, multispace0, multispace1, space1};
-use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value};
 use nom::multi::{many1, many_till, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -14777,6 +14777,12 @@ fn try_parse_reanimate_self_and_target(
 /// the sub_ability's target is set to `TargetFilter::ParentTarget` so it inherits the
 /// parent's resolved targets at resolution time.
 fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+    // CR 601.2c + CR 115.1: A chooser override belongs to the target phrase in
+    // the current compound instruction. This parser can recurse after a prior
+    // "of an opponent's choice" conjunct, so begin each new instruction with
+    // the controller default; its own target parser will stamp an override when
+    // the current phrase supplies one.
+    ctx.target_chooser = None;
     let lower = text.to_lowercase();
 
     // Quick bail: no "and" means no compound connector possible
@@ -14824,6 +14830,10 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     } else {
         ctx.clone()
     };
+    // CR 601.2c + CR 115.1: The continuation starts a new target instruction.
+    // Keep the primary phrase's announcer on `ctx`; only a chooser printed in
+    // the continuation itself may be attached to the chained sub-ability.
+    continuation_ctx.target_chooser = None;
 
     // Parse the sub-effect
     let mut sub_clause = parse_imperative_effect(sub_text, &mut continuation_ctx);
@@ -15090,6 +15100,9 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
 
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_ability.sub_ability = sub_clause.sub_ability;
+    // CR 601.2c + CR 115.1: the continuation's opponent-choice announcer belongs
+    // to this chained link rather than the primary target.
+    sub_ability.target_chooser = continuation_ctx.target_chooser.clone();
     // CR 115.6: Propagate "up to N" cardinality so the sub-clause target
     // remains optional (e.g. "up to one other target artifact or enchantment").
     sub_ability.multi_target = sub_clause.multi_target;
@@ -15558,8 +15571,28 @@ fn try_parse_multi_target_damage_chain(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
+    // This recognizer speculatively parses the whole clause. A failed attempt
+    // must leave every parser-context field (especially the target chooser)
+    // untouched for the fallback compound parser.
+    let mut tentative_ctx = ctx.clone();
+    let clause = try_parse_multi_target_damage_chain_inner(text, &mut tentative_ctx)?;
+    *ctx = tentative_ctx;
+    Some(clause)
+}
+
+fn try_parse_multi_target_damage_chain_inner(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    // CR 601.2c + CR 115.1: A bare-damage chain is a fresh instruction even
+    // when reached through a compound continuation. Do not let the preceding
+    // target phrase's announcing-player override leak into its first recipient.
+    ctx.target_chooser = None;
     let lower = text.to_lowercase();
     let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
+    // Each segment parses through the shared context, so retain the primary
+    // segment's announcer before a continuation can overwrite it.
+    let primary_target_chooser = ctx.target_chooser.clone();
     let trimmed = remainder.trim_start();
     let trimmed_lower = trimmed.to_lowercase();
     // A comma-delimited list ("..., M damage to T2, and K ...") or a bare
@@ -15578,8 +15611,9 @@ fn try_parse_multi_target_damage_chain(
 
     // Walk the comma-delimited continuation list. Each iteration either
     // consumes one bare-damage segment (returning the next AbilityDefinition)
-    // or aborts the entire chain — partial parses are not committed.
-    let mut segments: Vec<Effect> = Vec::new();
+    // or aborts the entire chain — partial parses are not committed. Each
+    // continuation retains its own target announcer.
+    let mut segments: Vec<(Effect, Option<TargetFilter>)> = Vec::new();
     let mut cursor = remainder.trim_start();
     while !cursor.is_empty() {
         let cursor_lower = cursor.to_lowercase();
@@ -15606,8 +15640,12 @@ fn try_parse_multi_target_damage_chain(
             return None;
         };
 
+        // CR 601.2c + CR 115.1: Every comma- or and-delimited damage recipient
+        // is a distinct target phrase. Do not inherit the preceding recipient's
+        // announcing-player override.
+        ctx.target_chooser = None;
         let (segment_effect, leftover) = parse_bare_damage_continuation(after_separator, ctx)?;
-        segments.push(segment_effect);
+        segments.push((segment_effect, ctx.target_chooser.clone()));
         cursor = leftover.trim_start();
     }
 
@@ -15615,14 +15653,17 @@ fn try_parse_multi_target_damage_chain(
         return None;
     }
 
+    ctx.target_chooser = primary_target_chooser;
+
     // Build the chain bottom-up so each segment becomes the `sub_ability` of
     // the previous one. Effects beyond the primary share the primary's
     // damage-source semantics by construction (each is a `DealDamage` with
     // `damage_source: None`).
     let mut chain_tail: Option<Box<AbilityDefinition>> = None;
-    for effect in segments.into_iter().rev() {
+    for (effect, target_chooser) in segments.into_iter().rev() {
         let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
         def.sub_ability = chain_tail.take();
+        def.target_chooser = target_chooser;
         chain_tail = Some(Box::new(def));
     }
 
@@ -16092,6 +16133,8 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
     }
 
     let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
+    // Preserve the primary target's announcer while parsing the continuation.
+    let primary_target_chooser = ctx.target_chooser.clone();
 
     if remainder.is_empty() {
         return None;
@@ -16107,9 +16150,16 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
         return None;
     }
 
+    // CR 601.2c + CR 115.1: This compound continuation has its own target
+    // phrase, so it starts with the controller as chooser unless it explicitly
+    // provides an override.
+    ctx.target_chooser = None;
+
     // Parse the sub-effect through the full clause pipeline (not just imperative),
     // because the sub-text may have a subject prefix like "you gain 3 life".
     let mut sub_clause = parse_effect_clause(sub_text, ctx);
+    let sub_target_chooser = ctx.target_chooser.clone();
+    ctx.target_chooser = primary_target_chooser;
 
     // Guard: if the sub-text parsed to Unimplemented, it's likely a target phrase
     // continuation ("each creature and planeswalker they control") rather than an
@@ -16129,6 +16179,7 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
 
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_ability.sub_ability = sub_clause.sub_ability;
+    sub_ability.target_chooser = sub_target_chooser;
 
     Some(ParsedEffectClause {
         effect: primary_effect,
@@ -21486,6 +21537,16 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     ))
     .parse(lower)
     .ok()?;
+    parse_named_choice_object(rest)
+}
+
+/// The object phrase of a named choice, with any leading "choose "/"secretly
+/// choose " already stripped (e.g. "a creature type", "a creature card name").
+/// Factored out of `try_parse_named_choice` so a conjunction of choices sharing
+/// one "choose" ("choose a creature card name and a creature type" — Psychic
+/// Paper) can re-dispatch each conjunct through this same phrase table instead
+/// of duplicating it or reconstructing a "choose "-prefixed string.
+pub(crate) fn parse_named_choice_object(rest: &str) -> Option<ChoiceType> {
     type E<'a> = OracleError<'a>;
     if tag::<_, _, E>("a creature type").parse(rest).is_ok() {
         Some(ChoiceType::creature_type())
@@ -21621,6 +21682,38 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         // semantics.
         try_parse_labeled_choice(rest).map(|options| ChoiceType::Labeled { options })
     }
+}
+
+/// CR 608.2d + CR 614.1c: A conjunction of named-choice phrases sharing one
+/// "choose" ("choose a creature card name and a creature type" — Psychic
+/// Paper). Strips the same "choose "/"secretly choose " prefix
+/// `try_parse_named_choice` strips, then splits on top-level " and " and
+/// re-dispatches each conjunct through `parse_named_choice_object` (the same
+/// phrase table `try_parse_named_choice` itself delegates to), so this stays
+/// additive rather than duplicating tags. `separated_list1` naturally extends
+/// to a future 3+-way conjunction. Returns `None` for a bare (non-conjunction)
+/// choice — callers fall back to `try_parse_named_choice` for that case.
+pub(crate) fn try_parse_named_choice_conjunction(choose_text: &str) -> Option<Vec<ChoiceType>> {
+    let (after_choose, _) = alt((
+        tag::<_, _, OracleError<'_>>("choose "),
+        nom::sequence::preceded(tag("secretly "), tag("choose ")),
+    ))
+    .parse(choose_text)
+    .ok()?;
+    let trimmed = after_choose.trim_end_matches('.').trim();
+
+    fn conjunct(input: &str) -> nom::IResult<&str, ChoiceType, OracleError<'_>> {
+        map_opt(
+            alt((take_until::<_, _, OracleError<'_>>(" and "), rest)),
+            parse_named_choice_object,
+        )
+        .parse(input)
+    }
+
+    let (_, choices) = all_consuming(separated_list1(tag(" and "), conjunct))
+        .parse(trimmed)
+        .ok()?;
+    (choices.len() >= 2).then_some(choices)
 }
 
 /// CR 608.2d + CR 113.3: Parse a typed keyword enumeration following "choose "

@@ -213,9 +213,17 @@ pub(crate) fn handle_select_modes(
         pending_sel.additional_cost_decided = pending.additional_cost_decided;
         pending_sel.declared_kickers_to_pay = pending.declared_kickers_to_pay;
         pending_sel.declined_kickers = pending.declined_kickers;
+        // CR 601.2c + CR 115.1: target declaration belongs to the controller by
+        // default, but the FIRST slot may route its announcement to another player
+        // ("of an opponent's choice"). For this card class slot 0 is the
+        // controller; the general `chooser.unwrap_or(controller)` keeps the path
+        // correct for any future card whose first slot is opponent-chosen.
+        let initial_player = target_slots
+            .first()
+            .and_then(|slot| slot.chooser)
+            .unwrap_or(controller);
         return Ok(WaitingFor::TargetSelection {
-            // CR 115.1: target selection belongs to the spell's controller.
-            player: controller,
+            player: initial_player,
             pending_cast: Box::new(pending_sel),
             target_slots,
             mode_labels,
@@ -270,6 +278,16 @@ pub(crate) fn handle_select_targets(
             target_slots,
             ..
         } => {
+            // CR 601.2c + CR 115.1: when any slot is announced by a player other
+            // than the controller ("of an opponent's choice"), the bulk SelectTargets
+            // action (which submits every slot at once on the controller's behalf)
+            // is not valid — each slot must be announced one at a time via
+            // ChooseTarget so the correct player declares each target.
+            if target_slots.iter().any(|slot| slot.chooser.is_some()) {
+                return Err(EngineError::InvalidAction(
+                    "Mixed-chooser targets must be announced one slot at a time".to_string(),
+                ));
+            }
             validate_selected_targets_for_ability(
                 state,
                 &pending_cast.ability,
@@ -363,7 +381,13 @@ pub(crate) fn handle_select_targets(
 
 pub(crate) fn handle_choose_target(
     state: &mut GameState,
-    player: PlayerId,
+    // CR 601.2c + CR 115.1: the announcer of the slot just submitted (the
+    // controller, or an opponent for an "of an opponent's choice" slot). The
+    // dispatch layer already authorized this player against `WaitingFor.player`;
+    // routing here re-derives the next slot's announcer and the completion
+    // controller from the slots and the pending cast, so the inbound announcer is
+    // not read again.
+    _player: PlayerId,
     target: Option<TargetRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -397,19 +421,34 @@ pub(crate) fn handle_choose_target(
     )? {
         // CR 700.2: preserve the inbound mode labels unchanged — walking the
         // slots one at a time does not change the slot→mode mapping.
-        TargetSelectionAdvance::InProgress(selection) => Ok(WaitingFor::TargetSelection {
-            player,
-            pending_cast: Box::new(pending),
-            target_slots,
-            mode_labels,
-            selection,
-        }),
+        TargetSelectionAdvance::InProgress(selection) => {
+            // CR 601.2c + CR 115.1: the announcer for the NEXT slot may differ from
+            // this slot's announcer ("of an opponent's choice"). Route the prompt to
+            // that slot's `chooser`, defaulting to the spell/ability's controller.
+            // This is the ONLY place the announcing player flips mid-walk.
+            let next_player = target_slots
+                .get(selection.current_slot)
+                .and_then(|slot| slot.chooser)
+                .unwrap_or(pending.ability.controller);
+            Ok(WaitingFor::TargetSelection {
+                player: next_player,
+                pending_cast: Box::new(pending),
+                target_slots,
+                mode_labels,
+                selection,
+            })
+        }
         TargetSelectionAdvance::Complete(selected_slots) => {
             let mut ability = pending.ability.clone();
             assign_selected_slots_in_chain(state, &mut ability, &selected_slots)?;
+            // CR 115.1: regardless of who announced each slot, the spell/ability is
+            // controlled, paid for, and put on the stack by its controller. Volcanic
+            // Offering's final slot is opponent-chosen; without re-anchoring here the
+            // inbound per-slot `player` (the opponent) would pay and stack the spell.
+            let controller = pending.ability.controller;
 
             if let Some(waiting_for) =
-                maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
+                maybe_pause_for_cast_distribution(state, controller, &pending, &ability)?
             {
                 return Ok(waiting_for);
             }
@@ -417,7 +456,7 @@ pub(crate) fn handle_choose_target(
             if let Some(ability_index) = pending.activation_ability_index {
                 if let Some(waiting_for) = pay_activation_costs_after_target_selection(
                     state,
-                    player,
+                    controller,
                     &pending,
                     ability.clone(),
                     ability_index,
@@ -427,7 +466,13 @@ pub(crate) fn handle_choose_target(
                 }
 
                 let assigned_targets = flatten_targets_in_chain(&ability);
-                emit_targeting_events(state, &assigned_targets, pending.object_id, player, events);
+                emit_targeting_events(
+                    state,
+                    &assigned_targets,
+                    pending.object_id,
+                    controller,
+                    events,
+                );
 
                 let entry_id = ObjectId(state.next_object_id);
                 state.next_object_id += 1;
@@ -439,7 +484,7 @@ pub(crate) fn handle_choose_target(
                     StackEntry {
                         id: entry_id,
                         source_id: pending.object_id,
-                        controller: player,
+                        controller,
                         kind: StackEntryKind::ActivatedAbility {
                             source_id: pending.object_id,
                             ability,
@@ -456,7 +501,7 @@ pub(crate) fn handle_choose_target(
                     .pending_activations
                     .push((pending.object_id, ability_index));
                 events.push(GameEvent::AbilityActivated {
-                    player_id: player,
+                    player_id: controller,
                     source_id: pending.object_id,
                     // CR 606.2: Targeted activations (most loyalty abilities) finalize
                     // here. Classify from the source ability's printed cost via
@@ -476,19 +521,21 @@ pub(crate) fn handle_choose_target(
                     state,
                     pending.object_id,
                     ability_index,
-                    player,
+                    controller,
                     events,
                 );
                 priority::clear_priority_passes(state);
+                // CR 117.3c + CR 115.1: priority returns to the controller after the
+                // ability is announced, not to a slot's opponent announcer.
                 return Ok(drain_deferred_triggers_after_stack_object_announcement(
                     state,
                     events,
-                    WaitingFor::Priority { player },
+                    WaitingFor::Priority { player: controller },
                 ));
             }
 
             let cost = pending.cost.clone();
-            finish_pending_cast_cost_or_pay(state, player, pending, ability, cost, events)
+            finish_pending_cast_cost_or_pay(state, controller, pending, ability, cost, events)
         }
     }
 }

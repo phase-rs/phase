@@ -1059,6 +1059,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    // CR 118.9 + CR 601.2b: "[Once during each of your turns, ]you may cast
+    // [filter] by paying life equal to its mana value rather than paying its
+    // mana cost." Demon of Fate's Design class. Must precede the free-cast
+    // handler below because both match "you may cast" prefix, but this shape
+    // has "by paying" (alternative cost) not "without paying" (free cast).
+    if let Some(result) = parse_cast_by_paying_life_alt_cost(&text) {
+        return Some(result);
+    }
+
     // CR 601.2b + CR 118.9a + CR 601.2: Omniscience-class restricted free-cast
     // static. Optional " from your hand" zone qualifier — Dracogenesis's
     // "you may cast Dragon spells without paying their mana costs" relies on
