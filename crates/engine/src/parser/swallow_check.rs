@@ -4017,6 +4017,7 @@ fn detect_duration_this_turn(
         matches!(
             x,
             FilterProp::WasDealtDamageThisTurn
+                | FilterProp::DealtDamageThisTurn
                 | FilterProp::EnteredThisTurn
                 | FilterProp::ZoneChangedThisTurn { .. }
                 | FilterProp::AttackedThisTurn { .. }

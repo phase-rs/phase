@@ -316,8 +316,14 @@ fn handle_activated_mode_choice(
             pending.activation_cost = ability_cost;
             pending.activation_ability_index = ability_index;
             pending.target_constraints = target_constraints;
+            // CR 601.2c + CR 602.2b: first slot's announcer (controller unless the
+            // slot is "of an opponent's choice").
+            let initial_player = target_slots
+                .first()
+                .and_then(|slot| slot.chooser)
+                .unwrap_or(player);
             return Ok(WaitingFor::TargetSelection {
-                player,
+                player: initial_player,
                 pending_cast: Box::new(pending),
                 target_slots,
                 mode_labels,

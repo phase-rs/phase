@@ -29,7 +29,9 @@ use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
-use super::oracle_nom::primitives::{parse_number as nom_parse_number, scan_contains};
+use super::oracle_nom::primitives::{
+    parse_number as nom_parse_number, scan_contains, scan_preceded,
+};
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_casting::{
@@ -1027,6 +1029,79 @@ fn split_dual_cant_clause<'a>(line: &'a str, lower: &str) -> Option<(&'a str, &'
         return None;
     }
     Some((subject, p1, p2))
+}
+
+/// CR 701.26b + CR 614.6: Split `<continuous grant or restriction> and can't
+/// become untapped` / `and can't be untapped` across parser layers — the
+/// first conjunct stays whatever `parse_static_line_multi` recognizes it as
+/// (RemoveAllAbilities, a P/T pump, a keyword grant, …) and the trailing
+/// prohibition becomes an unconditional `ProposedEvent::Untap` prevention
+/// (CR 701.26b, the BROAD untap prohibition — not a `StaticMode::CantUntap`,
+/// which is the untap-step-only class per CR 502.3 and is handled by the
+/// same-layer sibling `try_split_and_doesnt_untap`).
+///
+/// Frozen in Ice ("Enchanted creature loses all abilities and can't become
+/// untapped.") is the seed card: without this split, `is_static_pattern`
+/// claims the whole line and the generic continuous-modification scanner has
+/// no `ContinuousModification` representation for "can't become untapped", so
+/// it silently vanishes — the enchanted creature loses its abilities but
+/// untaps normally next turn, defeating the lock. Mirrors
+/// `try_split_and_doesnt_untap` (`oracle_static/evasion.rs`, the CR 502.3
+/// narrow form) but crosses into the replacement layer for the broad form,
+/// reusing the grant's parsed `affected` filter as the replacement's subject
+/// instead of re-deriving it from text.
+fn try_split_and_cant_become_untapped(
+    text: &str,
+) -> Option<(Vec<StaticDefinition>, ReplacementDefinition)> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    let (before, _matched, rest) = scan_preceded(&lower, |i: &str| {
+        let (i, _) = (
+            tag::<_, _, VE>("and can"),
+            alt((tag("'t "), tag("\u{2019}t "))),
+            alt((tag("become "), tag("be "))),
+            tag("untapped"),
+        )
+            .parse(i)?;
+        Ok((i, ()))
+    })?;
+
+    // CR 701.26b: only a terminal (period-only) tail is the plain broad
+    // prohibition; any other trailing clause is a different shape and the
+    // split declines rather than mis-split it — parity with the sibling
+    // `try_split_and_doesnt_untap` terminal guard.
+    if !rest.trim_start().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    // `before` is a slice of the lowercased copy, so its byte length can
+    // diverge from the equivalent prefix of `text` (e.g. Turkish dotted
+    // İ lowercases to a two-codepoint "i̇"). Re-anchor via char count on
+    // `text` directly rather than reusing the lowercased byte offset, so
+    // this never slices `text` on a non-char boundary.
+    let cut_char_count = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .chars()
+        .count();
+    let cut_end = text
+        .char_indices()
+        .nth(cut_char_count)
+        .map_or(text.len(), |(idx, _)| idx);
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_with_graveyard_keyword_continuation(&line_a, None, None);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    let replacement = ReplacementDefinition::new(ReplacementEvent::Untap)
+        .valid_card(affected)
+        .description(text.to_string());
+    Some((defs, replacement))
 }
 
 // ===========================================================================
@@ -4569,6 +4644,25 @@ pub(crate) fn parse_oracle_ir(
             for __item in replacements {
                 emitter.replacement_at(item_line, __item);
             }
+            i += 1;
+            continue;
+        }
+
+        // Priority 6f: Compound `<continuous grant or restriction> and can't
+        // become untapped` prohibition (Frozen in Ice class). CR 701.26b +
+        // CR 614.6: the leading grant/restriction clause ("loses all
+        // abilities", a P/T pump, a keyword grant, …) stays a static
+        // modification, and the trailing "can't become untapped"/"can't be
+        // untapped" clause becomes a broad Untap-prevention replacement. The
+        // leading clause makes Priority 7's `is_static_pattern` fire and
+        // consume the whole line via the generic continuous-modification
+        // scanner, which has no representation for the untap prohibition and
+        // silently drops it. Split so both layers see their conjunct.
+        if let Some((statics, replacement)) = try_split_and_cant_become_untapped(&static_line) {
+            for __item in statics {
+                emitter.static_at(item_line, __item);
+            }
+            emitter.replacement_at(item_line, replacement);
             i += 1;
             continue;
         }

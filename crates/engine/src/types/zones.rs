@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// CR 400.1: The seven game zones — library, hand, battlefield, graveyard, stack, exile, and command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Zone {
     /// CR 401: The library — a player's draw pile, face-down, order matters.
     Library,

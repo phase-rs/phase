@@ -65,7 +65,9 @@ use crate::types::zones::Zone;
 /// Serializes as the plain variant string ("Top" / "Bottom") so the frontend
 /// `GameAction::ChooseMutateMergeSide` payload is `{ side: "Top" | "Bottom" }`,
 /// parallel to the sibling `ChooseTopOrBottom { top: bool }`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum MergeSide {
     /// The mutating spell is placed on TOP of the target creature — the spell's
     /// card/token supplies the copiable characteristics.

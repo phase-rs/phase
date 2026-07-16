@@ -119,7 +119,7 @@ fn coalesce_sources(sources: &[DecisionSource]) -> Vec<(DecisionSource, u8)> {
 /// `key` is the order-insensitive identity B2 looks the template up by (its
 /// `kind` selects trigger-ordering vs loop-choice; its `sources` multiset is the
 /// coverage marker the gate matches a recurring group against).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DecisionTemplate {
     pub owner: PlayerId,
     /// Pins in the group's canonical decision order.
@@ -130,10 +130,9 @@ pub struct DecisionTemplate {
 
 /// Identifies one free choice within a group: which source raised it (CR 400.7-stable
 /// [`DecisionSource`]) plus a sub-index disambiguating multiple choices from one source
-/// (e.g. two target slots on one ability). `PartialEq`/`Eq` only — the
-/// [`predictability_gate`] matches slots by equality, and `DecisionSource = YieldTarget`
-/// carries no `Ord` derive in Phase 1 (RULED Deferral 1).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// (e.g. two target slots on one ability). It derives a canonical order because
+/// `GameAction::DeclareShortcut` participates in deterministic AI action ordering.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DecisionSlot {
     pub source: DecisionSource,
     pub index: u8,
@@ -141,14 +140,14 @@ pub struct DecisionSlot {
 
 /// CR 603.5: whether a "may" pin takes the optional action or declines it. Typed (not `bool`)
 /// so both outcomes are self-documenting at every construction and match site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum MayChoiceOption {
     Take,
     Decline,
 }
 
 /// CR 732.6: whether an "[A] unless [B]" pin pays [B] to break the loop, or declines and takes [A].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum UnlessPaymentOption {
     Pay,
     Decline,
@@ -156,7 +155,7 @@ pub enum UnlessPaymentOption {
 
 /// One pinned decision. Variants are distinct CR choice KINDS (ordering / targeting /
 /// modal / optional-"may" / "[A] unless [B]" break), not a parameterization axis.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PinnedDecision {
     /// CR 603.3b: place this source's trigger at ordering position `pos`.
     Order { source: DecisionSource, pos: u8 },
@@ -254,7 +253,7 @@ pub enum DecisionPointKind {
 
 /// A pinned target. `ByIdentity` re-resolves to a live legal ObjectId each iteration
 /// (CR 608.2b); `Scheduled` is an iteration-indexed pure function (CR 732.2a).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TargetPin {
     ByIdentity(DecisionSource),
     Player(PlayerId),
@@ -263,7 +262,7 @@ pub enum TargetPin {
 
 /// CR 732.2a: how the pins are replayed. `Static` (ordering) ignores the iteration
 /// index; `Scheduled` (loop shortcut) makes every choice a pure function of it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ReplayMode {
     Static,
     Scheduled { count: IterationCount },
@@ -277,7 +276,7 @@ pub enum ReplayMode {
 /// adds their driver, so the shipped surface stays minimal and fully tested. The enum is
 /// kept (rather than a bare `u32` field on `Scheduled`) so Phase 3 adds those variants
 /// without a field-type change at any `Scheduled` construction site.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IterationCount {
     Fixed(u32),
     /// CR 704.5a + CR 732.1b: repeat until a player is at 0-or-less life — the driver
@@ -293,7 +292,7 @@ pub enum IterationCount {
 /// enforced BY CONSTRUCTION: no variant carries any prior-outcome/event input, so a
 /// "react to what happened" target is unrepresentable (this is what collapses the
 /// predictability gate's "no conditional" clause into "total coverage").
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TargetSchedule {
     Constant(DecisionSource),
     RoundRobin(Vec<DecisionSource>),
