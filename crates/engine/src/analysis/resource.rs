@@ -1493,7 +1493,7 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
         if obj
             .abilities
             .iter()
-            .any(scan::ability_definition_reads_sibling_mutable)
+            .any(scan::ability_definition_reads_sibling_mutable_for_loop)
         {
             return true;
         }
@@ -1537,7 +1537,16 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
             {
                 return true;
             }
-            if !def.modifications.is_empty() {
+            // CR 613.1: a live continuous modification vetoes iff it READS a mutable
+            // board aggregate (`sibling`) OR a projected player resource
+            // (`projected`). BOTH axes (M9): the projected-resource firewall has no
+            // modification scan, so this descent is the sole guard against a
+            // projected-reading modification (a `SetDynamicPower{Ref(LifeTotal)}`
+            // anthem) reaching the ω/drain cover.
+            if def.modifications.iter().any(|m| {
+                scan::continuous_modification_reads_sibling_mutable(m)
+                    || scan::continuous_modification_reads_projected_resource(m)
+            }) {
                 return true;
             }
         }
@@ -5180,6 +5189,116 @@ mod tests {
         assert!(
             !cover(&prior, &current),
             "a grown token with an activated ability is not churn-inert ⇒ REJECT"
+        );
+    }
+
+    // ---- P2 (CR 732.2a): the firewall DESCENDS Token/Mana bodies (LoopFirewall) ----
+
+    /// P2-9 (firewall): Gaea's Cradle's `{T}: Add {G} for each creature you control`
+    /// on a functioning battlefield permanent. The S5 ability-body scan (firewall
+    /// item 2) runs `LoopFirewall`, descends `Effect::Mana`, and vetoes via the
+    /// COUNT path (`AnyOneColor.count` → `scan_quantity_ref::ObjectCount`). That the
+    /// firewall flips to false when the count is dropped (revert-probe: bind
+    /// `AnyOneColor.count` to `_` in `scan_mana_production`) proves the descent is
+    /// `LoopFirewall`, not the fail-closed `Conservative` blanket.
+    #[test]
+    fn gaeas_cradle_firewall_vetoes_via_count_path() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction, QuantityExpr,
+        };
+        use crate::types::mana::ManaColor;
+        use std::sync::Arc;
+        let mut state = GameState::new_two_player(7);
+        let land = inert_token(&mut state, 800, 0, "Gaea's Cradle");
+        let mana = Effect::Mana {
+            produced: ManaProduction::AnyOneColor {
+                count: QuantityExpr::Ref {
+                    qty: object_count_ref(),
+                },
+                color_options: vec![ManaColor::Green],
+                contribution: ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        };
+        state.objects.get_mut(&land).unwrap().abilities =
+            Arc::new(vec![AbilityDefinition::new(AbilityKind::Activated, mana)]);
+        assert!(
+            fire_time_conditions_read_growing_class(&state),
+            "Gaea's Cradle mana ability reads |G| via its count (S5 LoopFirewall descent)"
+        );
+    }
+
+    /// P2-7 (firewall): a board-color mana aggregate (`DistinctColorsAmongPermanents`)
+    /// with a NON-`Typed` filter still vetoes — the arm self-asserts its own
+    /// `sibling` (the signal cannot come from the `Typed` arm). Revert-probe: strip
+    /// the arm's own `sibling:true` literal in `scan_mana_production` ⇒ firewall false.
+    #[test]
+    fn mana_board_aggregate_firewall_vetoes() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, ManaProduction};
+        use std::sync::Arc;
+        let mut state = GameState::new_two_player(7);
+        let src = inert_token(&mut state, 810, 0, "Faeburrow Elder");
+        let mana = Effect::Mana {
+            produced: ManaProduction::DistinctColorsAmongPermanents {
+                filter: TargetFilter::Controller,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        };
+        state.objects.get_mut(&src).unwrap().abilities =
+            Arc::new(vec![AbilityDefinition::new(AbilityKind::Activated, mana)]);
+        assert!(
+            fire_time_conditions_read_growing_class(&state),
+            "a board-color mana aggregate self-asserts sibling ⇒ firewall vetoes"
+        );
+    }
+
+    /// P2-10 (M9, U3): a projected-reading modification (`SetDynamicPower{Ref(LifeTotal)}`)
+    /// on a live static VETOES the firewall via the `:1539` descent's PROJECTED axis
+    /// — the projected-resource firewall has NO modification scan, so this descent is
+    /// the sole guard. AXIS ISOLATION: the modification reads projected, NOT sibling.
+    /// Revert-probe: drop `|| continuous_modification_reads_projected_resource(m)`
+    /// from the `:1539` descent ⇒ firewall false.
+    #[test]
+    fn projected_reading_modification_still_vetoes_the_firewall() {
+        use crate::game::ability_scan::{
+            continuous_modification_reads_projected_resource,
+            continuous_modification_reads_sibling_mutable,
+        };
+        use crate::types::ability::{ContinuousModification, PlayerScope, QuantityExpr};
+        let m = ContinuousModification::SetDynamicPower {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+            },
+        };
+        // AXIS ISOLATION (scanner level): projected, not sibling.
+        assert!(
+            !continuous_modification_reads_sibling_mutable(&m),
+            "a LifeTotal read is projected, not sibling"
+        );
+        assert!(
+            continuous_modification_reads_projected_resource(&m),
+            "a LifeTotal read is projected"
+        );
+        // FIREWALL level: the :1539 descent's projected axis vetoes.
+        let mut state = GameState::new_two_player(7);
+        let src = inert_token(&mut state, 820, 0, "AnthemSource");
+        state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::continuous().modifications(vec![m]));
+        assert!(
+            fire_time_conditions_read_growing_class(&state),
+            "a projected-reading modification vetoes via the :1539 projected axis (M9)"
         );
     }
 

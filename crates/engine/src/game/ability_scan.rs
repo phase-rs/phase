@@ -94,10 +94,10 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, ControllerRef,
     CountScope, Duration, EachDamageRecipient, Effect, FilterProp, ForEachCategoryAction,
-    GuessSubject, KeeperConstraint, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition,
-    ResolvedAbility, StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource,
-    TriggerCondition, TypedFilter,
+    GuessSubject, KeeperConstraint, ManaProduction, ModalChoice, MultiTargetSpec, ObjectScope,
+    PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, RepeatContinuation,
+    ReplacementCondition, ResolvedAbility, StaticCondition, TargetChoiceTiming, TargetFilter,
+    TrackedAnaphorSource, TriggerCondition, TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::keywords::{DisguiseCost, Keyword};
@@ -143,6 +143,26 @@ impl Axes {
     }
 }
 
+/// Which consumer is asking, and thus how the two mode-divergent arms
+/// (`Effect::Token`, `Effect::Mana`) classify.
+///
+/// `Conservative` is the pre-existing shared answer that the CR 603.3b
+/// trigger-ordering gate (`game::triggers`) and every non-firewall caller
+/// require, and it keeps the `LoopDetectionMode::Off` game byte-identical (#4603).
+/// `LoopFirewall` is used ONLY by the CR 732.2a object-growth firewall
+/// (`analysis::resource`), which needs the two token/mana blankets to DESCEND
+/// rather than fail closed. Every other arm is mode-invariant, so `Off` cannot
+/// observe `LoopFirewall` — the divergent arms are reachable only through the
+/// firewall's `*_for_loop` entry points, themselves reachable only under
+/// `loop_detection.samples()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScanMode {
+    /// Fail-closed on `Token`/`Mana` (the shared CR 603.3b + default answer).
+    Conservative,
+    /// Descend `Token`/`Mana` bodies (CR 732.2a firewall only).
+    LoopFirewall,
+}
+
 /// Walk a resolved ability's read-bearing fields.
 ///
 /// The `ResolvedAbility` destructure below is **exhaustive with no `..` rest
@@ -152,7 +172,7 @@ impl Axes {
 /// `ResolvedAbility` fails to compile here until it is classified, closing the
 /// "unread aux field" hole class at compile time (not just `multi_target` /
 /// `target_constraints`).
-fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
+fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
     let ResolvedAbility {
         // ---- read-bearing: scanned into `acc` below ----
         effect,
@@ -208,12 +228,12 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         parent_target_missing_reason: _, // seam flag
     } = a;
 
-    let mut acc = scan_effect(effect);
+    let mut acc = scan_effect(effect, mode);
     if let Some(sub) = sub_ability {
-        acc = acc.or(resolved_ability_axes(sub));
+        acc = acc.or(resolved_ability_axes(sub, mode));
     }
     if let Some(else_branch) = else_ability {
-        acc = acc.or(resolved_ability_axes(else_branch));
+        acc = acc.or(resolved_ability_axes(else_branch, mode));
     }
     if let Some(condition) = condition {
         acc = acc.or(scan_ability_condition(condition));
@@ -339,7 +359,7 @@ fn scan_target_selection_constraint(c: &TargetSelectionConstraint) -> Axes {
     }
 }
 
-fn scan_effect(x: &Effect) -> Axes {
+fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
     match x {
         Effect::StartYourEngines { player_scope } => {
             let mut acc = Axes::NONE;
@@ -446,7 +466,57 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(target));
             acc
         }
-        Effect::Token { .. } => Axes::CONSERVATIVE,
+        // CR 732.2a: a token-making effect fails closed for the CR 603.3b gate
+        // (`Conservative`), but the object-growth firewall (`LoopFirewall`) must
+        // DESCEND — a token that reads nothing sibling/projected does not veto an
+        // otherwise-bounded loop. Exhaustive 14-field destructure, NO `..`: a new
+        // field fails to compile until classified.
+        Effect::Token {
+            power,
+            toughness,
+            keywords,
+            count,
+            owner,
+            attach_to,
+            static_abilities,
+            enter_with_counters,
+            // read-free: literal name/types/colors/supertypes and enter-state flags
+            // express no resolution-time dynamic read.
+            name: _,
+            types: _,
+            colors: _,
+            tapped: _,
+            enters_attacking: _,
+            supertypes: _,
+        } => match mode {
+            ScanMode::Conservative => Axes::CONSERVATIVE,
+            ScanMode::LoopFirewall => {
+                let mut acc = Axes::NONE;
+                acc = acc.or(scan_pt_value(power));
+                acc = acc.or(scan_pt_value(toughness));
+                for kw in keywords {
+                    acc = acc.or(scan_keyword(kw, mode));
+                }
+                acc = acc.or(scan_quantity_expr(count));
+                acc = acc.or(scan_target_filter(owner));
+                if let Some(at) = attach_to {
+                    acc = acc.or(scan_target_filter(at));
+                }
+                // A granted static's condition + its layered modifications (P2-a).
+                for sd in static_abilities {
+                    if let Some(cond) = &sd.condition {
+                        acc = acc.or(scan_static_condition(cond));
+                    }
+                    for m in &sd.modifications {
+                        acc = acc.or(scan_continuous_modification(m, mode));
+                    }
+                }
+                for (_counter_type, qty) in enter_with_counters {
+                    acc = acc.or(scan_quantity_expr(qty));
+                }
+                acc
+            }
+        },
         Effect::GainLife { amount, player } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(amount));
@@ -864,7 +934,25 @@ fn scan_effect(x: &Effect) -> Axes {
             clear_triggers: _,
             clear_coin_flips: _,
         } => Axes::NONE,
-        Effect::Mana { .. } => Axes::CONSERVATIVE,
+        // CR 732.2a: same split as `Effect::Token`. Exhaustive 5-field destructure,
+        // NO `..`. In `LoopFirewall` the produced-mana metric + optional player
+        // target descend; `restrictions`/`grants`/`expiry` express no board read.
+        Effect::Mana {
+            produced,
+            target,
+            restrictions: _,
+            grants: _,
+            expiry: _,
+        } => match mode {
+            ScanMode::Conservative => Axes::CONSERVATIVE,
+            ScanMode::LoopFirewall => {
+                let mut acc = scan_mana_production(produced);
+                if let Some(t) = target {
+                    acc = acc.or(scan_target_filter(t));
+                }
+                acc
+            }
+        },
         Effect::Discard {
             count,
             target,
@@ -1100,7 +1188,7 @@ fn scan_effect(x: &Effect) -> Axes {
         Effect::CreateDamageReplacement { .. } => Axes::CONSERVATIVE,
         Effect::CreateDrawReplacement { replacement_effect } => {
             let mut acc = Axes::NONE;
-            acc = acc.or(scan_effect(replacement_effect));
+            acc = acc.or(scan_effect(replacement_effect, mode));
             acc
         }
         Effect::LoseTheGame { target } => {
@@ -1569,7 +1657,7 @@ fn scan_effect(x: &Effect) -> Axes {
             count,
         } => scan_quantity_expr(count),
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
-            scan_effect(replacement_effect)
+            scan_effect(replacement_effect, mode)
         }
         Effect::ChaosEnsues => Axes::NONE,
         // Field-less self-gathering effect: no target/quantity axes to scan.
@@ -2455,6 +2543,16 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
         // (authority: `project_out_resources`, analysis/resource.rs). Pure
         // type/controller predicates read none. `event`/`sibling` stay CONSERVATIVE
         // (byte-preserved) — only the projected axis is refined.
+        //
+        // ⛔ INVARIANT (CR 732.2a firewall soundness): this arm is the SOLE
+        // `sibling: true` source inside `scan_target_filter`. A board-AGGREGATE
+        // caller (a color/type-from-board mana metric, a `scan_quantity_ref`
+        // `ObjectCount`, an `IsPresent` static condition) MUST self-assert its OWN
+        // `sibling: true` literal and only THEN `.or(scan_target_filter(..))` — it
+        // must NOT delegate its board-read signal to this `Typed` arm. Two reasons:
+        // (a) a non-`Typed` board filter would be missed even today; (b) a future
+        // P3 (`sibling: mode == Conservative`) relaxation of this arm would silently
+        // turn every delegating aggregate into a false certificate.
         TargetFilter::Typed(tf) => Axes {
             event: true,
             sibling: true,
@@ -3625,13 +3723,13 @@ fn scan_count_scope(x: &CountScope) -> Axes {
 /// Axis 3: does this resolved ability (and its chain/conditions) read a
 /// projected player-level resource or journal? (`analysis::resource` item 4.)
 pub(crate) fn ability_reads_projected_resource(ability: &ResolvedAbility) -> bool {
-    resolved_ability_axes(ability).projected
+    resolved_ability_axes(ability, ScanMode::Conservative).projected
 }
 
 /// Axis 1: does this resolved ability read the concrete triggering-event /
 /// cost-paid-object context? (CR 603.4; `game::triggers` ordering.)
 pub(crate) fn ability_uses_event_context(ability: &ResolvedAbility) -> bool {
-    resolved_ability_axes(ability).event
+    resolved_ability_axes(ability, ScanMode::Conservative).event
 }
 
 /// Axis 2: does this resolved ability read a source/recipient or board-scoped
@@ -3639,7 +3737,7 @@ pub(crate) fn ability_uses_event_context(ability: &ResolvedAbility) -> bool {
 /// C2 distinct-event auto-resolve gate — the Rubblebelt Rioters / Orcish
 /// Siegemaster exclusion.)
 pub(crate) fn ability_reads_sibling_mutable(ability: &ResolvedAbility) -> bool {
-    resolved_ability_axes(ability).sibling
+    resolved_ability_axes(ability, ScanMode::Conservative).sibling
 }
 
 /// Axis 3 on a bare trigger fire-time `condition` (CR 603.4 intervening-if) —
@@ -3690,7 +3788,7 @@ pub(crate) fn duration_reads_projected_resource(duration: &Duration) -> bool {
 /// fails to compile until classified. `cost` is bound read-free here because the
 /// object-growth cost surface is scanned separately by
 /// `analysis::resource::cost_surface_references_growing_class` (§5.4).
-fn ability_definition_axes(def: &AbilityDefinition) -> Axes {
+fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
     let AbilityDefinition {
         // ---- read-bearing ----
         effect,
@@ -3735,12 +3833,12 @@ fn ability_definition_axes(def: &AbilityDefinition) -> Axes {
         iteration_kind_binding: _,
     } = def;
 
-    let mut acc = scan_effect(effect);
+    let mut acc = scan_effect(effect, mode);
     if let Some(sub) = sub_ability {
-        acc = acc.or(ability_definition_axes(sub));
+        acc = acc.or(ability_definition_axes(sub, mode));
     }
     if let Some(else_branch) = else_ability {
-        acc = acc.or(ability_definition_axes(else_branch));
+        acc = acc.or(ability_definition_axes(else_branch, mode));
     }
     if let Some(duration) = duration {
         acc = acc.or(scan_duration(duration));
@@ -3766,7 +3864,7 @@ fn ability_definition_axes(def: &AbilityDefinition) -> Axes {
         acc = acc.or(scan_modal_choice(modal));
     }
     for m in mode_abilities {
-        acc = acc.or(ability_definition_axes(m));
+        acc = acc.or(ability_definition_axes(m, mode));
     }
     if let Some(qty) = repeat_for {
         acc = acc.or(scan_quantity_expr(qty));
@@ -3796,7 +3894,7 @@ fn ability_definition_axes(def: &AbilityDefinition) -> Axes {
 /// `obj.abilities` def regardless of `kind` [S5], granted-ability bodies, and the
 /// pending/delayed store bodies).
 pub(crate) fn ability_definition_reads_sibling_mutable(def: &AbilityDefinition) -> bool {
-    ability_definition_axes(def).sibling
+    ability_definition_axes(def, ScanMode::Conservative).sibling
 }
 
 /// Axis 2 on a bare trigger fire-time `condition` (CR 603.4 intervening-if).
@@ -3829,7 +3927,7 @@ pub(crate) fn duration_reads_sibling_mutable(duration: &Duration) -> bool {
 /// (Affinity/Convoke/…) are IMPLICIT — they carry no scannable `QuantityExpr`, so
 /// they are classified separately by [`keyword_cost_reads_growing_class`].
 pub(crate) fn ability_cost_references_sibling_mutable(cost: &AbilityCost) -> bool {
-    scan_ability_cost(cost).sibling
+    scan_ability_cost(cost, ScanMode::Conservative).sibling
 }
 
 /// Axis 2 on a bare `QuantityRef` — the dynamic cost multiplier
@@ -3842,7 +3940,7 @@ pub(crate) fn quantity_ref_references_sibling_mutable(qty: &QuantityRef) -> bool
     scan_quantity_ref(qty).sibling
 }
 
-fn scan_ability_cost(cost: &AbilityCost) -> Axes {
+fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes {
     match cost {
         AbilityCost::ManaDynamic { quantity } => scan_quantity_expr(quantity),
         AbilityCost::PayLife { amount } => scan_quantity_expr(amount),
@@ -3856,13 +3954,13 @@ fn scan_ability_cost(cost: &AbilityCost) -> Axes {
         } => scan_quantity_expr(count),
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => costs
             .iter()
-            .fold(Axes::NONE, |acc, c| acc.or(scan_ability_cost(c))),
+            .fold(Axes::NONE, |acc, c| acc.or(scan_ability_cost(c, mode))),
         AbilityCost::PerCounter {
             counter: _,
             target,
             base,
-        } => scan_target_filter(target).or(scan_ability_cost(base)),
-        AbilityCost::EffectCost { effect } => scan_effect(effect),
+        } => scan_target_filter(target).or(scan_ability_cost(base, mode)),
+        AbilityCost::EffectCost { effect } => scan_effect(effect, mode),
         // Fixed / bounded / structural costs: no dynamic board read (a
         // board-reading tap/exile aggregate that varies the *reduction* is caught
         // by the cost-keyword classifier, not here).
@@ -4148,6 +4246,414 @@ pub(crate) fn modification_grants_growing_cost_keyword(m: &ContinuousModificatio
         ContinuousModification::AddKeywordWithDerivedCost { .. } => true,
         _ => false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// CR 732.2a object-growth firewall scanners (LoopFirewall mode only).
+//
+// These are the P2 walkers that make the `Effect::Token`/`Effect::Mana` blankets
+// DESCEND. They are reached exclusively through the `*_for_loop` /
+// `continuous_modification_reads_*` entry points below, which the
+// `analysis::resource` firewall calls under `loop_detection.samples()`. Nothing
+// in the `Conservative`-mode walk (the CR 603.3b gate and every other consumer)
+// touches them, so `LoopDetectionMode::Off` is byte-identical by construction.
+// ---------------------------------------------------------------------------
+
+/// A token's `power`/`toughness` (CR 208). A dynamic `Quantity` P/T reads its
+/// `QuantityExpr`; a fixed or `*`-placeholder P/T reads nothing here.
+fn scan_pt_value(pt: &PtValue) -> Axes {
+    match pt {
+        PtValue::Fixed(_) => Axes::NONE,
+        PtValue::Variable(_) => Axes::NONE,
+        PtValue::Quantity(q) => scan_quantity_expr(q),
+    }
+}
+
+/// CR 732.2a: does a keyword carried by a created token READ a growing
+/// board/graveyard class? Payload SHAPE alone is unsound (Convoke/Delve/Improvise/
+/// Bargain/Station are UNIT variants that read the board), so the COST-read axis
+/// delegates to the shipped exhaustive semantic authority
+/// [`keyword_cost_reads_growing_class`] (17 tap/sacrifice/exile/scale keywords),
+/// `.or()` a descent of the few keyword PAYLOADS that carry a scannable
+/// `QuantityExpr` / `TargetFilter` / `AbilityCost`. EXHAUSTIVE, NO `_` wildcard —
+/// a new payload-bearing keyword fails to compile until classified.
+fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
+    // Axis-2 cost surface: fully exhaustive & fail-closed on new variants.
+    let cost_read = if keyword_cost_reads_growing_class(kw) {
+        Axes {
+            event: false,
+            sibling: true,
+            projected: false,
+        }
+    } else {
+        Axes::NONE
+    };
+    let payload_read = match kw {
+        // scannable payloads (the only keywords whose parameter can read the board)
+        Keyword::Mobilize(q) | Keyword::Firebending(q) => scan_quantity_expr(q),
+        Keyword::Enchant(tf) => scan_target_filter(tf),
+        Keyword::CumulativeUpkeep(c) | Keyword::Escalate(c) => scan_ability_cost(c, mode),
+        // payload types with no scanner that can transitively express a board read
+        // ⇒ fail-closed CONSERVATIVE (a filter / cost-wrapper we do not descend).
+        Keyword::HexproofFrom(_)
+        | Keyword::Affinity(_)
+        | Keyword::Craft { .. }
+        | Keyword::Protection(_)
+        | Keyword::Companion(_)
+        | Keyword::Gift(_)
+        | Keyword::Ward(_)
+        | Keyword::Bestow(_)
+        | Keyword::Embalm(_)
+        | Keyword::Eternalize(_)
+        | Keyword::Escape(_)
+        | Keyword::Evoke(_)
+        | Keyword::Echo(_)
+        | Keyword::Buyback(_)
+        | Keyword::Cycling(_)
+        | Keyword::Flashback(_) => Axes::CONSERVATIVE,
+        // Every other keyword carries a read-free payload (unit / u32 / String /
+        // ManaCost / value tag): it reads nothing on any axis here. Its cost-read,
+        // if any, is already captured by `cost_read` above.
+        Keyword::Flying
+        | Keyword::FirstStrike
+        | Keyword::DoubleStrike
+        | Keyword::Trample
+        | Keyword::TrampleOverPlaneswalkers
+        | Keyword::Deathtouch
+        | Keyword::Lifelink
+        | Keyword::Vigilance
+        | Keyword::Haste
+        | Keyword::Reach
+        | Keyword::Defender
+        | Keyword::Menace
+        | Keyword::Indestructible
+        | Keyword::Hexproof
+        | Keyword::Shroud
+        | Keyword::Flash
+        | Keyword::Fear
+        | Keyword::Intimidate
+        | Keyword::Skulk
+        | Keyword::Shadow
+        | Keyword::Horsemanship
+        | Keyword::Wither
+        | Keyword::Infect
+        | Keyword::Afflict(_)
+        | Keyword::StartingIntensity(_)
+        | Keyword::Prowess
+        | Keyword::Undying
+        | Keyword::Persist
+        | Keyword::Cascade
+        | Keyword::Exalted
+        | Keyword::Flanking
+        | Keyword::Evolve
+        | Keyword::Extort
+        | Keyword::Exploit
+        | Keyword::Explore
+        | Keyword::Ascend
+        | Keyword::StartYourEngines
+        | Keyword::Dredge(_)
+        | Keyword::Modular(_)
+        | Keyword::Renown(_)
+        | Keyword::Fabricate(_)
+        | Keyword::Annihilator(_)
+        | Keyword::Bushido(_)
+        | Keyword::Frenzy(_)
+        | Keyword::Tribute(_)
+        | Keyword::Soulbond
+        | Keyword::Unearth(_)
+        | Keyword::Convoke
+        | Keyword::Waterbend
+        | Keyword::Delve
+        | Keyword::Devoid
+        | Keyword::Changeling
+        | Keyword::Phasing
+        | Keyword::Battlecry
+        | Keyword::Decayed
+        | Keyword::Unleash
+        | Keyword::Riot
+        | Keyword::Afterlife(_)
+        | Keyword::EtbCounter { .. }
+        | Keyword::Reconfigure(_)
+        | Keyword::LivingWeapon
+        | Keyword::JobSelect
+        | Keyword::TotemArmor
+        | Keyword::Fading(_)
+        | Keyword::Vanishing(_)
+        | Keyword::Kicker(_)
+        | Keyword::Equip(_)
+        | Keyword::Landwalk(_)
+        | Keyword::Rampage(_)
+        | Keyword::Absorb(_)
+        | Keyword::Crew { .. }
+        | Keyword::Partner(_)
+        | Keyword::Ninjutsu(_)
+        | Keyword::CommanderNinjutsu(_)
+        | Keyword::Prowl(_)
+        | Keyword::Morph(_)
+        | Keyword::Megamorph(_)
+        | Keyword::Mayhem(_)
+        | Keyword::Madness(_)
+        | Keyword::Miracle(_)
+        | Keyword::Dash(_)
+        | Keyword::Emerge(_)
+        | Keyword::Harmonize(_)
+        | Keyword::Foretell(_)
+        | Keyword::Mutate(_)
+        | Keyword::Disturb(_)
+        | Keyword::Disguise(_)
+        | Keyword::Blitz(_)
+        | Keyword::Overload(_)
+        | Keyword::Spectacle(_)
+        | Keyword::Surge(_)
+        | Keyword::Encore(_)
+        | Keyword::Casualty(_)
+        | Keyword::Entwine(_)
+        | Keyword::Outlast(_)
+        | Keyword::Scavenge(_)
+        | Keyword::Reinforce { .. }
+        | Keyword::Fortify(_)
+        | Keyword::Prototype { .. }
+        | Keyword::Plot(_)
+        | Keyword::Offspring(_)
+        | Keyword::Impending { .. }
+        | Keyword::LevelUp(_)
+        | Keyword::Banding
+        | Keyword::BandsWithOther(_)
+        | Keyword::Epic
+        | Keyword::Fuse
+        | Keyword::Gravestorm
+        | Keyword::Haunt
+        | Keyword::Hideaway(_)
+        | Keyword::Improvise
+        | Keyword::Ingest
+        | Keyword::Melee
+        | Keyword::Mentor
+        | Keyword::Myriad
+        | Keyword::Provoke
+        | Keyword::Rebound
+        | Keyword::Retrace
+        | Keyword::Ripple(_)
+        | Keyword::SplitSecond
+        | Keyword::Storm
+        | Keyword::Suspend { .. }
+        | Keyword::Totem
+        | Keyword::Warp(_)
+        | Keyword::Sneak(_)
+        | Keyword::WebSlinging(_)
+        | Keyword::Discover(_)
+        | Keyword::Spree
+        | Keyword::Ravenous
+        | Keyword::Daybound
+        | Keyword::Nightbound
+        | Keyword::Enlist
+        | Keyword::ReadAhead
+        | Keyword::Compleated
+        | Keyword::Conspire
+        | Keyword::Demonstrate
+        | Keyword::Dethrone
+        | Keyword::DoubleTeam
+        | Keyword::LivingMetal
+        | Keyword::Poisonous(_)
+        | Keyword::Bloodthirst(_)
+        | Keyword::Amplify(_)
+        | Keyword::Graft(_)
+        | Keyword::Devour(_)
+        | Keyword::Toxic(_)
+        | Keyword::Saddle(_)
+        | Keyword::Teamwork(_)
+        | Keyword::Soulshift(_)
+        | Keyword::Backup(_)
+        | Keyword::Squad(_)
+        | Keyword::Typecycling { .. }
+        | Keyword::Splice { .. }
+        | Keyword::Bargain
+        | Keyword::Sunburst
+        | Keyword::Champion(_)
+        | Keyword::Training
+        | Keyword::Assist
+        | Keyword::Augment
+        | Keyword::Aftermath
+        | Keyword::JumpStart
+        | Keyword::Cipher
+        | Keyword::Transmute(_)
+        | Keyword::Transfigure(_)
+        | Keyword::Recover(_)
+        | Keyword::Cleave(_)
+        | Keyword::Undaunted
+        | Keyword::Paradigm
+        | Keyword::Station
+        | Keyword::Replicate(_)
+        | Keyword::Awaken { .. }
+        | Keyword::ForMirrodin
+        | Keyword::MoreThanMeetsTheEye(_)
+        | Keyword::Freerunning(_)
+        | Keyword::Increment
+        | Keyword::Specialize(_)
+        | Keyword::Offering(_)
+        | Keyword::Unknown(_) => Axes::NONE,
+    };
+    cost_read.or(payload_read)
+}
+
+/// CR 106.1/106.7/109.1: the produced-mana metric of an `Effect::Mana`. Two
+/// distinct sibling-read paths (R1): a COUNT-DRIVEN metric's board read (if any)
+/// lives entirely inside its `count` (self-guarded by `scan_quantity_ref`'s
+/// `ObjectCount` arm), while a color/type-FROM-BOARD aggregate must self-assert
+/// its OWN `sibling:true` (see the invariant at `scan_target_filter`'s `Typed`
+/// arm). EXHAUSTIVE over all 15 variants, NO `_` wildcard.
+fn scan_mana_production(p: &ManaProduction) -> Axes {
+    match p {
+        // COUNT-DRIVEN: any board read lives inside `count`; NO own sibling literal.
+        ManaProduction::Colorless { count }
+        | ManaProduction::AnyOneColor { count, .. }
+        | ManaProduction::AnyCombination { count, .. }
+        | ManaProduction::ChosenColor { count, .. }
+        | ManaProduction::OpponentLandColors { count }
+        | ManaProduction::AnyInCommandersColorIdentity { count, .. } => scan_quantity_expr(count),
+        // SCOPED-OBJECT (Omnath, Locus of All): a SINGLE scoped object's colors,
+        // NOT a board aggregate — the scope's own read surface is the sole sibling
+        // source (CR 202.2c). NO own sibling literal.
+        ManaProduction::AnyCombinationOfObjectColors { count, scope } => {
+            scan_quantity_expr(count).or(scan_object_scope(scope))
+        }
+        // ⛔ BOARD-AGGREGATE (color/type-from-board): self-assert OWN `sibling:true`
+        // (R1 — mirror `scan_quantity_ref`; must NOT delegate the board read to the
+        // `Typed` arm of `scan_target_filter`).
+        ManaProduction::DistinctColorsAmongPermanents { filter } => Axes {
+            event: false,
+            sibling: true,
+            projected: false,
+        }
+        .or(scan_target_filter(filter)),
+        ManaProduction::AnyOneColorAmongPermanents { count, filter, .. } => Axes {
+            event: false,
+            sibling: true,
+            projected: false,
+        }
+        .or(scan_quantity_expr(count))
+        .or(scan_target_filter(filter)),
+        ManaProduction::AnyTypeProduceableBy { count, land_filter } => Axes {
+            event: false,
+            sibling: true,
+            projected: false,
+        }
+        .or(scan_quantity_expr(count))
+        .or(scan_target_filter(land_filter)),
+        // CR 106.3: reads the triggering `ManaAdded` event (event axis).
+        ManaProduction::TriggerEventManaType => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
+        // read-free: fixed colors / fixed pre-specified combinations read nothing.
+        ManaProduction::Fixed { .. }
+        | ManaProduction::Mixed { .. }
+        | ManaProduction::ChoiceAmongCombinations { .. } => Axes::NONE,
+        // no walker for `LinkedExileScope` ⇒ fail-closed CONSERVATIVE.
+        ManaProduction::ChoiceAmongExiledColors { .. } => Axes::CONSERVATIVE,
+    }
+}
+
+/// CR 613.1 + CR 732.2a: does a continuous modification READ a mutable board
+/// aggregate (`sibling`) or a projected player resource (`projected`)? EXHAUSTIVE
+/// over all 53 `ContinuousModification` variants, NO `_` wildcard — a new variant
+/// fails to compile until classified. `mode` is threaded to the granted-ability
+/// descent (`GrantAbility`) so a token body inside a grant is classified in the
+/// same mode. The AST is finite and acyclic, so the mutual recursion terminates.
+fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> Axes {
+    match m {
+        // descend the dynamic P/T / dynamic-keyword / enter-counter QuantityExpr (8)
+        ContinuousModification::SetDynamicPower { value }
+        | ContinuousModification::SetDynamicToughness { value }
+        | ContinuousModification::SetPowerDynamic { value }
+        | ContinuousModification::SetToughnessDynamic { value }
+        | ContinuousModification::AddDynamicPower { value }
+        | ContinuousModification::AddDynamicToughness { value }
+        | ContinuousModification::AddDynamicKeyword { value, .. } => scan_quantity_expr(value),
+        ContinuousModification::AddCounterOnEnter { count, .. } => scan_quantity_expr(count),
+        // descend the granted keyword (2, B4 — routes through the same authority)
+        ContinuousModification::AddKeyword { keyword }
+        | ContinuousModification::RemoveKeyword { keyword } => scan_keyword(keyword, mode),
+        // descend a granted ability body (GrantAbility). Presence of Gond's aura
+        // grants a `{T}: Create ...` activated ability whose token body reads
+        // nothing sibling — descending is what lets the firewall NOT over-veto it.
+        ContinuousModification::GrantAbility { definition } => {
+            ability_definition_axes(definition, mode)
+        }
+        // fail-closed CONSERVATIVE: inner payloads with no walker (9). `GrantTrigger`
+        // carries a `TriggerDefinition` (a `TriggerMode`, not a `TriggerCondition`)
+        // that is outside the scanner's traversal closure — conservative is the
+        // documented fail-safe (over-veto = missed offer). A full `TriggerDefinition`
+        // walker is a follow-up.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. } => Axes::CONSERVATIVE,
+        // read-free (33): static structural mods (name/type/color/anthem/chosen-
+        // attribute/copy-time) read no growing aggregate. An anthem `Add/SetPower`
+        // applies to a growing class but READS nothing.
+        ContinuousModification::SetName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::SetStartingLoyalty { .. }
+        | ContinuousModification::RemoveManaCost => Axes::NONE,
+    }
+}
+
+/// LoopFirewall-mode axis-2 (`sibling`) on a def-level `AbilityDefinition` (trigger
+/// `execute` bodies, every functioning `obj.abilities` def, granted-ability bodies)
+/// — the CR 732.2a object-growth firewall's DESCENDING body scan (§P0-e row 2).
+pub(crate) fn ability_definition_reads_sibling_mutable_for_loop(def: &AbilityDefinition) -> bool {
+    ability_definition_axes(def, ScanMode::LoopFirewall).sibling
+}
+
+/// CR 613.1 + CR 732.2a: does a live continuous modification READ a mutable board
+/// aggregate (axis-2 `sibling`)? Consumed by the `analysis::resource` `:1539`
+/// modification firewall descent.
+pub(crate) fn continuous_modification_reads_sibling_mutable(m: &ContinuousModification) -> bool {
+    scan_continuous_modification(m, ScanMode::LoopFirewall).sibling
+}
+
+/// CR 106.1 / CR 119 / CR 122.1 + CR 732.2a: does a live continuous modification
+/// READ a projected player resource (axis-3 `projected`)? Load-bearing (M9): the
+/// projected-resource firewall has NO modification scan, so this `:1539` descent is
+/// the sole guard against a projected-reading modification (a
+/// `SetDynamicPower{Ref(LifeTotal)}` anthem).
+pub(crate) fn continuous_modification_reads_projected_resource(m: &ContinuousModification) -> bool {
+    scan_continuous_modification(m, ScanMode::LoopFirewall).projected
 }
 
 // ---------------------------------------------------------------------------
@@ -4839,9 +5345,12 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator,
+        AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator, ManaContribution,
+        StaticDefinition,
     };
+    use crate::types::counter::CounterType;
     use crate::types::identifiers::ObjectId;
+    use crate::types::mana::ManaColor;
     use crate::types::player::{PlayerCounterKind, PlayerId};
 
     fn ability_with_amount(qty: QuantityRef) -> ResolvedAbility {
@@ -4866,6 +5375,212 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         )
+    }
+
+    // ---- P0/P2: the ScanMode split + descending object-growth firewall ----
+
+    /// A read-free vanilla token (Presence of Gond's "1/1 green Elf Warrior"):
+    /// fixed P/T, no keywords, fixed count, controller owner, no statics/counters.
+    fn vanilla_token() -> Effect {
+        Effect::Token {
+            name: "Elf Warrior".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string()],
+            colors: vec![ManaColor::Green],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        }
+    }
+
+    /// A board `ObjectCount` — the canonical sibling-mutable dynamic quantity
+    /// (`scan_quantity_ref::ObjectCount` self-asserts `sibling`).
+    fn object_count() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        }
+    }
+
+    /// P0-1: a vanilla token stays fail-closed CONSERVATIVE in `Conservative` mode.
+    /// Revert-probe: make the Token arm descend unconditionally ⇒ `event` flips false.
+    #[test]
+    fn conservative_mode_token_axes_are_unchanged() {
+        let axes = scan_effect(&vanilla_token(), ScanMode::Conservative);
+        assert!(axes.event && axes.sibling && axes.projected);
+    }
+
+    /// P0-2: same for `Effect::Mana`.
+    /// Revert-probe: make the Mana arm descend unconditionally ⇒ `event` flips false.
+    #[test]
+    fn conservative_mode_mana_axes_are_unchanged() {
+        let mana = Effect::Mana {
+            produced: ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        };
+        let axes = scan_effect(&mana, ScanMode::Conservative);
+        assert!(axes.event && axes.sibling && axes.projected);
+    }
+
+    /// P0-3: the CR 603.3b trigger-ordering gate is byte-identical for a token-bodied
+    /// trigger — it stays order-DEPENDENT (prompts). Uses the PUBLIC entries that
+    /// `game::triggers` consumes (which pass `Conservative`). Revert-probe: descend
+    /// the shared arm in `Conservative` ⇒ event/sibling drop ⇒ `c2` flips to true
+    /// (spurious auto-order).
+    #[test]
+    fn cr_603_3b_gate_is_byte_identical_for_a_token_trigger() {
+        let ability = ResolvedAbility::new(vanilla_token(), Vec::new(), ObjectId(1), PlayerId(0));
+        let c2 = !ability_uses_event_context(&ability) && !ability_reads_sibling_mutable(&ability);
+        assert!(
+            !c2,
+            "token-bodied trigger must stay order-dependent (CR 603.3b)"
+        );
+    }
+
+    /// P0-4: the same vanilla token DESCENDS to NONE in `LoopFirewall` (reads
+    /// nothing); a dynamic-count token descends to a sibling read. The vanilla→NONE
+    /// control proves the sibling in the dynamic case is carried by `count` alone.
+    /// Revert-probe: bind `count` to `_` in the Token arm ⇒ the dynamic assertion flips.
+    #[test]
+    fn loop_firewall_mode_token_axes_descend() {
+        let axes = scan_effect(&vanilla_token(), ScanMode::LoopFirewall);
+        assert!(!axes.event && !axes.sibling && !axes.projected);
+
+        let mut dyn_tok = vanilla_token();
+        if let Effect::Token { count, .. } = &mut dyn_tok {
+            *count = object_count();
+        }
+        assert!(scan_effect(&dyn_tok, ScanMode::LoopFirewall).sibling);
+    }
+
+    /// P2-1: a fixed anthem modification reads nothing (control for P2-2).
+    #[test]
+    fn fixed_anthem_modification_reads_nothing() {
+        let axes = scan_continuous_modification(
+            &ContinuousModification::AddPower { value: 2 },
+            ScanMode::LoopFirewall,
+        );
+        assert!(!axes.event && !axes.sibling && !axes.projected);
+    }
+
+    /// P2-2: a dynamic-P/T modification reads a sibling aggregate.
+    /// Revert-probe: move the arm into the read-free bucket (⇒ NONE) ⇒ fails.
+    #[test]
+    fn dynamic_pt_modification_reads_sibling() {
+        let m = ContinuousModification::SetDynamicPower {
+            value: object_count(),
+        };
+        assert!(scan_continuous_modification(&m, ScanMode::LoopFirewall).sibling);
+    }
+
+    /// P2-3: a token whose `enter_with_counters` count is a board `ObjectCount`
+    /// reads sibling. The vanilla control (P0-4) has empty counters ⇒ NONE, so the
+    /// sibling is carried by `enter_with_counters` alone. Revert-probe: bind
+    /// `enter_with_counters` to `_` in the Token arm ⇒ flips.
+    #[test]
+    fn token_effect_with_dynamic_enter_counters_reads_sibling() {
+        let mut tok = vanilla_token();
+        if let Effect::Token {
+            enter_with_counters,
+            ..
+        } = &mut tok
+        {
+            *enter_with_counters = vec![(CounterType::Plus1Plus1, object_count())];
+        }
+        assert!(scan_effect(&tok, ScanMode::LoopFirewall).sibling);
+    }
+
+    /// P2-4: a token whose granted static ability carries a dynamic-P/T modification
+    /// reads sibling. Revert-probe: bind `static_abilities` to `_` in the Token arm
+    /// ⇒ flips.
+    #[test]
+    fn token_effect_with_dynamic_static_ability_reads_sibling() {
+        let mut tok = vanilla_token();
+        if let Effect::Token {
+            static_abilities, ..
+        } = &mut tok
+        {
+            *static_abilities = vec![StaticDefinition::continuous().modifications(vec![
+                ContinuousModification::SetDynamicPower {
+                    value: object_count(),
+                },
+            ])];
+        }
+        assert!(scan_effect(&tok, ScanMode::LoopFirewall).sibling);
+    }
+
+    /// P2-5 (B4): a token carrying a growing-cost keyword (Convoke — a UNIT variant
+    /// that reads the board) reads sibling. Proves payload-SHAPE classification is
+    /// insufficient: `keyword_cost_reads_growing_class` is the semantic authority.
+    /// Revert-probe: bind `keywords` to `_` in the Token arm ⇒ flips.
+    #[test]
+    fn token_effect_with_growing_cost_keyword_reads_sibling() {
+        let mut tok = vanilla_token();
+        if let Effect::Token { keywords, .. } = &mut tok {
+            *keywords = vec![Keyword::Convoke];
+        }
+        assert!(scan_effect(&tok, ScanMode::LoopFirewall).sibling);
+    }
+
+    /// P2-6 (B5): `AddCounterOnEnter` with a dynamic count reads sibling — it looks
+    /// structural but carries a `QuantityExpr`. Revert-probe: sweep the arm into the
+    /// read-free bucket ⇒ flips.
+    #[test]
+    fn add_counter_on_enter_modification_reads_sibling() {
+        let m = ContinuousModification::AddCounterOnEnter {
+            counter_type: CounterType::Plus1Plus1,
+            count: object_count(),
+            if_type: None,
+        };
+        assert!(scan_continuous_modification(&m, ScanMode::LoopFirewall).sibling);
+    }
+
+    /// P2-7 (B2 + R1): a board-color aggregate self-asserts its OWN `sibling`, even
+    /// with a NON-`Typed` filter (`Controller` ⇒ `scan_target_filter` = NONE), so
+    /// the signal cannot come from the `Typed` arm. Revert-probe: strip the arm's
+    /// own `sibling:true` literal (delegate to `scan_target_filter` only) ⇒ with a
+    /// non-`Typed` filter, flips to false.
+    #[test]
+    fn mana_board_aggregate_self_asserts_sibling() {
+        let p = ManaProduction::DistinctColorsAmongPermanents {
+            filter: TargetFilter::Controller,
+        };
+        assert!(scan_mana_production(&p).sibling);
+    }
+
+    /// P2-8 (B2): `TriggerEventManaType` reads the triggering event (event axis).
+    /// Revert-probe: bin it NONE ⇒ flips.
+    #[test]
+    fn mana_production_trigger_event_type_is_conservative() {
+        assert!(scan_mana_production(&ManaProduction::TriggerEventManaType).event);
+    }
+
+    /// P2-9: Gaea's Cradle's `{T}: Add {G} for each creature you control` is the
+    /// MEASURED shape `AnyOneColor{count: Ref(ObjectCount{Typed{Creature}}), ...}` —
+    /// a COUNT-path arm whose sibling comes from `count` → `scan_quantity_ref::
+    /// ObjectCount` (NOT a board-aggregate literal, distinct from P2-7's FILTER
+    /// path). Revert-probe: bind the mana arm's `count` to `_` ⇒ flips to NONE.
+    #[test]
+    fn gaeas_cradle_count_path_vetoes() {
+        let p = ManaProduction::AnyOneColor {
+            count: object_count(),
+            color_options: vec![ManaColor::Green],
+            contribution: ManaContribution::Base,
+        };
+        assert!(scan_mana_production(&p).sibling);
     }
 
     // ---- A2 determinism gate: the randomness classifier (CR 732.2a) ----
