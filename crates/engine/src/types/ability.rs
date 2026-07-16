@@ -4789,7 +4789,7 @@ pub enum TapStateChange {
 /// inexpressible boolean combination. Parameterizes the lock/unlock axis — both
 /// live within CR rule section 709.5 — into one effect variant instead of two
 /// sibling effects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DoorLockOp {
     /// CR 709.5f: choose a locked half and give it the unlocked designation.
@@ -19893,7 +19893,7 @@ pub enum ContinuousModification {
 // ---------------------------------------------------------------------------
 
 /// Unified target reference for creatures and players.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum TargetRef {
     Object(ObjectId),
     Player(PlayerId),

@@ -729,21 +729,21 @@ pub struct BattlefieldEntryRecord {
     pub controller: PlayerId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AutoMayChoice {
     Accept,
     Decline,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum MayTriggerOrigin {
     Printed { trigger_index: usize },
     Keyword { keyword: KeywordKind },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MayTriggerAutoChoiceKey {
     pub player: PlayerId,
     pub source_id: ObjectId,
@@ -764,7 +764,7 @@ pub struct MayTriggerAutoChoiceRecord {
 /// `AllCopies` yields for every trigger from any object sharing the source's
 /// card identity, so it keeps matching after a token source ceases to exist
 /// (CR 704.5d) and matches newly created copies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum YieldScope {
     ThisObject,
     AllCopies,
@@ -1597,14 +1597,14 @@ pub struct PendingVoteBallotIteration {
     pub controller: PlayerId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CounterMoveChoice {
     pub destination_id: ObjectId,
     pub counter_type: CounterType,
     pub count: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CounterCostChoice {
     pub object_id: ObjectId,
     pub counter_type: CounterType,
@@ -1616,7 +1616,7 @@ pub struct CounterCostChoice {
 /// Unlike [`CounterCostChoice`], there is no `object_id`: the removal source is
 /// the single object fixed by the effect (the ability's target or `SelfRef`),
 /// so the client only chooses which counter types and how many of each to shed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CounterRemoveChoice {
     pub counter_type: CounterType,
     pub count: u32,
@@ -2245,7 +2245,7 @@ fn default_copy_retarget_effect_kind() -> EffectKind {
 /// CR 601.2g-h: Whether the engine may auto-pay an unambiguous spell mana cost
 /// or must pause after announcement so the player can activate mana abilities
 /// manually before committing payment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CastPaymentMode {
     #[default]
@@ -2668,7 +2668,7 @@ pub enum ManaChoicePrompt {
 
 /// CR 608.2d + CR 605.3b: Player's answer to a `ManaChoicePrompt`, carried by
 /// `GameAction::ChooseManaColor`. Shape mirrors the prompt variant.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ManaChoice {
     SingleColor(ManaType),
@@ -2801,7 +2801,7 @@ pub enum LayersDirty {
     /// Only these objects entered the battlefield since the last flush and no
     /// other layer-affecting mutation occurred. Candidate for the incremental
     /// fast path.
-    EnteredObjects(HashSet<ObjectId>),
+    EnteredObjects(BTreeSet<ObjectId>),
     /// A full battlefield re-evaluation is required.
     Full,
 }
@@ -2824,7 +2824,7 @@ impl LayersDirty {
     pub fn mark_entered(&mut self, id: ObjectId) {
         match self {
             Self::Full => {}
-            Self::Clean => *self = Self::EnteredObjects(HashSet::from([id])),
+            Self::Clean => *self = Self::EnteredObjects(BTreeSet::from([id])),
             Self::EnteredObjects(s) => {
                 s.insert(id);
             }
@@ -2955,7 +2955,7 @@ pub enum ShardOptions {
 }
 
 /// CR 107.4f + CR 601.2f: The caster's resolved choice for one Phyrexian shard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ShardChoice {
     /// Pay one mana of the shard's color (or either component color for hybrid-Phyrexian).
@@ -3229,7 +3229,7 @@ impl VoteActor {
 /// self-documenting domain and the parser/AI cannot accidentally swap
 /// pile semantics. Pile A is the partitioner's chosen subset; pile B is
 /// `eligible \ pile_a`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PileSide {
     A,
@@ -5625,7 +5625,7 @@ pub struct CopyTargetSlot {
 
 /// CR 510.1c: Optional combat-damage assignment mode for attackers with text like
 /// "you may have this creature assign its combat damage as though it weren't blocked."
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum CombatDamageAssignmentMode {
     #[default]
     Normal,
@@ -6185,7 +6185,7 @@ impl WaitingFor {
 ///
 /// The session owner is compared against the active player (CR 102.1) at each
 /// turn start (CR 500.1) to decide whether the session survives the boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum TurnBoundary {
     /// Clears at the next turn start (i.e. the end of the session owner's
     /// current turn), regardless of whose turn begins. Legacy behavior; the
@@ -6204,7 +6204,7 @@ pub enum TurnBoundary {
 /// `GameAction::SetPhaseStops`. Keeping them out of the request preserves a
 /// single source of truth and lets the preference change mid-session without
 /// requiring a new auto-pass request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AutoPassRequest {
     UntilStackEmpty,
