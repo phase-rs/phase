@@ -747,13 +747,8 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_cards_in_zone_ref,
         )),
         // CR 208.3 / CR 306.5c: source-scoped power / toughness / loyalty
-        // self-possessives ("~'s power", "~'s loyalty"). Nested to keep the
-        // outer `alt` within nom 8.0's 21-item tuple arity.
-        alt((
-            parse_self_power_ref,
-            parse_self_toughness_ref,
-            parse_self_loyalty_ref,
-        )),
+        // self-possessives ("~'s power", "~'s loyalty").
+        parse_self_characteristic_ref,
         parse_damage_dealt_this_turn_ref,
         parse_life_lost_ref,
         parse_life_gained_ref,
@@ -2438,60 +2433,39 @@ pub(crate) fn parse_self_possessive(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// Parse "its power" / "~'s power" / "this creature's power" / "this card's
-/// power" / "his power" / "her power" / "their power".
+/// Parse a self-possessive characteristic: power, toughness, or loyalty.
 ///
 /// CR 400.7 + CR 208.3: Scavenge and other graveyard-activated effects reference
 /// the source via "this card's power" because the source is a card (not a
 /// creature) when the ability is activated. `SelfPower` is LKI-aware at
-/// resolution time (see `game/quantity.rs`), so all phrasings resolve
-/// identically. See `parse_self_possessive` for the gendered-pronoun rationale.
-fn parse_self_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+/// resolution time (see `game/quantity.rs`). CR 306.5c makes a planeswalker's
+/// loyalty its number of loyalty counters, represented by `CountersOn` rather
+/// than a new characteristic reference. See `parse_self_possessive` for the
+/// gendered-pronoun rationale.
+fn parse_self_characteristic_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = parse_self_possessive(input)?;
-    let (rest, _) = tag(" power").parse(rest)?;
-    Ok((
-        rest,
-        QuantityRef::Power {
-            scope: crate::types::ability::ObjectScope::Source,
-        },
+    alt((
+        value(
+            QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+            tag(" power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: ObjectScope::Source,
+            },
+            tag(" toughness"),
+        ),
+        value(
+            QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(CounterType::Loyalty),
+            },
+            tag(" loyalty"),
+        ),
     ))
-}
-
-/// Parse "its loyalty" / "~'s loyalty" / "this creature's loyalty" /
-/// "this card's loyalty" — the loyalty of the ability's source planeswalker.
-///
-/// CR 306.5c: The loyalty of a planeswalker on the battlefield is equal to the
-/// number of loyalty counters on it, so a source-scoped loyalty reference is the
-/// count of `Loyalty` counters on the source (Nissa, Ascended Animist:
-/// "Create an X/X green Phyrexian Horror creature token, where X is ~'s
-/// loyalty"). Composed from the shared `parse_self_possessive` prefix so every
-/// self-referent phrasing routes to `CountersOn { Source, Loyalty }`, mirroring
-/// `parse_self_power_ref`.
-fn parse_self_loyalty_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = parse_self_possessive(input)?;
-    let (rest, _) = tag(" loyalty").parse(rest)?;
-    Ok((
-        rest,
-        QuantityRef::CountersOn {
-            scope: crate::types::ability::ObjectScope::Source,
-            counter_type: Some(CounterType::Loyalty),
-        },
-    ))
-}
-
-/// Parse "its toughness" / "~'s toughness" / "this creature's toughness" /
-/// "this card's toughness" / "his toughness" / "her toughness" /
-/// "their toughness". See `parse_self_power_ref` for the card-vs-creature
-/// rationale and `parse_self_possessive` for the gendered-pronoun rationale.
-fn parse_self_toughness_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = parse_self_possessive(input)?;
-    let (rest, _) = tag(" toughness").parse(rest)?;
-    Ok((
-        rest,
-        QuantityRef::Toughness {
-            scope: crate::types::ability::ObjectScope::Source,
-        },
-    ))
+    .parse(rest)
 }
 
 /// Parse damage-history references such as Chandra's Incinerator's
