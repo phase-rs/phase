@@ -1140,6 +1140,7 @@ pub(super) fn handle_resolution_choice(
                     CastOfferKind::Discover {
                         hit_card,
                         exiled_misses,
+                        source_id,
                         discover_value,
                     },
             },
@@ -1153,6 +1154,7 @@ pub(super) fn handle_resolution_choice(
                 // rejection the hit goes to the discovering player's hand
                 // (`ToHand`) while the misses go to the library bottom.
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
+                    source_id,
                     exiled_misses,
                     reject_action: crate::types::ability::ResolutionMvRejectAction::ToHand,
                     success_action:
@@ -1182,19 +1184,22 @@ pub(super) fn handle_resolution_choice(
             } else {
                 // CR 701.57a: decline — hit goes to the discovering player's
                 // hand; the misses go to the library bottom in a random order.
-                zones::move_to_zone(state, hit_card, Zone::Hand, events);
-
-                {
-                    use rand::seq::SliceRandom;
-
-                    let mut shuffled = exiled_misses;
-                    shuffled.shuffle(&mut state.rng);
-                    for card_id in shuffled {
-                        zones::move_to_library_position(state, card_id, false, events);
-                    }
-                }
-
-                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                // The raw hit-to-hand move remains outside tranche L1, but its
+                // printed tail waits on the replacement-aware bottom batch.
+                crate::game::effects::discover::shuffle_to_bottom(
+                    state,
+                    &exiled_misses,
+                    source_id,
+                    Some(
+                        crate::types::game_state::BatchCompletion::DiscoverDeclined {
+                            player,
+                            hit_card,
+                            source_id,
+                        },
+                    ),
+                    events,
+                );
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
         }
         // CR 608.2g + CR 609.4b: Paid during-resolution graveyard cast (Quistis
@@ -1219,6 +1224,7 @@ pub(super) fn handle_resolution_choice(
         ) => {
             if matches!(choice, crate::types::actions::CastChoice::Cast) {
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
+                    source_id: hit_card,
                     exiled_misses: Vec::new(),
                     reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                     success_action:
@@ -1438,6 +1444,7 @@ pub(super) fn handle_resolution_choice(
                         hit_card,
                         exiled_misses,
                         source_mv,
+                        source_id,
                     },
             },
             GameAction::CascadeChoice { choice },
@@ -1450,6 +1457,7 @@ pub(super) fn handle_resolution_choice(
                 // (after X), and on rejection the hit joins the misses on the
                 // library bottom (`BottomWithMisses`).
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
+                    source_id,
                     exiled_misses,
                     reject_action:
                         crate::types::ability::ResolutionMvRejectAction::BottomWithMisses,
@@ -1482,9 +1490,22 @@ pub(super) fn handle_resolution_choice(
                 // bottom of the library in a random order together.
                 let mut all_to_bottom = exiled_misses;
                 all_to_bottom.push(hit_card);
-                crate::game::effects::cascade::shuffle_to_bottom(state, &all_to_bottom, events);
-
-                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                match crate::game::effects::cascade::shuffle_to_bottom(
+                    state,
+                    &all_to_bottom,
+                    source_id,
+                    None,
+                    events,
+                ) {
+                    crate::game::zone_pipeline::BatchMoveResult::Done => {
+                        ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
+                            state, player, events,
+                        ))
+                    }
+                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                        ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                    }
+                }
             }
         }
         (
@@ -1495,6 +1516,7 @@ pub(super) fn handle_resolution_choice(
                         hit_card,
                         remaining_hits,
                         revealed_misses,
+                        source_id,
                     },
             },
             GameAction::RippleChoice { choice },
@@ -1505,6 +1527,7 @@ pub(super) fn handle_resolution_choice(
                 // free during resolution. No mana-value gate (unlike Cascade); on
                 // decline/rollback the hit joins the rest on the library bottom.
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
+                    source_id,
                     exiled_misses: revealed_misses,
                     reject_action:
                         crate::types::ability::ResolutionMvRejectAction::BottomWithMisses,
@@ -1533,9 +1556,22 @@ pub(super) fn handle_resolution_choice(
                 let mut all_to_bottom = revealed_misses;
                 all_to_bottom.extend(remaining_hits);
                 all_to_bottom.push(hit_card);
-                crate::game::effects::cascade::shuffle_to_bottom(state, &all_to_bottom, events);
-
-                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                match crate::game::effects::cascade::shuffle_to_bottom(
+                    state,
+                    &all_to_bottom,
+                    source_id,
+                    None,
+                    events,
+                ) {
+                    crate::game::zone_pipeline::BatchMoveResult::Done => {
+                        ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
+                            state, player, events,
+                        ))
+                    }
+                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                        ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                    }
+                }
             }
         }
         // CR 608.2g + CR 601.2 + CR 202.3: Invoke Calamity's free-cast window —
@@ -1598,6 +1634,7 @@ pub(super) fn handle_resolution_choice(
             // per-card MV is pre-checked and these casts carry no resulting-MV
             // permission constraint).
             let cleanup = crate::types::ability::ResolutionCastCleanup {
+                source_id: chosen,
                 exiled_misses: Vec::new(),
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action:
@@ -5354,6 +5391,76 @@ pub(crate) fn run_batch_completion(
 ) {
     use crate::types::game_state::BatchCompletion;
     match completion {
+        BatchCompletion::CascadeBottomComplete {
+            controller,
+            source_id,
+            exiled_count,
+        } => {
+            events.push(GameEvent::CascadeMissed {
+                controller,
+                source_id,
+                exiled_count,
+            });
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Cascade,
+                source_id,
+                subject: None,
+            });
+        }
+        BatchCompletion::DiscoverBottomComplete { source_id } => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Discover,
+                source_id,
+                subject: None,
+            });
+        }
+        BatchCompletion::DiscoverPlacementComplete { source_id } => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Discover,
+                source_id,
+                subject: None,
+            });
+        }
+        BatchCompletion::DiscoverDeclined {
+            player,
+            hit_card,
+            source_id,
+        } => {
+            zones::move_to_zone(state, hit_card, Zone::Hand, events);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Discover,
+                source_id,
+                subject: None,
+            });
+            finish_with_continuation(state, player, events);
+        }
+        BatchCompletion::ResolutionCastRejectedToHand {
+            player,
+            hit_card,
+            source_id,
+        } => {
+            zones::move_to_zone(state, hit_card, Zone::Hand, events);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Discover,
+                source_id,
+                subject: None,
+            });
+            crate::game::priority::clear_priority_passes(state);
+            state.waiting_for = WaitingFor::Priority { player };
+        }
+        BatchCompletion::PutOnTopComplete {
+            source_id,
+            removed_exile_links,
+        } => {
+            state.exile_links.retain(|link| {
+                link.source_id != source_id || !removed_exile_links.contains(&link.exiled_id)
+            });
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::PutAtLibraryPosition,
+                source_id,
+                subject: None,
+            });
+        }
         BatchCompletion::SurveilKeepOnTop { player, top_cards } => {
             surveil_keep_on_top(state, player, &top_cards);
             finish_with_continuation(state, player, events);

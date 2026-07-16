@@ -610,6 +610,7 @@ fn cast_single_target_during_resolution(
     // (only reached if a future free-cast adds an MV gate; these carry none).
     // There are no dig misses for a targeted single-card free-cast.
     let cleanup = crate::types::ability::ResolutionCastCleanup {
+        source_id: ability.source_id,
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,

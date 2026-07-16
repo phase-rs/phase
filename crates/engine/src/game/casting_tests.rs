@@ -44239,6 +44239,7 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
         ));
     }
     let cleanup = crate::types::ability::ResolutionCastCleanup {
+        source_id: spell,
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
