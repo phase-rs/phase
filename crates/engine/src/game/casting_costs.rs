@@ -8120,18 +8120,22 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         // concession. Cleared with the object's other permissions when the spell
         // leaves the stack. Free casts (no concession) carry `None` and skip this.
         if let Some(obj) = state.objects.get_mut(&object_id) {
-            obj.casting_permissions[index] = CastingPermission::ExileWithAltCost {
-                cost: crate::types::mana::ManaCost::SelfManaCost,
-                cast_transformed: false,
-                constraint: None,
-                granted_to,
-                resolution_cleanup: None,
-                duration: None,
-                graveyard_replacement: None,
-                enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
-                mana_spend_permission,
-            };
+            if let Some(mana_spend_permission) = mana_spend_permission {
+                obj.casting_permissions[index] = CastingPermission::ExileWithAltCost {
+                    cost: crate::types::mana::ManaCost::SelfManaCost,
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to,
+                    resolution_cleanup: None,
+                    duration: None,
+                    graveyard_replacement: None,
+                    enters_with_counter: None,
+                    enters_with_modifications: Vec::new(),
+                    mana_spend_permission: Some(mana_spend_permission),
+                };
+            } else {
+                obj.casting_permissions.remove(index);
+            }
         }
         let waiting_for = handle_resolution_cast_success(
             state,
