@@ -293,8 +293,14 @@ pub fn handle_activate_loyalty(
         pending.activation_cost = Some(crate::types::ability::AbilityCost::Loyalty {
             amount: loyalty_cost,
         });
+        // CR 601.2c + CR 606.3: first slot's announcer (controller unless the slot
+        // is "of an opponent's choice").
+        let initial_player = target_slots
+            .first()
+            .and_then(|slot| slot.chooser)
+            .unwrap_or(player);
         return Ok(WaitingFor::TargetSelection {
-            player,
+            player: initial_player,
             pending_cast: Box::new(pending),
             target_slots,
             mode_labels: Vec::new(),

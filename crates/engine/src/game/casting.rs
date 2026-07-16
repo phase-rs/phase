@@ -29,7 +29,7 @@ use crate::types::statics::{
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_targets_in_chain, auto_select_targets,
@@ -882,7 +882,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
     // CR 117.1c: per-turn frequency is enforced inside the helper, not by
     // active-player gating, so the same logic covers the rare case of an
     // `Unlimited` printing on either player's turn.
-    let exile_permission_ids: HashSet<ObjectId> =
+    let exile_permission_ids: BTreeSet<ObjectId> =
         exile_objects_castable_by_permission(state, player)
             .iter()
             .map(|(obj_id, _source_id, _freq)| *obj_id)
@@ -10806,6 +10806,7 @@ fn continue_with_prepared(
             let target_slots = vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: legal,
                 optional: false,
+                chooser: None,
             }];
             if let Some(targets) = auto_select_targets(&target_slots, &[])? {
                 let mut resolved = resolved;
@@ -10875,6 +10876,7 @@ fn continue_with_prepared(
         let target_slots = vec![crate::types::game_state::TargetSelectionSlot {
             legal_targets: legal,
             optional: false,
+            chooser: None,
         }];
         if let Some(targets) = auto_select_targets(&target_slots, &[])? {
             let mut resolved = resolved;
@@ -11077,6 +11079,44 @@ fn continue_with_prepared(
             .as_ref()
             .map(|ability| ability.target_constraints.clone())
             .unwrap_or_default();
+
+        // CR 601.2c + CR 115.1: When a slot is announced by an opponent ("of an
+        // opponent's choice") and the controller has two or more opponents, the
+        // controller first chooses which opponent announces. Defer target
+        // declaration until that choice is recorded; a single-opponent cast has
+        // no decision and proceeds straight through. Each opponent-choice effect
+        // is decided independently — `begin_deferred_target_selection` re-prompts
+        // for every remaining group after this first one is recorded.
+        if let Some(choice) = casting_costs::next_announcing_opponent_choice(&resolved) {
+            let candidates = crate::game::players::opponents(state, player);
+            if candidates.len() >= 2 {
+                let mut pending = PendingCast::new(
+                    prepared.object_id,
+                    prepared.card_id,
+                    resolved,
+                    prepared.mana_cost.clone(),
+                );
+                pending.base_cost = Some(prepared.base_mana_cost.clone());
+                pending.casting_variant = prepared.casting_variant;
+                pending.cast_timing_permission = prepared.cast_timing_permission;
+                pending.distribute = prepared
+                    .ability_def
+                    .as_ref()
+                    .and_then(|a| a.distribute.clone());
+                pending.origin_zone = prepared.origin_zone;
+                pending.payment_mode = prepared.payment_mode;
+                pending.target_constraints = target_constraints;
+                pending.deferred_target_selection = true;
+                return Ok(WaitingFor::ChooseAnnouncingOpponent {
+                    player,
+                    candidates,
+                    choice_index: choice.index,
+                    choice_count: choice.count,
+                    target_type: choice.target_type,
+                    pending_cast: Box::new(pending),
+                });
+            }
+        }
 
         // CR 601.2b: Casualty (optional sacrifice) must be declared before targets are
         // chosen. Detect an effective Casualty cost and route through the deferred target
@@ -11547,6 +11587,7 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
                             prepared.object_id,
                         ),
                         optional: false,
+                        chooser: None,
                     })
                 } else {
                     None
@@ -11572,6 +11613,7 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
             vec![TargetSelectionSlot {
                 legal_targets: legal,
                 optional: false,
+                chooser: None,
             }]
         });
     }

@@ -713,6 +713,7 @@
     "confirmTap": "Confirmer l'engagement ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conserver les cibles actuelles",
     "skip": "Ignorer",
+    "opponentChoice": "(au choix de l'adversaire)",
     "chooseNewTarget": "Choisissez la nouvelle cible du sort",
     "chooseNewTargetForSpell": "Choisissez une nouvelle cible pour {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1666,6 +1667,13 @@
     "title": "Choisir un protecteur",
     "battleFallback": "Bataille",
     "subtitle": "{{name}} a besoin d'un nouveau protecteur. Choisissez quel adversaire la défendra."
+  },
+  "announcingOpponent": {
+    "title": "Choisir l'adversaire qui annonce ({{current}} sur {{total}})",
+    "subtitle": "Choisissez quel adversaire annonce {{target}} ({{current}} sur {{total}}).",
+    "targetLand": "la cible de terrain",
+    "targetCreature": "la cible de créature",
+    "targetChoice": "ce choix de cible"
   },
   "clashOpponent": {
     "title": "Choisir l'adversaire pour la confrontation",

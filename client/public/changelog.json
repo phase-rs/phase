@@ -1,6 +1,19 @@
 {
   "entries": [
     {
+      "id": 174,
+      "date": "2026-07-15",
+      "title": "Hogaak truly casts without mana",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Natural Balance joins the card pool, while optional triggered modes now let you decline before choosing the required modes (Shadrix of the Shining Flame)\n• Color-qualified keyword grants now work creature by creature (Scion of Draco), and subtype token substitutions can transform every Fish into a Shark, then an Octopus (Fisher's Talent)\n• Chthonian Nightmare now asks for X in its Pay X {E} cost and carries that value through its sacrifice and reanimation\n• Psychic Paper now chooses its creature card name and creature type as it becomes attached\n\n🛠️ Cards That Now Work Right\n• Hogaak, Arisen Necropolis can no longer spend mana to cast itself — only its printed alternative payment tools work\n• Copy Enchantment now attaches when it enters as a copied Aura; created Equipment and Aura tokens also attach to the intended object\n• Feather, the Redeemed correctly exiles a resolving spell and returns it at the next end step, while Lilah, Undefeated Slickshot makes the exiled spell plotted only when that exile actually happens\n• Power Leak now charges the enchanted permanent's controller the correct remaining damage after its payment; Nether Spirit can return from the graveyard when it is the only creature card there\n• Chandra's Ignition no longer damages its chosen source creature, and Red Guardian can target only a creature that actually dealt damage this turn\n• Frozen in Ice preserves its can't-become-untapped clause, Bronzehide Lion's granted indestructible ends on time, and Navigator's Compass keeps a chosen land type alongside its other types\n• Silent-Blade Oni can cast from the damaged player's revealed hand, Thoughtseize leaves a hand alone when no eligible card was revealed, and named-card tutors honor their alternate choices\n• Bandit's Talent counts the right hellbent opponents, Slitherwisp checks for flash, and Wasp / Shrinking Savior respect literal power and toughness thresholds\n\n⚔️ Combat & Gameplay\n• Draw replacements now finish every part of connive and scry correctly; Miracle is available for the first draw-step card, and Gift draws respect draw limits\n• Returning a permanent from exile now triggers its enters-the-battlefield abilities (Fiend Hunter, Oblivion Ring, and similar cards)\n• Descendants' Fury can sacrifice one of the creatures that dealt combat damage and use its creature type; prevention shields that redirect damage now redirect it rather than erasing it (Palisade Giant, Veteran Bodyguard)\n• Replacement effects now apply consistently to activation and foretell costs, and cancelling a targeted loyalty activation restores the right state\n\n🖥️ Interface\n• Mana-payment choices now show engine-backed previews, selected modal modes appear on the stack, and battlefield keyword badges no longer include irrelevant entries",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1527124682334277723"
+    },
+    {
       "id": 173,
       "date": "2026-07-14",
       "title": "X values stay where they matter",

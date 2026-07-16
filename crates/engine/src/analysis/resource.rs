@@ -2295,6 +2295,7 @@ fn replacement_event_matches_life(event: &ReplacementEvent) -> Option<LifeEventC
         | ReplacementEvent::DealtDamage
         | ReplacementEvent::Mill
         | ReplacementEvent::Attached
+        | ReplacementEvent::SearchFound
         | ReplacementEvent::DrawCards
         | ReplacementEvent::ProduceMana
         | ReplacementEvent::Scry

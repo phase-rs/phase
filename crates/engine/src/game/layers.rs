@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
@@ -94,7 +94,7 @@ fn effect_candidate_ids(
 }
 
 struct PreparedIncrementalFlush {
-    recipient_ids: HashSet<ObjectId>,
+    recipient_ids: BTreeSet<ObjectId>,
     active_effects: Vec<ActiveContinuousEffect>,
 }
 
@@ -2512,7 +2512,7 @@ pub fn flush_layers(state: &mut GameState) {
 
 fn prepare_incremental_flush(
     state: &mut GameState,
-    entered_ids: &HashSet<ObjectId>,
+    entered_ids: &BTreeSet<ObjectId>,
 ) -> Option<PreparedIncrementalFlush> {
     for &id in entered_ids {
         let obj = state.objects.get(&id)?;
@@ -2582,7 +2582,7 @@ fn prepare_incremental_flush(
 #[cfg(test)]
 pub(crate) fn incremental_flush_must_escalate(
     state: &GameState,
-    entered_ids: &HashSet<ObjectId>,
+    entered_ids: &BTreeSet<ObjectId>,
 ) -> bool {
     // Axis 1 — per-entered preconditions.
     for &id in entered_ids {
@@ -2637,7 +2637,7 @@ pub(crate) fn incremental_flush_must_escalate(
 
 fn active_effects_force_incremental_escalation(
     state: &GameState,
-    entered_ids: &HashSet<ObjectId>,
+    entered_ids: &BTreeSet<ObjectId>,
     active_effects: &[ActiveContinuousEffect],
 ) -> bool {
     active_effects.iter().any(|e| {
@@ -2706,7 +2706,7 @@ fn active_effects_force_incremental_escalation(
 /// (invariant 5), so the cached BEFORE truth aligns with the consulted def.
 fn any_active_static_condition_perturbed_by_entry(
     state: &GameState,
-    entered_ids: &HashSet<ObjectId>,
+    entered_ids: &BTreeSet<ObjectId>,
 ) -> bool {
     let mut found = false;
     for_each_static_effect_source(state, |state, obj| {
@@ -2870,8 +2870,8 @@ fn entered_object_blocks_incremental(
 /// continuous static applies to the enchanted permanent, not itself).
 fn incremental_recipient_ids(
     state: &GameState,
-    entered_ids: &HashSet<ObjectId>,
-) -> HashSet<ObjectId> {
+    entered_ids: &BTreeSet<ObjectId>,
+) -> BTreeSet<ObjectId> {
     let mut recipients = entered_ids.clone();
     for &id in entered_ids {
         if let Some(host) = state
@@ -2888,7 +2888,7 @@ fn incremental_recipient_ids(
 
 fn effect_is_restricted_to_incremental_recipients(
     effect: &ActiveContinuousEffect,
-    recipient_ids: &HashSet<ObjectId>,
+    recipient_ids: &BTreeSet<ObjectId>,
 ) -> bool {
     match &effect.affected_filter {
         TargetFilter::SelfRef => recipient_ids.contains(&effect.source_id),
@@ -3977,7 +3977,7 @@ fn apply_combat_assignment_rule_effects(state: &mut GameState) {
 /// object-affecting continuous effects.
 fn apply_combat_assignment_rule_effects_filtered(
     state: &mut GameState,
-    restrict_to: Option<&HashSet<ObjectId>>,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
 ) {
     let mut effects = collect_active_combat_assignment_rule_effects(state);
     effects.sort_by_key(|effect| (effect.timestamp, effect.controller.0, effect.source_id.0));
@@ -4029,7 +4029,10 @@ fn apply_combat_assignment_rule_effects_filtered(
 /// affected objects. This is run AFTER all keyword grants/removals are applied,
 /// so the denial wins regardless of grant timestamp — the rules-correct "can't
 /// have" outcome (a concurrent anthem can't restore a denied keyword).
-fn apply_cant_have_keyword_denials(state: &mut GameState, restrict_to: Option<&HashSet<ObjectId>>) {
+fn apply_cant_have_keyword_denials(
+    state: &mut GameState,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+) {
     // Collect (affected object, denied keyword) pairs under an immutable borrow,
     // then strip — avoids a borrow conflict with the per-object mutation.
     let mut denials: Vec<(ObjectId, Keyword)> = Vec::new();
@@ -4675,7 +4678,7 @@ fn apply_continuous_effect(
 fn apply_continuous_effect_to(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
-    restrict_to: &HashSet<ObjectId>,
+    restrict_to: &BTreeSet<ObjectId>,
     abilities_suppressed: &mut HashSet<ObjectId>,
     zone_cache: &mut LayerZoneObjectCache,
 ) {
@@ -4841,7 +4844,7 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
 fn apply_continuous_effect_filtered(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
-    restrict_to: Option<&HashSet<ObjectId>>,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
     abilities_suppressed: &mut HashSet<ObjectId>,
     zone_cache: &mut LayerZoneObjectCache,
 ) {

@@ -10,6 +10,7 @@ use crate::types::ability::{
     SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition,
     TapCreaturesAggregate, TargetFilter, TypeFilter, TypedFilter, EXILE_COST_X,
 };
+use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActivationResidual, AssistState, CastPaymentMode, CastingVariant, ConvokeMode, CostResume,
@@ -1189,12 +1190,114 @@ pub(super) fn drain_deferred_triggers_after_stack_object_announcement(
         .unwrap_or(waiting_for)
 }
 
+/// CR 601.2c + CR 115.1: Find the next "of an opponent's choice" slot group — an
+/// ability link whose `target_chooser` is `Opponent` — which still has no
+/// announcing opponent recorded. The returned one-based position and total let a
+/// display client distinguish consecutive prompts without inspecting or
+/// reinterpreting the in-flight spell. Each opponent-choice effect is decided
+/// independently, so the controller may name the same or different opponents per
+/// effect (e.g. Volcanic Offering's second land vs. its second creature). Paired
+/// with `assign_next_announcing_opponent` to drive one prompt per group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AnnouncingOpponentChoice {
+    pub index: usize,
+    pub count: usize,
+    pub target_type: Option<CoreType>,
+}
+
+pub(crate) fn next_announcing_opponent_choice(
+    ability: &ResolvedAbility,
+) -> Option<AnnouncingOpponentChoice> {
+    let mut next = None;
+    let mut count = 0;
+    let mut node = Some(ability);
+    while let Some(link) = node {
+        if matches!(link.target_chooser, Some(TargetFilter::Opponent)) {
+            count += 1;
+            if link.context.announcing_opponent.is_none() && next.is_none() {
+                next = Some(AnnouncingOpponentChoice {
+                    index: count,
+                    count: 0,
+                    target_type: target_type_for_announcing_opponent_choice(link),
+                });
+            }
+        }
+        node = link.sub_ability.as_deref();
+    }
+    next.map(|choice| AnnouncingOpponentChoice { count, ..choice })
+}
+
+fn target_type_for_announcing_opponent_choice(ability: &ResolvedAbility) -> Option<CoreType> {
+    let TargetFilter::Typed(filter) = ability.effect.target_filter()? else {
+        return None;
+    };
+    filter
+        .type_filters
+        .iter()
+        .find_map(|type_filter| match type_filter {
+            TypeFilter::Artifact => Some(CoreType::Artifact),
+            TypeFilter::Creature => Some(CoreType::Creature),
+            TypeFilter::Enchantment => Some(CoreType::Enchantment),
+            TypeFilter::Instant => Some(CoreType::Instant),
+            TypeFilter::Land => Some(CoreType::Land),
+            TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
+            TypeFilter::Sorcery => Some(CoreType::Sorcery),
+            TypeFilter::Battle => Some(CoreType::Battle),
+            TypeFilter::Kindred => Some(CoreType::Kindred),
+            TypeFilter::Permanent
+            | TypeFilter::Card
+            | TypeFilter::Any
+            | TypeFilter::Non(_)
+            | TypeFilter::Subtype(_)
+            | TypeFilter::AnyOf(_) => None,
+        })
+}
+
+/// CR 601.2c + CR 115.1: record `chosen` as the announcing opponent for the first
+/// opponent-choice slot group that still lacks one, returning whether a link was
+/// stamped. Only that single group is assigned per call, so the state machine can
+/// re-prompt for each remaining group and let the controller pick a (possibly
+/// different) opponent for every "of an opponent's choice" effect.
+pub(crate) fn assign_next_announcing_opponent(
+    ability: &mut ResolvedAbility,
+    chosen: PlayerId,
+) -> bool {
+    let mut node = Some(ability);
+    while let Some(link) = node {
+        let needs = link.context.announcing_opponent.is_none()
+            && matches!(link.target_chooser, Some(TargetFilter::Opponent));
+        if needs {
+            link.context.announcing_opponent = Some(chosen);
+            return true;
+        }
+        node = link.sub_ability.as_deref_mut();
+    }
+    false
+}
+
 pub(crate) fn begin_deferred_target_selection(
     state: &mut GameState,
     player: PlayerId,
     mut pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 601.2c + CR 115.1: If an "of an opponent's choice" slot group still needs
+    // its announcing opponent chosen (and the controller has ≥2 opponents to pick
+    // among), raise that decision before declaring targets. This loops once per
+    // unassigned group, so each opponent-choice effect gets its own announcer.
+    let announcing_candidates = crate::game::players::opponents(state, player);
+    if announcing_candidates.len() >= 2 {
+        if let Some(choice) = next_announcing_opponent_choice(&pending.ability) {
+            return Ok(WaitingFor::ChooseAnnouncingOpponent {
+                player,
+                candidates: announcing_candidates,
+                choice_index: choice.index,
+                choice_count: choice.count,
+                target_type: choice.target_type,
+                pending_cast: Box::new(pending),
+            });
+        }
+    }
     pending.deferred_target_selection = false;
     // CR 700.2 + CR 601.2b: For modal casts whose target legality depended on
     // X (or any deferred cost), the mode-choice step recorded the chosen mode
@@ -1299,8 +1402,14 @@ pub(crate) fn begin_deferred_target_selection(
         &target_slots,
         &pending.target_constraints,
     )?;
+    // CR 601.2c + CR 115.1: first slot's announcer (controller unless the slot is
+    // "of an opponent's choice").
+    let initial_player = target_slots
+        .first()
+        .and_then(|slot| slot.chooser)
+        .unwrap_or(player);
     Ok(WaitingFor::TargetSelection {
-        player,
+        player: initial_player,
         pending_cast: Box::new(pending),
         target_slots,
         mode_labels,
@@ -3856,8 +3965,14 @@ pub(super) fn push_activated_ability_to_stack(
         pending_act.activation_cost = None;
         pending_act.activation_ability_index = Some(ability_index);
         pending_act.pending_loyalty_activation_player = pending_loyalty_activation_player;
+        // CR 601.2c + CR 602.2b: first slot's announcer (activator unless the slot
+        // is "of an opponent's choice").
+        let initial_player = target_slots
+            .first()
+            .and_then(|slot| slot.chooser)
+            .unwrap_or(player);
         return Ok(WaitingFor::TargetSelection {
-            player,
+            player: initial_player,
             pending_cast: Box::new(pending_act),
             target_slots,
             mode_labels: Vec::new(),
@@ -10620,6 +10735,31 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
+
+    #[test]
+    fn announcing_opponent_preflight_ignores_scoped_player_chooser() {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.target_chooser = Some(TargetFilter::ScopedPlayer);
+        ability.scoped_player = Some(PlayerId(1));
+
+        assert!(
+            next_announcing_opponent_choice(&ability).is_none(),
+            "an existing scoped-player chooser must not prompt the caster to choose an opponent"
+        );
+        assert!(
+            !assign_next_announcing_opponent(&mut ability, PlayerId(1)),
+            "only an explicit opponent-choice slot may record an announcing opponent"
+        );
+        assert_eq!(ability.context.announcing_opponent, None);
+    }
 
     /// CR 614.1a + CR 608.2n (PLAN §8 Risk #2): the Invoke Calamity free-cast
     /// "if this spell would be put into your graveyard, exile it instead" rider

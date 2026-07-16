@@ -220,7 +220,7 @@ pub struct CaseState {
 /// truth and lets exhaustive `match` arms force every consumer to handle both
 /// variants. Equipment-only call sites use `as_object()` with a CR-cited
 /// `expect` to assert the rules invariant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum AttachTarget {
     /// CR 301.5 / CR 303.4f: attached to a permanent.
@@ -261,7 +261,7 @@ impl From<ObjectId> for AttachTarget {
 
 /// CR 709.5c: Which half, or door, of a shared-type-line split permanent is
 /// being locked or unlocked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RoomDoor {
     Left,
     Right,

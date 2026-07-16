@@ -11,7 +11,7 @@ use super::ability::{
 };
 use super::card::{PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
-use super::identifiers::ObjectId;
+use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaType, UnitDecision};
 use super::phase::Phase;
@@ -24,6 +24,40 @@ pub use super::zones::EtbTapState;
 pub struct ReplacementId {
     pub source: ObjectId,
     pub index: usize,
+}
+
+/// CR 701.23a + CR 614.6: Final disposition of one found card after the
+/// replacement pipeline. The modified form snapshots the selected source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SearchFoundDisposition {
+    Original,
+    Modified(BoundSearchFoundDisposition),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundSearchFoundDisposition {
+    pub destination: Zone,
+    /// CR 400.7: exact incarnation of the selected replacement source. A
+    /// resumed choice consumes this snapshot without rebinding to a new object
+    /// that later reused the same id.
+    pub source: ObjectIncarnationRef,
+}
+
+/// CR 616.1: Candidate data frozen when a SearchFound ordering
+/// prompt is offered. Resume consumes this snapshot without consulting the
+/// live source object or replacement registry again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundSearchFoundCandidate {
+    pub replacement_id: ReplacementId,
+    pub disposition: BoundSearchFoundDisposition,
+    pub source_name: String,
+    pub description: String,
+    /// Whether the snapshotted definition may be declined. This is carried per
+    /// candidate because a CR 616.1 ordering prompt can contain more than one
+    /// optional SearchFound replacement; collapsing optionality onto the whole
+    /// pending prompt would force one of them to apply.
+    #[serde(default)]
+    pub is_optional: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -353,6 +387,18 @@ pub enum ProposedEvent {
     Draw {
         player_id: PlayerId,
         count: u32,
+        applied: HashSet<AppliedReplacementKey>,
+    },
+    /// CR 701.23a + CR 614.1: One card found during a search, before the
+    /// search instruction sends it to its printed destination.
+    SearchFound {
+        searcher: PlayerId,
+        /// Semantic owner of the library participating in this search. `None`
+        /// when Library was not among the effective searched zones.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_owner: Option<PlayerId>,
+        object_id: ObjectId,
+        disposition: SearchFoundDisposition,
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.22a + CR 614.1a: A player is about to scry cards. Replacement
@@ -710,6 +756,7 @@ impl ProposedEvent {
             ProposedEvent::ZoneChange { applied, .. }
             | ProposedEvent::Damage { applied, .. }
             | ProposedEvent::Draw { applied, .. }
+            | ProposedEvent::SearchFound { applied, .. }
             | ProposedEvent::Scry { applied, .. }
             | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::CoinFlip { applied, .. }
@@ -743,6 +790,7 @@ impl ProposedEvent {
             ProposedEvent::ZoneChange { applied, .. }
             | ProposedEvent::Damage { applied, .. }
             | ProposedEvent::Draw { applied, .. }
+            | ProposedEvent::SearchFound { applied, .. }
             | ProposedEvent::Scry { applied, .. }
             | ProposedEvent::Mill { applied, .. }
             | ProposedEvent::CoinFlip { applied, .. }
@@ -859,6 +907,14 @@ impl ProposedEvent {
             | ProposedEvent::ProduceMana { player_id, .. }
             | ProposedEvent::EmptyManaPool { player_id, .. }
             | ProposedEvent::Planeswalk { player_id, .. } => *player_id,
+            // CR 616.1: a card in a library has no controller, so its owner
+            // chooses among applicable replacements. `None` is reserved for a
+            // nonlibrary selection, where no SearchFound replacement applies.
+            ProposedEvent::SearchFound {
+                searcher,
+                library_owner,
+                ..
+            } => library_owner.unwrap_or(*searcher),
             ProposedEvent::CreateToken { owner, .. } => *owner,
             ProposedEvent::TokenEntry { entry_ref, .. } => state
                 .liminal_entries
@@ -889,6 +945,7 @@ impl ProposedEvent {
             | ProposedEvent::Discard { object_id, .. }
             | ProposedEvent::Sacrifice { object_id, .. }
             | ProposedEvent::Explore { object_id, .. }
+            | ProposedEvent::SearchFound { object_id, .. }
             // CR 614.1a: the conniving permanent is the affected object the
             // `valid_card` filter ("a creature you control") is matched against.
             | ProposedEvent::Connive { object_id, .. } => Some(*object_id),

@@ -1311,6 +1311,35 @@ pub fn resolve_effect_player_ref(
             TargetRef::Player(player) => Some(*player),
             _ => None,
         }),
+        // CR 102.2 + CR 102.3 + CR 601.2c: "of an opponent's choice" — the slot's
+        // announcing player is an opponent of the
+        // controller. CR 601.2c normally makes the controller announce every
+        // target; this card text overrides the announcer for this one slot.
+        //
+        // CR 601.2c + CR 115.1: in a multiplayer game the controller chooses
+        // which opponent announces; that choice is recorded on the cast's
+        // `SpellContext` (`announcing_opponent`) and takes precedence. Falling
+        // back: an opponent already targeted by the resolving spell, otherwise
+        // the first opponent in seat order (the single-opponent case, where
+        // there is no decision to make).
+        TargetFilter::Opponent => ability
+            .context
+            .announcing_opponent
+            .filter(|&chosen| crate::game::players::is_opponent(state, ability.controller, chosen))
+            .or_else(|| {
+                ability.targets.iter().find_map(|target| match target {
+                    TargetRef::Player(player) => {
+                        crate::game::players::is_opponent(state, ability.controller, *player)
+                            .then_some(*player)
+                    }
+                    _ => None,
+                })
+            })
+            .or_else(|| {
+                crate::game::players::opponents(state, ability.controller)
+                    .first()
+                    .copied()
+            }),
         TargetFilter::ParentTargetController => {
             crate::game::ability_utils::parent_target_controller(ability, state).or_else(|| {
                 resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
@@ -5491,6 +5520,78 @@ mod tests {
             find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99))
                 .contains(&TargetRef::Object(c1)),
             "hexproof does not block the controller (CR 702.11b)"
+        );
+    }
+
+    /// CR 102.3 + CR 601.2c: `TargetFilter::Opponent` resolves to a deterministic
+    /// opponent of the ability's controller. In a two-player game that is the one
+    /// opponent.
+    #[test]
+    fn resolve_effect_player_ref_opponent_two_player_resolves_to_the_one_opponent() {
+        use crate::types::ability::Effect;
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::unimplemented("test", "test"),
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::Opponent),
+            Some(PlayerId(1)),
+            "two-player: the single opponent of P0 is P1"
+        );
+    }
+
+    /// The fallback for an unselected 3+ player ability is deterministic; the cast
+    /// pipeline prompts the controller before target selection, so normal casts do
+    /// not rely on this defensive branch.
+    #[test]
+    fn resolve_effect_player_ref_opponent_three_player_resolves_to_first_seat_opponent() {
+        use crate::types::ability::Effect;
+        use crate::types::format::FormatConfig;
+        let state = GameState::new(FormatConfig::standard(), 3, 42);
+        let ability = ResolvedAbility::new(
+            Effect::unimplemented("test", "test"),
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let first_opp = crate::game::players::opponents(&state, PlayerId(0))
+            .first()
+            .copied()
+            .expect("P0 has opponents in a 3-player game");
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::Opponent),
+            Some(first_opp),
+            "3-player: first APNAP/seat-order opponent is the deterministic announcer"
+        );
+        assert_ne!(
+            first_opp,
+            PlayerId(0),
+            "the announcer is never the controller"
+        );
+    }
+
+    /// CR 601.2c: when the resolving ability already targets an opponent, that
+    /// targeted opponent is preferred over the seat-order fallback.
+    #[test]
+    fn resolve_effect_player_ref_opponent_prefers_targeted_opponent() {
+        use crate::types::ability::Effect;
+        use crate::types::format::FormatConfig;
+        let state = GameState::new(FormatConfig::standard(), 3, 42);
+        let opps = crate::game::players::opponents(&state, PlayerId(0));
+        let targeted = *opps.last().expect("at least one opponent");
+        let ability = ResolvedAbility::new(
+            Effect::unimplemented("test", "test"),
+            vec![TargetRef::Player(targeted)],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::Opponent),
+            Some(targeted),
+            "an already-targeted opponent is the announcer"
         );
     }
 }

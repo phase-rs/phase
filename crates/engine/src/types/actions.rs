@@ -21,7 +21,7 @@ use crate::game::game_object::AttachTarget;
 /// shortcut. This intentionally does not reuse the legacy loop-shortcut
 /// vocabulary: the route is an engine-proved finite reducer transcript, not a
 /// general loop certificate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum PrecastCopyShortcutResponse {
     Propose { route_id: u64 },
@@ -35,7 +35,7 @@ pub enum PrecastCopyShortcutResponse {
 /// Bool flags are not composable — this enum can grow new branches (e.g.,
 /// "Cast face-down", "Put into hand" already exists for Discover) without
 /// changing call sites that already exhaustively match.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CastChoice {
     /// CR 701.57a + CR 702.85a: Cast the offered card without paying its mana
@@ -61,7 +61,7 @@ pub enum CastChoice {
 ///   Only available when `object_id` references a card named "Serum Powder" in
 ///   the actor's hand (CR 103.5b and Serum Powder Oracle text). The player
 ///   remains pending and may keep, mulligan, or use another Serum Powder next.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum MulliganChoice {
     Keep,
@@ -82,7 +82,7 @@ pub enum MulliganChoice {
 /// state, not on this action — the decision is structurally identical across
 /// keywords; only post-payment semantics diverge (per CR 702.74a Evoke,
 /// CR 702.96a Overload, CR 702.103a Bestow, and the custom Warp keyword).
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AlternativeCastDecision {
     /// Pay the spell's printed mana cost. Resolution proceeds normally.
@@ -100,7 +100,7 @@ pub enum AlternativeCastDecision {
 /// `Pay { index }` selects the sub-cost by its position in
 /// `WaitingFor::UnlessPaymentChooseCost::costs` and routes back into the
 /// standard single-cost `handle_unless_payment` path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum UnlessCostBranch {
     Decline,
@@ -110,7 +110,7 @@ pub enum UnlessCostBranch {
 /// CR 400.11 + CR 406.3: One discriminated selection committed for an
 /// outside-game choice. The two source pools (sideboard and face-up exile) are
 /// expressed as parallel variants so the action wire format is uniform.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum OutsideGameSelection {
     /// CR 400.11a: A copy from the player's sideboard, identified by its slot.
@@ -119,8 +119,15 @@ pub enum OutsideGameSelection {
     FaceUpExile { object_id: ObjectId },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr, strum::EnumDiscriminants,
+)]
 #[serde(tag = "type", content = "data")]
+// Issue #4878: `GameActionKind` is the allocation-free discriminant used by
+// `GameAction::cmp_stable` to order actions by variant before comparing
+// payloads, so deterministic AI/legal-action sorting never depends on
+// `HashSet`/`HashMap` iteration order (previously ordered via `Debug` strings).
+#[strum_discriminants(name(GameActionKind), derive(PartialOrd, Ord))]
 pub enum GameAction {
     PassPriority,
     /// CR 608.2d + CR 701.42: select the exact pair to process for meld.
@@ -195,6 +202,13 @@ pub enum GameAction {
     /// CR 608.2d + CR 700.3: "An opponent separates" — the controller's answer
     /// to `WaitingFor::SeparatePilesChooseOpponent`.
     ChoosePileOpponent {
+        opponent: PlayerId,
+    },
+    /// CR 601.2c + CR 115.1: The spell controller's answer to
+    /// `WaitingFor::ChooseAnnouncingOpponent` — which opponent announces the
+    /// "of an opponent's choice" target slot. `opponent` must be one of that
+    /// prompt's `candidates`.
+    ChooseAnnouncingOpponent {
         opponent: PlayerId,
     },
     /// CR 702.132a: Assist — the caster's answer to `WaitingFor::AssistChoosePlayer`.
@@ -878,7 +892,7 @@ pub enum GameAction {
 /// reading the identity latched on that source's trigger (CR 400.7), so the
 /// frontend never constructs an incarnation or card id. `Remove` echoes a
 /// stored `YieldTarget` verbatim; `ClearAll` drops every yield for the actor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum PriorityYieldOp {
     Add {
@@ -895,7 +909,7 @@ pub enum PriorityYieldOp {
 /// acting player's stored "don't ask again" auto-choices for optional ("may")
 /// triggers. `Remove` echoes a stored key verbatim; `ClearAll` drops every stored
 /// auto-choice belonging to the acting player.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum MayTriggerAutoChoiceOp {
     Remove { key: MayTriggerAutoChoiceKey },
@@ -906,14 +920,14 @@ pub enum MayTriggerAutoChoiceOp {
 /// trigger-ordering preferences. A live `OrderTriggers` response is the sole
 /// authority that records a preference; clients may only forget all of their
 /// saved preferences.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum TriggerOrderTemplateOp {
     ClearAll,
 }
 
 /// CR 701.48a: Learn choice — rummage a specific card, or skip entirely.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum LearnOption {
     /// Discard the specified card, then draw one.
@@ -1405,6 +1419,16 @@ impl GameAction {
         self.into()
     }
 
+    /// Issue #4878: allocation-free total order over `GameAction`, used for
+    /// deterministic AI candidate / legal-action sorting. Orders by the
+    /// `GameActionKind` discriminant first, then by payload fields, so equal
+    /// scores never depend on `HashSet`/`HashMap` allocation-order iteration.
+    /// Replaces the previous `format!("{:?}", action)` sort keys — no `Debug`
+    /// formatting is used for ordering.
+    pub fn cmp_stable(&self, other: &Self) -> std::cmp::Ordering {
+        super::action_stable_order::cmp_game_actions(self, other)
+    }
+
     /// CR 605.3a: Whether this action is a mana ability activation.
     ///
     /// Mana abilities are excluded from the flat `legal_actions()` result
@@ -1532,6 +1556,7 @@ impl GameAction {
             | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
             | GameAction::ChoosePileOpponent { .. }
+            | GameAction::ChooseAnnouncingOpponent { .. }
             | GameAction::ChooseAssistPlayer { .. }
             | GameAction::CommitAssistPayment { .. }
             | GameAction::ChooseBattleProtector { .. }

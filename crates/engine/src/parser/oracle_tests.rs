@@ -3567,6 +3567,37 @@ fn scoped_player_of_their_choice_marks_target_chooser() {
     );
 }
 
+/// CR 601.2c + CR 115.1: An announcing-player override belongs only to the
+/// printed target phrase that carries it. Ordinary target phrases following
+/// "of an opponent's choice" must return target choice to the controller.
+#[test]
+fn opponent_choice_chooser_does_not_leak_to_following_target_phrase() {
+    let r = parse(
+        "Destroy target nonbasic land you don't control and target nonbasic land of an opponent's choice you don't control. ~ deals 7 damage to target creature you don't control and 7 damage to target creature of an opponent's choice you don't control.",
+        "Volcanic Offering",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    let mut choosers = Vec::new();
+    let mut link = r.abilities.first();
+    while let Some(ability) = link {
+        choosers.push(ability.target_chooser.clone());
+        link = ability.sub_ability.as_deref();
+    }
+
+    assert_eq!(
+        choosers,
+        vec![
+            None,
+            Some(TargetFilter::Opponent),
+            None,
+            Some(TargetFilter::Opponent),
+        ],
+        "only Volcanic Offering's two explicit opponent-choice targets may override the controller"
+    );
+}
+
 /// CR 601.2c: an ordinary "destroy target creature" has no scoped-player
 /// chooser — controller chooses (default `None`). Negative guard so a
 /// regression that always stamps the chooser cannot pass silently.
