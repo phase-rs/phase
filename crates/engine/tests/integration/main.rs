@@ -14,6 +14,7 @@ mod ancient_copper_dragon_roll_d20;
 mod announce_locked_x_runtime;
 mod another_round_repeat;
 mod archmage_ascension_gated_draw_replacement;
+mod arcum_weathervane_supertype_removal;
 mod ark_of_hunger_play_from_graveyard_751;
 mod armored_kincaller_or_condition;
 mod ashaya_nontoken_lands;
